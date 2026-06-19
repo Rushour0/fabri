@@ -24,3 +24,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["agent_memory*"]
+
+# The bundled example tools are data, not importable modules: a manifest is a
+# .json + an executable in any language (Python/Go/...). Without this, a wheel
+# install ships only the .py files and drops every .json manifest, so the
+# `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
+[tool.setuptools.package-data]
+"agent_memory.tools.examples" = ["*.json", "example_go_tool/*"]
