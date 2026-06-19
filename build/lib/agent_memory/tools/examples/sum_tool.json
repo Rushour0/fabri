@@ -1,8 +1,0 @@
-{
-  "name": "sum",
-  "description": "Adds two numbers `a` and `b`. Go binary, proves the tool contract is polyglot.",
-  "command": ["example_go_tool/sum_tool"],
-  "input_schema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}},
-  "output_schema": {"type": "object", "properties": {"sum": {"type": "number"}}},
-  "timeout_s": 5
-}

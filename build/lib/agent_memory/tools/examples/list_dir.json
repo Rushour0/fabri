@@ -1,8 +1,0 @@
-{
-  "name": "list_dir",
-  "description": "List entries in a directory inside the sandbox. args: {path: relative path, default '.'}. Use this to discover what files exist before reading or editing -- safer than guessing filenames.",
-  "command": ["python3", "list_dir.py"],
-  "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
-  "output_schema": {"type": "object"},
-  "timeout_s": 5
-}

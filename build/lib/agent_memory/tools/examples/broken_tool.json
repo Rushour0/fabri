@@ -1,8 +1,0 @@
-{
-  "name": "broken",
-  "description": "Deliberately misbehaving tool used only to test runner.py's failure handling (malformed output, timeout).",
-  "command": ["python3", "broken_tool.py"],
-  "input_schema": {"type": "object"},
-  "output_schema": {"type": "object"},
-  "timeout_s": 1
-}
