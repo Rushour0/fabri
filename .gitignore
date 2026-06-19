@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.DS_Store
+
+# per-run state, written project-local under .agent_memory/ (see paths.py)
+.agent_memory/
+logs/
+src/agent_memory/traces/
+
+# compiled example Go tool binary
+src/agent_memory/tools/examples/example_go_tool/sum_tool

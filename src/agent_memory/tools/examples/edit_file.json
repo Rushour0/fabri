@@ -1,0 +1,17 @@
+{
+  "name": "edit_file",
+  "description": "Replace a unique string in an existing sandboxed file. args: {path, old, new, replace_all?: bool}. Errors if `old` is not found, or if it appears more than once without replace_all=true -- forces the agent to scope edits precisely.",
+  "command": ["python3", "edit_file.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "old": {"type": "string"},
+      "new": {"type": "string"},
+      "replace_all": {"type": "boolean"}
+    },
+    "required": ["path", "old", "new"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 5
+}

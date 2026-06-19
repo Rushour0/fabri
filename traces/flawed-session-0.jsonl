@@ -1,0 +1,3 @@
+{"ts": 1781795108.150603, "type": "start", "task": "Use the broken tool with trigger fast", "context_block": "Relevant guidelines from past sessions:\n- [strategic] Always confirm destructive ops before running.\n- [tactical] Prefer the sum tool over manual addition for numeric tasks.\n- [tactical] Forge interior maps use a separate VRAM screenblock from village maps."}
+{"ts": 1781795108.1725929, "type": "tool_call", "name": "broken", "args": {"trigger": "fast"}, "result": {"ok": false, "error": "malformed JSON output from tool"}}
+{"ts": 1781795108.172779, "type": "final", "text": "Tool failed, giving up."}

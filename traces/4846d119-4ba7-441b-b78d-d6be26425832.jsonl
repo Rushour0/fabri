@@ -1,0 +1,2 @@
+{"ts": 1781816751.4641259, "type": "start", "task": "bad", "context_block": ""}
+{"ts": 1781816751.4643588, "type": "error", "reason": "llm response had neither tool_call nor final_text", "outcome": "failed"}

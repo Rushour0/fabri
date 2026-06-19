@@ -1,0 +1,8 @@
+{
+  "name": "echo",
+  "description": "Echoes back the input JSON under an `echoed` key. Used to verify the tool contract end-to-end.",
+  "command": ["python3", "echo_tool.py"],
+  "input_schema": {"type": "object"},
+  "output_schema": {"type": "object", "properties": {"echoed": {}}},
+  "timeout_s": 5
+}

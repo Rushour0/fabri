@@ -1,0 +1,26 @@
+[project]
+name = "agent-memory"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "qdrant-client>=1.9",
+    "sentence-transformers>=3.0",
+    "anthropic>=0.40",
+    "tiktoken>=0.7",
+    "pyyaml>=6.0",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+agent-memory = "agent_memory.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_memory*"]

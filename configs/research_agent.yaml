@@ -1,0 +1,25 @@
+agent:
+  name: research-agent
+  max_steps: 10
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  max_tokens: 1024
+  api_key_env: ANTHROPIC_API_KEY
+
+tools:
+  manifest_dir: src/agent_memory/tools/examples
+  enabled: [web_search, read_file, write_file]
+  sandbox_root: .
+  decompose:
+    enabled: true
+    max_subquestions: 5
+
+memory:
+  collection: research_agent_memory
+  qdrant_url: http://localhost:6333
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30
