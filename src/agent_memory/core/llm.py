@@ -1,11 +1,19 @@
 import json
 import time
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Callable, Protocol
 
 from agent_memory.core.logging_setup import get_logger
 
 logger = get_logger()
+
+
+class LLMError(RuntimeError):
+    """Unrecoverable problem talking to the LLM provider: an API error, a rate
+    limit that survived retries, or a response truncated/empty enough that we
+    refuse to treat it as a real answer. The agent loop maps this to
+    Outcome.FAILED and ends the run cleanly instead of crashing with a raw
+    provider traceback."""
 
 
 @dataclass
@@ -17,12 +25,39 @@ class ToolCall:
 
 @dataclass
 class LLMResponse:
+    # `tool_call` is a convenience for constructing a single-call response (used
+    # by the ScriptedLLMBackend and tests); __post_init__ folds it into
+    # `tool_calls`, which is what the agent loop reads so it can dispatch
+    # parallel tool calls a model may emit in one turn.
     tool_call: ToolCall | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
     final_text: str | None = None
+    stop_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.tool_call is not None and not self.tool_calls:
+            self.tool_calls = [self.tool_call]
 
 
 class LLMBackend(Protocol):
     def step(self, system: str, messages: list[dict]) -> LLMResponse: ...
+
+
+def _call_with_retry(fn: Callable, transient: tuple[type[Exception], ...], attempts: int = 3, base_delay: float = 0.5):
+    """Call `fn`, retrying transient provider errors (rate limit, connection,
+    5xx) with exponential backoff. Non-transient exceptions propagate
+    unchanged; exhausting the retries raises LLMError."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except transient as e:
+            last = e
+            if i < attempts - 1:
+                delay = base_delay * (2**i)
+                logger.warning("llm call transient error (attempt %d/%d), retrying in %.1fs: %s", i + 1, attempts, delay, e)
+                time.sleep(delay)
+    raise LLMError(f"llm call failed after {attempts} attempts: {last}") from last
 
 
 class ScriptedLLMBackend:
@@ -56,37 +91,61 @@ class AnthropicLLMBackend:
         self._max_tokens = max_tokens
 
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
+        import anthropic
+
         t0 = time.monotonic()
-        resp = self._client.messages.create(
-            model=self._model,
-            system=system,
-            messages=messages,
-            tools=self._tools,
-            max_tokens=self._max_tokens,
-        )
+        try:
+            resp = _call_with_retry(
+                lambda: self._client.messages.create(
+                    model=self._model,
+                    system=system,
+                    messages=messages,
+                    tools=self._tools,
+                    max_tokens=self._max_tokens,
+                ),
+                transient=(anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError),
+            )
+        except anthropic.APIError as e:
+            raise LLMError(f"anthropic API error: {e}") from e
+
         elapsed = time.monotonic() - t0
         usage = resp.usage
         logger.info(
-            "anthropic call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d",
+            "anthropic call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d stop=%s",
             self._model,
             elapsed,
             usage.input_tokens,
             usage.output_tokens,
+            resp.stop_reason,
         )
-        for block in resp.content:
-            if block.type == "tool_use":
-                return LLMResponse(tool_call=ToolCall(name=block.name, args=block.input, id=block.id))
-            if block.type == "text":
-                return LLMResponse(final_text=block.text)
-        return LLMResponse(final_text="")
+
+        # A response truncated at the token cap can't be trusted: a tool_use
+        # block may carry partial/invalid args, and a cut-off text answer is not
+        # a real final answer. Fail rather than dispatch garbage or report a
+        # half-answer as success.
+        if resp.stop_reason == "max_tokens":
+            raise LLMError("anthropic response truncated at max_tokens; raise llm.max_tokens for this agent")
+
+        # Claude can return several content blocks in one turn (reasoning text
+        # plus one or more tool_use blocks, or parallel tool_use blocks). Collect
+        # every tool_use; only treat the response as final when there are none.
+        tool_calls = [
+            ToolCall(name=b.name, args=b.input, id=b.id) for b in resp.content if b.type == "tool_use"
+        ]
+        if tool_calls:
+            return LLMResponse(tool_calls=tool_calls, stop_reason=resp.stop_reason)
+
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        return LLMResponse(final_text=text or None, stop_reason=resp.stop_reason)
 
 
 class OpenAILLMBackend:
-    """Stub second provider proving LLMBackend is provider-agnostic: same step()
-    signature as AnthropicLLMBackend, translating OpenAI's tool-call/content
-    response into the same LLMResponse shape. Not feature-complete (no
-    streaming, vision, etc.) -- enough to prove `provider: openai` in config
-    works end-to-end with a real call."""
+    """Second provider proving LLMBackend is provider-agnostic: same step()
+    signature as AnthropicLLMBackend. The agent's message history is kept in
+    Anthropic's tool_use/tool_result block shape, so this backend translates it
+    into OpenAI's assistant.tool_calls + role:"tool" schema on the way out --
+    without that, multi-step tool use never round-trips and the model re-issues
+    or hallucinates calls. Not feature-complete (no streaming/vision)."""
 
     def __init__(
         self,
@@ -113,26 +172,83 @@ class OpenAILLMBackend:
             for t in (tools or [])
         ]
 
+    @staticmethod
+    def _to_openai(m: dict) -> list[dict]:
+        """Translate one agent-history message (string content, or a list of
+        Anthropic-style tool_use/tool_result blocks) into one or more
+        OpenAI-shaped messages."""
+        content = m["content"]
+        role = m["role"]
+        if isinstance(content, str):
+            return [{"role": role, "content": content}]
+
+        if role == "assistant":
+            tool_calls = [
+                {
+                    "id": b["id"],
+                    "type": "function",
+                    "function": {"name": b["name"], "arguments": json.dumps(b["input"])},
+                }
+                for b in content
+                if b.get("type") == "tool_use"
+            ]
+            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+            msg: dict = {"role": "assistant", "content": text or None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            return [msg]
+
+        # user turn carrying tool_result blocks -> one role:"tool" message each
+        out = []
+        for b in content:
+            if b.get("type") == "tool_result":
+                c = b["content"]
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": b["tool_use_id"],
+                        "content": c if isinstance(c, str) else json.dumps(c),
+                    }
+                )
+            else:
+                out.append({"role": "user", "content": json.dumps(b)})
+        return out
+
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
+        import openai
+
         t0 = time.monotonic()
         oa_messages = [{"role": "system", "content": system}]
         for m in messages:
-            content = m["content"]
-            oa_messages.append({"role": m["role"], "content": content if isinstance(content, str) else json.dumps(content)})
+            oa_messages.extend(self._to_openai(m))
 
-        resp = self._client.chat.completions.create(
-            model=self._model,
-            messages=oa_messages,
-            tools=self._tools or None,
-            max_tokens=self._max_tokens,
-        )
-        elapsed = time.monotonic() - t0
-        choice = resp.choices[0].message
-        logger.info("openai call: model=%s latency=%.2fs", self._model, elapsed)
-
-        if choice.tool_calls:
-            call = choice.tool_calls[0]
-            return LLMResponse(
-                tool_call=ToolCall(name=call.function.name, args=json.loads(call.function.arguments), id=call.id)
+        try:
+            resp = _call_with_retry(
+                lambda: self._client.chat.completions.create(
+                    model=self._model,
+                    messages=oa_messages,
+                    tools=self._tools or None,
+                    max_tokens=self._max_tokens,
+                ),
+                transient=(openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError),
             )
-        return LLMResponse(final_text=choice.content or "")
+        except openai.OpenAIError as e:
+            raise LLMError(f"openai API error: {e}") from e
+
+        elapsed = time.monotonic() - t0
+        choice = resp.choices[0]
+        logger.info("openai call: model=%s latency=%.2fs finish=%s", self._model, elapsed, choice.finish_reason)
+
+        if choice.finish_reason == "length":
+            raise LLMError("openai response truncated at max_tokens; raise llm.max_tokens for this agent")
+
+        message = choice.message
+        if message.tool_calls:
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(name=c.function.name, args=json.loads(c.function.arguments), id=c.id)
+                    for c in message.tool_calls
+                ],
+                stop_reason=choice.finish_reason,
+            )
+        return LLMResponse(final_text=message.content or None, stop_reason=choice.finish_reason)

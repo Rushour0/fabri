@@ -39,6 +39,27 @@ def test_promotion_to_strategic_after_threshold_sessions():
     store.delete(entry.id)
 
 
+def test_recurrence_of_promoted_guideline_does_not_demote_or_duplicate():
+    store = make_store()
+    text = "Promoted lesson that recurs again after going strategic."
+
+    entry = None
+    for i in range(PROMOTION_THRESHOLD_SESSIONS):
+        entry = ingest_guideline(store, text, session_id=f"s{i}")
+    assert entry.kind == "strategic"
+
+    # One more recurrence (new session) of the SAME lesson: must merge into the
+    # existing strategic entry, not insert a fresh tactical dup or clobber it
+    # back to tactical.
+    again = ingest_guideline(store, text, session_id="s-later")
+    assert again.id == entry.id
+    assert again.kind == "strategic"
+    assert store.count() == 1
+    assert store.count(kind="tactical") == 0
+
+    store.delete(entry.id)
+
+
 def test_distinct_guidelines_are_not_merged():
     store = make_store()
     e1 = ingest_guideline(store, "Guideline about tool A.", session_id="s1")

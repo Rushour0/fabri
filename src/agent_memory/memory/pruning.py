@@ -18,14 +18,21 @@ def ingest_guideline(
     promotion_threshold_sessions: int = PROMOTION_THRESHOLD_SESSIONS,
 ) -> MemoryEntry:
     """Insert or merge a new candidate guideline. A near-duplicate of an existing
-    tactical entry (cosine sim >= similarity_threshold) increments that entry's
-    recurrence count instead of inserting a duplicate; once it has recurred across
-    >= promotion_threshold_sessions distinct sessions, it's promoted to strategic.
-    `tools` accumulates (union) across merges rather than overwriting, since the
-    same guideline can end up associated with more than one tool over time."""
+    entry (cosine sim >= similarity_threshold, tactical *or* strategic) increments
+    that entry's recurrence count instead of inserting a duplicate; once it has
+    recurred across >= promotion_threshold_sessions distinct sessions, it's
+    promoted to strategic. A merge never demotes: an already-strategic entry stays
+    strategic. `tools` accumulates (union) across merges rather than overwriting,
+    since the same guideline can end up associated with more than one tool over
+    time."""
     tags = tags or []
     tools = tools or []
-    existing = store.find_similar(text, threshold=similarity_threshold, kind="tactical")
+    # Search across both kinds: matching only tactical entries would let a
+    # recurrence of a promoted guideline slip through as a brand-new tactical
+    # dup (restarting its promotion counter), or -- when the synthesized text is
+    # identical -- collide on the deterministic point id and clobber the
+    # strategic entry back down to tactical on upsert.
+    existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
 
     if existing is not None:
         entry, score = existing

@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import subprocess
 import time
 
@@ -6,6 +8,16 @@ from agent_memory.core.logging_setup import get_logger
 from agent_memory.tools.manifest_schema import ToolManifest
 
 logger = get_logger()
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Kill the tool's whole process group, not just the direct child. Tools
+    like bash/python_exec spawn grandchildren; killing only the child (what
+    subprocess.run's timeout does) orphans them and leaks processes."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()  # already gone, or no killpg support -- fall back to the child
 
 
 def run_tool(manifest: ToolManifest, args: dict) -> dict:
@@ -17,25 +29,36 @@ def run_tool(manifest: ToolManifest, args: dict) -> dict:
     t0 = time.monotonic()
 
     try:
-        proc = subprocess.run(
+        # start_new_session=True puts the child in its own process group so a
+        # timeout can SIGKILL the entire tree. errors="replace" keeps a tool that
+        # emits non-UTF-8 bytes from raising UnicodeDecodeError out of our hands.
+        proc = subprocess.Popen(
             manifest.command,
-            input=json.dumps(args),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=manifest.timeout_s,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        logger.warning("tool %s: timeout after %.2fs", manifest.name, time.monotonic() - t0)
-        return {"ok": False, "error": f"timeout after {manifest.timeout_s}s"}
     except OSError as e:
         logger.error("tool %s: failed to start: %s", manifest.name, e)
         return {"ok": False, "error": f"failed to start tool: {e}"}
 
+    try:
+        stdout, stderr = proc.communicate(input=json.dumps(args), timeout=manifest.timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        proc.communicate()  # reap the killed child and close pipes
+        logger.warning("tool %s: timeout after %.2fs (killed process group)", manifest.name, time.monotonic() - t0)
+        return {"ok": False, "error": f"timeout after {manifest.timeout_s}s"}
+
     elapsed = time.monotonic() - t0
-    out = {"stderr": proc.stderr} if proc.stderr else {}
+    out = {"stderr": stderr} if stderr else {}
 
     try:
-        parsed = json.loads(proc.stdout)
+        parsed = json.loads(stdout)
     except json.JSONDecodeError:
         logger.warning("tool %s: malformed JSON output (%.2fs)", manifest.name, elapsed)
         return {"ok": False, "error": "malformed JSON output from tool", **out}

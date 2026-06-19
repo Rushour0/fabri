@@ -12,44 +12,35 @@ integrity/robustness; P3 = hardening/nits.
   `pyproject.toml`; verified all 13 manifests ship and `builtin` resolves to
   `[read_file, write_file]` from a clean non-sibling wheel install.
 
-## P1 — correctness bugs that bite a real user
+## P1 — correctness bugs that bite a real user — ALL FIXED
 
-- [ ] **Anthropic backend returns only the first content block.**
-  `core/llm.py:76-81`. A `text`+`tool_use` response returns the text and never
-  runs the tool (false SUCCESS); parallel `tool_use` blocks are dropped, and an
-  unpaired `tool_use` in the echoed history 400s the next call. → Iterate all
-  blocks, prefer/execute `tool_use`, pair every `tool_use` with a `tool_result`.
-- [ ] **OpenAI backend doesn't round-trip tool calls.** `core/llm.py:116-121`.
-  History holds Anthropic-shaped tool_use/tool_result dicts; OpenAI `step()`
-  `json.dumps`es them into `content` instead of emitting `assistant.tool_calls`
-  + `role:"tool"` messages, so multi-step tool use breaks/loops. → Make message
-  history provider-agnostic and translate per backend.
-- [ ] **`max_tokens` truncation mid-tool-call treated as a final answer.**
-  `core/llm.py:60-66,76-81`. Truncated `tool_use` → partial/empty args, or
-  falls through to `final_text=""` → false SUCCESS. → Check `stop_reason`; raise
-  on `max_tokens`.
-- [ ] **No API-error/rate-limit handling.** `core/llm.py:60-66`. A transient 429
-  crashes the whole run with a raw traceback. → Catch `anthropic`/`openai`
-  errors, retry with backoff, map unrecoverable ones to `Outcome.FAILED`
-  (currently reserved-but-unused, `core/outcome.py:8`).
-- [ ] **Empty LLM response counts as success.** `core/llm.py:81,138` +
-  `core/agent.py:104`. Any non-None `final_text` (including `""`) → SUCCESS. →
-  Treat empty final text as `AgentProtocolError` / non-success.
-- [ ] **Memory dedup hardcoded to `kind="tactical"`.** `memory/pruning.py:28`.
-  Once promoted to strategic, a recurring guideline is either re-inserted as a
-  fresh tactical dup (promotion counter restarts) or, if text-identical, its
-  point ID collides and `upsert` clobbers the strategic entry back to
-  tactical/hit_count=1. → Search both kinds on ingest; never let a re-insert
-  demote a strategic entry.
-- [ ] **Sandbox fails open when `AGENT_SANDBOX_ROOT` is unset.**
-  `tools/examples/{read_file,write_file,edit_file,list_dir,grep}.py:~11`
-  (`os.environ.get(..., ".")`). Verified reading an out-of-tree file with the
-  var unset. → Fail closed: error + non-zero exit if unset. (Jail itself
-  correctly resists symlink/abs-path escapes via `resolve()` — keep that.)
-- [ ] **Subprocess timeout doesn't kill the child's process group.**
-  `tools/runner.py:20-26`. `bash`/`python_exec` grandchildren leak on timeout;
-  the timeout guarantee is hollow. → `start_new_session=True` +
-  `os.killpg(os.getpgid(pid), SIGKILL)` on `TimeoutExpired`.
+Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
+`tools/runner.py`, `tools/examples/*.py`); 4 regression tests added; suite green.
+
+- [x] **Anthropic backend returns only the first content block.** `core/llm.py`.
+  Now collects every `tool_use` block (parallel calls supported), only treats a
+  turn as final when there are no tool calls, and `core/agent.py` dispatches the
+  whole list, pairing each `tool_use` with a `tool_result`.
+- [x] **OpenAI backend doesn't round-trip tool calls.** `core/llm.py`. New
+  `_to_openai()` translates the Anthropic-shaped history into
+  `assistant.tool_calls` + `role:"tool"` messages, so multi-step tool use
+  round-trips.
+- [x] **`max_tokens` truncation treated as a final answer.** `core/llm.py`.
+  Both backends raise `LLMError` on `stop_reason`/`finish_reason` == max-tokens.
+- [x] **No API-error/rate-limit handling.** `core/llm.py`. `_call_with_retry`
+  retries transient provider errors with backoff; unrecoverable ones become
+  `LLMError` → `Outcome.FAILED` (now a live outcome, `core/agent.py`).
+- [x] **Empty LLM response counts as success.** Backends return `final_text=None`
+  for an empty turn; `core/agent.py` treats falsy final text as
+  `AgentProtocolError`, not SUCCESS.
+- [x] **Memory dedup hardcoded to `kind="tactical"`.** `memory/store.py`
+  `find_similar(kind=None)` + `memory/pruning.py` now match across both kinds and
+  never demote a promoted strategic entry.
+- [x] **Sandbox fails open when `AGENT_SANDBOX_ROOT` is unset.** All 7 sandbox
+  tools fail closed (error + exit 1) when the var is unset.
+- [x] **Subprocess timeout doesn't kill the child's process group.**
+  `tools/runner.py` runs tools via `Popen(start_new_session=True)` and
+  `os.killpg(...SIGKILL)` on timeout (plus `errors="replace"` decoding).
 
 ## P2 — integrity & robustness
 

@@ -1,0 +1,8 @@
+{
+  "name": "web_search",
+  "description": "Searches the web for a query and returns titles, URLs, and snippets. Requires SEARCH_API_KEY to be set; without it, returns an error result.",
+  "command": ["python3", "web_search.py"],
+  "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+  "output_schema": {"type": "object", "properties": {"results": {"type": "array"}}},
+  "timeout_s": 10
+}

@@ -16,7 +16,7 @@ from agent_memory import (
     ToolRegistry,
     run_agent,
 )
-from agent_memory.core.llm import LLMResponse, ToolCall
+from agent_memory.core.llm import LLMError, LLMResponse, ToolCall
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "agent_memory" / "tools" / "examples"
 
@@ -95,6 +95,48 @@ def test_run_agent_malformed_llm_response_raises_protocol_error(tmp_path):
     script = [LLMResponse()]  # neither tool_call nor final_text
     with pytest.raises(AgentProtocolError):
         run_agent("nonsense", ScriptedLLMBackend(script), tools, store)
+
+
+def test_run_agent_empty_final_text_is_not_a_false_success(tmp_path):
+    # An empty string is not a real answer; it must not be reported as SUCCESS.
+    tools = _sandbox(tmp_path)
+    store = _store()
+    with pytest.raises(AgentProtocolError):
+        run_agent("empty", ScriptedLLMBackend([LLMResponse(final_text="")]), tools, store)
+
+
+def test_run_agent_parallel_tool_calls_in_one_turn(tmp_path):
+    # A single LLM turn emitting two tool_use blocks must run BOTH tools, then
+    # append exactly one assistant turn + one user turn pairing every result.
+    tools = _sandbox(tmp_path)
+    store = _store()
+    script = [
+        LLMResponse(
+            tool_calls=[
+                ToolCall(name="write_file", args={"path": "a.txt", "content": "A"}, id="t1"),
+                ToolCall(name="write_file", args={"path": "b.txt", "content": "B"}, id="t2"),
+            ]
+        ),
+        LLMResponse(final_text="wrote both"),
+    ]
+    result = run_agent("parallel", ScriptedLLMBackend(script), tools, store)
+    assert result["outcome"] == "success"
+    assert (tmp_path / "a.txt").read_text() == "A"
+    assert (tmp_path / "b.txt").read_text() == "B"
+
+
+def test_run_agent_llm_error_maps_to_failed_outcome(tmp_path):
+    # A provider error mid-run ends the run as FAILED, not a raw traceback.
+    tools = _sandbox(tmp_path)
+    store = _store()
+
+    class _BoomBackend:
+        def step(self, system, messages):
+            raise LLMError("simulated rate limit")
+
+    result = run_agent("boom", _BoomBackend(), tools, store)
+    assert result["outcome"] == "failed"
+    assert result["success"] is False
 
 
 def test_multi_dir_registry_merges_manifests(tmp_path):

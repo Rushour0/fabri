@@ -1,0 +1,12 @@
+{
+  "name": "write_file",
+  "description": "Writes text content to a file. Path must resolve inside the configured sandbox root; parent directories are created as needed.",
+  "command": ["python3", "write_file.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+    "required": ["path", "content"]
+  },
+  "output_schema": {"type": "object", "properties": {"bytes_written": {"type": "number"}}},
+  "timeout_s": 5
+}

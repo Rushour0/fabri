@@ -1,7 +1,7 @@
 from agent_memory.admin import AdminAuthError, describe_config, memory_summary, render_dashboard, require_admin
 from agent_memory.config import DEFAULT_CONFIG, load_config
 from agent_memory.core.agent import AgentProtocolError, run_agent
-from agent_memory.core.llm import AnthropicLLMBackend, LLMBackend, OpenAILLMBackend, ScriptedLLMBackend
+from agent_memory.core.llm import AnthropicLLMBackend, LLMBackend, LLMError, OpenAILLMBackend, ScriptedLLMBackend
 from agent_memory.core.outcome import Outcome
 from agent_memory.memory.store import QdrantMemoryStore
 from agent_memory.orchestrator.pipeline import process_trace
@@ -15,6 +15,7 @@ __all__ = [
     "AnthropicLLMBackend",
     "DEFAULT_CONFIG",
     "LLMBackend",
+    "LLMError",
     "OpenAILLMBackend",
     "Outcome",
     "QdrantMemoryStore",

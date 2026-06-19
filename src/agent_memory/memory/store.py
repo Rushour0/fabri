@@ -58,8 +58,11 @@ class QdrantMemoryStore:
         return [(MemoryEntry.from_payload(p.payload), p.score) for p in results.points]
 
     def find_similar(
-        self, text: str, threshold: float = 0.85, kind: str = "tactical"
+        self, text: str, threshold: float = 0.85, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
+        # kind=None searches every entry regardless of tactical/strategic, so a
+        # recurrence of an already-promoted guideline still matches its
+        # strategic entry instead of being re-inserted as a fresh tactical dup.
         results = self.query(text, top_k=1, kind=kind)
         if results and results[0][1] >= threshold:
             return results[0]

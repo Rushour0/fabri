@@ -8,7 +8,11 @@ SANDBOX_ROOT_ENV = "AGENT_SANDBOX_ROOT"
 
 def main() -> int:
     args = json.loads(sys.stdin.read())
-    root = Path(os.environ.get(SANDBOX_ROOT_ENV, ".")).resolve()
+    root_env = os.environ.get(SANDBOX_ROOT_ENV)
+    if not root_env:
+        print(json.dumps({"error": f"{SANDBOX_ROOT_ENV} is not set; refusing to run unsandboxed"}))
+        return 1
+    root = Path(root_env).resolve()
     target = (root / args.get("path", ".")).resolve()
 
     if not target.is_relative_to(root):
