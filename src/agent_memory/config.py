@@ -11,7 +11,21 @@ from agent_memory.orchestrator.retrieval import DEFAULT_TOP_K
 DEFAULT_TOOLS_DIR = Path(__file__).resolve().parent / "tools" / "examples"
 
 DEFAULT_CONFIG = {
-    "agent": {"name": "default", "max_steps": 10, "system_prompt_prefix": ""},
+    "agent": {
+        "name": "default",
+        "max_steps": 10,
+        # If `system_prompt` is set, it REPLACES the framework's generic
+        # boilerplate ("You are an autonomous agent..."). If `system_prompt_prefix`
+        # is set, it is prepended to whatever follows. Both empty = original
+        # behavior. Consuming projects use these to inject domain-specific
+        # identity, format contracts, few-shots, etc.
+        "system_prompt": "",
+        "system_prompt_prefix": "",
+        # Format the model is asked to PRODUCE structured output in (decompose).
+        # "json" is the reliable default; "toon" is opt-in (always json-fallback).
+        # Native tool-call arguments are always provider JSON regardless.
+        "output_format": "json",
+    },
     "llm": {
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
@@ -23,6 +37,10 @@ DEFAULT_CONFIG = {
         "enabled": None,
         "sandbox_root": ".",
         "agents": [],  # other agent.yaml configs exposed as tools -- see tools/agent_tool.py
+        # How tool results are serialized INTO the model's context. "toon" (default)
+        # saves input tokens; the framework encodes this end, so there's no model
+        # reliability risk. Set "json" to opt out.
+        "result_format": "toon",
         "decompose": {"enabled": False, "max_subquestions": DEFAULT_MAX_SUBQUESTIONS},
     },
     "memory": {

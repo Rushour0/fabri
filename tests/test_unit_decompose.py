@@ -50,3 +50,17 @@ def test_decompose_strips_whitespace_around_json():
     result = decompose(llm, "x")
     assert result["ok"] is True
     assert result["result"]["subquestions"] == ["a"]
+
+
+def test_decompose_accepts_toon_output_when_opted_in():
+    llm = ScriptedLLMBackend([LLMResponse(final_text="[3]: q1,q2,q3")])
+    result = decompose(llm, "x", output_format="toon")
+    assert result == {"ok": True, "result": {"subquestions": ["q1", "q2", "q3"]}}
+
+
+def test_decompose_toon_mode_still_accepts_json_fallback():
+    # reliability: a model that ignores the TOON instruction and answers JSON works
+    llm = ScriptedLLMBackend([LLMResponse(final_text='["a", "b"]')])
+    result = decompose(llm, "x", output_format="toon")
+    assert result["ok"] is True
+    assert result["result"]["subquestions"] == ["a", "b"]

@@ -36,6 +36,10 @@ def main() -> int:
         max_steps=config["agent"]["max_steps"],
         top_k=mem_cfg["top_k"],
         max_subquestions=decompose_cfg["max_subquestions"],
+        system_prompt=config["agent"].get("system_prompt", ""),
+        system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
+        result_format=tools_cfg.get("result_format", "toon"),
+        output_format=config["agent"].get("output_format", "json"),
     )
     print(json.dumps({"final_text": result["final_text"], "outcome": result["outcome"]}))
     return 0 if result["outcome"] in (Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value) else 1

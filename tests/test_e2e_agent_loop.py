@@ -125,6 +125,48 @@ def test_run_agent_parallel_tool_calls_in_one_turn(tmp_path):
     assert (tmp_path / "b.txt").read_text() == "B"
 
 
+class _CaptureBackend:
+    """Records the messages it's handed on each step; runs one tool then finishes."""
+    def __init__(self):
+        self.n = 0
+        self.system = None
+        self.messages_at_finish = None
+
+    def step(self, system, messages):
+        self.n += 1
+        if self.n == 1:
+            self.system = system
+            return LLMResponse(tool_calls=[ToolCall(name="list_dir", args={"path": "."}, id="t1")])
+        self.messages_at_finish = messages
+        return LLMResponse(final_text="done")
+
+
+def _injected_tool_result(messages):
+    return messages[-1]["content"][0]["content"]
+
+
+def test_tool_results_injected_as_toon_by_default(tmp_path):
+    (tmp_path / "a.txt").write_text("x")
+    tools = _sandbox(tmp_path)
+    backend = _CaptureBackend()
+    run_agent("inspect", backend, tools, _store())  # result_format defaults to toon
+    injected = _injected_tool_result(backend.messages_at_finish)
+    # the list_dir entries array renders as a TOON table, not a JSON object
+    assert not injected.lstrip().startswith("{")
+    assert "entries[1]{name,is_dir}:" in injected
+    assert "TOON" in backend.system  # the model is told the result format
+
+
+def test_result_format_json_opts_out(tmp_path):
+    (tmp_path / "a.txt").write_text("x")
+    tools = _sandbox(tmp_path)
+    backend = _CaptureBackend()
+    run_agent("inspect", backend, tools, _store(), result_format="json")
+    injected = _injected_tool_result(backend.messages_at_finish)
+    assert injected.lstrip().startswith("{")  # plain JSON
+    assert backend.system is not None and "TOON" not in backend.system
+
+
 def test_run_agent_llm_error_maps_to_failed_outcome(tmp_path):
     # A provider error mid-run ends the run as FAILED, not a raw traceback.
     tools = _sandbox(tmp_path)

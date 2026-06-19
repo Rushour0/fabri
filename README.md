@@ -76,6 +76,7 @@ src/agent_memory/        # src/ layout: repo is "agent-memory", package is "agen
   runtime.py     build_llm/build_tools/build_tool_defs -- shared by cli and agent_runner_tool
   admin.py       admin-only config inspection + dashboard (stub auth seam, see below)
   config.py      YAML agent config loader (DEFAULT_CONFIG + load_config)
+  toon.py        TOON codec: compact JSON-shaped encoding for tool results (token savings)
   paths.py       project-local .agent_memory/ resolution for traces + logs
   cli.py         the `agent-memory` console command (composition over the public API)
   __init__.py    public API: run_agent, load_config, ToolRegistry, QdrantMemoryStore, ...
@@ -113,6 +114,19 @@ before the agent sees it — malformed output, timeouts, and tool error exits
 are distinct, well-defined failure modes rather than crashes. See
 `tools/examples/` for a Python tool (`echo`), a Go tool (`sum`), and a
 deliberately misbehaving tool (`broken`) used only by the test suite.
+
+### Token efficiency (TOON)
+
+Tool results are encoded into the model's context as **TOON**
+(Token-Oriented Object Notation, `toon.py`) rather than JSON by default — a
+compact indentation-based encoding that drops braces and collapses uniform
+arrays to a single header row plus data rows, typically ~30–40% fewer
+characters on tabular results. The framework encodes this itself (no model
+reliability risk); the trace/logs keep raw JSON. Pipeline: `json → toon → llm`
+inbound, and JSON outbound by default (`tools.result_format`,
+`agent.output_format` — see `docs/creating-an-agent.md`). Native tool-call
+arguments stay provider JSON. The codec round-trips any JSON-shaped value and
+`agent_memory.toon.encode`/`.decode` are public.
 
 ### Memory lifecycle
 

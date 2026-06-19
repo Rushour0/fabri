@@ -5,6 +5,7 @@ import uuid
 from agent_memory.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
 from agent_memory.core.llm import LLMBackend, LLMError, ToolCall
 from agent_memory.core.logging_setup import get_logger
+from agent_memory.toon import encode as toon_encode
 from agent_memory.core.outcome import Outcome
 from agent_memory.memory.store import QdrantMemoryStore
 from agent_memory.orchestrator.retrieval import DEFAULT_TOP_K, retrieve_context
@@ -25,13 +26,49 @@ class AgentProtocolError(RuntimeError):
     which the loop maps to Outcome.FAILED rather than raising.)"""
 
 
-def build_system_prompt(context_block: str, tool_descriptions: str) -> str:
+DEFAULT_AGENT_IDENTITY = "You are an autonomous agent. Use tools when needed, and stop once the task is done."
+
+TOON_RESULT_NOTE = (
+    "Tool results are given to you in TOON, a compact format: objects are `key: value` "
+    "lines; arrays are `name[N]: v1,v2,...`, or a table `name[N]{f1,f2}:` followed by one "
+    "comma-separated row per element. Read it as structured data; keep calling tools and "
+    "answering normally."
+)
+
+
+def build_system_prompt(
+    context_block: str,
+    tool_descriptions: str,
+    *,
+    system_prompt: str = "",
+    system_prompt_prefix: str = "",
+    result_format: str = "json",
+) -> str:
+    # `system_prompt` (when set) replaces the framework's generic identity line
+    # entirely -- domain agents use this to inject "You are the story_agent..."
+    # with format pointers and few-shots. `system_prompt_prefix` (when set) is
+    # prepended verbatim; useful for global notes that apply across many configs.
+    # Both empty -> identical to pre-patch behavior.
+    identity = system_prompt or DEFAULT_AGENT_IDENTITY
     parts = [
-        "You are an autonomous agent. Use tools when needed, and stop once the task is done.",
+        system_prompt_prefix,
+        identity,
         f"Available tools:\n{tool_descriptions}" if tool_descriptions else "",
+        TOON_RESULT_NOTE if result_format == "toon" else "",
         context_block,
     ]
     return "\n\n".join(p for p in parts if p)
+
+
+def _encode_result(result: dict, result_format: str) -> str:
+    """Serialize a tool result for the model. TOON saves input tokens; we never
+    let an encode error break the loop -- fall back to JSON."""
+    if result_format == "toon":
+        try:
+            return toon_encode(result)
+        except Exception:  # pragma: no cover - defensive, encode handles all JSON shapes
+            logger.warning("toon encode failed for a tool result; falling back to JSON")
+    return json.dumps(result)
 
 
 def run_agent(
@@ -43,13 +80,28 @@ def run_agent(
     max_steps: int = MAX_STEPS,
     top_k: int = DEFAULT_TOP_K,
     max_subquestions: int = DEFAULT_MAX_SUBQUESTIONS,
+    system_prompt: str = "",
+    system_prompt_prefix: str = "",
+    result_format: str = "toon",
+    output_format: str = "json",
 ) -> dict:
+    # result_format: how tool results are serialized INTO the model's context
+    #   (toon = fewer input tokens; we control this end so it's reliability-free).
+    # output_format: the format the model is asked to PRODUCE structured output in
+    #   (decompose). Defaults to json for reliability; toon is opt-in and always
+    #   falls back to json parsing. Native tool-call args are always provider JSON.
     session_id = session_id or str(uuid.uuid4())
     logger.info("agent run starting: task=%r session_id=%s", task, session_id)
 
     context_block = retrieve_context(store, task, top_k=top_k, tool_names=[t.name for t in tools.list()])
     tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in tools.list())
-    system = build_system_prompt(context_block, tool_descriptions)
+    system = build_system_prompt(
+        context_block,
+        tool_descriptions,
+        system_prompt=system_prompt,
+        system_prompt_prefix=system_prompt_prefix,
+        result_format=result_format,
+    )
 
     log_event(session_id, {"type": "start", "task": task, "context_block": context_block})
 
@@ -67,7 +119,8 @@ def run_agent(
             response = llm.step(system, messages)
             if response.tool_calls:
                 had_tool_failure |= _dispatch_tool_calls(
-                    response.tool_calls, tools, llm, task, max_subquestions, session_id, messages, step_num
+                    response.tool_calls, tools, llm, task, max_subquestions,
+                    session_id, messages, step_num, result_format, output_format,
                 )
                 continue
         except LLMError as e:
@@ -117,6 +170,8 @@ def _dispatch_tool_calls(
     session_id: str,
     messages: list[dict],
     step_num: int,
+    result_format: str = "toon",
+    output_format: str = "json",
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
@@ -132,7 +187,10 @@ def _dispatch_tool_calls(
         logger.info("step %d: dispatching tool %s args=%s", step_num, call.name, call.args)
         t0 = time.monotonic()
         if call.name == DECOMPOSE_TOOL_NAME:
-            result = decompose(llm, call.args.get("task", default_task), max_subquestions=max_subquestions)
+            result = decompose(
+                llm, call.args.get("task", default_task),
+                max_subquestions=max_subquestions, output_format=output_format,
+            )
         else:
             result = tools.invoke(call.name, call.args)
         elapsed = time.monotonic() - t0
@@ -143,10 +201,13 @@ def _dispatch_tool_calls(
 
         log_event(session_id, {"type": "tool_call", "name": call.name, "args": call.args, "result": result})
 
+        # The trace keeps the raw dict; only the copy entering the model's context
+        # is TOON-encoded (or JSON), so token savings don't cost us a readable log.
+        encoded = _encode_result(result, result_format)
         assistant_blocks.append({"type": "tool_use", "id": call.id, "name": call.name, "input": call.args})
-        result_blocks.append({"type": "tool_result", "tool_use_id": call.id, "content": json.dumps(result)})
+        result_blocks.append({"type": "tool_result", "tool_use_id": call.id, "content": encoded})
         simple_calls.append(f"[tool_call:{call.name}]")
-        simple_results.append(f"[tool_result] {result}")
+        simple_results.append(f"[tool_result] {encoded}")
 
     if real_ids:
         # Real provider tool-use: echo the assistant's tool_use blocks verbatim,

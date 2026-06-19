@@ -42,6 +42,8 @@ only override what you need. Full schema:
 agent:
   name: my-agent
   max_steps: 10                 # loop budget; raise for multi-tool research tasks
+  output_format: json           # format the MODEL is asked to emit (decompose): json (default,
+                                # reliable) or toon (opt-in, fewer output tokens, json-fallback)
 
 llm:
   provider: anthropic           # or "openai"
@@ -55,6 +57,8 @@ tools:
     - tools/agent_tools         # your project's own tools, relative to cwd
   enabled: [read_file, write_file]   # null = every discovered tool
   sandbox_root: project          # read_file/write_file refuse paths outside this
+  result_format: toon            # how tool results are fed INTO the model: toon (default,
+                                 # fewer input tokens) or json
   decompose:
     enabled: false                # turn on for research-shaped tasks
     max_subquestions: 5
@@ -80,6 +84,25 @@ path to the agent-memory checkout. Every *other* path in the config
 (`manifest_dir` entries, `sandbox_root`) resolves relative to **the directory
 you run the command from**, not the config file's location — run from your
 project root.
+
+### Token efficiency: TOON
+
+Tool results are fed into the model in [TOON](../src/agent_memory/toon.py)
+(Token-Oriented Object Notation) by default — a compact, indentation-based
+encoding of JSON that drops braces and, for uniform arrays, the repeated keys
+(one header row instead). A typical tabular result is ~30–40% fewer characters
+than JSON; the trace/logs keep the raw JSON, so only the copy in the model's
+context shrinks. The framework encodes this itself, so there's no model
+reliability risk — flip it off with `tools.result_format: json`.
+
+The reverse (`json → toon → llm → toon → json`) is opt-in: set
+`agent.output_format: toon` to ask the model to *emit* TOON (saving output
+tokens on `decompose`), but it always falls back to parsing JSON if the model
+doesn't comply — so the default stays `json` for reliability. One seam is
+always JSON regardless: the providers' **native tool-call arguments**, which
+the API returns as JSON (using TOON there would mean giving up native tool
+calling). `agent_memory.toon.encode` / `.decode` are public if you want them in
+your own tools.
 
 ## 3. Pick your tools
 
