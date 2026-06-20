@@ -1,6 +1,6 @@
 [project]
 name = "fabri"
-version = "0.4.1"
+version = "0.4.2"
 description = "A local memory + orchestration framework for token-efficient LLM agents: planner/executor split, retrieved tool descriptions, batch tool calls, Reflexion-style success-pattern mining, tactical/strategic memory over execution traces, polyglot subprocess tools, agent-as-tool composition, Anthropic prompt caching, per-run usage events, and TOON I/O."
 readme = "README.md"
 requires-python = ">=3.11"

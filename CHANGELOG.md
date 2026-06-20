@@ -4,6 +4,21 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.4.2 — 2026-06-21
+
+### Fixed
+
+- **`ToolRegistry` import crash on annotation introspection.** The v0.4.0
+  `invoke_batch(self, calls: list[dict])` signature shadowed `list` against
+  the existing `ToolRegistry.list()` method — under PEP 649 deferred
+  annotations, any consumer that touched `__annotations__` /
+  `inspect.signature` / `typing.get_type_hints` on the class hit
+  `TypeError: 'function' object is not subscriptable`. Fix:
+  `from __future__ import annotations` at the top of `tools/registry.py`
+  so all annotations stay as strings and the lookup never resolves
+  `list` against the method. Public API unchanged (`registry.list()`
+  still works).
+
 ## v0.4.1 — 2026-06-21
 
 PyPI metadata polish: package description rewritten to surface the A1–A5
