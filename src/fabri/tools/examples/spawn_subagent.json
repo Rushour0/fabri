@@ -1,0 +1,28 @@
+{
+  "name": "spawn_subagent",
+  "description": "Spawn a fabri sub-agent dynamically by config path. Use when the parent agent needs to pick a sub-agent at runtime (vs. the static `tools.agents[]` form, which fixes the choice at config load). The sub-agent runs as a fresh agent_runner_tool.py subprocess; optional system_prompt_inline / system_prompt_path overrides the sub-agent's configured prompt for this one call. `additional_context` is prepended to the task. `parallel_group` is a metadata tag the parent runner loop reads to fan out spawn calls concurrently (see F2). Returns the sub-agent's {final_text, outcome, session_id, trace_path}.",
+  "command": ["python3", "spawn_subagent.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "config_path": {"type": "string"},
+      "task": {"type": "string"},
+      "system_prompt_inline": {"type": "string"},
+      "system_prompt_path": {"type": "string"},
+      "additional_context": {"type": "string"},
+      "parallel_group": {"type": "string"},
+      "timeout_s": {"type": "integer"}
+    },
+    "required": ["config_path", "task"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "final_text": {"type": "string"},
+      "outcome": {"type": "string"},
+      "session_id": {"type": "string"},
+      "trace_path": {"type": "string"}
+    }
+  },
+  "timeout_s": 600
+}

@@ -34,6 +34,10 @@ def main() -> int:
                         help="Override sub-agent memory.qdrant_url")
     parser.add_argument("--memory-collection", dest="memory_collection", default=None,
                         help="Override sub-agent memory.collection")
+    parser.add_argument("--system-prompt", dest="system_prompt", default=None,
+                        help="Override sub-agent agent.system_prompt (inline string). F1.")
+    parser.add_argument("--system-prompt-file", dest="system_prompt_file", default=None,
+                        help="Override sub-agent agent.system_prompt with file contents. F1.")
     cli_args = parser.parse_args()
     args = json.loads(sys.stdin.read())
     config = load_config(cli_args.config_path)
@@ -45,6 +49,18 @@ def main() -> int:
         config["memory"]["qdrant_url"] = cli_args.qdrant_url
     if cli_args.memory_collection is not None:
         config["memory"]["collection"] = cli_args.memory_collection
+    if cli_args.system_prompt is not None and cli_args.system_prompt_file is not None:
+        print(json.dumps({"error": "pass --system-prompt OR --system-prompt-file, not both"}))
+        return 1
+    if cli_args.system_prompt is not None:
+        config.setdefault("agent", {})["system_prompt"] = cli_args.system_prompt
+    elif cli_args.system_prompt_file is not None:
+        from pathlib import Path as _P
+        try:
+            config.setdefault("agent", {})["system_prompt"] = _P(cli_args.system_prompt_file).read_text()
+        except OSError as e:
+            print(json.dumps({"error": f"failed to read --system-prompt-file: {e}"}))
+            return 1
 
     tools_cfg = config["tools"]
     tools = build_tools(tools_cfg)
