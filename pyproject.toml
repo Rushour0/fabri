@@ -55,3 +55,6 @@ include = ["fabri*"]
 # `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
 [tool.setuptools.package-data]
 "fabri.tools.examples" = ["*.json", "example_go_tool/*"]
+# S2: Dockerfile.base ships with the wheel so consumers can build
+# `fabri/sandbox:latest` directly from an installed package.
+"fabri.sandbox" = ["Dockerfile.base"]

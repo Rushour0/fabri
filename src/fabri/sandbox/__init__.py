@@ -55,6 +55,9 @@ class Sandbox(ABC):
         return None
 
 
+__all__ = ["Sandbox", "LocalSandbox", "DockerSandbox"]
+
+
 class LocalSandbox(Sandbox):
     """Today's behavior, lifted unchanged into an object.
 
@@ -69,3 +72,15 @@ class LocalSandbox(Sandbox):
         self, manifest: ToolManifest, payload: dict, extra_env: dict | None = None
     ) -> dict:
         return run_tool(manifest, payload, extra_env=extra_env)
+
+
+def __getattr__(name):
+    # Lazy import so `from fabri.sandbox import Sandbox, LocalSandbox` never
+    # pulls in the Docker module unless the consumer asks for it (avoids any
+    # one-time import cost of the subprocess/queue plumbing for the common
+    # LocalSandbox case).
+    if name == "DockerSandbox":
+        from fabri.sandbox.docker_sandbox import DockerSandbox
+
+        return DockerSandbox
+    raise AttributeError(f"module 'fabri.sandbox' has no attribute {name!r}")
