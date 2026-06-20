@@ -1,6 +1,7 @@
 import json
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
 from fabri.core.llm import LLMBackend, LLMError, ToolCall
@@ -162,6 +163,26 @@ def run_agent(
     return {"session_id": session_id, "success": success, "final_text": final_text, "outcome": outcome.value}
 
 
+SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
+
+
+def _index_parallel_groups(calls: list[ToolCall]) -> dict[str, list[int]]:
+    """F2: group spawn_subagent call indices by their `parallel_group` arg.
+    Only spawn_subagent participates; other tools stay serial. A group with
+    one entry is still treated as 'parallel' (it just runs alone) so the
+    trace gets the parallel_group tag uniformly.
+    """
+    groups: dict[str, list[int]] = {}
+    for i, call in enumerate(calls):
+        if call.name != SPAWN_SUBAGENT_TOOL_NAME:
+            continue
+        group = call.args.get("parallel_group")
+        if not group:
+            continue
+        groups.setdefault(group, []).append(i)
+    return groups
+
+
 def _dispatch_tool_calls(
     calls: list[ToolCall],
     tools: ToolRegistry,
@@ -184,23 +205,79 @@ def _dispatch_tool_calls(
     assistant_blocks, result_blocks = [], []
     simple_calls, simple_results = [], []
 
-    for call in calls:
-        logger.info("step %d: dispatching tool %s args=%s", step_num, call.name, call.args)
-        t0 = time.monotonic()
+    # F2: spawn_subagent calls that share a `parallel_group` arg fan out
+    # concurrently; everything else stays serial. Other tool kinds remain
+    # serial regardless -- only sub-agent spawns are expected to be slow
+    # enough that the overhead of a thread pool is worth it, and they're the
+    # tool kind the agent's prompt expects to fan out anyway.
+    parallel_indices = _index_parallel_groups(calls)
+    parallel_index_set = {i for idxs in parallel_indices.values() for i in idxs}
+
+    def _dispatch_one(call: ToolCall) -> dict:
         if call.name == DECOMPOSE_TOOL_NAME:
-            result = decompose(
+            return decompose(
                 llm, call.args.get("task", default_task),
                 max_subquestions=max_subquestions, output_format=output_format,
             )
-        else:
-            result = tools.invoke(call.name, call.args)
+        return tools.invoke(call.name, call.args)
+
+    results: dict[int, dict] = {}
+
+    # 1) Serial calls in original order.
+    for i, call in enumerate(calls):
+        if i in parallel_index_set:
+            continue
+        logger.info("step %d: dispatching tool %s args=%s", step_num, call.name, call.args)
+        t0 = time.monotonic()
+        results[i] = _dispatch_one(call)
         elapsed = time.monotonic() - t0
-        logger.info("step %d: tool %s returned ok=%s in %.2fs", step_num, call.name, result.get("ok"), elapsed)
+        logger.info("step %d: tool %s returned ok=%s in %.2fs", step_num, call.name, results[i].get("ok"), elapsed)
+
+    # 2) Parallel-group calls, dispatched concurrently by group. Events are
+    # logged as each future completes (chronological-completion order), so
+    # the trace shows the actual interleaving -- which is the whole point of
+    # the F2 acceptance criterion. The assistant/result blocks below are
+    # still emitted in original call order so the Anthropic API stays happy.
+    for group_name, idx_list in parallel_indices.items():
+        if len(idx_list) == 1:
+            i = idx_list[0]
+            call = calls[i]
+            logger.info("step %d: dispatching tool %s (parallel_group=%s) args=%s",
+                        step_num, call.name, group_name, call.args)
+            t0 = time.monotonic()
+            results[i] = _dispatch_one(call)
+            logger.info("step %d: tool %s returned ok=%s in %.2fs",
+                        step_num, call.name, results[i].get("ok"), time.monotonic() - t0)
+            continue
+        with ThreadPoolExecutor(max_workers=len(idx_list)) as pool:
+            future_to_idx = {
+                pool.submit(_dispatch_one, calls[i]): i for i in idx_list
+            }
+            for future in future_to_idx:
+                pass  # submission only; iteration below collects in completion order
+            from concurrent.futures import as_completed
+
+            for future in as_completed(future_to_idx):
+                i = future_to_idx[future]
+                results[i] = future.result()
+                logger.info(
+                    "step %d: tool %s (parallel_group=%s) returned ok=%s",
+                    step_num, calls[i].name, group_name, results[i].get("ok"),
+                )
+
+    # 3) Build the message turn + log events in original call order.
+    for i, call in enumerate(calls):
+        result = results[i]
         if not result.get("ok"):
             had_failure = True
             logger.warning("step %d: tool %s failed: %s", step_num, call.name, result.get("error"))
 
-        log_event(session_id, {"type": "tool_call", "name": call.name, "args": call.args, "result": result})
+        event = {"type": "tool_call", "name": call.name, "args": call.args, "result": result}
+        if i in parallel_index_set and call.args.get("parallel_group"):
+            # F2 tag so trace readers can spot the fan-out and a host UI can
+            # group concurrent sub-agent activity.
+            event["parallel_group"] = call.args["parallel_group"]
+        log_event(session_id, event)
 
         # The trace keeps the raw dict; only the copy entering the model's context
         # is TOON-encoded (or JSON), so token savings don't cost us a readable log.

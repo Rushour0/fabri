@@ -5,6 +5,7 @@ uses, so the calling agent's ToolRegistry/runner doesn't need to know this
 "tool" is itself a whole agent."""
 import argparse
 import json
+import os
 import sys
 
 from fabri.config import load_config
@@ -34,7 +35,18 @@ def main() -> int:
                         help="Override sub-agent memory.qdrant_url")
     parser.add_argument("--memory-collection", dest="memory_collection", default=None,
                         help="Override sub-agent memory.collection")
+    parser.add_argument("--system-prompt", dest="system_prompt", default=None,
+                        help="Override sub-agent agent.system_prompt (inline string). F1.")
+    parser.add_argument("--system-prompt-file", dest="system_prompt_file", default=None,
+                        help="Override sub-agent agent.system_prompt with file contents. F1.")
+    parser.add_argument("--ask-user-socket", dest="ask_user_socket", default=None,
+                        help="Path to a Unix socket the ask_user tool routes questions to (A1).")
     cli_args = parser.parse_args()
+    if cli_args.ask_user_socket is not None:
+        # Tools inherit this via os.environ; the ToolRegistry's run_tool
+        # subprocess only sets extra_env for sandbox-root, so plain inheritance
+        # is enough -- no registry plumbing needed.
+        os.environ["FABRI_ASK_USER_SOCKET"] = cli_args.ask_user_socket
     args = json.loads(sys.stdin.read())
     config = load_config(cli_args.config_path)
     if cli_args.model is not None:
@@ -45,6 +57,18 @@ def main() -> int:
         config["memory"]["qdrant_url"] = cli_args.qdrant_url
     if cli_args.memory_collection is not None:
         config["memory"]["collection"] = cli_args.memory_collection
+    if cli_args.system_prompt is not None and cli_args.system_prompt_file is not None:
+        print(json.dumps({"error": "pass --system-prompt OR --system-prompt-file, not both"}))
+        return 1
+    if cli_args.system_prompt is not None:
+        config.setdefault("agent", {})["system_prompt"] = cli_args.system_prompt
+    elif cli_args.system_prompt_file is not None:
+        from pathlib import Path as _P
+        try:
+            config.setdefault("agent", {})["system_prompt"] = _P(cli_args.system_prompt_file).read_text()
+        except OSError as e:
+            print(json.dumps({"error": f"failed to read --system-prompt-file: {e}"}))
+            return 1
 
     tools_cfg = config["tools"]
     tools = build_tools(tools_cfg)

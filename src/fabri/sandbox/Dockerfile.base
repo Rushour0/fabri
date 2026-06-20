@@ -1,0 +1,43 @@
+# fabri/sandbox base image. Consuming projects extend this:
+#
+#   FROM fabri/sandbox:latest
+#   COPY tools/agent_tools/ /opt/project/tools/agent_tools/
+#   COPY .agent/ /opt/project/.agent/
+#
+# Build from the fabri repo root:
+#   docker build -f src/fabri/sandbox/Dockerfile.base -t fabri/sandbox:latest .
+#
+# The image is intentionally minimal: a Python interpreter, fabri installed
+# in editable mode, and an unprivileged user. Bind-mount your project state
+# in at runtime (see DockerSandbox.bind_mounts).
+
+FROM python:3.12-slim
+
+# devkitARM, build tooling, etc. live in *project* extensions of this image
+# (e.g. ludexel-service's engine-svc Dockerfile) -- the base stays generic.
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash fabri
+WORKDIR /opt/fabri
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --no-cache-dir -e .
+
+# Default sandbox root inside the container; bind-mount your project state
+# here from the host. DockerSandbox.bind_mounts maps host:/path -> /workspace.
+ENV FABRI_SANDBOX_ROOT=/workspace
+ENV FABRI_HOME=/home/fabri/.fabri
+RUN mkdir -p /workspace /home/fabri/.fabri \
+    && chown -R fabri:fabri /workspace /home/fabri/.fabri /opt/fabri
+
+USER fabri
+WORKDIR /workspace
+
+# Containers run as idle workers; DockerSandbox.run_detached overrides
+# CMD with `sleep infinity`, then issues `docker exec` per tool call.
+CMD ["python3", "--version"]

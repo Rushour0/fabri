@@ -1,6 +1,6 @@
 [project]
 name = "fabri"
-version = "0.2.0"
+version = "0.2.1"
 description = "A local memory + orchestration framework for custom LLM agents: tactical/strategic memory over execution traces, polyglot subprocess tools, agent-as-tool composition, and token-efficient TOON I/O."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,3 +55,6 @@ include = ["fabri*"]
 # `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
 [tool.setuptools.package-data]
 "fabri.tools.examples" = ["*.json", "example_go_tool/*"]
+# S2: Dockerfile.base ships with the wheel so consumers can build
+# `fabri/sandbox:latest` directly from an installed package.
+"fabri.sandbox" = ["Dockerfile.base"]

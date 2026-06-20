@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import json
 import os
 import sys
@@ -57,6 +58,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     _require_api_key(config["llm"]["api_key_env"])
     session_id = args.session_id or str(uuid.uuid4())
     configure_logging(session_id, verbose=args.verbose)
+    if getattr(args, "ask_user_socket", None):
+        os.environ["FABRI_ASK_USER_SOCKET"] = args.ask_user_socket
 
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
@@ -138,6 +141,88 @@ def cmd_admin_config(args: argparse.Namespace) -> None:
     print(json.dumps(describe_config(config, tools), indent=2))
 
 
+def cmd_traces_show(args: argparse.Namespace) -> None:
+    """Pretty-print a session's JSONL trace. The framework already writes
+    every step (start / tool_call / final / failed) to .fabri/traces/<sid>.jsonl;
+    this is just the reader so a user can debug an agent run without
+    grepping JSON by hand. Doubles as the 'khudka' observability spine."""
+    from fabri.orchestrator.traces import read_trace, trace_path
+
+    events = read_trace(args.session_id)
+    if not events:
+        print(f"no events at {trace_path(args.session_id)}", file=sys.stderr)
+        sys.exit(1)
+    t0 = events[0].get("ts", 0.0)
+    for ev in events:
+        dt = ev.get("ts", t0) - t0
+        kind = ev.get("type", "?")
+        if kind == "tool_call":
+            name = ev.get("name", "?")
+            ok = ev.get("result", {}).get("ok")
+            tag = ev.get("parallel_group")
+            tag_str = f" [{tag}]" if tag else ""
+            print(f"  +{dt:6.2f}s tool_call {name}{tag_str} ok={ok}")
+        elif kind == "start":
+            print(f"  +{dt:6.2f}s start task={ev.get('task', '')[:80]!r}")
+        elif kind == "final":
+            print(f"  +{dt:6.2f}s final outcome={ev.get('outcome')} text={ev.get('text', '')[:120]!r}")
+        elif kind == "failed":
+            print(f"  +{dt:6.2f}s failed reason={ev.get('reason')!r}")
+        elif kind == "ask_user":
+            print(f"  +{dt:6.2f}s ask_user q={ev.get('question', '')[:80]!r}")
+        else:
+            print(f"  +{dt:6.2f}s {kind} {json.dumps({k: v for k, v in ev.items() if k != 'ts'})[:120]}")
+
+
+def cmd_traces_tail(args: argparse.Namespace) -> None:
+    """Follow a trace file (like `tail -f`), pretty-printing new events as
+    they arrive. Useful when the agent is running in another shell and you
+    want a live view of its tool calls."""
+    import time as _time
+    from fabri.orchestrator.traces import trace_path
+
+    path = trace_path(args.session_id)
+    if not path.exists():
+        path.touch()
+    with path.open("r") as f:
+        # Seek to end so we only see new events, not historical.
+        f.seek(0, 2)
+        t_start = _time.time()
+        try:
+            while True:
+                line = f.readline()
+                if not line:
+                    _time.sleep(0.2)
+                    continue
+                try:
+                    ev = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                dt = ev.get("ts", t_start) - t_start
+                kind = ev.get("type", "?")
+                summary = ev.get("name") or ev.get("outcome") or ev.get("reason") or ""
+                tag = ev.get("parallel_group")
+                tag_str = f" [{tag}]" if tag else ""
+                print(f"  +{dt:6.2f}s {kind}{tag_str} {summary}", flush=True)
+        except KeyboardInterrupt:
+            pass
+
+
+def cmd_traces_list(args: argparse.Namespace) -> None:
+    """List recent traces under $FABRI_HOME/traces (or .fabri/traces) so the
+    user can find a session_id without remembering the UUID."""
+    from fabri.paths import traces_dir
+
+    d = traces_dir()
+    if not d.exists():
+        print(f"no traces dir at {d}", file=sys.stderr)
+        return
+    entries = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in entries[: args.limit]:
+        size = p.stat().st_size
+        print(f"  {p.stem}  ({size} B)")
+
+
 def cmd_admin_dashboard(args: argparse.Namespace) -> None:
     try:
         require_admin(args.admin_token)
@@ -153,6 +238,11 @@ def cmd_admin_dashboard(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fabri")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"fabri {importlib.metadata.version('fabri')}",
+    )
     parser.add_argument("--verbose", action="store_true", help="Log at DEBUG level to the console")
     parser.add_argument("--config", dest="config", default=None, help="Path to an agent.yaml config")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +255,8 @@ def main() -> None:
     p_run = sub.add_parser("run", help="Run the agent on a task")
     p_run.add_argument("task")
     p_run.add_argument("--session-id", dest="session_id", default=None)
+    p_run.add_argument("--ask-user-socket", dest="ask_user_socket", default=None,
+                       help="Path to a Unix socket the ask_user tool routes questions to (A1).")
     p_run.set_defaults(func=cmd_run)
 
     p_ingest = sub.add_parser("ingest-traces", help="Synthesize guidelines from a session's trace")
@@ -187,6 +279,21 @@ def main() -> None:
 
     p_admin_dash = admin_sub.add_parser("dashboard", help="Human-readable summary: agent, tools, memory counts")
     p_admin_dash.set_defaults(func=cmd_admin_dashboard)
+
+    p_traces = sub.add_parser("traces", help="Inspect JSONL traces under $FABRI_HOME/traces (homegrown observability spine)")
+    traces_sub = p_traces.add_subparsers(dest="traces_command", required=True)
+
+    p_traces_show = traces_sub.add_parser("show", help="Pretty-print a session's trace")
+    p_traces_show.add_argument("session_id")
+    p_traces_show.set_defaults(func=cmd_traces_show)
+
+    p_traces_tail = traces_sub.add_parser("tail", help="Follow a session's trace as it's written")
+    p_traces_tail.add_argument("session_id")
+    p_traces_tail.set_defaults(func=cmd_traces_tail)
+
+    p_traces_list = traces_sub.add_parser("list", help="List recent session traces")
+    p_traces_list.add_argument("--limit", type=int, default=20)
+    p_traces_list.set_defaults(func=cmd_traces_list)
 
     args = parser.parse_args()
     try:
