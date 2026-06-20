@@ -24,6 +24,16 @@ class ToolCall:
 
 
 @dataclass
+class LLMUsage:
+    """Per-call token accounting. All fields default to 0 so a scripted backend
+    that doesn't fill them in still aggregates cleanly in run_agent's totals."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+
+@dataclass
 class LLMResponse:
     # `tool_call` is a convenience for constructing a single-call response (used
     # by the ScriptedLLMBackend and tests); __post_init__ folds it into
@@ -39,6 +49,9 @@ class LLMResponse:
     # agent loop logs this as a `thought` trace event before the
     # tool_call(s) it preceded; host UIs can render it as reasoning context.
     thinking_text: str | None = None
+    # Filled in by real provider backends so run_agent can aggregate a per-run
+    # `usage` event. Optional so ScriptedLLMBackend stays a one-liner.
+    usage: LLMUsage | None = None
 
     def __post_init__(self) -> None:
         if self.tool_call is not None and not self.tool_calls:
@@ -47,6 +60,14 @@ class LLMResponse:
 
 class LLMBackend(Protocol):
     def step(self, system: str, messages: list[dict]) -> LLMResponse: ...
+
+    def set_tools(self, tool_defs: list[dict]) -> None:
+        """Replace the backend's tool list mid-construction (A1: retrieved tool
+        descriptions). Real provider backends override; ScriptedLLMBackend
+        ignores. `tool_defs` is the universal Anthropic-shaped list
+        (`{name, description, input_schema}`) -- providers that want a
+        different wire format convert internally."""
+        ...
 
 
 def _call_with_retry(fn: Callable, transient: tuple[type[Exception], ...], attempts: int = 3, base_delay: float = 0.5):
@@ -73,6 +94,10 @@ class ScriptedLLMBackend:
     def __init__(self, script: list[LLMResponse]):
         self._script = list(script)
         self._i = 0
+
+    def set_tools(self, tool_defs: list[dict]) -> None:
+        # No-op: scripted backend doesn't model the provider tool list.
+        return None
 
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         if self._i >= len(self._script):
@@ -104,6 +129,9 @@ class AnthropicLLMBackend:
         # prefix to ~10% billing on cache hits. Flag exists so cost-sensitive
         # smoke tests / scripted backends can opt out.
         self._enable_prompt_cache = enable_prompt_cache
+
+    def set_tools(self, tool_defs: list[dict]) -> None:
+        self._tools = list(tool_defs or [])
 
     def _build_system(self, system: str):
         if not self._enable_prompt_cache:
@@ -143,6 +171,12 @@ class AnthropicLLMBackend:
         # them so a run's trace shows whether the cache is hitting.
         cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        call_usage = LLMUsage(
+            input_tokens=usage.input_tokens or 0,
+            output_tokens=usage.output_tokens or 0,
+            cache_creation_input_tokens=cache_create,
+            cache_read_input_tokens=cache_read,
+        )
         logger.info(
             "anthropic call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d cache_create=%d cache_read=%d stop=%s",
             self._model,
@@ -177,9 +211,14 @@ class AnthropicLLMBackend:
                 tool_calls=tool_calls,
                 stop_reason=resp.stop_reason,
                 thinking_text=text_blocks or None,
+                usage=call_usage,
             )
 
-        return LLMResponse(final_text=text_blocks or None, stop_reason=resp.stop_reason)
+        return LLMResponse(
+            final_text=text_blocks or None,
+            stop_reason=resp.stop_reason,
+            usage=call_usage,
+        )
 
 
 class OpenAILLMBackend:
@@ -203,7 +242,12 @@ class OpenAILLMBackend:
         self._client = openai.OpenAI(api_key=os.environ.get(api_key_env))
         self._model = model
         self._max_tokens = max_tokens
-        self._tools = [
+        self._tools: list[dict] = []
+        self.set_tools(tools or [])
+
+    @staticmethod
+    def _to_openai_tools(tool_defs: list[dict]) -> list[dict]:
+        return [
             {
                 "type": "function",
                 "function": {
@@ -212,8 +256,11 @@ class OpenAILLMBackend:
                     "parameters": t.get("input_schema") or {"type": "object"},
                 },
             }
-            for t in (tools or [])
+            for t in tool_defs
         ]
+
+    def set_tools(self, tool_defs: list[dict]) -> None:
+        self._tools = self._to_openai_tools(tool_defs or [])
 
     @staticmethod
     def _to_openai(m: dict) -> list[dict]:
@@ -285,6 +332,12 @@ class OpenAILLMBackend:
         if choice.finish_reason == "length":
             raise LLMError("openai response truncated at max_tokens; raise llm.max_tokens for this agent")
 
+        oai_usage = getattr(resp, "usage", None)
+        call_usage = LLMUsage(
+            input_tokens=getattr(oai_usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(oai_usage, "completion_tokens", 0) or 0,
+        )
+
         message = choice.message
         if message.tool_calls:
             return LLMResponse(
@@ -293,5 +346,10 @@ class OpenAILLMBackend:
                     for c in message.tool_calls
                 ],
                 stop_reason=choice.finish_reason,
+                usage=call_usage,
             )
-        return LLMResponse(final_text=message.content or None, stop_reason=choice.finish_reason)
+        return LLMResponse(
+            final_text=message.content or None,
+            stop_reason=choice.finish_reason,
+            usage=call_usage,
+        )

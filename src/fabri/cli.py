@@ -29,6 +29,19 @@ def cmd_init(args: argparse.Namespace) -> None:
     print("\n" + next_steps(args.dir))
 
 
+def _planner_mode_from_cfg(planner_cfg: dict) -> str:
+    """Translate the agent.planner block (which carries both an enabled flag and
+    a mode string for back-compat) into the run_agent.planner_mode argument."""
+    mode = planner_cfg.get("mode", "off")
+    if mode in ("auto", "force", "off"):
+        if not planner_cfg.get("enabled", False) and mode != "off":
+            # `enabled: false` wins over any non-off mode -- so a stale `mode`
+            # value in a config can't surprise-activate the planner.
+            return "off"
+        return mode
+    return "off"
+
+
 def _require_api_key(api_key_env: str) -> None:
     if not os.environ.get(api_key_env):
         print(
@@ -84,6 +97,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         result_format=tools_cfg.get("result_format", "toon"),
         output_format=config["agent"].get("output_format", "json"),
         decompose_llm=build_decompose_llm(config),
+        planner_llm=build_decompose_llm(config),
+        planner_mode=_planner_mode_from_cfg(config["agent"].get("planner", {})),
+        planner_max_items=config["agent"].get("planner", {}).get("max_items", 8),
+        planner_auto_token_threshold=config["agent"].get("planner", {}).get("auto_token_threshold", 80),
+        tool_retrieval_enabled=tools_cfg.get("retrieval", {}).get("enabled", False),
+        tool_retrieval_top_k=tools_cfg.get("retrieval", {}).get("top_k", 6),
+        tool_retrieval_always_include=tuple(
+            tools_cfg.get("retrieval", {}).get("always_include", [])
+        ),
     )
     print(json.dumps(result, indent=2))
     # An LLM-error / max-steps / no-final outcome must surface to the

@@ -2,10 +2,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fabri.tools.manifest_schema import ToolManifest
-from fabri.tools.result import tool_error
+from fabri.tools.result import tool_error, tool_ok
 
 if TYPE_CHECKING:
     from fabri.sandbox import Sandbox
+
+BATCH_TOOL_NAME = "batch"
+# Tools the batch tool refuses to dispatch -- nested batches would multiply the
+# fan-out unpredictably; spawn_subagent + ask_user have side effects that don't
+# belong inside an opaque batch result.
+BATCH_FORBIDDEN_NESTED = frozenset({BATCH_TOOL_NAME, "spawn_subagent", "ask_user"})
 
 
 class ToolRegistry:
@@ -53,8 +59,35 @@ class ToolRegistry:
         return list(self.tools.values())
 
     def invoke(self, name: str, args: dict) -> dict:
+        if name == BATCH_TOOL_NAME and BATCH_TOOL_NAME in self.tools:
+            return self.invoke_batch(args.get("calls") or [])
         manifest = self.tools.get(name)
         if manifest is None:
             return tool_error(f"unknown tool: {name}")
         extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else None
         return self.sandbox.run_tool(manifest, args, extra_env=extra_env)
+
+    def invoke_batch(self, calls: list[dict]) -> dict:
+        """Dispatch a list of `{name, args}` calls inside one tool invocation.
+        Returns `{"ok": True, "result": {"results": [...]}}` where each entry
+        is the standard `{ok, result?, error?}` shape -- a per-call failure
+        does NOT short-circuit the batch (the model gets every result, can
+        decide what to do). Nested batches and side-effecting meta-tools
+        are refused with a clear error so the model retries with the
+        flattened calls instead."""
+        if not isinstance(calls, list):
+            return tool_error("batch: `calls` must be a list of {name, args} objects")
+        results: list[dict] = []
+        for entry in calls:
+            if not isinstance(entry, dict) or "name" not in entry:
+                results.append(tool_error("batch entry malformed: expected {name, args}"))
+                continue
+            inner_name = entry["name"]
+            if inner_name in BATCH_FORBIDDEN_NESTED:
+                results.append(tool_error(
+                    f"batch refuses to dispatch {inner_name!r}: nested batch or "
+                    f"side-effecting meta-tools are not allowed."
+                ))
+                continue
+            results.append(self.invoke(inner_name, entry.get("args") or {}))
+        return tool_ok({"results": results})

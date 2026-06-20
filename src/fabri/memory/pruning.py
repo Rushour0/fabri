@@ -41,6 +41,7 @@ def ingest_guideline(
     tools: list[str] | None = None,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
     promotion_threshold_sessions: int = PROMOTION_THRESHOLD_SESSIONS,
+    kind: str = "tactical",
 ) -> MemoryEntry:
     """Insert or merge a new candidate guideline. A near-duplicate of an existing
     entry (cosine sim >= similarity_threshold, tactical *or* strategic) increments
@@ -53,12 +54,16 @@ def ingest_guideline(
     tags = tags or []
     tools = tools or []
     with _collection_lock(store.collection):
-        # Search across both kinds: matching only tactical entries would let a
-        # recurrence of a promoted guideline slip through as a brand-new tactical
-        # dup (restarting its promotion counter), or -- when the synthesized text is
-        # identical -- collide on the deterministic point id and clobber the
-        # strategic entry back down to tactical on upsert.
-        existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
+        # A4: success_pattern entries are deduped against same-kind entries
+        # only, so a "what worked" guideline doesn't merge into a textually
+        # similar failure-derived guideline (or vice versa) and silently
+        # suppress one of the two signals at retrieval time. Failure-derived
+        # kinds (tactical / strategic) still search across both -- that's the
+        # promotion path the historical pruning already relied on.
+        if kind == "success_pattern":
+            existing = store.find_similar(text, threshold=similarity_threshold, kind="success_pattern")
+        else:
+            existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
 
         if existing is not None:
             entry, score = existing
@@ -77,8 +82,8 @@ def ingest_guideline(
             store.upsert(entry)
             return entry
 
-        entry = MemoryEntry(text=text, kind="tactical", session_ids=[session_id], tags=tags, tools=tools)
-        logger.debug("inserted new tactical guideline: %r tools=%s", entry.text, entry.tools)
+        entry = MemoryEntry(text=text, kind=kind, session_ids=[session_id], tags=tags, tools=tools)
+        logger.debug("inserted new %s guideline: %r tools=%s", kind, entry.text, entry.tools)
         store.upsert(entry)
         return entry
 

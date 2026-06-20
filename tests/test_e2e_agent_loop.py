@@ -181,6 +181,136 @@ def test_run_agent_llm_error_maps_to_failed_outcome(tmp_path):
     assert result["success"] is False
 
 
+def test_run_agent_planner_mode_force_emits_plan_events(tmp_path):
+    # A2: planner_mode='force' runs one plan() call up-front then one executor
+    # step-loop per plan item. Trace must carry plan_started, two
+    # plan_item_started/finished pairs, and plan_finished -- in that order.
+    tools = _sandbox(tmp_path)
+    store = _store()
+    planner_plan = (
+        '{"items": ['
+        '{"goal": "write a.txt", "artifacts": ["a.txt"], "depends_on": []},'
+        '{"goal": "write b.txt", "artifacts": ["b.txt"], "depends_on": [0]}'
+        ']}'
+    )
+    # Main script: planner emits the JSON plan first, then the executor runs
+    # one write_file + one final_text per plan item.
+    script = [
+        LLMResponse(final_text=planner_plan),  # planner step
+        LLMResponse(tool_call=ToolCall(name="write_file", args={"path": "a.txt", "content": "A"}, id="t1")),
+        LLMResponse(final_text="wrote a"),
+        LLMResponse(tool_call=ToolCall(name="write_file", args={"path": "b.txt", "content": "B"}, id="t2")),
+        LLMResponse(final_text="wrote b"),
+    ]
+    backend = ScriptedLLMBackend(script)
+    result = run_agent(
+        "build a then build b", backend, tools, store,
+        planner_mode="force", max_steps=10,
+    )
+    assert result["success"] is True
+    assert (tmp_path / "a.txt").read_text() == "A"
+    assert (tmp_path / "b.txt").read_text() == "B"
+
+    from fabri.events import EventType
+    from fabri.orchestrator.traces import read_trace
+    events = read_trace(result["session_id"])
+    types = [e["type"] for e in events]
+    assert EventType.PLAN_STARTED.value in types
+    assert types.count(EventType.PLAN_ITEM_STARTED.value) == 2
+    assert types.count(EventType.PLAN_ITEM_FINISHED.value) == 2
+    assert EventType.PLAN_FINISHED.value in types
+    # plan_started must precede the first plan_item_started; plan_finished must
+    # land before the usage event at run end.
+    assert types.index(EventType.PLAN_STARTED.value) < types.index(EventType.PLAN_ITEM_STARTED.value)
+    assert types.index(EventType.PLAN_FINISHED.value) < types.index(EventType.USAGE.value)
+
+
+def test_run_agent_planner_mode_off_leaves_legacy_path_unchanged(tmp_path):
+    # planner_mode='off' (default) must produce zero plan events.
+    tools = _sandbox(tmp_path)
+    backend = ScriptedLLMBackend([LLMResponse(final_text="done")])
+    result = run_agent("x", backend, tools, _store())
+    from fabri.events import EventType
+    from fabri.orchestrator.traces import read_trace
+    types = {e["type"] for e in read_trace(result["session_id"])}
+    assert EventType.PLAN_STARTED.value not in types
+
+
+def test_run_agent_with_tool_retrieval_narrows_system_prompt(tmp_path):
+    # A1: enabling tool_retrieval restricts the descriptions in the system
+    # prompt to the task-relevant subset. The full set has 7+ tools; with
+    # top_k=2 the prompt must reference at most that many (+ always_include).
+    tools = _sandbox(tmp_path)
+    backend = _CaptureBackend()
+    run_agent(
+        "read a file from disk",
+        backend,
+        tools,
+        _store(),
+        tool_retrieval_enabled=True,
+        tool_retrieval_top_k=2,
+        tool_retrieval_always_include=(),
+    )
+    sys_prompt = backend.system
+    # Only the top-2 task-relevant tools end up in "Available tools:".
+    available_block = sys_prompt.split("Available tools:")[1].split("\n\n")[0]
+    listed = [line[2:].split(":")[0] for line in available_block.splitlines() if line.startswith("- ")]
+    assert len(listed) == 2
+    assert "read_file" in listed  # the obviously relevant tool survives
+
+
+def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
+    # A5: every run ends with a `usage` event and the return dict carries a
+    # `usage` subobject with the six per-run fields.
+    tools = _sandbox(tmp_path)
+    store = _store()
+    script = [LLMResponse(final_text="hello")]
+    result = run_agent("usage", ScriptedLLMBackend(script), tools, store)
+
+    usage = result["usage"]
+    assert set(usage.keys()) == {
+        "input_tokens", "output_tokens",
+        "cache_creation_input_tokens", "cache_read_input_tokens",
+        "step_count", "wall_time_s",
+    }
+    assert usage["step_count"] == 1
+    assert usage["wall_time_s"] >= 0
+    # Scripted backend leaves LLMResponse.usage=None, so token totals stay 0.
+    assert usage["input_tokens"] == 0
+    assert usage["output_tokens"] == 0
+
+    from fabri.events import EventType
+    from fabri.orchestrator.traces import read_trace
+    events = read_trace(result["session_id"])
+    assert events[-1]["type"] == EventType.USAGE.value
+    assert events[-1]["step_count"] == 1
+
+
+def test_run_agent_usage_aggregates_across_steps(tmp_path):
+    # When the backend reports per-call usage, run_agent sums it across every step.
+    from fabri.core.llm import LLMUsage
+
+    tools = _sandbox(tmp_path)
+    store = _store()
+    script = [
+        LLMResponse(
+            tool_call=ToolCall(name="list_dir", args={"path": "."}, id="t1"),
+            usage=LLMUsage(input_tokens=10, output_tokens=5, cache_read_input_tokens=3),
+        ),
+        LLMResponse(
+            final_text="done",
+            usage=LLMUsage(input_tokens=20, output_tokens=4, cache_creation_input_tokens=7),
+        ),
+    ]
+    result = run_agent("usage-agg", ScriptedLLMBackend(script), tools, store)
+    usage = result["usage"]
+    assert usage["input_tokens"] == 30
+    assert usage["output_tokens"] == 9
+    assert usage["cache_read_input_tokens"] == 3
+    assert usage["cache_creation_input_tokens"] == 7
+    assert usage["step_count"] == 2
+
+
 def test_multi_dir_registry_merges_manifests(tmp_path):
     # Build a second manifest dir on disk with one tool and confirm both dirs'
     # tools end up in one registry -- the wiring the framework relies on for

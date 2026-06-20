@@ -79,7 +79,9 @@ def test_first_run_scaffold_then_drive(tmp_path, monkeypatch):
     types = [e.get("type") for e in lines]
     assert types[0] == "start"
     assert "tool_call" in types
-    assert types[-1] == "final"
+    # `usage` is the new run-end event (A5); `final` is the second-to-last.
+    assert types[-2] == "final"
+    assert types[-1] == "usage"
 
 
 def test_first_run_incomplete_with_tool_failure(tmp_path, monkeypatch):

@@ -4,6 +4,68 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.4.0 — 2026-06-21
+
+Token-optimization series A1–A5 (planner/executor split, retrieved tool
+descriptions, batch tool, success-pattern mining, per-run usage event). All
+changes are non-breaking: defaults preserve the v0.3.0 behaviour and the new
+paths are opt-in via `agent.planner.*`, `tools.retrieval.*`, or by listing
+`batch` in `tools.enabled`.
+
+### Added
+
+- **Per-run `usage` event (A5).** `run_agent` now accumulates per-call
+  input/output/cache-creation/cache-read token totals across the loop and
+  emits a `usage` trace event at run end, alongside the existing
+  `final` / `failed` / `incomplete` event. The same fields are returned in
+  the `run_agent` result dict under `usage` (plus `step_count` and
+  `wall_time_s`) so host services can persist per-run cost without parsing
+  stderr logs. `LLMResponse` gained an optional `LLMUsage` carrier; the
+  Anthropic and OpenAI backends fill it; `ScriptedLLMBackend` leaves it
+  `None` and totals stay zero.
+
+- **Retrieved tool descriptions (A1).** New
+  `orchestrator.retrieval.retrieve_tools(task, registry, top_k, always_include)`
+  ranks a registry's tools by cosine similarity of their descriptions to the
+  task. When `tools.retrieval.enabled: true` is set in the config,
+  `run_agent` narrows both the `Available tools:` block in the system prompt
+  AND the provider's `tools=` list (via a new `LLMBackend.set_tools()`) to
+  the top-K + an always-include set (defaults: `spawn_subagent`, `ask_user`,
+  `decompose`). The filtered subset is fixed for the whole run so the v0.3.0
+  prompt cache still hits across steps. Per-tool description vectors are
+  cached at module scope so re-runs don't re-embed every tool.
+
+- **Planner / executor split (A2).** New `core/planner.py` exports
+  `plan(task, llm, max_items)` and `PlanItem`. `run_agent` gained
+  `planner_mode: "off" | "auto" | "force"` (default `off` for back-compat),
+  a `planner_llm` argument (with the historical `decompose_llm` kept as a
+  fallback), and `planner_max_items` / `planner_auto_token_threshold`. When
+  the planner is engaged, the executor runs one step-loop per plan item in
+  dependency-resolved order with a minimal per-item user message ("current
+  goal + artefacts + previously completed"), so each item pays only its own
+  share of the prompt instead of the full accumulated history. New trace
+  events: `plan_started`, `plan_item_started`, `plan_item_finished`,
+  `plan_finished`. Configurable via `agent.planner.{enabled, mode,
+  max_items, auto_token_threshold}`.
+
+- **`batch` tool (A3).** A new built-in tool that takes
+  `{"calls": [{"name": "...", "args": {...}}, ...]}` and dispatches each
+  inside the registry process, collapsing the common
+  "validate -> schema_check -> xref_check -> generator_dryrun" verification
+  ladder from N model round-trips to one. Nested `batch` calls and
+  side-effecting meta-tools (`spawn_subagent`, `ask_user`) are refused with
+  a clear per-entry error rather than silently dispatched. Default off;
+  opt-in by listing `batch` in `tools.enabled`.
+
+- **Success-pattern mining (A4).** `process_trace` now also mines a "what
+  worked" guideline from every run that ended with a `final` event and at
+  least one ok=true tool call, ingesting it under a new
+  `kind: "success_pattern"`. `MemoryEntry.id` is now namespaced by kind
+  (success vs failure) so a success_pattern can't collide with a textually
+  similar failure-derived guideline. `retrieve_context` reserves up to
+  `top_k // 2` slots for success patterns so they survive even when a flood
+  of failure-derived guidelines would otherwise drown them at retrieval.
+
 ## v0.3.0 — 2026-06-21
 
 Token-optimization for file-generating agents. All changes are non-breaking:

@@ -72,6 +72,25 @@ def test_distinct_guidelines_are_not_merged():
     store.delete(e2.id)
 
 
+def test_success_pattern_does_not_merge_into_textually_similar_tactical():
+    # A4: success and failure-derived guidelines stay separated in dedup so a
+    # success_pattern can't suppress a failure guideline (or vice versa) just
+    # because the synthesized text happens to be close.
+    store = make_store()
+    text = "Use spawn_subagent to fan out work across map and character domains."
+
+    failure_entry = ingest_guideline(store, text, session_id="s1", kind="tactical")
+    success_entry = ingest_guideline(store, text, session_id="s2", kind="success_pattern")
+
+    assert failure_entry.id != success_entry.id
+    assert failure_entry.kind == "tactical"
+    assert success_entry.kind == "success_pattern"
+    assert store.count() == 2
+
+    store.delete(failure_entry.id)
+    store.delete(success_entry.id)
+
+
 def test_tools_accumulate_across_merges_not_overwritten():
     store = make_store()
     text = "Recurring guideline tied to more than one tool."

@@ -1,0 +1,29 @@
+{
+  "name": "batch",
+  "description": "Dispatch several tool calls in one turn (CodeAct-lite). Use when you would otherwise call N tools in a fixed sequence (e.g. validate_content -> schema_check -> xref_check) -- collapses N LLM round-trips to one. Each entry is `{name, args}`. Cannot recursively call `batch`, `spawn_subagent`, or `ask_user`.",
+  "command": ["__inproc_batch__"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "calls": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "args": {"type": "object"}
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    "required": ["calls"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "results": {"type": "array"}
+    }
+  },
+  "timeout_s": 30
+}

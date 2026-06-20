@@ -5,18 +5,23 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
-from fabri.core.llm import LLMBackend, LLMError, ToolCall
+from fabri.core.llm import LLMBackend, LLMError, LLMUsage, ToolCall
+from fabri.core.planner import DEFAULT_MAX_PLAN_ITEMS, PlanItem, plan as run_plan, topological_order
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType, StepReason
 from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
 from fabri.memory.store import QdrantMemoryStore
-from fabri.orchestrator.retrieval import DEFAULT_TOP_K, retrieve_context
+from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, DEFAULT_TOP_K, retrieve_context, retrieve_tools
 from fabri.orchestrator.traces import log_event
 from fabri.tools.registry import ToolRegistry
 
 MAX_STEPS = 10
 DECOMPOSE_TOOL_NAME = "decompose"
+# Tools the orchestrator prompt assumes always exist regardless of how a
+# task's wording lines up against their descriptions; retrieve_tools keeps
+# them in the filtered subset.
+DEFAULT_ALWAYS_INCLUDE_TOOLS = ("spawn_subagent", "ask_user", "decompose")
 
 logger = get_logger()
 
@@ -112,6 +117,13 @@ def run_agent(
     result_format: str = "toon",
     output_format: str = "json",
     decompose_llm: LLMBackend | None = None,
+    planner_llm: LLMBackend | None = None,
+    planner_mode: str = "off",
+    planner_max_items: int = DEFAULT_MAX_PLAN_ITEMS,
+    planner_auto_token_threshold: int = 80,
+    tool_retrieval_enabled: bool = False,
+    tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K,
+    tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
 ) -> dict:
     # result_format: how tool results are serialized INTO the model's context
     #   (toon = fewer input tokens; we control this end so it's reliability-free).
@@ -122,7 +134,33 @@ def run_agent(
     logger.info("agent run starting: task=%r session_id=%s", task, session_id)
 
     context_block = retrieve_context(store, task, top_k=top_k, tool_names=[t.name for t in tools.list()])
-    tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in tools.list())
+    # A1: when retrieval is on, narrow the system prompt + provider tool list
+    # to a task-relevant subset (top-K by description-vs-task similarity, plus
+    # always-include meta-tools). The filtered subset is the same for the whole
+    # run, so the prompt cache (v0.3.0) still hits across steps. The model is
+    # given the same list the backend will accept calls on -- otherwise a hint
+    # in the prompt could prompt the model to call a tool the backend can't
+    # dispatch.
+    if tool_retrieval_enabled:
+        visible_tools = retrieve_tools(
+            task,
+            tools,
+            top_k=tool_retrieval_top_k,
+            always_include=tool_retrieval_always_include,
+        )
+        filtered_defs = [
+            {"name": t.name, "description": t.description, "input_schema": t.input_schema or {"type": "object"}}
+            for t in visible_tools
+        ]
+        try:
+            llm.set_tools(filtered_defs)
+        except AttributeError:
+            # Backend predates the A1 set_tools API; fall back to leaving its
+            # tools attribute alone. The system prompt still narrows.
+            logger.warning("backend %s lacks set_tools(); tool-list filtering will not propagate to the provider", type(llm).__name__)
+    else:
+        visible_tools = tools.list()
+    tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in visible_tools)
     system = build_system_prompt(
         context_block,
         tool_descriptions,
@@ -133,14 +171,217 @@ def run_agent(
 
     log_event(session_id, {"type": EventType.START.value, "task": task, "context_block": context_block})
 
-    messages = [{"role": "user", "content": task}]
     final_text = None
     success = False
     failed = False
     error_reason = None
     had_tool_failure = False
+    usage_totals = LLMUsage()
+    step_count = 0
+    run_t0 = time.monotonic()
 
-    for step_num in range(max_steps):
+    def _accumulate(resp_usage: LLMUsage | None) -> None:
+        if resp_usage is None:
+            return
+        usage_totals.input_tokens += resp_usage.input_tokens
+        usage_totals.output_tokens += resp_usage.output_tokens
+        usage_totals.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
+        usage_totals.cache_read_input_tokens += resp_usage.cache_read_input_tokens
+
+    # A2: planner/executor split. `auto` engages when the task is long enough
+    # to benefit (>= planner_auto_token_threshold characters); `force` always
+    # engages; `off` keeps the historical single-loop behaviour. The planner
+    # is one LLM call ahead of the loop; the executor then runs the existing
+    # step body once per plan item with a minimal per-item user message.
+    plan_engaged = planner_mode == "force" or (
+        planner_mode == "auto" and len(task) >= planner_auto_token_threshold
+    )
+
+    def _run_executor_loop(
+        item_messages: list[dict], item_task: str, item_max_steps: int, step_offset: int
+    ) -> tuple[str | None, bool, bool, str | None, bool, int]:
+        """Run the inner step loop against `item_messages` (mutated in place).
+        Returns (final_text, success, failed, error_reason, had_failure, steps_used).
+        Raises AgentProtocolError exactly like the historical loop on a
+        no-tool-no-text response, so existing callers see no behaviour shift."""
+        item_final = None
+        item_success = False
+        item_failed = False
+        item_error = None
+        item_had_failure = False
+        steps_used = 0
+        for inner_step in range(item_max_steps):
+            global_step = step_offset + inner_step
+            steps_used = inner_step + 1
+            t0 = time.monotonic()
+            log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": global_step})
+            try:
+                response = llm.step(system, item_messages)
+                _accumulate(response.usage)
+                if response.tool_calls:
+                    if response.thinking_text:
+                        log_event(session_id, {
+                            "type": EventType.THOUGHT.value,
+                            "text": response.thinking_text,
+                            "step": global_step,
+                        })
+                    step_had_failure = _dispatch_tool_calls(
+                        response.tool_calls, tools, decompose_llm or llm, item_task, max_subquestions,
+                        session_id, item_messages, global_step, result_format, output_format,
+                    )
+                    item_had_failure |= step_had_failure
+                    log_event(session_id, {
+                        "type": EventType.STEP_FINISHED.value,
+                        "step": global_step,
+                        "elapsed_s": round(time.monotonic() - t0, 3),
+                        "reason": StepReason.TOOLS.value,
+                        "tool_failure": step_had_failure,
+                        "tool_count": len(response.tool_calls),
+                    })
+                    continue
+            except LLMError as e:
+                item_failed = True
+                item_error = str(e)
+                logger.error("step %d: unrecoverable llm error: %s", global_step, e)
+                log_event(session_id, {"type": EventType.ERROR.value, "reason": item_error, "outcome": Outcome.FAILED.value})
+                log_event(session_id, {
+                    "type": EventType.STEP_FINISHED.value,
+                    "step": global_step,
+                    "elapsed_s": round(time.monotonic() - t0, 3),
+                    "reason": StepReason.LLM_ERROR.value,
+                })
+                return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
+
+            if response.final_text:
+                if response.thinking_text:
+                    log_event(session_id, {
+                        "type": EventType.THOUGHT.value,
+                        "text": response.thinking_text,
+                        "step": global_step,
+                    })
+                item_final = response.final_text
+                item_success = True
+                logger.info("step %d: final answer produced", global_step)
+                log_event(session_id, {
+                    "type": EventType.STEP_FINISHED.value,
+                    "step": global_step,
+                    "elapsed_s": round(time.monotonic() - t0, 3),
+                    "reason": StepReason.FINAL.value,
+                })
+                return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
+
+            reason = "llm response had no tool calls and no final text"
+            logger.error("step %d: %s", global_step, reason)
+            log_event(session_id, {"type": EventType.ERROR.value, "reason": reason, "outcome": Outcome.FAILED.value})
+            log_event(session_id, {
+                "type": EventType.STEP_FINISHED.value,
+                "step": global_step,
+                "elapsed_s": round(time.monotonic() - t0, 3),
+                "reason": StepReason.PROTOCOL_ERROR.value,
+            })
+            raise AgentProtocolError(reason)
+        return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
+
+    if plan_engaged:
+        planner_backend = planner_llm or decompose_llm or llm
+        try:
+            plan_items = run_plan(task, planner_backend, max_items=planner_max_items)
+        except LLMError as e:
+            failed = True
+            error_reason = f"planner failed: {e}"
+            plan_items = []
+            log_event(session_id, {"type": EventType.ERROR.value, "reason": error_reason, "outcome": Outcome.FAILED.value})
+
+        if plan_items:
+            order = topological_order(plan_items)
+            log_event(session_id, {
+                "type": EventType.PLAN_STARTED.value,
+                "items": [it.to_dict() for it in plan_items],
+                "order": order,
+            })
+            steps_remaining = max_steps
+            per_item_outputs: list[str] = []
+            completed: list[str] = []
+            for plan_idx in order:
+                if steps_remaining <= 0 or failed:
+                    break
+                item = plan_items[plan_idx]
+                log_event(session_id, {
+                    "type": EventType.PLAN_ITEM_STARTED.value,
+                    "index": plan_idx,
+                    "goal": item.goal,
+                    "artifacts": list(item.artifacts),
+                })
+                # Minimal per-item context block: just the goal + artefacts +
+                # one-line summary of completed items. Crucially we do NOT
+                # carry forward the prior item's full tool_result history --
+                # that's the token-cost cut versus running one big loop.
+                summary = "; ".join(completed) if completed else "(none yet)"
+                item_user = (
+                    f"Current goal: {item.goal}\n"
+                    f"Target artefacts: {', '.join(item.artifacts) or '(none)'}\n"
+                    f"Previously completed in this plan: {summary}\n"
+                    f"Do this single goal, then reply with a brief confirmation."
+                )
+                item_messages = [{"role": "user", "content": item_user}]
+                item_budget = max(1, steps_remaining // max(1, len(order) - len(per_item_outputs)))
+                try:
+                    item_final, item_success, item_failed, item_error, item_had_failure, used = _run_executor_loop(
+                        item_messages, item.goal, item_budget, step_offset=step_count,
+                    )
+                except AgentProtocolError:
+                    log_event(session_id, {
+                        "type": EventType.PLAN_ITEM_FINISHED.value,
+                        "index": plan_idx,
+                        "ok": False,
+                        "reason": "protocol_error",
+                    })
+                    raise
+                step_count += used
+                steps_remaining -= used
+                had_tool_failure |= item_had_failure
+                if item_failed:
+                    failed = True
+                    error_reason = item_error
+                    log_event(session_id, {
+                        "type": EventType.PLAN_ITEM_FINISHED.value,
+                        "index": plan_idx,
+                        "ok": False,
+                        "reason": "llm_error",
+                    })
+                    break
+                if item_success and item_final:
+                    per_item_outputs.append(item_final)
+                    completed.append(f"#{plan_idx} {item.goal}")
+                    log_event(session_id, {
+                        "type": EventType.PLAN_ITEM_FINISHED.value,
+                        "index": plan_idx,
+                        "ok": True,
+                    })
+                else:
+                    log_event(session_id, {
+                        "type": EventType.PLAN_ITEM_FINISHED.value,
+                        "index": plan_idx,
+                        "ok": False,
+                        "reason": "incomplete",
+                    })
+            log_event(session_id, {
+                "type": EventType.PLAN_FINISHED.value,
+                "items_completed": len(per_item_outputs),
+                "items_total": len(plan_items),
+            })
+            if per_item_outputs and not failed:
+                final_text = "\n\n".join(per_item_outputs)
+                success = len(per_item_outputs) == len(plan_items)
+        # Skip the historical single-loop body below by jumping to outcome.
+        plan_engaged = True
+    else:
+        plan_engaged = False
+
+    messages = [{"role": "user", "content": task}]
+    legacy_steps = [] if plan_engaged else list(range(max_steps))
+    for step_num in legacy_steps:
+        step_count = step_num + 1
         logger.debug("step %d: calling llm", step_num)
         t0 = time.monotonic()
         # Step boundary: gives the host UI a clean separator between
@@ -151,6 +392,7 @@ def run_agent(
         log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": step_num})
         try:
             response = llm.step(system, messages)
+            _accumulate(response.usage)
             if response.tool_calls:
                 # Emit the inline reasoning the model produced alongside its
                 # tool_use blocks BEFORE the tool_call events so trace
@@ -239,7 +481,23 @@ def run_agent(
     else:
         log_event(session_id, {"type": EventType.INCOMPLETE.value, "reason": "max steps reached", "outcome": outcome.value})
 
-    return {"session_id": session_id, "success": success, "final_text": final_text, "outcome": outcome.value}
+    usage_dict = {
+        "input_tokens": usage_totals.input_tokens,
+        "output_tokens": usage_totals.output_tokens,
+        "cache_creation_input_tokens": usage_totals.cache_creation_input_tokens,
+        "cache_read_input_tokens": usage_totals.cache_read_input_tokens,
+        "step_count": step_count,
+        "wall_time_s": round(time.monotonic() - run_t0, 3),
+    }
+    log_event(session_id, {"type": EventType.USAGE.value, **usage_dict})
+
+    return {
+        "session_id": session_id,
+        "success": success,
+        "final_text": final_text,
+        "outcome": outcome.value,
+        "usage": usage_dict,
+    }
 
 
 SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"

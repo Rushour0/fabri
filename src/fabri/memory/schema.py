@@ -20,8 +20,15 @@ class MemoryEntry:
     @property
     def id(self) -> str:
         """Deterministic point ID derived from the compressed text, so re-upserting
-        the same guideline is idempotent rather than relying on locking."""
-        digest = hashlib.sha256(self.text.strip().lower().encode()).hexdigest()
+        the same guideline is idempotent rather than relying on locking.
+
+        A4: success_pattern entries share a separate id namespace from
+        failure-derived guidelines (tactical / strategic). Tactical and
+        strategic share a namespace because promotion mutates kind in place
+        on the same point; success_pattern is a different signal entirely
+        and must not collide with a textually similar failure entry."""
+        namespace = "success" if self.kind == "success_pattern" else "failure"
+        digest = hashlib.sha256(f"{namespace}::{self.text.strip().lower()}".encode()).hexdigest()
         return str(uuid.UUID(digest[:32]))
 
     def to_payload(self) -> dict:

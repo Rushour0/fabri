@@ -27,6 +27,11 @@ class EventType(str, Enum):
     INCOMPLETE = "incomplete"
     ERROR = "error"
     ASK_USER = "ask_user"
+    USAGE = "usage"
+    PLAN_STARTED = "plan_started"
+    PLAN_ITEM_STARTED = "plan_item_started"
+    PLAN_ITEM_FINISHED = "plan_item_finished"
+    PLAN_FINISHED = "plan_finished"
 
 
 class StepReason(str, Enum):
