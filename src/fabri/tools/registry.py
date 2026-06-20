@@ -1,11 +1,19 @@
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fabri.tools.manifest_schema import ToolManifest
-from fabri.tools.runner import run_tool
+
+if TYPE_CHECKING:
+    from fabri.sandbox import Sandbox
 
 
 class ToolRegistry:
-    def __init__(self, manifest_dir: Path | list[Path], sandbox_root: str | None = None):
+    def __init__(
+        self,
+        manifest_dir: Path | list[Path],
+        sandbox_root: str | None = None,
+        sandbox: "Sandbox | None" = None,
+    ):
         # A project typically wants the framework's generic tools (read_file,
         # web_search, ...) plus its own domain tools discovered from the same
         # registry -- accepting a list lets a config list multiple directories
@@ -18,6 +26,16 @@ class ToolRegistry:
         dirs = [manifest_dir] if isinstance(manifest_dir, Path) else list(manifest_dir)
         self.manifest_dirs = dirs
         self.sandbox_root = sandbox_root
+        # S1: route tool invocations through a `Sandbox` instance. Default is
+        # LocalSandbox -- preserves the pre-S1 behavior (direct subprocess +
+        # FABRI_SANDBOX_ROOT env threading) so existing configs / tests don't
+        # see a behavior shift. Import is lazy to avoid a circular dep with
+        # fabri.sandbox (which imports from fabri.tools).
+        if sandbox is None:
+            from fabri.sandbox import LocalSandbox
+
+            sandbox = LocalSandbox()
+        self.sandbox = sandbox
         self.tools: dict[str, ToolManifest] = {}
         for manifest_dir in dirs:
             for path in sorted(manifest_dir.glob("*.json")):
@@ -38,4 +56,4 @@ class ToolRegistry:
         if manifest is None:
             return {"ok": False, "error": f"unknown tool: {name}"}
         extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else None
-        return run_tool(manifest, args, extra_env=extra_env)
+        return self.sandbox.run_tool(manifest, args, extra_env=extra_env)
