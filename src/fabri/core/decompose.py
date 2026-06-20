@@ -2,6 +2,7 @@ import json
 
 from fabri import toon
 from fabri.core.llm import LLMBackend
+from fabri.tools.result import tool_error, tool_ok
 
 DEFAULT_MAX_SUBQUESTIONS = 5
 
@@ -36,8 +37,8 @@ def decompose(
     text = (response.final_text or "").strip()
     subquestions = _parse_string_list(text, prefer=output_format)
     if subquestions is None:
-        return {"ok": False, "error": f"decompose: malformed response: {text!r}"}
-    return {"ok": True, "result": {"subquestions": subquestions[:max_subquestions]}}
+        return tool_error(f"decompose: malformed response: {text!r}")
+    return tool_ok({"subquestions": subquestions[:max_subquestions]})
 
 
 def _parse_string_list(text: str, prefer: str) -> list | None:

@@ -89,6 +89,7 @@ class AnthropicLLMBackend:
         tools: list[dict] | None = None,
         max_tokens: int = 1024,
         api_key_env: str = "ANTHROPIC_API_KEY",
+        enable_prompt_cache: bool = True,
     ):
         import os
 
@@ -98,6 +99,25 @@ class AnthropicLLMBackend:
         self._model = model
         self._tools = tools or []
         self._max_tokens = max_tokens
+        # The system prompt + tool list are identical across every step of a
+        # given run; Anthropic's ephemeral cache (5-min TTL) cuts the re-sent
+        # prefix to ~10% billing on cache hits. Flag exists so cost-sensitive
+        # smoke tests / scripted backends can opt out.
+        self._enable_prompt_cache = enable_prompt_cache
+
+    def _build_system(self, system: str):
+        if not self._enable_prompt_cache:
+            return system
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+    def _build_tools(self):
+        # Mark the last tool with cache_control; Anthropic caches every block
+        # at and before the marker, so one tag covers the whole tool list.
+        if not self._enable_prompt_cache or not self._tools:
+            return self._tools
+        marked = [dict(t) for t in self._tools]
+        marked[-1] = {**marked[-1], "cache_control": {"type": "ephemeral"}}
+        return marked
 
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         import anthropic
@@ -107,9 +127,9 @@ class AnthropicLLMBackend:
             resp = _call_with_retry(
                 lambda: self._client.messages.create(
                     model=self._model,
-                    system=system,
+                    system=self._build_system(system),
                     messages=messages,
-                    tools=self._tools,
+                    tools=self._build_tools(),
                     max_tokens=self._max_tokens,
                 ),
                 transient=(anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError),
@@ -119,12 +139,18 @@ class AnthropicLLMBackend:
 
         elapsed = time.monotonic() - t0
         usage = resp.usage
+        # Cache usage fields land on `usage` when prompt caching fires; surface
+        # them so a run's trace shows whether the cache is hitting.
+        cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
         logger.info(
-            "anthropic call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d stop=%s",
+            "anthropic call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d cache_create=%d cache_read=%d stop=%s",
             self._model,
             elapsed,
             usage.input_tokens,
             usage.output_tokens,
+            cache_create,
+            cache_read,
             resp.stop_reason,
         )
 

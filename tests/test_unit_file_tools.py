@@ -85,6 +85,61 @@ def test_read_file_rejects_path_escape(reg):
     assert "escapes sandbox root" in r["result"]["error"]
 
 
+def test_read_file_window_returns_slice(reg, tmp_path):
+    (tmp_path / "f.py").write_text("a\nb\nc\nd\ne\n")
+    r = reg.invoke("read_file", {"path": "f.py", "line_start": 2, "line_end": 4})
+    assert r["ok"] is True
+    res = r["result"]
+    assert res["content"] == "b\nc\nd\n"
+    assert res["start_line"] == 2
+    assert res["end_line"] == 4
+    assert res["total_lines"] == 5
+    assert res["truncated"] is True
+
+
+def test_read_file_window_clamps_to_eof(reg, tmp_path):
+    (tmp_path / "f.txt").write_text("x\ny\n")
+    r = reg.invoke("read_file", {"path": "f.txt", "line_start": 1, "line_end": 999})
+    assert r["ok"] is True
+    assert r["result"]["content"] == "x\ny\n"
+    assert r["result"]["end_line"] == 2
+    assert r["result"]["truncated"] is False
+
+
+def test_read_file_window_inverted_range_rejected(reg, tmp_path):
+    (tmp_path / "f.txt").write_text("x\ny\n")
+    r = reg.invoke("read_file", {"path": "f.txt", "line_start": 5, "line_end": 2})
+    assert r["ok"] is False
+    assert "line_end" in r["result"]["error"]
+
+
+def test_read_file_outline_only(reg, tmp_path):
+    (tmp_path / "m.py").write_text(
+        "import os\n"
+        "def foo():\n"
+        "    pass\n"
+        "class Bar:\n"
+        "    def baz(self):\n"
+        "        return 1\n"
+        "CONST = 42\n"
+    )
+    r = reg.invoke("read_file", {"path": "m.py", "outline_only": True})
+    assert r["ok"] is True
+    lines = {e["line"] for e in r["result"]["outline"]}
+    # def foo (2), class Bar (4), def baz (5), CONST (7); `import os` not matched.
+    assert {2, 4, 5, 7} <= lines
+    assert 1 not in lines
+    assert r["result"]["total_lines"] == 7
+
+
+def test_read_file_back_compat_no_window(reg, tmp_path):
+    (tmp_path / "f.txt").write_text("hello")
+    r = reg.invoke("read_file", {"path": "f.txt"})
+    assert r["ok"] is True
+    # Pre-windowing shape: no start_line/end_line/total_lines fields.
+    assert r["result"] == {"path": "f.txt", "content": "hello"}
+
+
 # ---------- edit_file ----------
 
 def test_edit_file_unique_replacement(reg, tmp_path):

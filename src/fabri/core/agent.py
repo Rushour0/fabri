@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
 from fabri.core.llm import LLMBackend, LLMError, ToolCall
 from fabri.core.logging_setup import get_logger
+from fabri.events import EventType, StepReason
 from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
 from fabri.memory.store import QdrantMemoryStore
@@ -29,6 +31,21 @@ class AgentProtocolError(RuntimeError):
 
 DEFAULT_AGENT_IDENTITY = "You are an autonomous agent. Use tools when needed, and stop once the task is done."
 
+# Steers the model toward surgical edits over whole-file rewrites. Whole-file
+# `write_file` calls dominate output-token spend on a file-gen workload --
+# the canonical fix (Aider udiff, SWE-agent ACI, Anthropic text_editor's
+# str_replace) is to make the agent reach for a string-replace primitive when
+# the file already exists. The hint is appended whenever both edit_file and
+# write_file appear in the tool list, so it survives a domain config that
+# replaces the framework identity wholesale.
+FILE_EDIT_POLICY = (
+    "File edit policy: when modifying a file that already exists, prefer "
+    "`edit_file` (a unique string replace) over `write_file`. Use `write_file` "
+    "only when creating a new file or when more than half the file is "
+    "changing. `read_file` supports `line_start`/`line_end` and "
+    "`outline_only=true` -- read only the slice you need."
+)
+
 TOON_RESULT_NOTE = (
     "Tool results are given to you in TOON, a compact format: objects are `key: value` "
     "lines; arrays are `name[N]: v1,v2,...`, or a table `name[N]{f1,f2}:` followed by one "
@@ -51,10 +68,19 @@ def build_system_prompt(
     # prepended verbatim; useful for global notes that apply across many configs.
     # Both empty -> identical to pre-patch behavior.
     identity = system_prompt or DEFAULT_AGENT_IDENTITY
+    # Append the edit policy only when the agent actually has both write_file
+    # and edit_file available -- otherwise the hint refers to a tool the
+    # registry doesn't expose. Word-boundary match because tool_descriptions
+    # is a bullet list ("- write_file: ...").
+    has_edit_tools = (
+        re.search(r"\bedit_file\b", tool_descriptions or "") is not None
+        and re.search(r"\bwrite_file\b", tool_descriptions or "") is not None
+    )
     parts = [
         system_prompt_prefix,
         identity,
         f"Available tools:\n{tool_descriptions}" if tool_descriptions else "",
+        FILE_EDIT_POLICY if has_edit_tools else "",
         TOON_RESULT_NOTE if result_format == "toon" else "",
         context_block,
     ]
@@ -105,7 +131,7 @@ def run_agent(
         result_format=result_format,
     )
 
-    log_event(session_id, {"type": "start", "task": task, "context_block": context_block})
+    log_event(session_id, {"type": EventType.START.value, "task": task, "context_block": context_block})
 
     messages = [{"role": "user", "content": task}]
     final_text = None
@@ -117,6 +143,12 @@ def run_agent(
     for step_num in range(max_steps):
         logger.debug("step %d: calling llm", step_num)
         t0 = time.monotonic()
+        # Step boundary: gives the host UI a clean separator between
+        # turns so it can group thought + tool_call + tool_result events
+        # under one collapsible block per step. The paired `step_finished`
+        # event lands before every continue/break/raise out of the step
+        # and carries the elapsed wall time + step outcome.
+        log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": step_num})
         try:
             response = llm.step(system, messages)
             if response.tool_calls:
@@ -127,14 +159,23 @@ def run_agent(
                 # is dropped here (LLMResponse already normalised it).
                 if response.thinking_text:
                     log_event(session_id, {
-                        "type": "thought",
+                        "type": EventType.THOUGHT.value,
                         "text": response.thinking_text,
                         "step": step_num,
                     })
-                had_tool_failure |= _dispatch_tool_calls(
+                step_had_failure = _dispatch_tool_calls(
                     response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
                     session_id, messages, step_num, result_format, output_format,
                 )
+                had_tool_failure |= step_had_failure
+                log_event(session_id, {
+                    "type": EventType.STEP_FINISHED.value,
+                    "step": step_num,
+                    "elapsed_s": round(time.monotonic() - t0, 3),
+                    "reason": StepReason.TOOLS.value,
+                    "tool_failure": step_had_failure,
+                    "tool_count": len(response.tool_calls),
+                })
                 continue
         except LLMError as e:
             # Unrecoverable provider problem (API error, rate limit, truncated
@@ -143,14 +184,35 @@ def run_agent(
             failed = True
             error_reason = str(e)
             logger.error("step %d: unrecoverable llm error: %s", step_num, e)
-            log_event(session_id, {"type": "error", "reason": error_reason, "outcome": Outcome.FAILED.value})
+            log_event(session_id, {"type": EventType.ERROR.value, "reason": error_reason, "outcome": Outcome.FAILED.value})
+            log_event(session_id, {
+                "type": EventType.STEP_FINISHED.value,
+                "step": step_num,
+                "elapsed_s": round(time.monotonic() - t0, 3),
+                "reason": StepReason.LLM_ERROR.value,
+            })
             break
         logger.debug("step %d: llm responded in %.2fs", step_num, time.monotonic() - t0)
 
         if response.final_text:
+            # Mirror the tool_calls branch: if the model produced inline
+            # reasoning alongside the final answer, emit it as a `thought`
+            # event so the host UI doesn't lose the last-step rationale.
+            if response.thinking_text:
+                log_event(session_id, {
+                    "type": EventType.THOUGHT.value,
+                    "text": response.thinking_text,
+                    "step": step_num,
+                })
             final_text = response.final_text
             success = True
             logger.info("step %d: final answer produced", step_num)
+            log_event(session_id, {
+                "type": EventType.STEP_FINISHED.value,
+                "step": step_num,
+                "elapsed_s": round(time.monotonic() - t0, 3),
+                "reason": StepReason.FINAL.value,
+            })
             break
 
         # No tool calls and no usable final text (empty or structurally
@@ -158,18 +220,24 @@ def run_agent(
         # then reporting an empty answer as success.
         reason = "llm response had no tool calls and no final text"
         logger.error("step %d: %s", step_num, reason)
-        log_event(session_id, {"type": "error", "reason": reason, "outcome": Outcome.FAILED.value})
+        log_event(session_id, {"type": EventType.ERROR.value, "reason": reason, "outcome": Outcome.FAILED.value})
+        log_event(session_id, {
+            "type": EventType.STEP_FINISHED.value,
+            "step": step_num,
+            "elapsed_s": round(time.monotonic() - t0, 3),
+            "reason": StepReason.PROTOCOL_ERROR.value,
+        })
         raise AgentProtocolError(reason)
 
     outcome = _classify_outcome(success, had_tool_failure, failed)
     logger.info("agent run finished: outcome=%s session_id=%s", outcome.value, session_id)
 
     if success:
-        log_event(session_id, {"type": "final", "text": final_text, "outcome": outcome.value})
+        log_event(session_id, {"type": EventType.FINAL.value, "text": final_text, "outcome": outcome.value})
     elif failed:
-        log_event(session_id, {"type": "failed", "reason": error_reason, "outcome": outcome.value})
+        log_event(session_id, {"type": EventType.FAILED.value, "reason": error_reason, "outcome": outcome.value})
     else:
-        log_event(session_id, {"type": "incomplete", "reason": "max steps reached", "outcome": outcome.value})
+        log_event(session_id, {"type": EventType.INCOMPLETE.value, "reason": "max steps reached", "outcome": outcome.value})
 
     return {"session_id": session_id, "success": success, "final_text": final_text, "outcome": outcome.value}
 
@@ -234,11 +302,28 @@ def _dispatch_tool_calls(
 
     results: dict[int, dict] = {}
 
+    def _emit_tool_started(i: int, call: ToolCall, group: str | None) -> None:
+        # Lets the host UI flip to a "running …" state before slow tools
+        # (spawn_subagent in particular) return. The paired completion
+        # event is the existing `tool_call` emitted in section 3 with the
+        # full result attached, so existing trace readers stay unaffected.
+        event = {
+            "type": EventType.TOOL_STARTED.value,
+            "step": step_num,
+            "call_index": i,
+            "name": call.name,
+            "args": call.args,
+        }
+        if group:
+            event["parallel_group"] = group
+        log_event(session_id, event)
+
     # 1) Serial calls in original order.
     for i, call in enumerate(calls):
         if i in parallel_index_set:
             continue
         logger.info("step %d: dispatching tool %s args=%s", step_num, call.name, call.args)
+        _emit_tool_started(i, call, None)
         t0 = time.monotonic()
         results[i] = _dispatch_one(call)
         elapsed = time.monotonic() - t0
@@ -250,16 +335,29 @@ def _dispatch_tool_calls(
     # the F2 acceptance criterion. The assistant/result blocks below are
     # still emitted in original call order so the Anthropic API stays happy.
     for group_name, idx_list in parallel_indices.items():
+        # One event per group naming the fan-out members so a UI can render
+        # "running 3 subagents in parallel" without scanning ahead.
+        log_event(session_id, {
+            "type": EventType.PARALLEL_GROUP_STARTED.value,
+            "step": step_num,
+            "parallel_group": group_name,
+            "calls": [{"call_index": j, "name": calls[j].name} for j in idx_list],
+        })
         if len(idx_list) == 1:
             i = idx_list[0]
             call = calls[i]
             logger.info("step %d: dispatching tool %s (parallel_group=%s) args=%s",
                         step_num, call.name, group_name, call.args)
+            _emit_tool_started(i, call, group_name)
             t0 = time.monotonic()
             results[i] = _dispatch_one(call)
             logger.info("step %d: tool %s returned ok=%s in %.2fs",
                         step_num, call.name, results[i].get("ok"), time.monotonic() - t0)
             continue
+        # Emit tool_started for every fan-out member up-front; the actual
+        # completion order is preserved by the as_completed loop below.
+        for i in idx_list:
+            _emit_tool_started(i, calls[i], group_name)
         with ThreadPoolExecutor(max_workers=len(idx_list)) as pool:
             future_to_idx = {
                 pool.submit(_dispatch_one, calls[i]): i for i in idx_list
@@ -283,7 +381,14 @@ def _dispatch_tool_calls(
             had_failure = True
             logger.warning("step %d: tool %s failed: %s", step_num, call.name, result.get("error"))
 
-        event = {"type": "tool_call", "name": call.name, "args": call.args, "result": result}
+        event = {
+            "type": EventType.TOOL_CALL.value,
+            "step": step_num,
+            "call_index": i,
+            "name": call.name,
+            "args": call.args,
+            "result": result,
+        }
         if i in parallel_index_set and call.args.get("parallel_group"):
             # F2 tag so trace readers can spot the fan-out and a host UI can
             # group concurrent sub-agent activity.

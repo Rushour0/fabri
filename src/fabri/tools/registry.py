@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fabri.tools.manifest_schema import ToolManifest
+from fabri.tools.result import tool_error
 
 if TYPE_CHECKING:
     from fabri.sandbox import Sandbox
@@ -54,6 +55,6 @@ class ToolRegistry:
     def invoke(self, name: str, args: dict) -> dict:
         manifest = self.tools.get(name)
         if manifest is None:
-            return {"ok": False, "error": f"unknown tool: {name}"}
+            return tool_error(f"unknown tool: {name}")
         extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else None
         return self.sandbox.run_tool(manifest, args, extra_env=extra_env)

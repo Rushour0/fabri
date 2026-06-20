@@ -4,6 +4,42 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.3.0 — 2026-06-21
+
+Token-optimization for file-generating agents. All changes are non-breaking:
+existing configs and tool manifests keep working unchanged; the new behaviour
+is opt-out (caching) or opt-in (read_file windowing/outline).
+
+### Added
+
+- **Anthropic prompt caching on the static prefix.**
+  `AnthropicLLMBackend` now wraps the system prompt as a `cache_control:
+  ephemeral` text block and tags the last entry in the tool list with the
+  same marker — Anthropic caches every block at and before the marker, so
+  the system prompt + tool descriptions are billed at ~10% of full cost on
+  cache hits. The constructor accepts `enable_prompt_cache: bool = True` so
+  cost-sensitive or test runs can opt out. `cache_creation_input_tokens` and
+  `cache_read_input_tokens` are now logged on every call so cache wins are
+  visible in run traces.
+
+- **`read_file` supports windowed reads and structural outlines.** New
+  optional args `line_start` / `line_end` (1-indexed, inclusive) return a
+  slice with `start_line`, `end_line`, `total_lines`, `truncated`. New
+  `outline_only: true` returns the file's top-level structure (def/class/
+  heading/CONSTANT lines plus line numbers) for fast navigation before a
+  targeted window read. Whole-file reads (no args) keep their pre-change
+  output shape so every existing consumer is unaffected.
+
+### Changed
+
+- **Default agent identity steers toward `edit_file` over `write_file`.**
+  When both tools are present in the registry, the system prompt now
+  appends a `FILE_EDIT_POLICY` block telling the model to prefer surgical
+  string-replace edits over whole-file rewrites, and to read file windows
+  rather than whole files. The hint is registry-aware: it's skipped when
+  the agent doesn't actually have `edit_file` available. This is the
+  highest-ROI output-token cut for Ludexel-style file-gen workloads.
+
 ## v0.2.3 — 2026-06-21
 
 ### Fixed

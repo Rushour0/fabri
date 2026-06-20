@@ -1,16 +1,18 @@
 from fabri.core.llm import LLMBackend
 from fabri.core.logging_setup import get_logger
+from fabri.events import EventType
 from fabri.memory.compress import DEFAULT_MAX_TOKENS, count_tokens, synthesize_guideline
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD, ingest_guideline
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.traces import read_trace
+from fabri.tools.result import is_error
 
 logger = get_logger()
 
 
 def is_tool_failure(event: dict) -> bool:
-    return event.get("type") == "tool_call" and not event.get("result", {}).get("ok", True)
+    return event.get("type") == EventType.TOOL_CALL.value and is_error(event.get("result", {}))
 
 
 def process_trace(
@@ -26,7 +28,7 @@ def process_trace(
     This is the lifecycle step that closes the loop: today's failure becomes
     tomorrow's retrieved context."""
     events = read_trace(session_id)
-    task = next((e["task"] for e in events if e.get("type") == "start"), "")
+    task = next((e["task"] for e in events if e.get("type") == EventType.START.value), "")
     failures = [e for e in events if is_tool_failure(e)]
     logger.info("processing trace %s: %d failure(s) found", session_id, len(failures))
 

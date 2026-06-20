@@ -6,6 +6,7 @@ import time
 
 from fabri.core.logging_setup import get_logger
 from fabri.tools.manifest_schema import ToolManifest
+from fabri.tools.result import tool_error, tool_ok
 
 logger = get_logger()
 
@@ -61,7 +62,7 @@ def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) 
         )
     except OSError as e:
         logger.error("tool %s: failed to start: %s", manifest.name, e)
-        return {"ok": False, "error": f"failed to start tool: {e}"}
+        return tool_error(f"failed to start tool: {e}")
 
     try:
         stdout, stderr = proc.communicate(input=json.dumps(args), timeout=manifest.timeout_s)
@@ -69,14 +70,14 @@ def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) 
         _kill_process_group(proc)
         proc.communicate()  # reap the killed child and close pipes
         logger.warning("tool %s: timeout after %.2fs (killed process group)", manifest.name, time.monotonic() - t0)
-        return {"ok": False, "error": f"timeout after {manifest.timeout_s}s"}
+        return tool_error(f"timeout after {manifest.timeout_s}s")
     except Exception as e:
         # Broader catch: communicate() can raise on a write to a closed pipe,
         # ValueError on closed fds, etc. Any unexpected runner failure should
         # come back through the normalized contract, not crash the agent loop.
         _kill_process_group(proc)
         logger.error("tool %s: runner failure: %s", manifest.name, e)
-        return {"ok": False, "error": f"runner failure: {e}"}
+        return tool_error(f"runner failure: {e}")
 
     elapsed = time.monotonic() - t0
     truncated = False
@@ -98,11 +99,11 @@ def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) 
         parsed = json.loads(stdout)
     except json.JSONDecodeError:
         logger.warning("tool %s: malformed JSON output (%.2fs)", manifest.name, elapsed)
-        return {"ok": False, "error": "malformed JSON output from tool", **out}
+        return tool_error("malformed JSON output from tool", **out)
 
     if proc.returncode != 0:
         logger.warning("tool %s: exited %d (%.2fs)", manifest.name, proc.returncode, elapsed)
-        return {"ok": False, "error": f"tool exited {proc.returncode}", "result": parsed, **out}
+        return tool_error(f"tool exited {proc.returncode}", result=parsed, **out)
 
     logger.debug("tool %s: ok in %.2fs", manifest.name, elapsed)
-    return {"ok": True, "result": parsed, **out}
+    return tool_ok(parsed, **out)

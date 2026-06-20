@@ -1,8 +1,28 @@
 {
   "name": "read_file",
-  "description": "Reads a text file. Path must resolve inside the configured sandbox root.",
+  "description": "Reads a text file. Path must resolve inside the configured sandbox root. Optional `line_start`/`line_end` (1-indexed, inclusive) return a window; `outline_only=true` returns top-level structure (def/class/heading/CONST lines) for fast navigation -- prefer the window or outline over a whole-file read.",
   "command": ["python3", "read_file.py"],
-  "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-  "output_schema": {"type": "object", "properties": {"content": {"type": "string"}}},
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "line_start": {"type": "integer", "minimum": 1},
+      "line_end": {"type": "integer", "minimum": 1},
+      "outline_only": {"type": "boolean"}
+    },
+    "required": ["path"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "content": {"type": "string"},
+      "start_line": {"type": "integer"},
+      "end_line": {"type": "integer"},
+      "total_lines": {"type": "integer"},
+      "truncated": {"type": "boolean"},
+      "outline": {"type": "array"}
+    }
+  },
   "timeout_s": 5
 }
