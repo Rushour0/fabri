@@ -5,12 +5,12 @@ import sys
 import uuid
 
 from fabri.admin import AdminAuthError, describe_config, render_dashboard, require_admin
-from fabri.config import load_config
+from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
 from fabri.core.logging_setup import configure_logging
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.pipeline import process_trace
-from fabri.runtime import build_llm, build_tool_defs, build_tools
+from fabri.runtime import build_decompose_llm, build_llm, build_tool_defs, build_tools
 from fabri.scaffold import next_steps, scaffold
 
 
@@ -32,7 +32,21 @@ def _require_api_key(api_key_env: str) -> None:
     if not os.environ.get(api_key_env):
         print(
             f"{api_key_env} is not set. Export it before running the live agent, "
-            f"e.g.: export {api_key_env}=sk-...",
+            f"e.g.: export {api_key_env}=<your-api-key>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _open_store(mem_cfg: dict) -> QdrantMemoryStore:
+    """Open Qdrant with a user-friendly error if it's unreachable, instead of
+    leaking the raw qdrant_client/grpc traceback."""
+    try:
+        return QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+    except Exception as e:
+        print(
+            f"Could not reach Qdrant at {mem_cfg['qdrant_url']}: {e}\n"
+            f"Start it with: docker compose up -d  (or `docker run -p 6333:6333 qdrant/qdrant`).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -45,7 +59,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     configure_logging(session_id, verbose=args.verbose)
 
     mem_cfg = config["memory"]
-    store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+    store = _open_store(mem_cfg)
 
     tools_cfg = config["tools"]
     tools = build_tools(tools_cfg)
@@ -66,6 +80,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
         result_format=tools_cfg.get("result_format", "toon"),
         output_format=config["agent"].get("output_format", "json"),
+        decompose_llm=build_decompose_llm(config),
     )
     print(json.dumps(result, indent=2))
 
@@ -89,7 +104,7 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
     _require_api_key(config["llm"]["api_key_env"])
     configure_logging(args.session_id, verbose=args.verbose)
     mem_cfg = config["memory"]
-    store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+    store = _open_store(mem_cfg)
     llm = build_llm(config, [])
     entries = process_trace(
         args.session_id,
@@ -104,8 +119,7 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
 
 def cmd_inspect_memory(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    mem_cfg = config["memory"]
-    store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+    store = _open_store(config["memory"])
     print(f"tactical: {store.count(kind='tactical')}")
     print(f"strategic: {store.count(kind='strategic')}")
     if args.query:
@@ -133,7 +147,7 @@ def cmd_admin_dashboard(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     tools = build_tools(config["tools"])
     mem_cfg = config["memory"]
-    store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+    store = _open_store(mem_cfg)
     print(render_dashboard(config, tools, store))
 
 
@@ -175,7 +189,11 @@ def main() -> None:
     p_admin_dash.set_defaults(func=cmd_admin_dashboard)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

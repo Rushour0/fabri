@@ -54,11 +54,27 @@ DEFAULT_CONFIG = {
 }
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
+class ConfigError(ValueError):
+    """Raised when an agent.yaml is missing, malformed, or overrides a section
+    with the wrong shape. cli.py catches this and prints a clean stderr
+    message + exit 1, rather than letting the raw yaml/KeyError traceback out."""
+
+
+def _deep_merge(base: dict, override: dict, *, path: str = "") -> dict:
     merged = dict(base)
     for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge(merged[key], value)
+        here = f"{path}.{key}" if path else key
+        base_val = merged.get(key)
+        if isinstance(base_val, dict):
+            # Refuse to silently drop a whole subtree because the user wrote a
+            # scalar where a dict belongs. The pre-fix behavior overwrote and
+            # surfaced as a KeyError several layers deeper, which is opaque.
+            if not isinstance(value, dict):
+                raise ConfigError(
+                    f"config key {here!r} must be a mapping (got {type(value).__name__}); "
+                    f"this overrides a default that is itself a mapping."
+                )
+            merged[key] = _deep_merge(base_val, value, path=here)
         else:
             merged[key] = value
     return merged
@@ -68,9 +84,19 @@ def load_config(path: str | None) -> dict:
     """Load an agent.yaml config, merged on top of DEFAULT_CONFIG so omitted
     fields fall back to today's hardcoded behavior unchanged. `path=None`
     returns the framework defaults as-is -- the same shape a consuming
-    project's own agent.yaml would produce, so callers don't special-case it."""
+    project's own agent.yaml would produce, so callers don't special-case it.
+    Raises ConfigError on missing file, malformed YAML, or a shape mismatch."""
     if path is None:
         return DEFAULT_CONFIG
-    with open(path) as f:
-        user_config = yaml.safe_load(f) or {}
+    try:
+        with open(path) as f:
+            user_config = yaml.safe_load(f) or {}
+    except FileNotFoundError as e:
+        raise ConfigError(f"config file not found: {path}") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"malformed YAML in {path}: {e}") from e
+    if not isinstance(user_config, dict):
+        raise ConfigError(
+            f"top-level of {path} must be a mapping (got {type(user_config).__name__})."
+        )
     return _deep_merge(DEFAULT_CONFIG, user_config)

@@ -25,3 +25,9 @@ def traces_dir() -> Path:
     d = home() / ".fabri" / "traces"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def locks_dir() -> Path:
+    d = home() / ".fabri" / "locks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

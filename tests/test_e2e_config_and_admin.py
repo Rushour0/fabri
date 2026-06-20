@@ -45,8 +45,10 @@ def test_build_tools_filters_to_enabled_set(tmp_path):
     }
     reg = build_tools(cfg)
     assert set(reg.tools) == {"read_file", "write_file"}
-    # FABRI_SANDBOX_ROOT was set as a side effect for the file tools to read.
-    assert os.environ["FABRI_SANDBOX_ROOT"] == str(tmp_path.resolve())
+    # The sandbox root lives on the registry; it's threaded into each tool's
+    # subprocess env at invoke() time rather than set on the parent's os.environ
+    # (so two concurrent registries can't clobber each other).
+    assert reg.sandbox_root == str(tmp_path.resolve())
 
 
 def test_build_tools_registers_agent_as_tool(tmp_path):

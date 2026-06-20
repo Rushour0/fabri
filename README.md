@@ -108,6 +108,21 @@ in the parent's normal ReAct loop. See `ludexel/.agent/game_content_agent.yaml`
 for a worked example wiring four domain agents (character/tiles/map/story)
 into one top-level agent.
 
+A `tools.agents` entry may carry optional `model` / `max_tokens` keys that
+override the sub-agent's `llm.model` / `llm.max_tokens` at spawn time, so the
+parent can run on Sonnet while a cheap classifier sub-agent runs on Haiku
+without duplicating the full agent.yaml:
+
+```yaml
+tools:
+  agents:
+    - name: classify
+      description: Classify a snippet into one of N labels.
+      config: tools/agent_tools/classifier.yaml
+      model: claude-haiku-4-5      # cheap override; sub-agent's own yaml keeps the default
+      max_tokens: 256
+```
+
 ### Admin CLI / dashboard
 
 `cli.py admin config --config agent.yaml` prints the merged config plus the

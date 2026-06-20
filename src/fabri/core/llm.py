@@ -82,10 +82,13 @@ class AnthropicLLMBackend:
         model: str = "claude-sonnet-4-6",
         tools: list[dict] | None = None,
         max_tokens: int = 1024,
+        api_key_env: str = "ANTHROPIC_API_KEY",
     ):
+        import os
+
         import anthropic
 
-        self._client = anthropic.Anthropic()
+        self._client = anthropic.Anthropic(api_key=os.environ.get(api_key_env))
         self._model = model
         self._tools = tools or []
         self._max_tokens = max_tokens

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from fabri.core.agent import DECOMPOSE_TOOL_NAME
-from fabri.runtime import build_llm, build_tool_defs, build_tools
+from fabri.runtime import build_decompose_llm, build_llm, build_tool_defs, build_tools
 from fabri.tools.registry import ToolRegistry
 from fabri.tools.manifest_schema import ToolManifest
 
@@ -67,15 +67,40 @@ def test_build_tools_handles_string_manifest_dir(tmp_path):
 
 def test_build_tools_resolves_sandbox_to_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    build_tools({
+    reg = build_tools({
         "manifest_dir": [],
         "enabled": None,
         "sandbox_root": "sub/dir",
         "agents": [],
         "decompose": {"enabled": False, "max_subquestions": 5},
     })
-    # Should be the absolute resolution of `tmp_path/sub/dir`, not the literal string.
-    assert os.environ["FABRI_SANDBOX_ROOT"] == str((tmp_path / "sub" / "dir").resolve())
+    # Stored on the registry as an absolute path (later threaded into each tool
+    # subprocess's env=); deliberately NOT set on os.environ.
+    assert reg.sandbox_root == str((tmp_path / "sub" / "dir").resolve())
+
+
+def test_build_decompose_llm_returns_none_when_unset():
+    cfg = {"llm": {"provider": "anthropic", "model": "m", "max_tokens": 1, "api_key_env": "K"}}
+    assert build_decompose_llm(cfg) is None
+
+
+def test_build_decompose_llm_uses_override_model(monkeypatch):
+    # Stub out anthropic so we don't need the SDK / key; verify the override
+    # model is what reaches the backend.
+    captured = {}
+
+    class _Stub:
+        def __init__(self, model, tools, max_tokens, api_key_env):
+            captured["model"] = model
+            captured["max_tokens"] = max_tokens
+
+    monkeypatch.setattr("fabri.runtime.AnthropicLLMBackend", _Stub)
+    cfg = {"llm": {"provider": "anthropic", "model": "claude-sonnet-4-6",
+                   "decompose_model": "claude-haiku-4-5",
+                   "max_tokens": 1024, "api_key_env": "ANTHROPIC_API_KEY"}}
+    backend = build_decompose_llm(cfg)
+    assert backend is not None
+    assert captured["model"] == "claude-haiku-4-5"
 
 
 def test_build_tools_agents_default_to_empty(tmp_path):
