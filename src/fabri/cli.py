@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import json
 import os
 import sys
@@ -153,6 +154,11 @@ def cmd_admin_dashboard(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fabri")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"fabri {importlib.metadata.version('fabri')}",
+    )
     parser.add_argument("--verbose", action="store_true", help="Log at DEBUG level to the console")
     parser.add_argument("--config", dest="config", default=None, help="Path to an agent.yaml config")
     sub = parser.add_subparsers(dest="command", required=True)
