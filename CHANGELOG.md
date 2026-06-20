@@ -4,6 +4,12 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.4.1 — 2026-06-21
+
+PyPI metadata polish: package description rewritten to surface the A1–A5
+capabilities (planner/executor, retrieved tools, batch, success-pattern
+mining, usage events) alongside the v0.3.x feature set. No code changes.
+
 ## v0.4.0 — 2026-06-21
 
 Token-optimization series A1–A5 (planner/executor split, retrieved tool
