@@ -20,13 +20,29 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         proc.kill()  # already gone, or no killpg support -- fall back to the child
 
 
-def run_tool(manifest: ToolManifest, args: dict) -> dict:
+# Per-tool stdout cap. Even a tool's own `output_max_bytes` is opt-in; a
+# misbehaving subprocess streaming gigabytes still needs a hard ceiling so it
+# can't OOM the agent or balloon a single tool_result block past the model's
+# context. Truncation is signalled in the returned result.
+RUNNER_OUTPUT_CAP_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+
+def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) -> dict:
     """Invoke a tool's command as a subprocess: write `args` as JSON to stdin,
     read a JSON object from stdout. Always returns the normalized shape
     {ok: bool, error?: str, result?: ..., stderr?: str} -- the agent loop never
-    sees a raw exception, a hang, or a malformed-JSON crash."""
+    sees a raw exception, a hang, or a malformed-JSON crash.
+
+    `extra_env` is layered on top of os.environ for this one call -- the
+    ToolRegistry threads FABRI_SANDBOX_ROOT this way so two concurrent
+    registries don't clobber each other's root via the global env."""
     logger.debug("tool %s: invoking (args_size=%d bytes)", manifest.name, len(json.dumps(args)))
     t0 = time.monotonic()
+
+    env = None
+    if extra_env is not None:
+        env = os.environ.copy()
+        env.update(extra_env)
 
     try:
         # start_new_session=True puts the child in its own process group so a
@@ -41,6 +57,7 @@ def run_tool(manifest: ToolManifest, args: dict) -> dict:
             encoding="utf-8",
             errors="replace",
             start_new_session=True,
+            env=env,
         )
     except OSError as e:
         logger.error("tool %s: failed to start: %s", manifest.name, e)
@@ -53,9 +70,29 @@ def run_tool(manifest: ToolManifest, args: dict) -> dict:
         proc.communicate()  # reap the killed child and close pipes
         logger.warning("tool %s: timeout after %.2fs (killed process group)", manifest.name, time.monotonic() - t0)
         return {"ok": False, "error": f"timeout after {manifest.timeout_s}s"}
+    except Exception as e:
+        # Broader catch: communicate() can raise on a write to a closed pipe,
+        # ValueError on closed fds, etc. Any unexpected runner failure should
+        # come back through the normalized contract, not crash the agent loop.
+        _kill_process_group(proc)
+        logger.error("tool %s: runner failure: %s", manifest.name, e)
+        return {"ok": False, "error": f"runner failure: {e}"}
 
     elapsed = time.monotonic() - t0
-    out = {"stderr": stderr} if stderr else {}
+    truncated = False
+    if len(stdout) > RUNNER_OUTPUT_CAP_BYTES:
+        logger.warning(
+            "tool %s: stdout %d bytes exceeded cap %d; truncating",
+            manifest.name, len(stdout), RUNNER_OUTPUT_CAP_BYTES,
+        )
+        stdout = stdout[:RUNNER_OUTPUT_CAP_BYTES]
+        truncated = True
+    out: dict = {"stderr": stderr} if stderr else {}
+    if truncated:
+        # Truncation almost always also breaks the JSON contract, but flagging
+        # it explicitly turns "malformed JSON" into "tool produced too much
+        # output" in the trace, which is the real cause.
+        out["truncated"] = True
 
     try:
         parsed = json.loads(stdout)

@@ -1,8 +1,12 @@
+import fcntl
 import json
 import time
 from pathlib import Path
 
+from fabri.core.logging_setup import get_logger
 from fabri.paths import traces_dir
+
+logger = get_logger()
 
 
 def trace_path(session_id: str) -> Path:
@@ -11,12 +15,29 @@ def trace_path(session_id: str) -> Path:
 
 def log_event(session_id: str, event: dict) -> None:
     record = {"ts": time.time(), **event}
+    line = json.dumps(record) + "\n"
     with trace_path(session_id).open("a") as f:
-        f.write(json.dumps(record) + "\n")
+        # Exclusive lock so concurrent appenders (parent + sub-agent both writing
+        # to the same session id, or two sub-agents racing) can't interleave
+        # mid-record. fcntl.flock is released when the fd is closed.
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f.write(line)
 
 
 def read_trace(session_id: str) -> list[dict]:
+    """One malformed JSONL line shouldn't kill downstream processing of every
+    other event in the trace (the pipeline mines traces for tool failures, etc.).
+    Skip + log bad lines instead of raising."""
     path = trace_path(session_id)
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    out = []
+    for i, line in enumerate(path.read_text().splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            logger.warning("trace %s: skipping malformed line %d: %s", session_id, i, e)
+    return out

@@ -1,3 +1,0 @@
-{"ts": 1781794990.318811, "type": "start", "task": "Add 2 and 3 using the sum tool", "context_block": "Relevant guidelines from past sessions:\n- [tactical] Prefer the sum tool over manual addition for numeric tasks.\n- [strategic] Always confirm destructive ops before running.\n- [tactical] Forge interior maps use a separate VRAM screenblock from village maps."}
-{"ts": 1781794990.331085, "type": "tool_call", "name": "sum", "args": {"a": 2, "b": 3}, "result": {"ok": true, "result": {"sum": 5}}}
-{"ts": 1781794990.331271, "type": "final", "text": "The sum is 5."}

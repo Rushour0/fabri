@@ -84,6 +84,7 @@ def run_agent(
     system_prompt_prefix: str = "",
     result_format: str = "toon",
     output_format: str = "json",
+    decompose_llm: LLMBackend | None = None,
 ) -> dict:
     # result_format: how tool results are serialized INTO the model's context
     #   (toon = fewer input tokens; we control this end so it's reliability-free).
@@ -119,7 +120,7 @@ def run_agent(
             response = llm.step(system, messages)
             if response.tool_calls:
                 had_tool_failure |= _dispatch_tool_calls(
-                    response.tool_calls, tools, llm, task, max_subquestions,
+                    response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
                     session_id, messages, step_num, result_format, output_format,
                 )
                 continue
@@ -225,5 +226,9 @@ def _classify_outcome(success: bool, had_tool_failure: bool, failed: bool) -> Ou
     if failed:
         return Outcome.FAILED
     if not success:
-        return Outcome.INCOMPLETE
+        # Distinguish "ran out of steps cleanly" from "every tool failed and we
+        # ran out of steps trying" -- the latter is almost always the user's
+        # actual bug (bad sandbox path, missing dep, wrong manifest), and
+        # collapsing both into INCOMPLETE buries that signal.
+        return Outcome.INCOMPLETE_WITH_TOOL_FAILURE if had_tool_failure else Outcome.INCOMPLETE
     return Outcome.SUCCESS_WITH_RECOVERY if had_tool_failure else Outcome.SUCCESS

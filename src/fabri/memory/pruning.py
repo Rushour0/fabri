@@ -1,11 +1,36 @@
+import fcntl
+import re
+from contextlib import contextmanager
+
 from fabri.core.logging_setup import get_logger
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
+from fabri.paths import locks_dir
 
 SIMILARITY_THRESHOLD = 0.85
 PROMOTION_THRESHOLD_SESSIONS = 3
 
 logger = get_logger()
+
+
+@contextmanager
+def _collection_lock(collection: str):
+    """Serialize the find_similar -> update -> upsert critical section across
+    concurrent processes ingesting into the same Qdrant collection (e.g. a
+    parent agent and a sub-agent sharing one memory store). Without this, both
+    readers see hit_count=N, both write N+1, and one merge is lost.
+
+    Per-collection flock on a file under .fabri/locks/. The lock is released
+    when the fd is closed; held for the duration of one ingest_guideline call,
+    which is two Qdrant round-trips, not a long-running operation."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", collection)
+    path = locks_dir() / f"{safe}.ingest.lock"
+    f = path.open("a+")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        f.close()
 
 
 def ingest_guideline(
@@ -27,34 +52,35 @@ def ingest_guideline(
     time."""
     tags = tags or []
     tools = tools or []
-    # Search across both kinds: matching only tactical entries would let a
-    # recurrence of a promoted guideline slip through as a brand-new tactical
-    # dup (restarting its promotion counter), or -- when the synthesized text is
-    # identical -- collide on the deterministic point id and clobber the
-    # strategic entry back down to tactical on upsert.
-    existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
+    with _collection_lock(store.collection):
+        # Search across both kinds: matching only tactical entries would let a
+        # recurrence of a promoted guideline slip through as a brand-new tactical
+        # dup (restarting its promotion counter), or -- when the synthesized text is
+        # identical -- collide on the deterministic point id and clobber the
+        # strategic entry back down to tactical on upsert.
+        existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
 
-    if existing is not None:
-        entry, score = existing
-        if session_id not in entry.session_ids:
-            entry.session_ids.append(session_id)
-        entry.hit_count += 1
-        for tool_name in tools:
-            if tool_name not in entry.tools:
-                entry.tools.append(tool_name)
-        promoted = len(set(entry.session_ids)) >= promotion_threshold_sessions
-        if promoted and entry.kind != "strategic":
-            logger.info("promoting guideline to strategic (sim=%.2f): %r", score, entry.text)
-            entry.kind = "strategic"
-        else:
-            logger.debug("merged duplicate guideline (sim=%.2f, hit_count=%d): %r", score, entry.hit_count, entry.text)
+        if existing is not None:
+            entry, score = existing
+            if session_id not in entry.session_ids:
+                entry.session_ids.append(session_id)
+            entry.hit_count += 1
+            for tool_name in tools:
+                if tool_name not in entry.tools:
+                    entry.tools.append(tool_name)
+            promoted = len(set(entry.session_ids)) >= promotion_threshold_sessions
+            if promoted and entry.kind != "strategic":
+                logger.info("promoting guideline to strategic (sim=%.2f): %r", score, entry.text)
+                entry.kind = "strategic"
+            else:
+                logger.debug("merged duplicate guideline (sim=%.2f, hit_count=%d): %r", score, entry.hit_count, entry.text)
+            store.upsert(entry)
+            return entry
+
+        entry = MemoryEntry(text=text, kind="tactical", session_ids=[session_id], tags=tags, tools=tools)
+        logger.debug("inserted new tactical guideline: %r tools=%s", entry.text, entry.tools)
         store.upsert(entry)
         return entry
-
-    entry = MemoryEntry(text=text, kind="tactical", session_ids=[session_id], tags=tags, tools=tools)
-    logger.debug("inserted new tactical guideline: %r tools=%s", entry.text, entry.tools)
-    store.upsert(entry)
-    return entry
 
 
 def evict_stale(store: QdrantMemoryStore, min_hit_count: int = 1) -> int:

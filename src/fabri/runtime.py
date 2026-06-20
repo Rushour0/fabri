@@ -1,7 +1,6 @@
 """Shared composition helpers for turning a loaded config into the objects
 run_agent() needs. Used by both cli.py and tools/agent_runner_tool.py (the
 agent-as-tool adapter) so the two entry points build agents identically."""
-import os
 from pathlib import Path
 
 from fabri.config import DEFAULT_TOOLS_DIR
@@ -37,14 +36,20 @@ def build_tool_defs(registry: ToolRegistry, decompose_cfg: dict) -> list[dict]:
     return defs
 
 
-def build_llm(config: dict, tools_defs: list[dict]):
+def build_llm(config: dict, tools_defs: list[dict], *, model_override: str | None = None):
     llm_cfg = config["llm"]
     provider = llm_cfg["provider"]
+    model = model_override or llm_cfg["model"]
     if provider == "anthropic":
-        return AnthropicLLMBackend(model=llm_cfg["model"], tools=tools_defs, max_tokens=llm_cfg["max_tokens"])
+        return AnthropicLLMBackend(
+            model=model,
+            tools=tools_defs,
+            max_tokens=llm_cfg["max_tokens"],
+            api_key_env=llm_cfg["api_key_env"],
+        )
     if provider == "openai":
         return OpenAILLMBackend(
-            model=llm_cfg["model"],
+            model=model,
             tools=tools_defs,
             max_tokens=llm_cfg["max_tokens"],
             api_key_env=llm_cfg["api_key_env"],
@@ -52,15 +57,32 @@ def build_llm(config: dict, tools_defs: list[dict]):
     raise ValueError(f"unknown llm provider: {provider}")
 
 
+def build_decompose_llm(config: dict):
+    """If `llm.decompose_model` is set, returns a separate LLM backend bound to
+    that (typically cheaper) model so a Sonnet orchestrator can run decompose
+    on Haiku without changing its main backend. No tool defs -- decompose only
+    asks for a plain string list. Returns None when unset; run_agent then
+    reuses the main backend, preserving prior behavior."""
+    decompose_model = config["llm"].get("decompose_model")
+    if not decompose_model:
+        return None
+    return build_llm(config, [], model_override=decompose_model)
+
+
 def build_tools(tools_cfg: dict) -> ToolRegistry:
-    # file_read/file_write enforce this against FABRI_SANDBOX_ROOT themselves;
-    # set here (inherited by every tool subprocess) rather than threading a new
-    # parameter through ToolRegistry/run_tool for a constraint only two tools need.
-    os.environ["FABRI_SANDBOX_ROOT"] = str(Path(tools_cfg["sandbox_root"]).resolve())
+    # file_read/file_write enforce a path jail against FABRI_SANDBOX_ROOT in
+    # their own subprocess. ToolRegistry passes that env var explicitly to each
+    # tool spawn (see registry.invoke); we deliberately do NOT mutate the
+    # parent's os.environ, so two concurrent registries -- a parent and a
+    # sub-agent with a tighter sandbox -- can coexist without one clobbering
+    # the other's root.
+    sandbox_root = str(Path(tools_cfg["sandbox_root"]).resolve())
     manifest_dirs = tools_cfg["manifest_dir"]
     if isinstance(manifest_dirs, str):
         manifest_dirs = [manifest_dirs]
-    registry = ToolRegistry([_resolve_manifest_dir(d) for d in manifest_dirs])
+    registry = ToolRegistry(
+        [_resolve_manifest_dir(d) for d in manifest_dirs], sandbox_root=sandbox_root
+    )
     for entry in tools_cfg.get("agents", []):
         registry.register(make_agent_tool_manifest(entry))
     if tools_cfg["enabled"] is not None:

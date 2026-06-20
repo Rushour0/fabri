@@ -8,6 +8,7 @@ __pycache__/
 # per-run state, written project-local under .fabri/ (see paths.py)
 .fabri/
 logs/
+traces/
 src/fabri/traces/
 
 # compiled example Go tool binary

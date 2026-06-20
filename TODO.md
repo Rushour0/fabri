@@ -44,45 +44,40 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 
 ## P2 — integrity & robustness
 
-- [ ] **Non-atomic ingest read-modify-write → lost updates.**
-  `memory/store.py:24` + `memory/pruning.py:30-44`. Concurrent ingests (parent
-  + sub-agent on one collection) both read `hit_count=N`, both write `N+1`. →
-  Serialize ingest or use server-side atomic update / optimistic retry.
-- [ ] **No collection dimension/distance validation.** `memory/store.py:16-22`.
-  An existing collection from a different embedding model isn't detected;
-  `upsert` fails deep in Qdrant or queries return garbage. → On existing
-  collection, assert size/distance match and fail fast.
+- [x] **Non-atomic ingest → lost updates.** `memory/pruning.py`. The
+  find_similar→update→upsert critical section now runs under a per-collection
+  `fcntl` flock at `.fabri/locks/<collection>.ingest.lock` (`_collection_lock`).
+- [x] **No collection dimension/distance validation.** `memory/store.py:_ensure_collection`.
+  On an existing collection, asserts `VectorParams.size == EMBEDDING_DIM` and
+  `distance == COSINE`, raising a clear message naming the collection on
+  mismatch instead of an opaque Qdrant upsert error.
 - [ ] **`model_version` stored but never enforced.** `memory/schema.py:18` +
   `memory/embeddings.py`. Swapping the embedding model silently mixes embedding
   spaces in one collection. → Namespace collection by model version or
   reject/migrate on mismatch.
-- [ ] **`build_tools` mutates global `os.environ`.** `runtime.py:48`. Hidden,
-  order-dependent side effect that the sandbox tools trust as their only jail;
-  a second `build_tools` clobbers the root for already-spawned tools. → Pass
-  sandbox root explicitly via the subprocess `env=`.
-- [ ] **Runner robustness.** `tools/runner.py`: no `encoding="utf-8",
-  errors="replace"` → uncaught `UnicodeDecodeError` (only Timeout/OSError are
-  caught); requires entire stdout to be one JSON object (a stray print breaks
-  it); no runner-level output cap. → Set encoding, broaden except, document/
-  enforce the stdout contract, cap captured size.
-- [ ] **Trace read/write not robust to corruption.** `orchestrator/traces.py:14,22`.
-  One malformed JSONL line makes `read_trace` raise and kills all downstream
-  processing; `log_event` appends unlocked so concurrent writers can interleave.
-  → Skip/log bad lines; guard concurrent appends.
-- [ ] **Retrieval matching & ranking.** `orchestrator/retrieval.py:19-22,31-40`.
-  Substring tool-name match (`read` in "already"); re-embeds the task once per
-  matched tool; tag hits bypass any score floor and can crowd out relevant
-  vector hits. → Word-boundary match, embed once, apply a score floor to tag
-  hits.
-- [ ] **No config validation / fail-fast.** `config.py:42,56` + `cli.py:27`. A
-  non-dict override drops a whole subtree → later `KeyError`; missing file /
-  malformed YAML → raw traceback. → Validate merged shape; wrap load with a
-  clear stderr message + non-zero exit.
-- [ ] **Outcome semantics.** `core/agent.py:104,128-131`. SUCCESS == "produced
-  text", not "task done" (a give-up message is SUCCESS); INCOMPLETE drops
-  `had_tool_failure` so "every tool failed" looks like "ran out of steps". →
-  Document SUCCESS meaning and/or add a completion signal; carry
-  `had_tool_failure` into INCOMPLETE; detect repeated identical failing calls.
+- [x] **`build_tools` mutates global `os.environ`.** `runtime.py` +
+  `tools/registry.py` + `tools/runner.py`. Sandbox root is stored on the
+  `ToolRegistry` and passed via `subprocess.Popen(env=...)` per invocation;
+  two concurrent registries no longer clobber each other.
+- [x] **Runner robustness.** `tools/runner.py`. Broad `except Exception`
+  around `communicate()`, 1 MiB stdout cap (`RUNNER_OUTPUT_CAP_BYTES`) that
+  flags `truncated: true` instead of silently breaking the JSON contract,
+  `extra_env` plumbing for the per-registry sandbox.
+- [x] **Trace read/write robustness.** `orchestrator/traces.py`. `log_event`
+  takes an exclusive `fcntl.flock` before appending; `read_trace` skip-and-logs
+  malformed JSONL lines instead of raising.
+- [x] **Retrieval matching & ranking.** `orchestrator/retrieval.py`.
+  Word-boundary tool-name match (`\b{name}\b`); embed once and pass to a new
+  `QdrantMemoryStore.query_by_vector`; tag hits gated by `TAG_HIT_SCORE_FLOOR = 0.30`.
+- [x] **No config validation / fail-fast.** `config.py` + `cli.py`.
+  `_deep_merge` raises `ConfigError` on a scalar-overrides-dict shape
+  mismatch; `load_config` catches missing-file / malformed YAML / non-mapping
+  top-level; `cli.main()` prints `config error: ...` to stderr + exit 1.
+- [x] **Outcome semantics — INCOMPLETE conflates "ran out of steps cleanly"
+  with "every tool failed".** `core/agent.py` + `core/outcome.py`. New
+  `INCOMPLETE_WITH_TOOL_FAILURE` outcome. (SUCCESS = "produced text" is
+  still the documented contract; a real completion signal remains a future
+  change.)
 - [ ] **Token cap uses the wrong tokenizer.** `memory/compress.py:5,19`.
   `tiktoken cl100k_base` ≠ Claude/gpt-4o tokenizer; hard mid-clause truncation
   can produce a meaningless guideline. → Use the model's encoding (OpenAI) /
@@ -107,9 +102,18 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 - [ ] Wheel-packaging guard: `builtin` resolves to non-empty tools after a real
   `pip install` of the built wheel (regression test for the P0).
 - [ ] Strategic-dedup demotion / re-ingest of a promoted guideline.
-- [ ] Concurrent ingest (lost-update) behavior.
+- [ ] Concurrent ingest (lost-update) behavior — wired the flock; still need a
+  test that fires two ingests at the same collection in parallel and asserts
+  the final `hit_count` equals the number of ingests.
 - [ ] Multi-block / parallel-tool-call / `max_tokens`-truncated LLM responses
   against both backends.
+
+## Done this pass
+
+`tests/test_e2e_first_run_smoke.py` drives a full scaffold → load_config →
+build_tools → run_agent journey under a `ScriptedLLMBackend`, exercising the
+new ToolRegistry-owned sandbox, the flock-locked trace writer, and the new
+`INCOMPLETE_WITH_TOOL_FAILURE` outcome.
 
 ---
 Source: two parallel review passes (deep code audit + empirical wheel-install

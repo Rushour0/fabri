@@ -20,6 +20,34 @@ class QdrantMemoryStore:
                 collection_name=self.collection,
                 vectors_config=qmodels.VectorParams(size=EMBEDDING_DIM, distance=qmodels.Distance.COSINE),
             )
+            return
+
+        # Existing collection: verify it matches the current embedding model's
+        # dimension + distance. A mismatch (someone swapped the embedding model,
+        # or pointed at a collection from a different project) would otherwise
+        # surface as an opaque Qdrant error on upsert or, worse, return garbage
+        # neighbors from an incompatible vector space.
+        info = self.client.get_collection(self.collection)
+        params = info.config.params.vectors
+        # Qdrant returns either a VectorParams (single unnamed vector) or a
+        # dict of named ones. We use the single-vector shape, so this is a
+        # config error if it's anything else.
+        if not isinstance(params, qmodels.VectorParams):
+            raise RuntimeError(
+                f"collection {self.collection!r} uses named vectors; fabri expects a single "
+                f"unnamed vector. Recreate the collection or point fabri at a different one."
+            )
+        if params.size != EMBEDDING_DIM:
+            raise RuntimeError(
+                f"collection {self.collection!r} has vector size {params.size}, but the "
+                f"current embedding model produces size {EMBEDDING_DIM}. Recreate the "
+                f"collection or set memory.collection to a fresh name."
+            )
+        if params.distance != qmodels.Distance.COSINE:
+            raise RuntimeError(
+                f"collection {self.collection!r} uses distance {params.distance}, but fabri "
+                f"expects cosine. Recreate the collection or use a different one."
+            )
 
     def upsert(self, entry: MemoryEntry) -> str:
         vector = embed(entry.text)
@@ -42,7 +70,18 @@ class QdrantMemoryStore:
         kind: str | None = None,
         tools_any: list[str] | None = None,
     ) -> list[tuple[MemoryEntry, float]]:
-        vector = embed(text)
+        return self.query_by_vector(embed(text), top_k=top_k, kind=kind, tools_any=tools_any)
+
+    def query_by_vector(
+        self,
+        vector: list[float],
+        top_k: int = 5,
+        kind: str | None = None,
+        tools_any: list[str] | None = None,
+    ) -> list[tuple[MemoryEntry, float]]:
+        """Same as query() but accepts a precomputed embedding -- lets a caller
+        embed once and run several filtered passes (see orchestrator/retrieval.py
+        which does a vector pass plus one tag-filtered pass per mentioned tool)."""
         conditions = []
         if kind is not None:
             conditions.append(qmodels.FieldCondition(key="kind", match=qmodels.MatchValue(value=kind)))
