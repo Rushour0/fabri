@@ -1,6 +1,5 @@
 """End-to-end tests for the config loader and the admin gate -- the two
 seams a consuming project depends on when wiring a new agent up."""
-import os
 from pathlib import Path
 
 import pytest

@@ -2,8 +2,6 @@
 and agent_runner_tool.py share. Mostly about ensuring the decompose
 synthetic tool def is added/omitted correctly and that the llm provider
 switch raises on unknowns rather than silently returning None."""
-import os
-from pathlib import Path
 
 import pytest
 

@@ -7,14 +7,12 @@ the live API call. If this test breaks, the documented Quickstart broke."""
 import json
 import os
 import uuid
-from pathlib import Path
 
-import pytest
 
 from fabri import QdrantMemoryStore, ScriptedLLMBackend, run_agent
 from fabri.config import load_config
 from fabri.core.llm import LLMResponse, ToolCall
-from fabri.runtime import build_tool_defs, build_tools
+from fabri.runtime import build_tools
 from fabri.scaffold import scaffold
 
 
