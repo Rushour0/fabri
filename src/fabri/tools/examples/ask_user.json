@@ -1,0 +1,23 @@
+{
+  "name": "ask_user",
+  "description": "Block on a clarifying question to the user. The host process (CLI or service) receives the question on the configured ask-user socket, prompts the human, and writes back the answer. If no socket is configured (FABRI_ASK_USER_SOCKET unset), falls back to reading the answer from stdin -- handy for CLI dev. Use when the model genuinely needs a human decision (ambiguous scope, missing input, branch-point), NOT to fish for approval.",
+  "command": ["python3", "ask_user.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "question": {"type": "string"},
+      "options": {"type": "array", "items": {"type": "string"}},
+      "default": {"type": "string"}
+    },
+    "required": ["question"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {"type": "string"},
+      "selected_option": {"type": "string"}
+    },
+    "required": ["answer"]
+  },
+  "timeout_s": 3600
+}

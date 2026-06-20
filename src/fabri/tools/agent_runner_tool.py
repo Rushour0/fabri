@@ -5,6 +5,7 @@ uses, so the calling agent's ToolRegistry/runner doesn't need to know this
 "tool" is itself a whole agent."""
 import argparse
 import json
+import os
 import sys
 
 from fabri.config import load_config
@@ -38,7 +39,14 @@ def main() -> int:
                         help="Override sub-agent agent.system_prompt (inline string). F1.")
     parser.add_argument("--system-prompt-file", dest="system_prompt_file", default=None,
                         help="Override sub-agent agent.system_prompt with file contents. F1.")
+    parser.add_argument("--ask-user-socket", dest="ask_user_socket", default=None,
+                        help="Path to a Unix socket the ask_user tool routes questions to (A1).")
     cli_args = parser.parse_args()
+    if cli_args.ask_user_socket is not None:
+        # Tools inherit this via os.environ; the ToolRegistry's run_tool
+        # subprocess only sets extra_env for sandbox-root, so plain inheritance
+        # is enough -- no registry plumbing needed.
+        os.environ["FABRI_ASK_USER_SOCKET"] = cli_args.ask_user_socket
     args = json.loads(sys.stdin.read())
     config = load_config(cli_args.config_path)
     if cli_args.model is not None:

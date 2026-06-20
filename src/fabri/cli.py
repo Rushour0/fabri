@@ -58,6 +58,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     _require_api_key(config["llm"]["api_key_env"])
     session_id = args.session_id or str(uuid.uuid4())
     configure_logging(session_id, verbose=args.verbose)
+    if getattr(args, "ask_user_socket", None):
+        os.environ["FABRI_ASK_USER_SOCKET"] = args.ask_user_socket
 
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
@@ -171,6 +173,8 @@ def main() -> None:
     p_run = sub.add_parser("run", help="Run the agent on a task")
     p_run.add_argument("task")
     p_run.add_argument("--session-id", dest="session_id", default=None)
+    p_run.add_argument("--ask-user-socket", dest="ask_user_socket", default=None,
+                       help="Path to a Unix socket the ask_user tool routes questions to (A1).")
     p_run.set_defaults(func=cmd_run)
 
     p_ingest = sub.add_parser("ingest-traces", help="Synthesize guidelines from a session's trace")
