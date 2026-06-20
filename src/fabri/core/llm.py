@@ -33,6 +33,12 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     final_text: str | None = None
     stop_reason: str | None = None
+    # Inline reasoning text the model emitted alongside its tool_use blocks
+    # ("Let me check existing characters first…"). Empty when there's no
+    # accompanying text or when the response was a pure final answer. The
+    # agent loop logs this as a `thought` trace event before the
+    # tool_call(s) it preceded; host UIs can render it as reasoning context.
+    thinking_text: str | None = None
 
     def __post_init__(self) -> None:
         if self.tool_call is not None and not self.tool_calls:
@@ -132,14 +138,22 @@ class AnthropicLLMBackend:
         # Claude can return several content blocks in one turn (reasoning text
         # plus one or more tool_use blocks, or parallel tool_use blocks). Collect
         # every tool_use; only treat the response as final when there are none.
+        # When tool_use blocks are present, the accompanying text blocks carry
+        # the model's reasoning ("Let me check X first..."); capture them as
+        # thinking_text so the host UI can surface the chain of thought
+        # instead of dropping the prose on the floor.
         tool_calls = [
             ToolCall(name=b.name, args=b.input, id=b.id) for b in resp.content if b.type == "tool_use"
         ]
+        text_blocks = "".join(b.text for b in resp.content if b.type == "text").strip()
         if tool_calls:
-            return LLMResponse(tool_calls=tool_calls, stop_reason=resp.stop_reason)
+            return LLMResponse(
+                tool_calls=tool_calls,
+                stop_reason=resp.stop_reason,
+                thinking_text=text_blocks or None,
+            )
 
-        text = "".join(b.text for b in resp.content if b.type == "text")
-        return LLMResponse(final_text=text or None, stop_reason=resp.stop_reason)
+        return LLMResponse(final_text=text_blocks or None, stop_reason=resp.stop_reason)
 
 
 class OpenAILLMBackend:

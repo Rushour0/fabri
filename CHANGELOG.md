@@ -4,6 +4,25 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.2.2 — 2026-06-21
+
+Non-breaking: existing trace consumers ignore the new event kind, and
+LLMResponse gains an optional field that defaults to None.
+
+### Added
+
+- **Agent reasoning surfaces in the trace.** When Claude returns a
+  response with both `text` content blocks AND one or more `tool_use`
+  blocks in the same turn, the inline reasoning text was previously
+  dropped on the floor — `AnthropicLLMBackend.step` only captured the
+  tool_use blocks. Now the text is captured onto
+  `LLMResponse.thinking_text` and the agent loop emits a
+  `{"type": "thought", "text": ..., "step": N}` event in the trace
+  BEFORE the matching `tool_call` events. Host UIs can render the
+  thought as the "Let me check existing characters first…" reasoning
+  context that precedes the tool dispatch. Pure final responses
+  unchanged (text still becomes `final_text`).
+
 ## v0.2.1 — 2026-06-20
 
 Burns down the rest of Tracks F, S, and A from `docs/ROADMAP.md`. Nothing

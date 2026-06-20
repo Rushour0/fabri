@@ -120,6 +120,17 @@ def run_agent(
         try:
             response = llm.step(system, messages)
             if response.tool_calls:
+                # Emit the inline reasoning the model produced alongside its
+                # tool_use blocks BEFORE the tool_call events so trace
+                # readers see "Let me check X first..." preceding the
+                # tool that does the check. Empty / whitespace-only text
+                # is dropped here (LLMResponse already normalised it).
+                if response.thinking_text:
+                    log_event(session_id, {
+                        "type": "thought",
+                        "text": response.thinking_text,
+                        "step": step_num,
+                    })
                 had_tool_failure |= _dispatch_tool_calls(
                     response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
                     session_id, messages, step_num, result_format, output_format,
