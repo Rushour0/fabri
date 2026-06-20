@@ -1,8 +1,8 @@
 import uuid
 
-from agent_memory.memory.schema import MemoryEntry
-from agent_memory.memory.store import QdrantMemoryStore
-from agent_memory.orchestrator.retrieval import retrieve_context
+from fabri.memory.schema import MemoryEntry
+from fabri.memory.store import QdrantMemoryStore
+from fabri.orchestrator.retrieval import retrieve_context
 
 COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
 

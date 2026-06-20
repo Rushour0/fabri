@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from agent_memory.tools.registry import ToolRegistry
+from fabri.tools.registry import ToolRegistry
 
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "src" / "agent_memory" / "tools" / "examples"
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
 
 
 def make_registry() -> ToolRegistry:

@@ -1,4 +1,4 @@
-from agent_memory.memory.compress import count_tokens, enforce_token_cap
+from fabri.memory.compress import count_tokens, enforce_token_cap
 
 
 def test_short_text_is_unchanged():

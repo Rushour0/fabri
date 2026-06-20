@@ -1,7 +1,7 @@
 import uuid
 
-from agent_memory.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, ingest_guideline
-from agent_memory.memory.store import QdrantMemoryStore
+from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, ingest_guideline
+from fabri.memory.store import QdrantMemoryStore
 
 COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
 

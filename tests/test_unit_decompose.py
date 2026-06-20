@@ -4,8 +4,8 @@ sub-agent -- the tests pin that contract so a future change to the prompt
 or parsing doesn't silently break the agent loop's tool dispatch."""
 import pytest
 
-from agent_memory.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
-from agent_memory.core.llm import LLMResponse, ScriptedLLMBackend
+from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
+from fabri.core.llm import LLMResponse, ScriptedLLMBackend
 
 
 def test_decompose_returns_subquestions_on_valid_json():

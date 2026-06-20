@@ -9,22 +9,22 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory import (
+from fabri import (
     AgentProtocolError,
     QdrantMemoryStore,
     ScriptedLLMBackend,
     ToolRegistry,
     run_agent,
 )
-from agent_memory.core.llm import LLMError, LLMResponse, ToolCall
+from fabri.core.llm import LLMError, LLMResponse, ToolCall
 
-EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "agent_memory" / "tools" / "examples"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
 
 
 def _sandbox(tmp_path: Path) -> ToolRegistry:
-    # path-jail tools read AGENT_SANDBOX_ROOT at subprocess-spawn time, so the
+    # path-jail tools read FABRI_SANDBOX_ROOT at subprocess-spawn time, so the
     # env var must be set before tools.invoke() forks each call.
-    os.environ["AGENT_SANDBOX_ROOT"] = str(tmp_path)
+    os.environ["FABRI_SANDBOX_ROOT"] = str(tmp_path)
     return ToolRegistry(EXAMPLES_DIR)
 
 

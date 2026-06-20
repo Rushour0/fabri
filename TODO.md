@@ -1,4 +1,4 @@
-# agent-memory — backlog
+# fabri — backlog
 
 Prioritized from a hard correctness/security audit (2026-06-19). Each item:
 `file:line — problem → fix`. P0 = ships broken; P1 = bites a real user; P2 =
@@ -36,7 +36,7 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 - [x] **Memory dedup hardcoded to `kind="tactical"`.** `memory/store.py`
   `find_similar(kind=None)` + `memory/pruning.py` now match across both kinds and
   never demote a promoted strategic entry.
-- [x] **Sandbox fails open when `AGENT_SANDBOX_ROOT` is unset.** All 7 sandbox
+- [x] **Sandbox fails open when `FABRI_SANDBOX_ROOT` is unset.** All 7 sandbox
   tools fail closed (error + exit 1) when the var is unset.
 - [x] **Subprocess timeout doesn't kill the child's process group.**
   `tools/runner.py` runs tools via `Popen(start_new_session=True)` and

@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory.tools.registry import ToolRegistry
+from fabri.tools.registry import ToolRegistry
 
-EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "agent_memory" / "tools" / "examples"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
 
 
 @pytest.fixture
 def reg(tmp_path):
-    os.environ["AGENT_SANDBOX_ROOT"] = str(tmp_path)
+    os.environ["FABRI_SANDBOX_ROOT"] = str(tmp_path)
     return ToolRegistry(EXAMPLES_DIR)
 
 

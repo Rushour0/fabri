@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory import (
+from fabri import (
     AdminAuthError,
     DEFAULT_CONFIG,
     describe_config,
@@ -14,10 +14,10 @@ from agent_memory import (
     render_dashboard,
     require_admin,
 )
-from agent_memory.admin import ADMIN_TOKEN_ENV
-from agent_memory.runtime import build_tools
+from fabri.admin import ADMIN_TOKEN_ENV
+from fabri.runtime import build_tools
 
-EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "agent_memory" / "tools" / "examples"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
 
 
 def test_load_config_deep_merges_over_defaults(tmp_path):
@@ -45,8 +45,8 @@ def test_build_tools_filters_to_enabled_set(tmp_path):
     }
     reg = build_tools(cfg)
     assert set(reg.tools) == {"read_file", "write_file"}
-    # AGENT_SANDBOX_ROOT was set as a side effect for the file tools to read.
-    assert os.environ["AGENT_SANDBOX_ROOT"] == str(tmp_path.resolve())
+    # FABRI_SANDBOX_ROOT was set as a side effect for the file tools to read.
+    assert os.environ["FABRI_SANDBOX_ROOT"] == str(tmp_path.resolve())
 
 
 def test_build_tools_registers_agent_as_tool(tmp_path):
@@ -110,7 +110,7 @@ def test_describe_config_marks_agent_tools(tmp_path):
 
 
 def test_render_dashboard_includes_tools_and_memory(tmp_path):
-    from agent_memory import QdrantMemoryStore
+    from fabri import QdrantMemoryStore
     import uuid
 
     sub_cfg = tmp_path / "sub.yaml"

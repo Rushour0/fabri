@@ -6,7 +6,7 @@ import random
 
 import pytest
 
-from agent_memory import toon
+from fabri import toon
 
 
 def _round_trips(value):

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory import QdrantMemoryStore, ScriptedLLMBackend, ToolRegistry, run_agent
-from agent_memory.core.llm import LLMResponse, ToolCall
-from agent_memory.tools.manifest_schema import ToolManifest
+from fabri import QdrantMemoryStore, ScriptedLLMBackend, ToolRegistry, run_agent
+from fabri.core.llm import LLMResponse, ToolCall
+from fabri.tools.manifest_schema import ToolManifest
 
 
 def _store():

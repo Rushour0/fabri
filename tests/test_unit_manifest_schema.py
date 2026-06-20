@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_memory.tools.manifest_schema import ToolManifest
+from fabri.tools.manifest_schema import ToolManifest
 
 
 def _write(tmp_path, name, data):

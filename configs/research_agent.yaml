@@ -9,7 +9,7 @@ llm:
   api_key_env: ANTHROPIC_API_KEY
 
 tools:
-  manifest_dir: src/agent_memory/tools/examples
+  manifest_dir: src/fabri/tools/examples
   enabled: [web_search, read_file, write_file]
   sandbox_root: .
   decompose:
@@ -17,7 +17,7 @@ tools:
     max_subquestions: 5
 
 memory:
-  collection: research_agent_memory
+  collection: research_fabri
   qdrant_url: http://localhost:6333
   top_k: 5
   similarity_threshold: 0.85

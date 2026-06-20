@@ -5,13 +5,16 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# per-run state, written project-local under .agent_memory/ (see paths.py)
-.agent_memory/
+# per-run state, written project-local under .fabri/ (see paths.py)
+.fabri/
 logs/
-src/agent_memory/traces/
+src/fabri/traces/
 
 # compiled example Go tool binary
-src/agent_memory/tools/examples/example_go_tool/sum_tool
+src/fabri/tools/examples/example_go_tool/sum_tool
 
 # setuptools build output
 build/
+
+# build artifacts
+dist/

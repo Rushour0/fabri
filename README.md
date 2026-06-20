@@ -1,4 +1,4 @@
-# agent-memory
+# fabri
 
 A local, open-source memory + orchestration layer for a custom LLM agent.
 Built around two ideas:
@@ -10,7 +10,22 @@ Built around two ideas:
   compact and just-in-time, give each tool a single clear job, and let tools
   be polyglot processes behind a uniform JSON contract.
 
-## Setup
+## Quickstart
+
+```bash
+pip install fabri                    # the `fabri` console command lands on your PATH
+docker run -p 6333:6333 qdrant/qdrant   # vector store for the agent's memory
+export ANTHROPIC_API_KEY=...
+
+fabri init demo && cd demo           # scaffold a runnable starter project
+fabri --config agent.yaml run "greet Ada with the hello tool"
+```
+
+`fabri init` writes an `agent.yaml`, an example tool under `tools/agent_tools/`,
+and a `docker-compose.yml` — edit those, not the library. For OpenAI models,
+`pip install "fabri[openai]"` and set `llm.provider: openai`.
+
+## Setup (from a checkout)
 
 ```bash
 docker compose up -d                 # starts Qdrant on :6333
@@ -18,24 +33,23 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 export ANTHROPIC_API_KEY=...         # only needed for AnthropicLLMBackend
 ```
 
-`pip install` (editable here, or `pip install "agent-memory @ git+ssh://git@github.com/Rushour0/agent-memory.git"`
-from another project) puts an `agent-memory` console command on your PATH —
-that's the entry point everything below uses. Embeddings run fully locally via
+Installing puts a `fabri` console command on your PATH — that's the entry point
+everything below uses. Embeddings run fully locally via
 `sentence-transformers/all-MiniLM-L6-v2` — no embedding API calls, no cloud
 dependency beyond the LLM itself.
 
 ## Usage
 
 ```bash
-agent-memory run "some task description"
-agent-memory --config agent.yaml run "some task description"   # config-driven agent, see docs/creating-an-agent.md
-agent-memory --verbose run "some task description"   # DEBUG logging to console too
-agent-memory inspect-memory "a query to test retrieval"
-agent-memory ingest-traces <session-id>
+fabri run "some task description"
+fabri --config agent.yaml run "some task description"   # config-driven agent, see docs/creating-an-agent.md
+fabri --verbose run "some task description"   # DEBUG logging to console too
+fabri inspect-memory "a query to test retrieval"
+fabri ingest-traces <session-id>
 ```
 
 (`python cli.py ...` still works from a source checkout — it's a thin shim over
-the same `agent_memory.cli:main` the console script points at.)
+the same `fabri.cli:main` the console script points at.)
 
 See `docs/creating-an-agent.md` for using this as a library/framework in
 another project: installing it, writing an `agent.yaml`, adding tools, and a
@@ -49,17 +63,17 @@ message if it's unset, rather than a raw stack trace) — `inspect-memory` does
 not, since it only talks to Qdrant.
 
 Every run produces two records, both keyed by `session_id`: a structured
-JSONL trace (`.agent_memory/traces/<session_id>.jsonl`, the machine-readable
+JSONL trace (`.fabri/traces/<session_id>.jsonl`, the machine-readable
 record used by the pipeline) and a human-readable log
-(`.agent_memory/logs/<session_id>.log`, always
+(`.fabri/logs/<session_id>.log`, always
 DEBUG-level regardless of `--verbose` — that flag only controls what's also
 echoed to the console) with LLM call latency/token usage, tool dispatch
 latency, and every promotion/dedup decision the pipeline makes.
 
-Both land under `.agent_memory/` in the directory you run from (override with
-`$AGENT_MEMORY_HOME`), so each consuming project keeps its own traces and logs
+Both land under `.fabri/` in the directory you run from (override with
+`$FABRI_HOME`), so each consuming project keeps its own traces and logs
 rather than scattering them into wherever the package happens to be installed.
-Add `.agent_memory/` to your project's `.gitignore`.
+Add `.fabri/` to your project's `.gitignore`.
 
 Each run returns an `outcome`: `success` (clean), `success_with_recovery`
 (finished, but at least one tool call failed along the way), or `incomplete`
@@ -68,7 +82,7 @@ Each run returns an `outcome`: `success` (clean), `success_with_recovery`
 ## Architecture
 
 ```
-src/agent_memory/        # src/ layout: repo is "agent-memory", package is "agent_memory"
+src/fabri/        # src/ layout: repo is "fabri", package is "fabri"
   memory/        embeddings, schema, Qdrant store, compression, pruning/promotion
   orchestrator/  retrieval, trace logging, the trace -> guideline pipeline
   tools/         manifest schema, subprocess runner, example tools, agent-as-tool adapter
@@ -77,16 +91,16 @@ src/agent_memory/        # src/ layout: repo is "agent-memory", package is "agen
   admin.py       admin-only config inspection + dashboard (stub auth seam, see below)
   config.py      YAML agent config loader (DEFAULT_CONFIG + load_config)
   toon.py        TOON codec: compact JSON-shaped encoding for tool results (token savings)
-  paths.py       project-local .agent_memory/ resolution for traces + logs
-  cli.py         the `agent-memory` console command (composition over the public API)
+  paths.py       project-local .fabri/ resolution for traces + logs
+  cli.py         the `fabri` console command (composition over the public API)
   __init__.py    public API: run_agent, load_config, ToolRegistry, QdrantMemoryStore, ...
-cli.py           thin shim: `python cli.py ...` -> agent_memory.cli:main
+cli.py           thin shim: `python cli.py ...` -> fabri.cli:main
 ```
 
 ### Agents as tools
 
 A `tools.agents` entry in a config exposes a *different* agent.yaml as a tool
-on this one (`agent_memory/tools/agent_tool.py` builds the manifest,
+on this one (`fabri/tools/agent_tool.py` builds the manifest,
 `agent_runner_tool.py` runs the sub-agent as an ordinary subprocess tool —
 stdin `{"task": ...}`, stdout `{"final_text", "outcome"}`). This is
 composition, not a new orchestrator: each sub-agent is just another tool call
@@ -99,7 +113,7 @@ into one top-level agent.
 `cli.py admin config --config agent.yaml` prints the merged config plus the
 resolved tool registry as JSON; `cli.py admin dashboard --config agent.yaml`
 prints a human-readable summary (agent/llm/tools/memory counts). Both are
-gated by `require_admin()` (`agent_memory/admin.py`): if `AGENT_ADMIN_TOKEN`
+gated by `require_admin()` (`fabri/admin.py`): if `FABRI_ADMIN_TOKEN`
 is unset the gate is open (no auth backend exists yet), but once it's set,
 `--admin-token` must match it. This is a placeholder seam for real auth
 (SSO/API gateway/etc.), not a security boundary by itself.
@@ -126,7 +140,7 @@ reliability risk); the trace/logs keep raw JSON. Pipeline: `json → toon → ll
 inbound, and JSON outbound by default (`tools.result_format`,
 `agent.output_format` — see `docs/creating-an-agent.md`). Native tool-call
 arguments stay provider JSON. The codec round-trips any JSON-shaped value and
-`agent_memory.toon.encode`/`.decode` are public.
+`fabri.toon.encode`/`.decode` are public.
 
 ### Memory lifecycle
 
@@ -181,4 +195,15 @@ context in session N+1, without a human re-writing the prompt by hand.
 
 Covers store round-trip/idempotency, the dedup + promotion rule, the tool
 runner's normalized failure contract (Python + Go + malformed output +
-timeout), and the token-cap enforcement in `compress.py`.
+timeout), the token-cap enforcement in `compress.py`, the TOON codec
+(round-trip + fuzz), and the `fabri init` scaffold.
+
+## Releasing
+
+Tag a version (`git tag v0.1.0 && git push origin v0.1.0`) and GitHub Actions
+publishes to PyPI via Trusted Publishing — see `RELEASING.md` for the one-time
+setup.
+
+## License
+
+[Apache-2.0](LICENSE) © Rushikesh Patade.

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory.core.agent import DECOMPOSE_TOOL_NAME
-from agent_memory.runtime import build_llm, build_tool_defs, build_tools
-from agent_memory.tools.registry import ToolRegistry
-from agent_memory.tools.manifest_schema import ToolManifest
+from fabri.core.agent import DECOMPOSE_TOOL_NAME
+from fabri.runtime import build_llm, build_tool_defs, build_tools
+from fabri.tools.registry import ToolRegistry
+from fabri.tools.manifest_schema import ToolManifest
 
 
 def _registry_with(names):
@@ -75,7 +75,7 @@ def test_build_tools_resolves_sandbox_to_absolute(tmp_path, monkeypatch):
         "decompose": {"enabled": False, "max_subquestions": 5},
     })
     # Should be the absolute resolution of `tmp_path/sub/dir`, not the literal string.
-    assert os.environ["AGENT_SANDBOX_ROOT"] == str((tmp_path / "sub" / "dir").resolve())
+    assert os.environ["FABRI_SANDBOX_ROOT"] == str((tmp_path / "sub" / "dir").resolve())
 
 
 def test_build_tools_agents_default_to_empty(tmp_path):

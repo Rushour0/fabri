@@ -1,8 +1,8 @@
 # Creating an agent with this framework
 
-This framework is two things: an importable Python library (`agent_memory`)
+This framework is two things: an importable Python library (`fabri`)
 and a CLI (`cli.py`) that drives it from a YAML config. Creating a new agent
-means writing a config + a tools directory — no changes to `agent_memory/`
+means writing a config + a tools directory — no changes to `fabri/`
 itself.
 
 ## 1. Install it into your project
@@ -12,30 +12,29 @@ sit next to your project:
 
 ```bash
 cd your-project
-# from a published private repo:
-pip install "agent-memory @ git+ssh://git@github.com/Rushour0/agent-memory.git"
+pip install fabri
 # ...or from a local checkout while developing the framework itself:
-pip install -e /path/to/agent-memory
+pip install -e /path/to/fabri
 
 docker run -p 6333:6333 qdrant/qdrant      # Qdrant on :6333 (or use the repo's docker-compose.yml)
 export ANTHROPIC_API_KEY=...
 ```
 
-Installing puts an `agent-memory` console command on your PATH, and makes the
+Installing puts an `fabri` console command on your PATH, and makes the
 package importable:
 
 ```python
-import agent_memory
-print(agent_memory.__all__)
+import fabri
+print(fabri.__all__)
 ```
 
-Per-run state (traces + logs) is written to `.agent_memory/` in whatever
-directory you run from — add it to your `.gitignore`. Set `$AGENT_MEMORY_HOME`
+Per-run state (traces + logs) is written to `.fabri/` in whatever
+directory you run from — add it to your `.gitignore`. Set `$FABRI_HOME`
 to point it elsewhere.
 
 ## 2. Write an agent.yaml
 
-Every field has a default (see `agent_memory/config.py::DEFAULT_CONFIG`), so
+Every field has a default (see `fabri/config.py::DEFAULT_CONFIG`), so
 only override what you need. Full schema:
 
 ```yaml
@@ -64,7 +63,7 @@ tools:
     max_subquestions: 5
 
 memory:
-  collection: my_agent_memory    # separate Qdrant collection per agent
+  collection: my_fabri    # separate Qdrant collection per agent
   qdrant_url: http://localhost:6333
   top_k: 5
   similarity_threshold: 0.85     # dedup threshold for guideline merging
@@ -75,19 +74,19 @@ memory:
 Run it:
 
 ```bash
-agent-memory --config agent.yaml run "do the task"
+fabri --config agent.yaml run "do the task"
 ```
 
 `builtin` (or `builtin:tools`) in `manifest_dir` resolves to the framework's
 own bundled tools wherever the package is installed — so you never hardcode a
-path to the agent-memory checkout. Every *other* path in the config
+path to the fabri checkout. Every *other* path in the config
 (`manifest_dir` entries, `sandbox_root`) resolves relative to **the directory
 you run the command from**, not the config file's location — run from your
 project root.
 
 ### Token efficiency: TOON
 
-Tool results are fed into the model in [TOON](../src/agent_memory/toon.py)
+Tool results are fed into the model in [TOON](../src/fabri/toon.py)
 (Token-Oriented Object Notation) by default — a compact, indentation-based
 encoding of JSON that drops braces and, for uniform arrays, the repeated keys
 (one header row instead). A typical tabular result is ~30–40% fewer characters
@@ -101,14 +100,14 @@ tokens on `decompose`), but it always falls back to parsing JSON if the model
 doesn't comply — so the default stays `json` for reliability. One seam is
 always JSON regardless: the providers' **native tool-call arguments**, which
 the API returns as JSON (using TOON there would mean giving up native tool
-calling). `agent_memory.toon.encode` / `.decode` are public if you want them in
+calling). `fabri.toon.encode` / `.decode` are public if you want them in
 your own tools.
 
 ## 3. Pick your tools
 
 Every tool is a JSON manifest + an executable, auto-discovered by globbing
 `*.json` in each `manifest_dir`. Nothing about the registry is Python-specific
-or even agent-memory-specific — see `src/agent_memory/tools/examples/` for the
+or even fabri-specific — see `src/fabri/tools/examples/` for the
 shape (`echo` in Python, `sum` in Go, `read_file`/`write_file` with a
 path-jail, `web_search` calling out to Tavily).
 
@@ -136,13 +135,13 @@ print(json.dumps({"ok_field": "..."}))
 # exit != 0 = ok=false, same wrapping but {"ok": false, "error": ..., "result": ...}
 ```
 
-The runner (`agent_memory/tools/runner.py`) normalizes timeouts, nonzero
+The runner (`fabri/tools/runner.py`) normalizes timeouts, nonzero
 exits, and malformed-JSON output into the same `{ok, error?, result?,
 stderr?}` shape — your tool script never needs to worry about how the agent
 loop reports failure, only about its own stdout contract.
 
 **Sandboxing file access**: `read_file`/`write_file` resolve every path
-against `$AGENT_SANDBOX_ROOT` (set by the CLI from `tools.sandbox_root`) and
+against `$FABRI_SANDBOX_ROOT` (set by the CLI from `tools.sandbox_root`) and
 reject anything that escapes it — `path.resolve().is_relative_to(root)`. If
 you write your own file-touching tool, follow the same pattern; the registry
 itself enforces nothing, the discipline lives in each tool script.
@@ -151,7 +150,7 @@ itself enforces nothing, the discipline lives in each tool script.
 project already has a build/codegen step that would catch a bad file (a
 schema, a compiler, a linter), wrap *that* as a tool instead of writing new
 validation logic. See `tools/agent_tools/validate_content.py` in this
-project's `ludexel` integration (the agent_memory repo doesn't ship a
+project's `ludexel` integration (the fabri repo doesn't ship a
 copy — it's project-specific) — it shells out to `tools/generate_all.py`,
 captures stdout/stderr as JSON, and exits with the same code, so the agent
 gets a real pass/fail from the actual compiler rather than an approximate
@@ -173,8 +172,8 @@ directly if you want programmatic control (e.g. invoking the agent from your
 own script or service):
 
 ```python
-from agent_memory import run_agent, QdrantMemoryStore, build_llm, build_tool_defs, build_tools
-from agent_memory.config import load_config
+from fabri import run_agent, QdrantMemoryStore, build_llm, build_tool_defs, build_tools
+from fabri.config import load_config
 
 config = load_config("agent.yaml")
 store = QdrantMemoryStore(

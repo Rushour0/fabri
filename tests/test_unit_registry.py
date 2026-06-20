@@ -4,8 +4,8 @@ framework-default of the same name."""
 import json
 from pathlib import Path
 
-from agent_memory.tools.manifest_schema import ToolManifest
-from agent_memory.tools.registry import ToolRegistry
+from fabri.tools.manifest_schema import ToolManifest
+from fabri.tools.registry import ToolRegistry
 
 
 def _make_tool_dir(root: Path, names: list[str]) -> Path:

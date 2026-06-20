@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-RUNNER = Path(__file__).resolve().parent.parent / "src" / "agent_memory" / "tools" / "agent_runner_tool.py"
+RUNNER = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "agent_runner_tool.py"
 
 
 def _run(args, stdin: str, env_overrides=None):

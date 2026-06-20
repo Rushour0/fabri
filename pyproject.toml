@@ -1,33 +1,57 @@
 [project]
-name = "agent-memory"
+name = "fabri"
 version = "0.1.0"
+description = "A local memory + orchestration framework for custom LLM agents: tactical/strategic memory over execution traces, polyglot subprocess tools, agent-as-tool composition, and token-efficient TOON I/O."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Rushikesh Patade", email = "pataderushikesh@gmail.com" }]
+keywords = [
+    "llm", "agent", "agents", "memory", "anthropic", "claude", "openai",
+    "qdrant", "orchestration", "toon", "react", "tool-use",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "qdrant-client>=1.9",
     "sentence-transformers>=3.0",
     "anthropic>=0.40",
     "tiktoken>=0.7",
     "pyyaml>=6.0",
-    "openai>=1.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+openai = ["openai>=1.0"]               # only needed for `llm.provider: openai`
+dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0"]
+
+[project.urls]
+Homepage = "https://github.com/Rushour0/fabri"
+Repository = "https://github.com/Rushour0/fabri"
+Issues = "https://github.com/Rushour0/fabri/issues"
 
 [project.scripts]
-agent-memory = "agent_memory.cli:main"
+fabri = "fabri.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["agent_memory*"]
+include = ["fabri*"]
 
 # The bundled example tools are data, not importable modules: a manifest is a
 # .json + an executable in any language (Python/Go/...). Without this, a wheel
 # install ships only the .py files and drops every .json manifest, so the
 # `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
 [tool.setuptools.package-data]
-"agent_memory.tools.examples" = ["*.json", "example_go_tool/*"]
+"fabri.tools.examples" = ["*.json", "example_go_tool/*"]

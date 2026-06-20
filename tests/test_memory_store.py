@@ -1,7 +1,7 @@
 import uuid
 
-from agent_memory.memory.schema import MemoryEntry
-from agent_memory.memory.store import QdrantMemoryStore
+from fabri.memory.schema import MemoryEntry
+from fabri.memory.store import QdrantMemoryStore
 
 COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
 
