@@ -86,6 +86,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         decompose_llm=build_decompose_llm(config),
     )
     print(json.dumps(result, indent=2))
+    # An LLM-error / max-steps / no-final outcome must surface to the
+    # process exit code -- host services dispatch on `fabri run`'s
+    # returncode to decide whether to record a run as succeeded. Without
+    # this, an Anthropic rate-limit failure still exits 0 and downstream
+    # ledgers (e.g. ludexel's `runs` collection) mark the run succeeded
+    # despite having no final_text.
+    run_failed = not result.get("success") or result.get("outcome") != "succeeded"
 
     compress_llm = build_llm(config, [])
     entries = process_trace(
@@ -100,6 +107,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(f"\nSynthesized {len(entries)} guideline(s) from this run:")
         for e in entries:
             print(f"  [{e.kind}] {e.text}")
+
+    if run_failed:
+        sys.exit(1)
 
 
 def cmd_ingest_traces(args: argparse.Namespace) -> None:

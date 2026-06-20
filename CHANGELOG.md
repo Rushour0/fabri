@@ -4,6 +4,20 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.2.3 — 2026-06-21
+
+### Fixed
+
+- **`fabri run` now exits non-zero on a non-succeeded outcome.** When
+  the agent ran out of steps, hit a provider error (rate limit, 5xx,
+  malformed response), or produced no final answer, `cmd_run` was
+  still returning silently — meaning the process exited 0 even though
+  the trace was full of `failed` events. Host services dispatching on
+  the exit code (like ludexel's run record) wrote the run as succeeded
+  and lost the failure cause. Now: `sys.exit(1)` when
+  `result["success"]` is False or `result["outcome"] != "succeeded"`,
+  after the trace ingestion side-effects have run.
+
 ## v0.2.2 — 2026-06-21
 
 Non-breaking: existing trace consumers ignore the new event kind, and
