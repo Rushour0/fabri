@@ -20,6 +20,21 @@ def is_tool_failure(event: dict) -> bool:
     return event.get("type") == EventType.TOOL_CALL.value and is_error(event.get("result", {}))
 
 
+def is_discrepancy(event: dict) -> bool:
+    return event.get("type") == EventType.DISCREPANCY.value
+
+
+def _discrepancy_guideline_text(path: str) -> str:
+    """Canonical phrasing matching the surrounding guideline style: terse,
+    imperative, names the corrective behavior. Keep the wording stable so
+    repeated drift on the same path dedupes via cosine similarity rather than
+    accumulating near-duplicates."""
+    return (
+        f"After write_file/edit_file at {path}, re-read the file in the same "
+        f"step to confirm the write persisted."
+    )
+
+
 def process_trace(
     session_id: str,
     store: QdrantMemoryStore,
@@ -73,6 +88,21 @@ def process_trace(
                 kind="success_pattern",
             )
             new_entries.append(entry)
+
+    for event in events:
+        if not is_discrepancy(event):
+            continue
+        path = event.get("path", "<unknown>")
+        guideline_text = _discrepancy_guideline_text(path)
+        entry = ingest_guideline(
+            store,
+            guideline_text,
+            session_id,
+            tools=["write_file", "edit_file"],
+            similarity_threshold=similarity_threshold,
+            promotion_threshold_sessions=promotion_threshold_sessions,
+        )
+        new_entries.append(entry)
 
     for event in failures:
         failure_summary = (

@@ -8,6 +8,12 @@ overrides as CLI flags, and pipe `{task}` to its stdin -- matching the
 stdin-JSON / stdout-JSON contract every other fabri tool uses, so the parent's
 runner doesn't need to know this "tool" is itself an entire agent.
 
+Optional `memory_collection_suffix` namespaces the spawned child's qdrant
+collection by suffixing the parent's configured `memory.collection`. Use it
+when a multi-domain orchestrator wants each domain child writing guidelines
+into its own namespace (e.g. `<parent>_character` vs `<parent>_map`) so
+cross-domain retrieval doesn't crowd each child's context.
+
 Trust boundary: `config_path` and `system_prompt_path` are framework-level
 plumbing (yaml + prompt files the host project owns), not user data, so they
 are NOT enforced against `$FABRI_SANDBOX_ROOT`. The sub-agent's own
@@ -17,15 +23,44 @@ don't trust the parent's argument, don't enable this tool.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+from fabri.core.logging_setup import get_logger
+
+logger = get_logger()
+
+_SUFFIX_MAX_LEN = 32
+_SUFFIX_ALLOWED = re.compile(r"[^a-z0-9_-]")
 
 RUNNER_SCRIPT = (
     Path(__file__).resolve().parent.parent / "agent_runner_tool.py"
 )
 
 DEFAULT_TIMEOUT_S = 600
+
+
+def sanitize_collection_suffix(raw: str) -> str:
+    """Qdrant collection names accept a narrow charset; sanitize to lowercase
+    `[a-z0-9_-]` and cap at 32 chars so a parent passing `Tile/Map.v2` doesn't
+    blow up the spawn with an opaque qdrant error."""
+    cleaned = _SUFFIX_ALLOWED.sub("", raw.lower())
+    return cleaned[:_SUFFIX_MAX_LEN]
+
+
+def _parent_collection(config_path: str) -> str | None:
+    """Read the parent sub-agent's configured `memory.collection` so the suffix
+    can be concatenated. Returns None on any read failure; the caller falls
+    back to inheriting the parent collection verbatim."""
+    try:
+        from fabri.config import load_config
+
+        return load_config(config_path).get("memory", {}).get("collection")
+    except Exception as e:  # noqa: BLE001 -- config errors shouldn't kill spawn
+        logger.warning("spawn_subagent: could not read parent collection from %s: %s", config_path, e)
+        return None
 
 
 def build_runner_command(args: dict, runner_script: Path | None = None) -> list[str]:
@@ -44,6 +79,15 @@ def build_runner_command(args: dict, runner_script: Path | None = None) -> list[
         cmd += ["--system-prompt", str(args["system_prompt_inline"])]
     if "system_prompt_path" in args:
         cmd += ["--system-prompt-file", str(Path(args["system_prompt_path"]).resolve())]
+    raw_suffix = args.get("memory_collection_suffix")
+    if raw_suffix:
+        suffix = sanitize_collection_suffix(str(raw_suffix))
+        if suffix:
+            parent = _parent_collection(config_path)
+            if parent:
+                derived = f"{parent}_{suffix}"
+                logger.info("spawn_subagent: routing child memory to %r (suffix=%r)", derived, suffix)
+                cmd += ["--memory-collection", derived]
     return cmd
 
 

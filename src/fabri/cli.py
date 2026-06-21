@@ -270,6 +270,11 @@ def _render_event(ev: dict, t0: float) -> str:
         return f"{prefix} {kind} reason={ev.get('reason', '')!r}"
     if kind == "ask_user":
         return f"{prefix} ask_user q={ev.get('question', '')!r}"
+    if kind == "discrepancy":
+        return (
+            f"{prefix} discrepancy path={ev.get('path', '')!r} "
+            f"reason={ev.get('reason', '')!r}"
+        )
     rest = {k: v for k, v in ev.items() if k != "ts"}
     return f"{prefix} {kind} {json.dumps(rest, default=str)[:200]}"
 

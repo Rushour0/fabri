@@ -4,7 +4,31 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
-## v0.4.3 — 2026-06-21
+## v0.4.4 — 2026-06-21
+
+### Added
+
+- **`spawn_subagent` accepts `memory_collection_suffix`.** Multi-domain
+  orchestrators can now namespace each child's qdrant collection without
+  cloning the spawned sub-agent's yaml. When set, the child writes to
+  `<parent_collection>_<suffix>` (parent collection is read from the
+  sub-agent's `memory.collection`); omitted/empty keeps the inherited
+  behavior. The suffix is sanitized to lowercase `[a-z0-9_-]` and capped at
+  32 chars so a host passing `Tile/Map.v2` doesn't fail with an opaque
+  qdrant error. Hosts like ludexel can spawn `<parent>_character` vs
+  `<parent>_map` from the same prompt template so cross-domain guidelines
+  don't crowd each child's retrieval.
+- **`EventType.DISCREPANCY` + `fabri.events.emit_discrepancy(...)` helper.**
+  Hosts that post-hoc detect drift between what an agent claimed it did and
+  what actually landed in their store now have a first-class trace event to
+  emit (`{type: "discrepancy", path, reason}`). `process_trace` mines each
+  discrepancy into a tactical guideline ("After write_file/edit_file at
+  `<path>`, re-read the file in the same step to confirm the write
+  persisted.") that flows through the existing dedup/promotion pipeline.
+  `fabri traces show`/`tail` recognize the new event so it prints as a
+  readable line, not the catch-all JSON fallback.
+
+
 
 ### Fixed
 

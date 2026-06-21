@@ -170,6 +170,51 @@ def test_sub_agent_empty_stdout_returns_error(tmp_path):
     assert "no stdout" in payload["error"]
 
 
+def test_memory_collection_suffix_absent_inherits_parent(tmp_path):
+    """No suffix arg → no --memory-collection flag (sub-agent inherits its
+    own yaml's collection setting unchanged)."""
+    from fabri.tools.examples.spawn_subagent import build_runner_command
+
+    cfg = tmp_path / "agent.yaml"
+    cfg.write_text("memory:\n  collection: fabri_uX_pY\n")
+    cmd = build_runner_command({"config_path": str(cfg), "task": "t"})
+    assert "--memory-collection" not in cmd
+
+
+def test_memory_collection_suffix_present_concats(tmp_path):
+    from fabri.tools.examples.spawn_subagent import build_runner_command
+
+    cfg = tmp_path / "agent.yaml"
+    cfg.write_text("memory:\n  collection: fabri_uX_pY\n")
+    cmd = build_runner_command({
+        "config_path": str(cfg), "task": "t",
+        "memory_collection_suffix": "tile",
+    })
+    assert "--memory-collection" in cmd
+    assert cmd[cmd.index("--memory-collection") + 1] == "fabri_uX_pY_tile"
+
+
+def test_memory_collection_suffix_sanitized(tmp_path):
+    """Slashes / dots / uppercase get stripped or lowered; over-long suffix
+    truncated. The resulting collection name still concatenates cleanly."""
+    from fabri.tools.examples.spawn_subagent import (
+        build_runner_command, sanitize_collection_suffix,
+    )
+
+    assert sanitize_collection_suffix("Tile/Map.v2") == "tilemapv2"
+    assert sanitize_collection_suffix("x" * 50) == "x" * 32
+    assert sanitize_collection_suffix("safe_name-1") == "safe_name-1"
+
+    cfg = tmp_path / "agent.yaml"
+    cfg.write_text("memory:\n  collection: parent\n")
+    cmd = build_runner_command({
+        "config_path": str(cfg), "task": "t",
+        "memory_collection_suffix": "Char!Acter",
+    })
+    idx = cmd.index("--memory-collection") + 1
+    assert cmd[idx] == "parent_character"
+
+
 def test_spawn_subagent_registered_as_builtin():
     """The bundled `builtin` manifest_dir resolves to a registry that
     includes spawn_subagent."""

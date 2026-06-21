@@ -32,6 +32,33 @@ class EventType(str, Enum):
     PLAN_ITEM_STARTED = "plan_item_started"
     PLAN_ITEM_FINISHED = "plan_item_finished"
     PLAN_FINISHED = "plan_finished"
+    # B5: a host (e.g. ludexel) detected post-run drift between what the agent
+    # *claimed* it did and what actually landed in the host's store. Emitted
+    # via `emit_discrepancy(...)` so hosts don't need to know the on-wire shape;
+    # `process_trace` mines it into a tactical guideline.
+    DISCREPANCY = "discrepancy"
+
+
+def emit_discrepancy(session_id: str, path: str, reason: str) -> None:
+    """Record a post-run drift signal in the session's trace.
+
+    Hosts (ludexel et al.) call this after they detect that the agent claimed
+    a write at `path` but the artefact never landed (or did not match) in the
+    host's VersionStore. The event is shaped so `process_trace` can mine it
+    into a tactical guideline without the host having to mirror the event
+    schema. Imported here (not in `traces`) so callers get the helper from the
+    same module as `EventType`.
+    """
+    from fabri.orchestrator.traces import log_event
+
+    log_event(
+        session_id,
+        {
+            "type": EventType.DISCREPANCY.value,
+            "path": path,
+            "reason": reason,
+        },
+    )
 
 
 class StepReason(str, Enum):
