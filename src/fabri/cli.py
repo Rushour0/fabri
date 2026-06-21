@@ -173,11 +173,111 @@ def cmd_admin_config(args: argparse.Namespace) -> None:
     print(json.dumps(describe_config(config, tools), indent=2))
 
 
+def _ts_prefix(ev: dict, t0: float) -> str:
+    """Wallclock + relative-delta prefix used by every rendered trace line.
+    Trace events always carry `ts` (orchestrator/traces.py), so this is safe
+    by default -- "time should just work" without extra flags."""
+    import datetime as _dt
+    ts = ev.get("ts", t0)
+    wall = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+    dt = ts - t0
+    return f"  {wall} (+{dt:6.2f}s)"
+
+
+def _wrap_block(text: str, indent: str = "    ", width: int | None = None) -> str:
+    """Wrap a (possibly multi-line) text block under a fixed indent. Preserves
+    intentional newlines; only the long lines get wrapped."""
+    import shutil
+    import textwrap
+    if width is None:
+        width = max(60, shutil.get_terminal_size((100, 20)).columns - len(indent))
+    out = []
+    for line in text.splitlines() or [text]:
+        if not line.strip():
+            out.append("")
+            continue
+        out.extend(textwrap.wrap(line, width=width) or [""])
+    return "\n".join(indent + l for l in out)
+
+
+def _looks_like_code(text: str) -> bool:
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    return first.lstrip().startswith(("def ", "class ", "import ", "from ", "{", "[", "```"))
+
+
+def _format_payload(value, max_lines: int = 40) -> str:
+    """Pretty-print a JSON-ish payload, truncating to `max_lines` so a giant
+    tool result doesn't blow up the viewer (the full payload is still in the
+    JSONL on disk)."""
+    try:
+        s = json.dumps(value, indent=2, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        s = repr(value)
+    lines = s.splitlines()
+    if len(lines) > max_lines:
+        omitted = len(lines) - max_lines
+        lines = lines[:max_lines] + [f"... ({omitted} more lines truncated; see raw JSONL)"]
+    return "\n".join(lines)
+
+
+def _format_thought_body(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            pretty = _format_payload(json.loads(stripped))
+            return "\n".join("    " + l for l in pretty.splitlines())
+        except json.JSONDecodeError:
+            pass
+    if _looks_like_code(stripped):
+        return "\n".join("    ┃ " + l for l in stripped.splitlines())
+    return _wrap_block(text)
+
+
+def _render_event(ev: dict, t0: float) -> str:
+    kind = ev.get("type", "?")
+    prefix = _ts_prefix(ev, t0)
+    if kind == "tool_call":
+        name = ev.get("name", "?")
+        result = ev.get("result", {}) or {}
+        ok = result.get("ok")
+        tag = ev.get("parallel_group")
+        tag_str = f" [{tag}]" if tag else ""
+        header = f"{prefix} tool_call {name}{tag_str} ok={ok}"
+        parts = [header]
+        if ev.get("args"):
+            parts.append("    args:")
+            parts.append(_wrap_block(_format_payload(ev["args"]), indent="      "))
+        if result:
+            parts.append("    result:")
+            parts.append(_wrap_block(_format_payload(result), indent="      "))
+        return "\n".join(parts)
+    if kind == "thought":
+        body = _format_thought_body(ev.get("text", ""))
+        return f"{prefix} thought\n{body}"
+    if kind == "step_started":
+        return f"{prefix} ── step {ev.get('step')} ──"
+    if kind == "step_finished":
+        bits = [f"step {ev.get('step')} done"]
+        for k in ("elapsed_s", "reason", "tool_count", "tool_failure"):
+            if k in ev:
+                bits.append(f"{k}={ev[k]}")
+        return f"{prefix} ── {' '.join(bits)} ──"
+    if kind == "start":
+        return f"{prefix} start task={ev.get('task', '')!r}"
+    if kind == "final":
+        return f"{prefix} final outcome={ev.get('outcome')}\n{_wrap_block(ev.get('text', ''))}"
+    if kind in ("failed", "llm_error"):
+        return f"{prefix} {kind} reason={ev.get('reason', '')!r}"
+    if kind == "ask_user":
+        return f"{prefix} ask_user q={ev.get('question', '')!r}"
+    rest = {k: v for k, v in ev.items() if k != "ts"}
+    return f"{prefix} {kind} {json.dumps(rest, default=str)[:200]}"
+
+
 def cmd_traces_show(args: argparse.Namespace) -> None:
     """Pretty-print a session's JSONL trace. The framework already writes
-    every step (start / tool_call / final / failed) to .fabri/traces/<sid>.jsonl;
-    this is just the reader so a user can debug an agent run without
-    grepping JSON by hand. Doubles as the 'khudka' observability spine."""
+    every step (start / tool_call / thought / final / failed) to
+    .fabri/traces/<sid>.jsonl; this is the human-readable reader."""
     from fabri.orchestrator.traces import read_trace, trace_path
 
     events = read_trace(args.session_id)
@@ -186,24 +286,7 @@ def cmd_traces_show(args: argparse.Namespace) -> None:
         sys.exit(1)
     t0 = events[0].get("ts", 0.0)
     for ev in events:
-        dt = ev.get("ts", t0) - t0
-        kind = ev.get("type", "?")
-        if kind == "tool_call":
-            name = ev.get("name", "?")
-            ok = ev.get("result", {}).get("ok")
-            tag = ev.get("parallel_group")
-            tag_str = f" [{tag}]" if tag else ""
-            print(f"  +{dt:6.2f}s tool_call {name}{tag_str} ok={ok}")
-        elif kind == "start":
-            print(f"  +{dt:6.2f}s start task={ev.get('task', '')[:80]!r}")
-        elif kind == "final":
-            print(f"  +{dt:6.2f}s final outcome={ev.get('outcome')} text={ev.get('text', '')[:120]!r}")
-        elif kind == "failed":
-            print(f"  +{dt:6.2f}s failed reason={ev.get('reason')!r}")
-        elif kind == "ask_user":
-            print(f"  +{dt:6.2f}s ask_user q={ev.get('question', '')[:80]!r}")
-        else:
-            print(f"  +{dt:6.2f}s {kind} {json.dumps({k: v for k, v in ev.items() if k != 'ts'})[:120]}")
+        print(_render_event(ev, t0))
 
 
 def cmd_traces_tail(args: argparse.Namespace) -> None:
@@ -230,12 +313,7 @@ def cmd_traces_tail(args: argparse.Namespace) -> None:
                     ev = json.loads(line.strip())
                 except json.JSONDecodeError:
                     continue
-                dt = ev.get("ts", t_start) - t_start
-                kind = ev.get("type", "?")
-                summary = ev.get("name") or ev.get("outcome") or ev.get("reason") or ""
-                tag = ev.get("parallel_group")
-                tag_str = f" [{tag}]" if tag else ""
-                print(f"  +{dt:6.2f}s {kind}{tag_str} {summary}", flush=True)
+                print(_render_event(ev, t_start), flush=True)
         except KeyboardInterrupt:
             pass
 

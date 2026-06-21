@@ -4,6 +4,35 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.4.3 — 2026-06-21
+
+### Fixed
+
+- **Silenced HuggingFace / sentence-transformers chatter on every run.** The
+  embedding model used by memory retrieval (`all-MiniLM-L6-v2`) was leaking
+  a tqdm `Loading weights` bar and an "unauthenticated requests to the HF
+  Hub" warning to stderr on every `fabri run`. `memory/embeddings.py` now
+  sets `HF_HUB_DISABLE_PROGRESS_BARS` / `TRANSFORMERS_VERBOSITY=error` /
+  `HF_HUB_DISABLE_TELEMETRY` / `TOKENIZERS_PARALLELISM=false` **before**
+  importing `sentence_transformers`, and pins the relevant loggers to
+  WARNING/ERROR. A single `fabri` info line ("loading embedding model …")
+  fires only on the very first download; cached loads are silent.
+- **Skip the embedder entirely on a cold memory store.**
+  `orchestrator/retrieval.py::retrieve_context` short-circuits when the
+  Qdrant store has zero entries, so a fresh `fabri init` + first run never
+  has to load the 44MB embedding model.
+
+### Changed
+
+- **`fabri traces show` / `tail` rendering.** Every event now carries an
+  `HH:MM:SS (+Δs)` wallclock prefix (time "just works" by default, no
+  flag). `thought` events render their full body — no 120-char truncation
+  — with JSON pretty-printed and code-like blocks under a `┃` gutter.
+  `tool_call` prints pretty-printed `args` and `result` payloads (capped
+  at 40 lines; full payload still in the JSONL). `step_started` /
+  `step_finished` get `── step N ──` separators. `llm_error` / `failed`
+  print the full reason (no truncation).
+
 ## v0.4.2 — 2026-06-21
 
 ### Fixed

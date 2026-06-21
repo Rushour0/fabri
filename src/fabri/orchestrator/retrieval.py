@@ -97,6 +97,12 @@ def retrieve_context(
     guidelines even when their wording is too dissimilar for vector search alone
     to rank them in the top-k, but without a stale low-relevance entry crowding
     out vector hits."""
+    # Cold store: nothing to retrieve against, so skip the (expensive) embed
+    # call entirely. This means a fresh `fabri init` + first `fabri run` never
+    # has to load the 44MB sentence-transformers model.
+    if store.count() == 0:
+        return ""
+
     # Word-boundary match so `read_file` doesn't trigger on every task that
     # happens to contain "read" as a substring of "already", "ready", etc.
     mentioned_tools = [t for t in (tool_names or []) if _word_mentioned(t, task)]
