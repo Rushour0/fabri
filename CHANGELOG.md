@@ -4,6 +4,16 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.4.6 — 2026-06-22
+
+### Changed
+
+- **README is now self-contained for PyPI.** Previous versions linked to
+  `docs/creating-an-agent.md` in the repo; the README now inlines the
+  full config schema, tool manifest contract, agents-as-tools snippet,
+  and library-usage example so PyPI readers don't depend on repo file
+  visibility.
+
 ## v0.4.5 — 2026-06-22
 
 ### Changed
