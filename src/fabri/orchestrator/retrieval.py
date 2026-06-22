@@ -73,9 +73,19 @@ def retrieve_tools(
 TAG_HIT_SCORE_FLOOR = 0.30
 
 
+# Compiled word-boundary patterns are cached per tool name. `retrieve_context`
+# is hit on every run, and rebuilding `\bname\b` for every tool on every call
+# is pure waste once the registry is stable.
+_word_pattern_cache: dict[str, re.Pattern[str]] = {}
+
+
 def _word_mentioned(word: str, text: str) -> bool:
-    # `re.escape` keeps tool names with regex-special chars (`.`, `+`) safe.
-    return re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE) is not None
+    pattern = _word_pattern_cache.get(word)
+    if pattern is None:
+        # `re.escape` keeps tool names with regex-special chars (`.`, `+`) safe.
+        pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
+        _word_pattern_cache[word] = pattern
+    return pattern.search(text) is not None
 
 
 def retrieve_context(

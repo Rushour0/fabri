@@ -4,6 +4,29 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.4.5 — 2026-06-22
+
+### Changed
+
+- **Tool-name word-boundary regexes are cached.** `retrieval._word_mentioned`
+  was compiling `re.compile(rf"\b{name}\b", IGNORECASE)` on every retrieval
+  call for every registered tool; the compiled patterns are now cached
+  process-wide. Pure perf, no behaviour change.
+- **`run_agent` skips materialising a `range(max_steps)` list when the
+  planner already ran.** The legacy single-loop iterator is now a `range`
+  rather than `list(range(...))`, and is empty when `plan_engaged` is true.
+- **Inline-reasoning emit is centralised.** Four near-identical copies of
+  the `thought` event-log block (executor / legacy × tool_calls / final_text
+  branches) collapse to one `_emit_thought()` helper inside `run_agent`.
+
+### Added
+
+- **Protocol-error events now carry `had_tool_failure`.** When the LLM
+  returns no tool calls and no usable final text, the `error` event and
+  the paired log line include whether any prior tool call in the same
+  item/run failed -- distinguishing "model is broken" from "model gave up
+  after a cascade of tool failures" in post-hoc trace analysis.
+
 ## v0.4.4 — 2026-06-21
 
 ### Added

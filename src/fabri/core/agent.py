@@ -188,6 +188,17 @@ def run_agent(
         usage_totals.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
         usage_totals.cache_read_input_tokens += resp_usage.cache_read_input_tokens
 
+    def _emit_thought(thinking_text: str | None, step: int) -> None:
+        # Whitespace-only thinking is already dropped upstream by LLMResponse,
+        # so a truthy check is enough -- emit one `thought` event per step,
+        # paired with whichever branch (tool_calls or final_text) produced it.
+        if thinking_text:
+            log_event(session_id, {
+                "type": EventType.THOUGHT.value,
+                "text": thinking_text,
+                "step": step,
+            })
+
     # A2: planner/executor split. `auto` engages when the task is long enough
     # to benefit (>= planner_auto_token_threshold characters); `force` always
     # engages; `off` keeps the historical single-loop behaviour. The planner
@@ -219,12 +230,7 @@ def run_agent(
                 response = llm.step(system, item_messages)
                 _accumulate(response.usage)
                 if response.tool_calls:
-                    if response.thinking_text:
-                        log_event(session_id, {
-                            "type": EventType.THOUGHT.value,
-                            "text": response.thinking_text,
-                            "step": global_step,
-                        })
+                    _emit_thought(response.thinking_text, global_step)
                     step_had_failure = _dispatch_tool_calls(
                         response.tool_calls, tools, decompose_llm or llm, item_task, max_subquestions,
                         session_id, item_messages, global_step, result_format, output_format,
@@ -253,12 +259,7 @@ def run_agent(
                 return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
 
             if response.final_text:
-                if response.thinking_text:
-                    log_event(session_id, {
-                        "type": EventType.THOUGHT.value,
-                        "text": response.thinking_text,
-                        "step": global_step,
-                    })
+                _emit_thought(response.thinking_text, global_step)
                 item_final = response.final_text
                 item_success = True
                 logger.info("step %d: final answer produced", global_step)
@@ -271,8 +272,16 @@ def run_agent(
                 return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
 
             reason = "llm response had no tool calls and no final text"
-            logger.error("step %d: %s", global_step, reason)
-            log_event(session_id, {"type": EventType.ERROR.value, "reason": reason, "outcome": Outcome.FAILED.value})
+            logger.error(
+                "step %d: %s (prior_tool_failure_in_item=%s)",
+                global_step, reason, item_had_failure,
+            )
+            log_event(session_id, {
+                "type": EventType.ERROR.value,
+                "reason": reason,
+                "outcome": Outcome.FAILED.value,
+                "had_tool_failure": item_had_failure,
+            })
             log_event(session_id, {
                 "type": EventType.STEP_FINISHED.value,
                 "step": global_step,
@@ -379,7 +388,10 @@ def run_agent(
         plan_engaged = False
 
     messages = [{"role": "user", "content": task}]
-    legacy_steps = [] if plan_engaged else list(range(max_steps))
+    # When the planner engaged above, the executor has already consumed the
+    # step budget item-by-item; skip the legacy single-loop body entirely
+    # rather than materialising a range(max_steps) we won't iterate.
+    legacy_steps: range | list[int] = [] if plan_engaged else range(max_steps)
     for step_num in legacy_steps:
         step_count = step_num + 1
         logger.debug("step %d: calling llm", step_num)
@@ -394,17 +406,10 @@ def run_agent(
             response = llm.step(system, messages)
             _accumulate(response.usage)
             if response.tool_calls:
-                # Emit the inline reasoning the model produced alongside its
-                # tool_use blocks BEFORE the tool_call events so trace
-                # readers see "Let me check X first..." preceding the
-                # tool that does the check. Empty / whitespace-only text
-                # is dropped here (LLMResponse already normalised it).
-                if response.thinking_text:
-                    log_event(session_id, {
-                        "type": EventType.THOUGHT.value,
-                        "text": response.thinking_text,
-                        "step": step_num,
-                    })
+                # Emit any inline reasoning BEFORE the tool_call events so
+                # trace readers see "Let me check X first..." preceding the
+                # tool that does the check.
+                _emit_thought(response.thinking_text, step_num)
                 step_had_failure = _dispatch_tool_calls(
                     response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
                     session_id, messages, step_num, result_format, output_format,
@@ -437,15 +442,9 @@ def run_agent(
         logger.debug("step %d: llm responded in %.2fs", step_num, time.monotonic() - t0)
 
         if response.final_text:
-            # Mirror the tool_calls branch: if the model produced inline
-            # reasoning alongside the final answer, emit it as a `thought`
-            # event so the host UI doesn't lose the last-step rationale.
-            if response.thinking_text:
-                log_event(session_id, {
-                    "type": EventType.THOUGHT.value,
-                    "text": response.thinking_text,
-                    "step": step_num,
-                })
+            # Mirror the tool_calls branch: emit any inline reasoning so the
+            # host UI doesn't lose the last-step rationale.
+            _emit_thought(response.thinking_text, step_num)
             final_text = response.final_text
             success = True
             logger.info("step %d: final answer produced", step_num)
@@ -461,8 +460,16 @@ def run_agent(
         # malformed): raising beats silently burning every remaining step and
         # then reporting an empty answer as success.
         reason = "llm response had no tool calls and no final text"
-        logger.error("step %d: %s", step_num, reason)
-        log_event(session_id, {"type": EventType.ERROR.value, "reason": reason, "outcome": Outcome.FAILED.value})
+        logger.error(
+            "step %d: %s (prior_tool_failure_in_run=%s)",
+            step_num, reason, had_tool_failure,
+        )
+        log_event(session_id, {
+            "type": EventType.ERROR.value,
+            "reason": reason,
+            "outcome": Outcome.FAILED.value,
+            "had_tool_failure": had_tool_failure,
+        })
         log_event(session_id, {
             "type": EventType.STEP_FINISHED.value,
             "step": step_num,
