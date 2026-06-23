@@ -1,6 +1,6 @@
 [project]
 name = "fabri"
-version = "0.7.0"
+version = "0.7.1"
 description = "Ever-evolving prompting and context engineering for LLM agents through active memory and result analysis."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,7 +57,17 @@ include = ["fabri*"]
 # install ships only the .py files and drops every .json manifest, so the
 # `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
 [tool.setuptools.package-data]
-"fabri.tools.examples" = ["*.json", "example_go_tool/*"]
+"fabri.tools.examples" = [
+    "*.json",
+    "example_go_tool/*",
+    "example_rust_tool/*",
+    "example_rust_tool/src/*",
+    "example_node_tool/*",
+]
+# G15: tool recipes ship in the wheel so users can `cat $(python -c 'import
+# fabri.tools.recipes, os; print(os.path.dirname(fabri.tools.recipes.__file__))')/fetch_url.py`
+# and copy them out.
+"fabri.tools.recipes" = ["*.json", "*.py", "README.md"]
 # S2: Dockerfile.base ships with the wheel so consumers can build
 # `fabri/sandbox:latest` directly from an installed package.
 "fabri.sandbox" = ["Dockerfile.base"]

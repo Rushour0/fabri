@@ -1,0 +1,16 @@
+{
+  "name": "regex_lines",
+  "description": "Search a file for lines matching a regex (Rust example). Returns up to max_matches line numbers + text.",
+  "command": ["cargo", "run", "--quiet", "--release", "--manifest-path", "example_rust_tool/Cargo.toml", "--bin", "regex_lines"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "pattern": {"type": "string"},
+      "max_matches": {"type": "integer", "default": 100}
+    },
+    "required": ["path", "pattern"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 60
+}

@@ -277,6 +277,9 @@ def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
         "cost_usd", "cost_by_model", "subagent_cost_usd", "total_cost_usd",
         # G4: guideline reuse rate (cross-session learning signal).
         "guideline_reuse_rate", "guidelines_retrieved", "guidelines_from_prior_sessions",
+        # G10/G11: fan-out telemetry + regret detection.
+        "subagent_count", "subagent_successful_count", "subagent_failed_count",
+        "subagent_max_subtree_cost_usd", "subagent_regret_count",
     }
     assert usage["step_count"] == 1
     assert usage["wall_time_s"] >= 0

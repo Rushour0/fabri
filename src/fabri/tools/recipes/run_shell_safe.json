@@ -1,0 +1,12 @@
+{
+  "name": "run_shell_safe",
+  "description": "Run a single shell command from a strict allow-list of read-only binaries (git, ls, cat, head, tail, grep, find, wc, diff). Returns exit + stdout/stderr.",
+  "command": ["python3", "run_shell_safe.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {"cmd": {"type": "string"}},
+    "required": ["cmd"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 30
+}

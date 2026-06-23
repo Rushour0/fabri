@@ -4,6 +4,7 @@ real auth backend yet -- FABRI_ADMIN_TOKEN is a placeholder seam, not a
 security boundary. Every admin entry point funnels through require_admin() so
 real auth (SSO, an API gateway, whatever the deployment needs) has exactly one
 place to be wired in later, instead of being scattered across call sites."""
+import logging
 import os
 
 from fabri.memory.store import QdrantMemoryStore
@@ -11,6 +12,8 @@ from fabri.tools.agent_tool import AGENT_RUNNER_SCRIPT
 from fabri.tools.registry import ToolRegistry
 
 ADMIN_TOKEN_ENV = "FABRI_ADMIN_TOKEN"
+
+_logger = logging.getLogger("fabri.admin")
 
 
 class AdminAuthError(RuntimeError):
@@ -22,9 +25,19 @@ def require_admin(token: str | None) -> None:
     backend yet, so refusing to run at all would just be theater. Set it to
     start enforcing a shared-secret check; swap this function's body for real
     auth whenever that's available, since every admin command already calls
-    it before doing anything."""
+    it before doing anything.
+
+    P3 hardening: log a WARNING when the gate is open so the operator notices
+    (e.g. when grep-ing logs after deploying fabri behind a real ingress).
+    A silent open-by-default behaviour is the bug class that makes people
+    embarrass themselves on Twitter."""
     expected = os.environ.get(ADMIN_TOKEN_ENV)
     if expected is None:
+        _logger.warning(
+            "admin endpoint invoked with %s unset: gate is OPEN (no auth). "
+            "Set the env var to enforce a shared-secret check, or front fabri "
+            "with a real auth layer.", ADMIN_TOKEN_ENV,
+        )
         return
     if token != expected:
         raise AdminAuthError(f"admin token required (pass --admin-token, must match ${ADMIN_TOKEN_ENV})")

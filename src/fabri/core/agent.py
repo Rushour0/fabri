@@ -264,6 +264,48 @@ def run_agent(
     def _accumulate_subagent_cost(cost: float) -> None:
         subagent_cost_total[0] += cost
 
+    # G10/G11: fan-out telemetry + delegation-regret detection. The agent
+    # loop's "single-threaded by default" claim is the strategic counter-
+    # positioning — we instrument it so a host can see whether the agent is
+    # actually behaving that way and emit a `delegation_regret` event when a
+    # spawn did almost nothing but still cost money.
+    subagent_stats = {
+        "count": 0,
+        "successful_count": 0,
+        "failed_count": 0,
+        "max_subtree_cost_usd": 0.0,
+        "regret_count": 0,
+    }
+
+    def _on_subagent_finished(call, ok: bool, child_usage: dict | None) -> None:
+        subagent_stats["count"] += 1
+        if ok:
+            subagent_stats["successful_count"] += 1
+        else:
+            subagent_stats["failed_count"] += 1
+        if not child_usage:
+            return
+        cost = child_usage.get("total_cost_usd")
+        if cost is None:
+            cost = child_usage.get("cost_usd")
+        cost = float(cost or 0.0)
+        if cost > subagent_stats["max_subtree_cost_usd"]:
+            subagent_stats["max_subtree_cost_usd"] = round(cost, 6)
+        # G11: a spawn that produced almost nothing but still cost something
+        # is a delegation-regret signal. Threshold deliberately conservative:
+        # step_count<=1 means the child barely ran (likely should have been
+        # an inline tool call instead). Emitted only on a successful spawn,
+        # so a failed-spawn cost isn't double-counted as regret.
+        if ok and child_usage.get("step_count", 0) <= 1 and cost > 0:
+            subagent_stats["regret_count"] += 1
+            log_event(session_id, {
+                "type": "delegation_regret",
+                "tool": call.name,
+                "child_step_count": child_usage.get("step_count", 0),
+                "child_cost_usd": cost,
+                "reason": "spawn ran <=1 step but cost >0; likely inlinable",
+            })
+
     def _emit_thought(thinking_text: str | None, step: int) -> None:
         # Whitespace-only thinking is already dropped upstream by LLMResponse,
         # so a truthy check is enough -- emit one `thought` event per step,
@@ -311,6 +353,7 @@ def run_agent(
                         response.tool_calls, tools, decompose_llm or llm, item_task, max_subquestions,
                         session_id, item_messages, global_step, result_format, output_format,
                         on_subagent_cost=_accumulate_subagent_cost,
+                        on_subagent_finished=_on_subagent_finished,
                     )
                     item_had_failure |= step_had_failure
                     log_event(session_id, {
@@ -601,6 +644,12 @@ def run_agent(
         "guideline_reuse_rate": reuse_rate,
         "guidelines_retrieved": g_retrieved,
         "guidelines_from_prior_sessions": g_from_prior,
+        # G10/G11
+        "subagent_count": subagent_stats["count"],
+        "subagent_successful_count": subagent_stats["successful_count"],
+        "subagent_failed_count": subagent_stats["failed_count"],
+        "subagent_max_subtree_cost_usd": subagent_stats["max_subtree_cost_usd"],
+        "subagent_regret_count": subagent_stats["regret_count"],
     }
     log_event(session_id, {"type": EventType.USAGE.value, **usage_dict})
 
@@ -645,6 +694,7 @@ def _dispatch_tool_calls(
     result_format: str = "toon",
     output_format: str = "json",
     on_subagent_cost: Callable[[float], None] | None = None,
+    on_subagent_finished: Callable[..., None] | None = None,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
@@ -655,7 +705,13 @@ def _dispatch_tool_calls(
     `on_subagent_cost`, when given, is called with each spawned sub-agent's
     end-to-end `total_cost_usd` so the parent run can roll the sub-agent subtree
     into its own COGS. Optional + keyword-only so existing callers (and the F2
-    timing tests that call this directly) are unaffected."""
+    timing tests that call this directly) are unaffected.
+
+    `on_subagent_finished(call, ok, child_usage)` (G10/G11), when given, is
+    called once per spawn_subagent completion regardless of ok/failure, with
+    the child's usage dict (or None if the child returned no usage). The
+    parent uses this to track fan-out telemetry and emit a
+    `delegation_regret` event when the spawn was wasteful."""
     had_failure = False
     real_ids = all(c.id is not None for c in calls)
     assistant_blocks, result_blocks = [], []
@@ -763,15 +819,23 @@ def _dispatch_tool_calls(
         # its stdout JSON under `result`. Prefer total (includes grandchildren),
         # fall back to the child's own cost_usd. Defensive: a child on an old
         # fabri without cost fields contributes 0, not a crash.
-        if on_subagent_cost is not None and call.name == SPAWN_SUBAGENT_TOOL_NAME and result.get("ok"):
+        if call.name == SPAWN_SUBAGENT_TOOL_NAME:
+            ok = bool(result.get("ok"))
             child = result.get("result")
             child_usage = child.get("usage") if isinstance(child, dict) else None
-            if isinstance(child_usage, dict):
+            if on_subagent_cost is not None and ok and isinstance(child_usage, dict):
                 child_cost = child_usage.get("total_cost_usd")
                 if child_cost is None:
                     child_cost = child_usage.get("cost_usd")
                 if isinstance(child_cost, (int, float)):
                     on_subagent_cost(float(child_cost))
+            # G10/G11: telemetry + regret detection. Called regardless of ok
+            # so the parent can count failed spawns too.
+            if on_subagent_finished is not None:
+                on_subagent_finished(
+                    call, ok,
+                    child_usage if isinstance(child_usage, dict) else None,
+                )
 
         event = {
             "type": EventType.TOOL_CALL.value,

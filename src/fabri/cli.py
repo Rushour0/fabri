@@ -19,6 +19,7 @@ from fabri.runtime import (
     build_tools,
 )
 from fabri.scaffold import SCAFFOLD_TEMPLATES, next_steps, scaffold
+from fabri.tool_scaffold import SUPPORTED_LANGUAGES, scaffold_tool
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -244,6 +245,76 @@ def cmd_memory_list(args: argparse.Namespace) -> None:
     entries = store.iterate(kind=kind, limit=args.limit)
     for e in entries:
         print(json.dumps(e.to_payload()))
+
+
+def cmd_memory_diff(args: argparse.Namespace) -> None:
+    """G3: compare what the memory store learned between two sessions.
+
+    Each guideline carries a `session_ids` list — the sessions that contributed
+    to it. We partition every entry into three groups by membership in
+    {session_a, session_b}:
+
+    - **shared**: both A and B in session_ids (the guideline recurred in both)
+    - **new_in_b**: B in session_ids, A not — what session B taught the agent
+    - **only_in_a**: A in session_ids, B not — what session A taught that B
+      didn't surface (either A's lesson didn't apply to B, or it's already
+      strategic and was retrieved without contributing again)
+
+    Useful as a demo: "look what fabri learned in this 30-minute run."
+    """
+    config = load_config(args.config)
+    store = _open_store(config["memory"])
+    a, b = args.session_a, args.session_b
+    shared, new_in_b, only_in_a = [], [], []
+    for entry in store.iterate():
+        sids = set(entry.session_ids or [])
+        in_a = a in sids
+        in_b = b in sids
+        if in_a and in_b:
+            shared.append(entry)
+        elif in_b:
+            new_in_b.append(entry)
+        elif in_a:
+            only_in_a.append(entry)
+
+    def _render(label: str, entries: list) -> None:
+        if args.markdown:
+            print(f"## {label} ({len(entries)})\n")
+            for e in entries:
+                print(f"- [{e.kind}] {e.text}")
+            print()
+        else:
+            print(f"--- {label} ({len(entries)}) ---")
+            for e in entries:
+                print(f"  [{e.kind}] {e.text}")
+
+    if args.markdown:
+        print(f"# memory diff: {a[:8]} → {b[:8]}\n")
+    _render(f"new in {b[:8]}", new_in_b)
+    _render(f"shared between {a[:8]} and {b[:8]}", shared)
+    _render(f"only in {a[:8]}", only_in_a)
+
+
+def cmd_tool_init(args: argparse.Namespace) -> None:
+    """G14: scaffold a new tool (manifest + executable stub) in the picked
+    language. Default target dir: tools/agent_tools next to the cwd."""
+    from pathlib import Path as _P
+    target = _P(args.dir)
+    try:
+        result = scaffold_tool(args.language, args.name, target, force=args.force)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    if result["created"]:
+        print(f"Scaffolded a {args.language!r} tool {args.name!r} in {target}:")
+        for f in result["created"]:
+            print(f"  + {f}")
+    if result["skipped"]:
+        print("\nLeft existing files untouched (pass --force to overwrite):")
+        for f in result["skipped"]:
+            print(f"  . {f}")
+    print(f"\nNext: edit {args.name}.* to your liking, then list this dir in "
+          f"`tools.manifest_dir` of your agent.yaml.")
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -530,6 +601,27 @@ def main() -> None:
     p_mem_list.add_argument("--tactical", action="store_true")
     p_mem_list.add_argument("--limit", type=int, default=None)
     p_mem_list.set_defaults(func=cmd_memory_list)
+
+    # G3: `fabri memory diff <A> <B>` — what the agent learned between two sessions.
+    p_mem_diff = mem_sub.add_parser("diff", help="Compare guidelines between two sessions (G3)")
+    p_mem_diff.add_argument("session_a", help="The earlier session id")
+    p_mem_diff.add_argument("session_b", help="The later session id")
+    p_mem_diff.add_argument("--markdown", action="store_true", help="Render as markdown")
+    p_mem_diff.set_defaults(func=cmd_memory_diff)
+
+    # G14: `fabri tool init <lang> <name>` — scaffold a new tool in any language.
+    p_tool = sub.add_parser("tool", help="Tool-related helpers (scaffold a new tool)")
+    tool_sub = p_tool.add_subparsers(dest="tool_command", required=True)
+
+    p_tool_init = tool_sub.add_parser("init", help="Scaffold a new tool (G14)")
+    p_tool_init.add_argument("language", choices=SUPPORTED_LANGUAGES,
+                             help="Language of the new tool's executable")
+    p_tool_init.add_argument("name", help="Tool name (alphanumeric + underscore)")
+    p_tool_init.add_argument("--dir", default="tools/agent_tools",
+                             help="Where to write the manifest + executable (default: tools/agent_tools)")
+    p_tool_init.add_argument("--force", action="store_true",
+                             help="Overwrite existing files")
+    p_tool_init.set_defaults(func=cmd_tool_init)
 
     # G6/G7/G8/G20: `fabri report` — usage report across recent sessions.
     p_report = sub.add_parser("report", help="Aggregate cost/outcome across recent sessions (G6)")

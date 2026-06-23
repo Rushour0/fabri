@@ -1,0 +1,17 @@
+{
+  "name": "grep_dir",
+  "description": "Recursive regex grep over files matching a glob. Returns up to max_matches line hits.",
+  "command": ["python3", "grep_dir.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "pattern": {"type": "string"},
+      "glob": {"type": "string", "default": "*"},
+      "max_matches": {"type": "integer", "default": 200}
+    },
+    "required": ["path", "pattern"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 30
+}

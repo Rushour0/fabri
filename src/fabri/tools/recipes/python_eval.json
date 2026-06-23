@@ -1,0 +1,12 @@
+{
+  "name": "python_eval",
+  "description": "Evaluate a Python math expression using only safe builtins (math module + arithmetic). No I/O, no imports, no attributes.",
+  "command": ["python3", "python_eval.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {"expr": {"type": "string"}},
+    "required": ["expr"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 5
+}

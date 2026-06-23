@@ -4,6 +4,87 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.1 — 2026-06-23
+
+The "close the gaps that don't touch ludexel" release. P3 hardening pass +
+six additive features from the P2 backlog. No agent-loop semantics changed.
+No memory schema migration. No config-shape breaks. A host service that
+uses fabri as a library (e.g. ludexel) needs zero changes.
+
+### Added — fan-out telemetry & regret detection (G10/G11)
+
+- **`subagent_*` fields in every `usage` event**: `subagent_count`,
+  `subagent_successful_count`, `subagent_failed_count`,
+  `subagent_max_subtree_cost_usd`, `subagent_regret_count`. Tells you
+  whether the agent stayed single-threaded or fanned out, and what it cost.
+- **`delegation_regret` trace event.** Fires when a `spawn_subagent`
+  succeeded but the child ran ≤1 step *and* cost > $0 — i.e. the spawn was
+  almost certainly inlinable. The event carries `tool`, `child_step_count`,
+  `child_cost_usd`, and a `reason` string. The strategic "single-threaded by
+  default" claim is now empirically falsifiable per-run.
+- **`on_subagent_finished(call, ok, child_usage)` callback** in
+  `_dispatch_tool_calls` — invoked once per spawn regardless of ok/failure.
+  Optional + keyword-only so existing direct callers (the F2 timing tests)
+  are unaffected.
+
+### Added — CLI (G3, G14)
+
+- **`fabri memory diff <session_a> <session_b>`** — partitions every
+  guideline into `new in B`, `shared`, `only in A`. Demo-friendly: show what
+  the agent *learned* in a 30-minute run.
+- **`fabri tool init <lang> <name>`** — scaffold a new tool's manifest +
+  executable stub in `python | go | node | bash`. Lands the pair under
+  `--dir` (default `tools/agent_tools/`). Bash stubs are chmod 755.
+
+### Added — polyglot examples & recipes (G12/G13/G15)
+
+- **Rust example (`example_rust_tool/`)** — `regex_lines` tool: greps a file
+  for a regex, returns matching lines. Cargo + serde + regex.
+- **Node example (`example_node_tool/`)** — `file_stats` tool: bytes/lines/
+  words + a language guess from the extension.
+- **Tool recipes (`fabri.tools.recipes/`)** — copy-paste-ready patterns:
+  `fetch_url`, `git_diff`, `grep_dir`, `run_shell_safe`, `python_eval`. Each
+  ships with output caps + deny-lists where relevant.
+
+### Changed — P3 hardening
+
+- **`read_file` / `edit_file`** now refuse files > 1 MB with a clear error
+  message pointing the agent at `outline_only` / line windowing. Stops a
+  single tool call from blowing up the agent's context.
+- **`decompose` parser strips ```json``` / ```toon``` / bare ``` fences**
+  before json.loads / toon.decode — a fenced-but-otherwise-fine response is
+  no longer misclassified as malformed.
+- **`embed()` rejects empty/whitespace text** with a ValueError. Silent
+  near-zero-vector dedup poisoning is gone.
+- **Admin gate logs a WARNING when `FABRI_ADMIN_TOKEN` is unset** so an
+  operator can grep their logs after deploy to verify auth is wired.
+- **`build_tools` refuses a registry containing a tool named `decompose`**
+  — that name is reserved for the framework meta-tool.
+
+### Removed from the backlog (already fixed in an earlier release)
+
+- OpenAI parallel-tool-call truncation. The OpenAI backend already collects
+  every `message.tool_calls[]` and emits all of them on `LLMResponse`
+  (`core/llm.py:473`). The TODO item is stale.
+
+### Tests
+
+- **+27 tests** across `test_unit_p3_hardening.py` (fence strip, empty embed
+  reject, admin warning, reserved decompose, read_file cap),
+  `test_unit_subagent_telemetry.py` (G10/G11 callback + regret event),
+  `test_unit_tool_scaffold.py` (G14 scaffolder, all 4 languages),
+  `test_unit_memory_diff.py` (G3 partitions). Suite 396 → 423.
+
+### Ludexel compatibility
+
+This release deliberately defers:
+- G9 cost-budget enforcement (`agent.max_cost_usd`) — needs a UX design.
+- G21 extended prompt caching — needs an opt-in flag and careful Anthropic
+  testing.
+- G5 trace replay — semantics are non-trivial (re-run against memory at
+  point-in-time?).
+- `model_version` enforcement — would invalidate existing collections.
+
 ## v0.7.0 — 2026-06-23
 
 **The "make the claim true" release.** A strategic positioning review (see

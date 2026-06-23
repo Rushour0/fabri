@@ -109,6 +109,16 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
     registry = ToolRegistry(
         [_resolve_manifest_dir(d) for d in manifest_dirs], sandbox_root=sandbox_root
     )
+    # P3: `decompose` is a synthetic meta-tool the agent loop injects when
+    # `tools.decompose.enabled` is true (see core/agent.py). A user-shipped
+    # tool of the same name would shadow it and confuse build_tool_defs into
+    # emitting both. Refuse the registry at build time so the failure is loud,
+    # not a silent runtime collision.
+    if DECOMPOSE_TOOL_NAME in registry.tools:
+        raise ValueError(
+            f"tool name {DECOMPOSE_TOOL_NAME!r} is reserved for the framework "
+            f"meta-tool. Rename your tool (e.g. {DECOMPOSE_TOOL_NAME}_my)."
+        )
     for entry in tools_cfg.get("agents", []):
         registry.register(make_agent_tool_manifest(entry))
     # G19: MCP servers — connect each, list its tools, register them as

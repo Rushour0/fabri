@@ -15,6 +15,13 @@ from pathlib import Path
 
 SANDBOX_ROOT_ENV = "FABRI_SANDBOX_ROOT"
 
+# P3 hardening: cap whole-file reads so a single tool call can't blow up the
+# agent's context by ingesting a 100MB log file. Windowed and outline reads
+# are unaffected (they're already bounded by line slicing). The cap is
+# generous (1MB) for normal source files but stops a runaway. The agent gets
+# a clear error pointing it at outline_only / line_start / line_end.
+READ_FILE_MAX_BYTES = 1_000_000
+
 # def/class for Python/JS/Go-ish, markdown/ini headings, ALL_CAPS = ... constants.
 # Deliberately language-agnostic and shallow -- the goal is a coarse map, not a
 # parse tree. Extend per-language if it ever matters.
@@ -57,6 +64,16 @@ def main() -> int:
         print(_err(f"no such file: {args['path']}"))
         return 1
 
+    # P3: refuse to slurp a huge file. If the agent really wants the whole
+    # thing, it can window through it; this is a back-pressure signal, not a
+    # silent truncation.
+    size = target.stat().st_size
+    if size > READ_FILE_MAX_BYTES:
+        print(_err(
+            f"file is {size} bytes; read_file caps at {READ_FILE_MAX_BYTES}. "
+            f"Use outline_only=true to scan structure, or line_start/line_end to window."
+        ))
+        return 1
     raw = target.read_text()
     lines = raw.splitlines(keepends=True)
     total = len(lines)

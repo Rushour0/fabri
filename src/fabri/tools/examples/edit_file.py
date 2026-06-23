@@ -8,6 +8,11 @@ from pathlib import Path
 
 SANDBOX_ROOT_ENV = "FABRI_SANDBOX_ROOT"
 
+# P3 hardening: cap the file an edit can target. An edit_file tool is supposed
+# to do surgical replaces -- if you need to rewrite a multi-MB file, edit_file
+# is the wrong tool anyway. Matches read_file's cap so the two compose cleanly.
+EDIT_FILE_MAX_BYTES = 1_000_000
+
 
 def main() -> int:
     args = json.loads(sys.stdin.read())
@@ -28,6 +33,18 @@ def main() -> int:
 
     old, new = args["old"], args["new"]
     replace_all = bool(args.get("replace_all", False))
+
+    # P3: refuse the edit on huge files. Loading several MB of text into Python
+    # to do an O(n) substring replace is wasteful and a strong signal the agent
+    # is misusing this tool.
+    size = target.stat().st_size
+    if size > EDIT_FILE_MAX_BYTES:
+        print(json.dumps({
+            "error": f"file is {size} bytes; edit_file caps at {EDIT_FILE_MAX_BYTES}. "
+                     f"For files this large, write_file (whole replacement) or a "
+                     f"language-aware tool is the right move."
+        }))
+        return 1
     content = target.read_text()
 
     count = content.count(old)

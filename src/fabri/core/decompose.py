@@ -1,10 +1,21 @@
 import json
+import re
 
 from fabri import toon
 from fabri.core.llm import LLMBackend
 from fabri.tools.result import tool_error, tool_ok
 
 DEFAULT_MAX_SUBQUESTIONS = 5
+
+# P3 hardening: models often wrap structured output in markdown code fences
+# ("```json\n...\n```") even when asked for raw output. Strip them before
+# json.loads / toon.decode so a well-formed-but-fenced response isn't
+# misclassified as "malformed".
+_FENCE_RE = re.compile(r"^```(?:json|toon)?\s*\n?|\n?```\s*$", re.MULTILINE)
+
+
+def _strip_fences(text: str) -> str:
+    return _FENCE_RE.sub("", text).strip()
 
 
 def decompose(
@@ -54,13 +65,13 @@ def _parse_string_list(text: str, prefer: str) -> list | None:
 
 def _try_json(text: str):
     try:
-        return json.loads(text)
+        return json.loads(_strip_fences(text))
     except (json.JSONDecodeError, ValueError):
         return None
 
 
 def _try_toon(text: str):
     try:
-        return toon.decode(text)
+        return toon.decode(_strip_fences(text))
     except Exception:
         return None

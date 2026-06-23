@@ -1,0 +1,12 @@
+{
+  "name": "file_stats",
+  "description": "Return bytes/lines/words and a language guess for a file (Node.js example).",
+  "command": ["node", "example_node_tool/index.js"],
+  "input_schema": {
+    "type": "object",
+    "properties": {"path": {"type": "string"}},
+    "required": ["path"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 10
+}

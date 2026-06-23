@@ -1,0 +1,12 @@
+{
+  "name": "fetch_url",
+  "description": "Fetch a URL via HTTP GET and return its text content (HTML stripped, capped at 8KB).",
+  "command": ["python3", "fetch_url.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {"url": {"type": "string"}},
+    "required": ["url"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 30
+}

@@ -1,0 +1,14 @@
+{
+  "name": "git_diff",
+  "description": "Run `git diff <args>` in the current repo and return its output (capped at 64KB).",
+  "command": ["python3", "git_diff.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "ref": {"type": "string", "description": "e.g. 'HEAD~1', 'main', 'HEAD~1..HEAD'. Default: working tree vs HEAD."},
+      "path": {"type": "string", "description": "Restrict to one file/dir."}
+    }
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 30
+}

@@ -43,4 +43,10 @@ def get_model() -> SentenceTransformer:
 
 
 def embed(text: str) -> list[float]:
+    # P3 hardening: an empty or whitespace-only string embeds to a near-zero
+    # vector that matches everything similarly. That silently poisons retrieval
+    # and dedup downstream. Better to refuse at the boundary so the caller
+    # finds the bug instead of getting nonsense neighbors.
+    if text is None or not text.strip():
+        raise ValueError("embed(): refusing to embed empty/whitespace text")
     return get_model().encode(text, normalize_embeddings=True).tolist()
