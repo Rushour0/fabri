@@ -56,3 +56,48 @@ def test_cmd_run_exits_zero_on_success_outcomes(monkeypatch, capsys, outcome):
 def test_cmd_run_exits_nonzero_on_failure_outcomes(monkeypatch, capsys, outcome):
     code = _invoke_cmd_run(monkeypatch, {"success": False, "outcome": outcome, "final_text": ""})
     assert code != 0, f"outcome={outcome} should exit non-zero, got {code}"
+
+
+def test_cmd_run_exits_nonzero_when_success_false_overrides_success_outcome(monkeypatch):
+    """`success=False` must always exit non-zero, even if the outcome string
+    somehow says SUCCESS. Defensive: the two fields are computed independently
+    in core.agent, and a future divergence shouldn't silently swallow a failure."""
+    code = _invoke_cmd_run(monkeypatch, {"success": False, "outcome": Outcome.SUCCESS.value})
+    assert code != 0
+
+
+def test_cmd_run_exits_nonzero_on_unknown_outcome_string(monkeypatch):
+    """An unrecognized outcome value (e.g. a new enum variant that lands in the
+    result before cli.py is updated, or the old "succeeded" typo) must fail
+    closed, not open."""
+    code = _invoke_cmd_run(monkeypatch, {"success": True, "outcome": "succeeded"})
+    assert code != 0, "the old typo'd literal must NOT be treated as success"
+    code = _invoke_cmd_run(monkeypatch, {"success": True, "outcome": "totally_made_up"})
+    assert code != 0
+
+
+def test_cmd_run_prints_synthesized_guideline_summary(monkeypatch, capsys):
+    """The cmd_run UX includes a `Synthesized N guideline(s)` block when the
+    pipeline returns entries. This is the user's only visible signal that the
+    memory loop ran on their behalf — pin the rendering."""
+    from fabri.memory.schema import MemoryEntry
+
+    entry = MemoryEntry(
+        text="Re-read after write_file to confirm persistence",
+        kind="tactical",
+        session_ids=["sid"],
+        tags=[],
+        tools=["write_file"],
+        hit_count=1,
+        created_at=0.0,
+    )
+    monkeypatch.setattr(cli, "process_trace", lambda *a, **k: [entry])
+    code = _invoke_cmd_run(
+        monkeypatch,
+        {"success": True, "outcome": Outcome.SUCCESS.value, "final_text": "ok"},
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Synthesized 1 guideline(s)" in out
+    assert "[tactical]" in out
+    assert "Re-read after write_file" in out
