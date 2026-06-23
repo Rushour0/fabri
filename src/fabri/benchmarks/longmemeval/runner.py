@@ -215,9 +215,14 @@ def run_benchmark(
     results. `skip_judge` defaults true because the LLM-judge variant doubles
     the API spend and isn't useful for a quick sanity check; flip to False for
     a publishable number."""
-    api_key_env = load_config(config_path)["llm"]["api_key_env"]
-    if not os.environ.get(api_key_env):
-        raise RuntimeError(f"{api_key_env} unset; export before running.")
+    from fabri.runtime import find_missing_role_api_keys
+    cfg = load_config(config_path)
+    missing = find_missing_role_api_keys(cfg)
+    if missing:
+        raise RuntimeError(
+            "missing API key env vars: "
+            + ", ".join(f"{env} ({'+'.join(roles)})" for env, roles in missing.items())
+        )
 
     dataset_path = download_dataset()
     cases = load_cases(dataset_path, limit=limit)

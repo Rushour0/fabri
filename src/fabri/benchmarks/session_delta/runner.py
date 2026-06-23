@@ -82,11 +82,13 @@ def run_benchmark(
     task: str, config_path: str | None, runs: int = 5
 ) -> SessionDeltaResults:
     """Run the agent on `task` `runs` times. Returns aggregated results."""
+    from fabri.runtime import find_missing_role_api_keys
     config = load_config(config_path)
-    api_key_env = config["llm"]["api_key_env"]
-    if not os.environ.get(api_key_env):
+    missing = find_missing_role_api_keys(config)
+    if missing:
         raise RuntimeError(
-            f"{api_key_env} is not set; export it before running the benchmark."
+            "missing API key env vars: "
+            + ", ".join(f"{env} ({'+'.join(roles)})" for env, roles in missing.items())
         )
 
     results = SessionDeltaResults(task=task)

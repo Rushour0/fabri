@@ -42,6 +42,17 @@ PRICING: dict[str, tuple[float, float]] = {
     # Anthropic convention; for OpenAI they're approximate, reconciled to
     # invoice like everything else.
     "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.60),
+    # OpenRouter -- model ids are namespaced (<vendor>/<model>). OpenRouter
+    # passes through the underlying provider's rate with a small markup
+    # (~5% on average); these entries match the underlying provider's list
+    # price and are reconciled to the OpenRouter invoice like the others.
+    # Extend as new models are adopted.
+    "anthropic/claude-haiku-4-5":  (1.0, 5.0),
+    "anthropic/claude-sonnet-4-6": (3.0, 15.0),
+    "anthropic/claude-opus-4-8":   (5.0, 25.0),
+    "openai/gpt-4o":               (2.5, 10.0),
+    "openai/gpt-4o-mini":          (0.15, 0.60),
 }
 
 

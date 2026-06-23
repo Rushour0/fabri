@@ -45,10 +45,36 @@ agent:
                                 # reliable) or toon (opt-in, fewer output tokens, json-fallback)
 
 llm:
-  provider: anthropic           # or "openai"
+  # The MAIN orchestrator backend. Roles below inherit these defaults
+  # for anything they don't override.
+  provider: anthropic           # "anthropic" | "openai" | "openrouter"
   model: claude-sonnet-4-6
   max_tokens: 1024
   api_key_env: ANTHROPIC_API_KEY
+
+  # Per-role overrides. Each role can run on a different provider with its
+  # own API key; the four roles bill independently. Each entry may be:
+  #   - omitted / null  -> role inherits everything from the main llm.*
+  #   - a model-id string -> just swaps the model; provider stays
+  #   - a dict          -> any subset of {provider, model, api_key_env,
+  #                                       max_tokens, base_url, cache_messages}
+  # Example: cheap narrator on OpenRouter, decompose on OpenAI mini.
+  narrator:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    api_key_env: OPENROUTER_API_KEY
+    max_tokens: 60
+  decompose:
+    provider: openai
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+  planner: null                 # falls back to decompose, then main
+
+  # Legacy flat keys still work -- silently lifted into the role dicts
+  # above when the dict form is absent. Prefer the new shape in new configs.
+  # decompose_model: claude-haiku-4-5
+  # narrator_model: claude-haiku-4-5
+  # narrator_max_tokens: 60
 
 tools:
   manifest_dir:                 # one path, or a list -- merged into one registry

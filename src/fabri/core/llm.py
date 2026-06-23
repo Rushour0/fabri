@@ -365,13 +365,22 @@ class OpenAILLMBackend:
         tools: list[dict] | None = None,
         max_tokens: int = 1024,
         api_key_env: str = "OPENAI_API_KEY",
+        base_url: str | None = None,
     ):
         import openai
         import os
 
-        self._client = openai.OpenAI(api_key=os.environ.get(api_key_env))
+        # `base_url` lets this backend talk to any OpenAI-API-compatible
+        # endpoint -- in particular OpenRouter (https://openrouter.ai/api/v1).
+        # OpenRouter's wire protocol IS OpenAI's chat-completions + tools
+        # schema, so the rest of this class is identical between the two.
+        client_kwargs: dict = {"api_key": os.environ.get(api_key_env)}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = openai.OpenAI(**client_kwargs)
         self._model = model
         self._max_tokens = max_tokens
+        self._base_url = base_url
         self._tools: list[dict] = []
         self.set_tools(tools or [])
 

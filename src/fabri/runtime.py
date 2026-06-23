@@ -1,6 +1,7 @@
 """Shared composition helpers for turning a loaded config into the objects
 run_agent() needs. Used by both cli.py and tools/agent_runner_tool.py (the
 agent-as-tool adapter) so the two entry points build agents identically."""
+import os
 from pathlib import Path
 
 from fabri.config import DEFAULT_TOOLS_DIR
@@ -57,93 +58,118 @@ def build_tool_defs(registry: ToolRegistry, decompose_cfg: dict) -> list[dict]:
     return defs
 
 
-def build_llm(config: dict, tools_defs: list[dict], *, model_override: str | None = None):
-    llm_cfg = config["llm"]
-    provider = llm_cfg["provider"]
-    model = model_override or llm_cfg["model"]
+# Endpoint pinned by the `openrouter` provider sugar. OpenRouter speaks
+# OpenAI's chat-completions + tools wire format, so the OpenAI SDK
+# (via base_url) is the cleanest client; no separate backend needed.
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Roles that may resolve to a separate backend. "main" is always present;
+# the others are None when the user hasn't configured them (the agent loop
+# falls back to main for decompose/planner, silences narration for narrator).
+ROLES = ("main", "decompose", "planner", "narrator")
+
+
+def _resolve_role_cfg(config: dict, role: str) -> dict | None:
+    """Look up a role's fully-merged backend config from the normalized
+    `llm.roles` dict produced by config._normalize_llm_roles. Returns None
+    when the role is explicitly disabled (e.g. `llm.narrator: null`) or
+    absent. `main` is always present.
+
+    Tolerates a config that bypassed `load_config` (e.g. tests / programmatic
+    use that hand-built a flat dict): if `llm.roles` is missing, normalize
+    on the fly so the caller doesn't have to know about the new key."""
+    llm = config.get("llm") or {}
+    roles = llm.get("roles")
+    if not roles:
+        from fabri.config import _normalize_llm_roles
+        roles = _normalize_llm_roles(config)["llm"]["roles"]
+    return roles.get(role)
+
+
+def _instantiate(rcfg: dict, tool_defs: list[dict]):
+    """Single point of provider dispatch -- adding a fourth provider later
+    (Vertex, Bedrock, Groq, ...) means one new branch here and nothing
+    else."""
+    provider = (rcfg.get("provider") or "anthropic").lower()
+    model = rcfg["model"]
+    max_tokens = int(rcfg.get("max_tokens") or 1024)
+    api_key_env = rcfg.get("api_key_env") or "ANTHROPIC_API_KEY"
     if provider == "anthropic":
         return AnthropicLLMBackend(
             model=model,
-            tools=tools_defs,
-            max_tokens=llm_cfg["max_tokens"],
-            api_key_env=llm_cfg["api_key_env"],
-            cache_messages=bool(llm_cfg.get("cache_messages", False)),
+            tools=tool_defs,
+            max_tokens=max_tokens,
+            api_key_env=api_key_env,
+            cache_messages=bool(rcfg.get("cache_messages", False)),
         )
-    if provider == "openai":
+    if provider in ("openai", "openrouter"):
+        base_url = rcfg.get("base_url") or (
+            _OPENROUTER_BASE_URL if provider == "openrouter" else None
+        )
         return OpenAILLMBackend(
             model=model,
-            tools=tools_defs,
-            max_tokens=llm_cfg["max_tokens"],
-            api_key_env=llm_cfg["api_key_env"],
+            tools=tool_defs,
+            max_tokens=max_tokens,
+            api_key_env=api_key_env,
+            base_url=base_url,
         )
-    raise ValueError(f"unknown llm provider: {provider}")
+    raise ValueError(f"unknown llm provider: {provider!r}")
 
 
-# Provider-specific cheap-tier defaults used when the user's configured
-# narrator_model doesn't match the agent's provider (e.g. an openai run that
-# inherits the global haiku default). Keeps "default to haiku" working without
-# blowing up on an openai-only setup.
-_NARRATOR_PROVIDER_DEFAULTS = {
-    "anthropic": "claude-haiku-4-5",
-    "openai": "gpt-4o-mini",
-}
-
-
-def _is_anthropic_model_id(model: str) -> bool:
-    return model.startswith("claude-")
-
-
-def _is_openai_model_id(model: str) -> bool:
-    return model.startswith(("gpt-", "o1-", "o3-", "o4-"))
-
-
-def build_narrator_llm(config: dict):
-    """Cheap backend used for short user-facing status updates between steps.
-    Defaults to a Haiku-class model so narration is essentially free; set
-    `llm.narrator_model: null` to silence it. If the configured narrator
-    model is for a different provider than the main run (e.g. haiku default
-    on an openai provider), falls back to that provider's cheap-tier default
-    rather than failing the build. No tool defs -- the narrator only
-    produces a plain string."""
-    llm_cfg = config["llm"]
-    narrator_model = llm_cfg.get("narrator_model")
-    if not narrator_model:
+def build_role_llm(config: dict, role: str, tool_defs: list[dict] | None = None):
+    """Build the LLM backend for one role. `tool_defs` is the universal
+    Anthropic-shaped tool list and should only be passed for `main`; the
+    other roles run with no tools (decompose/planner emit JSON; narrator
+    emits one short string). Returns None when the role is disabled or
+    unset."""
+    rcfg = _resolve_role_cfg(config, role)
+    if rcfg is None or not rcfg.get("model"):
         return None
-    provider = (llm_cfg.get("provider") or "anthropic").lower()
-    # Provider/model mismatch -> swap to the provider's cheap default.
-    mismatched = (
-        (provider == "openai" and _is_anthropic_model_id(narrator_model))
-        or (provider == "anthropic" and _is_openai_model_id(narrator_model))
-    )
-    if mismatched:
-        fallback = _NARRATOR_PROVIDER_DEFAULTS.get(provider)
-        if not fallback:
-            return None
-        narrator_model = fallback
-    max_tokens = int(llm_cfg.get("narrator_max_tokens") or 60)
-    cfg = {
-        **config,
-        "llm": {
-            **llm_cfg,
-            "model": narrator_model,
-            "max_tokens": max_tokens,
-            # The narrator's prompt is one-shot per call (not the agent's
-            # growing history) so message caching is wasted bytes.
-            "cache_messages": False,
-        },
-    }
-    return build_llm(cfg, [], model_override=narrator_model)
+    return _instantiate(rcfg, tool_defs or [])
+
+
+def build_llm(config: dict, tools_defs: list[dict], *, model_override: str | None = None):
+    """Build the orchestrator (main) backend. `model_override`, when given,
+    swaps just the model id while keeping the rest of the main role config
+    intact -- used by tests / one-off scripts. Returning a real backend
+    (not None) is invariant for `main`: the resolver guarantees a config."""
+    rcfg = dict(_resolve_role_cfg(config, "main") or {})
+    if model_override:
+        rcfg["model"] = model_override
+    return _instantiate(rcfg, tools_defs)
 
 
 def build_decompose_llm(config: dict):
-    """Returns a separate LLM backend bound to `llm.decompose_model` so a
-    Sonnet orchestrator can run decompose on Haiku. No tool defs — decompose
-    only asks for a plain string list. None when unset; run_agent then
-    reuses the main backend."""
-    decompose_model = config["llm"].get("decompose_model")
-    if not decompose_model:
-        return None
-    return build_llm(config, [], model_override=decompose_model)
+    """Returns a separate backend for the decompose meta-step, or None when
+    `llm.decompose` is unset (the agent loop then reuses the main backend).
+    Honors per-role provider, so a Sonnet orchestrator can run decompose on
+    OpenRouter or OpenAI without affecting the main loop."""
+    return build_role_llm(config, "decompose")
+
+
+def find_missing_role_api_keys(config: dict) -> dict[str, list[str]]:
+    """Walk every configured role; collect distinct `api_key_env` values for
+    roles that will actually instantiate; return {env_var: [roles using it]}
+    for the ones that aren't set in the current process environment. Empty
+    dict means every required key is present."""
+    needed: dict[str, list[str]] = {}
+    for role in ROLES:
+        rcfg = _resolve_role_cfg(config, role)
+        if rcfg is None or not rcfg.get("model"):
+            continue
+        env = rcfg.get("api_key_env")
+        if not env:
+            continue
+        needed.setdefault(env, []).append(role)
+    return {env: roles for env, roles in needed.items() if not os.environ.get(env)}
+
+
+def build_narrator_llm(config: dict):
+    """Returns a cheap backend that emits short user-facing status updates
+    between tool steps, or None when `llm.narrator` is set to null. Defaults
+    to Haiku via the DEFAULT_CONFIG entry, and inherits any per-role
+    provider override (anthropic / openai / openrouter)."""
+    return build_role_llm(config, "narrator")
 
 
 def build_tools(tools_cfg: dict) -> ToolRegistry:

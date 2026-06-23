@@ -56,18 +56,28 @@ DEFAULT_CONFIG = {
         # reads from Anthropic's 5-min ephemeral cache on the next turn
         # (~0.1x input bill on the cached prefix).
         "cache_messages": False,
-        # Cheap-model backend used to generate short user-facing status
-        # updates between steps -- "Reading config.py", "Spawned 2 sub-agents",
-        # etc. Emitted as `narration` trace events alongside step machinery so
-        # a host UI can stream them. Defaults to Haiku because at <100 tokens
-        # per update it's effectively free; set to None (yaml: `null`) to
-        # silence narration. An OpenAI provider can override with e.g.
-        # `gpt-4o-mini`. The narrator never participates in the agent's
-        # decisions -- it only describes what just happened.
-        "narrator_model": "claude-haiku-4-5",
-        # Max tokens for one narration string. Kept tiny on purpose -- the
-        # whole point is short status lines, not paragraphs.
-        "narrator_max_tokens": 60,
+        # Per-role overrides. Each entry may be:
+        #   - null / absent  -> the role inherits provider/model/api_key_env
+        #                       from the parent llm.* defaults
+        #   - a string       -> just a model id; provider+api_key_env inherit
+        #   - a dict         -> any subset of {provider, model, api_key_env,
+        #                        max_tokens, base_url, cache_messages}
+        # `_normalize_llm_roles` resolves these into a fully-merged dict per
+        # role before any downstream code (runtime.build_role_llm, cli
+        # pre-flight, etc.) reads them.
+        "decompose": None,
+        "planner": None,
+        # Narrator emits short user-facing status updates between tool steps.
+        # Defaults to Haiku because <100 tokens per update is effectively
+        # free; set this dict to None to silence narration entirely.
+        "narrator": {"model": "claude-haiku-4-5", "max_tokens": 60},
+        # Legacy flat keys -- still honored for backward compatibility.
+        # `_normalize_llm_roles` lifts them into the corresponding role
+        # dict above when the role dict is absent. Prefer the dict form in
+        # new configs; these continue to work indefinitely.
+        "decompose_model": None,
+        "narrator_model": None,
+        "narrator_max_tokens": None,
     },
     "tools": {
         "manifest_dir": str(DEFAULT_TOOLS_DIR),
@@ -133,6 +143,99 @@ def _deep_merge(base: dict, override: dict, *, path: str = "") -> dict:
     return merged
 
 
+# Roles whose backend is resolved from llm.<role>; "main" maps to the parent
+# llm.* keys themselves rather than a nested entry.
+_LLM_ROLES = ("decompose", "planner", "narrator")
+
+# Per-role default api_key_env when the role's provider differs from the
+# parent llm.provider. Lets a user write `narrator: {provider: openai}`
+# without also having to spell out `api_key_env: OPENAI_API_KEY`.
+_PROVIDER_DEFAULT_API_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _normalize_llm_roles(cfg: dict) -> dict:
+    """Resolve `llm.<role>` and legacy flat keys into a single normalized
+    `llm.roles` dict shaped {decompose|planner|narrator: <full role cfg>|None}.
+
+    A role's full config is `{provider, model, api_key_env, max_tokens,
+    base_url, cache_messages}`. Missing keys inherit from the parent `llm.*`
+    defaults. A role entry that is None means the role is disabled (no
+    backend built; the agent loop falls back to main for decompose/planner,
+    and silences narration for narrator).
+
+    Legacy flat keys (`decompose_model`, `narrator_model`,
+    `narrator_max_tokens`) are lifted ONLY when the corresponding role dict
+    is absent, so a user who has both the legacy and new shape gets the new
+    shape (clean incremental migration).
+    """
+    llm = dict(cfg.get("llm") or {})
+    parent_provider = (llm.get("provider") or "anthropic").lower()
+    parent_defaults = {
+        "provider": parent_provider,
+        "model": llm.get("model"),
+        "api_key_env": llm.get("api_key_env") or _PROVIDER_DEFAULT_API_KEY_ENV.get(parent_provider),
+        "max_tokens": llm.get("max_tokens"),
+        "cache_messages": bool(llm.get("cache_messages", False)),
+        "base_url": llm.get("base_url"),
+    }
+
+    # Lift legacy flat keys into a synthetic role override, only when the
+    # matching role dict isn't already set. Lift wins nothing if both exist.
+    legacy_map = {
+        "decompose": llm.get("decompose_model"),
+        "narrator": llm.get("narrator_model"),
+    }
+    for role, legacy_model in legacy_map.items():
+        if legacy_model and llm.get(role) is None:
+            llm[role] = {"model": legacy_model}
+    if (llm.get("narrator") is not None
+            and isinstance(llm.get("narrator"), dict)
+            and llm["narrator"].get("max_tokens") is None
+            and llm.get("narrator_max_tokens") is not None):
+        llm["narrator"] = {**llm["narrator"], "max_tokens": llm["narrator_max_tokens"]}
+
+    roles: dict[str, dict | None] = {}
+    for role in _LLM_ROLES:
+        raw = llm.get(role)
+        if raw is None:
+            roles[role] = None
+            continue
+        if isinstance(raw, str):
+            raw = {"model": raw}
+        if not isinstance(raw, dict):
+            raise ConfigError(
+                f"config key llm.{role} must be a mapping, a model-id string, "
+                f"or null (got {type(raw).__name__})."
+            )
+        provider = (raw.get("provider") or parent_defaults["provider"]).lower()
+        # When the role overrides the provider but not the api_key_env, pick
+        # the provider's conventional env var instead of leaking the parent's.
+        api_key_env = raw.get("api_key_env")
+        if api_key_env is None:
+            api_key_env = (
+                parent_defaults["api_key_env"]
+                if provider == parent_defaults["provider"]
+                else _PROVIDER_DEFAULT_API_KEY_ENV.get(provider)
+            )
+        roles[role] = {
+            "provider": provider,
+            "model": raw.get("model") or parent_defaults["model"],
+            "api_key_env": api_key_env,
+            "max_tokens": raw.get("max_tokens") or parent_defaults["max_tokens"],
+            "cache_messages": bool(raw.get("cache_messages", parent_defaults["cache_messages"])),
+            "base_url": raw.get("base_url") or parent_defaults["base_url"],
+        }
+
+    # `main` is always present; it's the parent llm.* defaults verbatim.
+    roles["main"] = parent_defaults
+    llm["roles"] = roles
+    return {**cfg, "llm": llm}
+
+
 def _apply_env_overrides(cfg: dict) -> dict:
     """`QDRANT_URL` env var, if set, overrides `memory.qdrant_url` so a
     container host can propagate the in-cluster address (`qdrant:6333`)
@@ -157,7 +260,7 @@ def load_config(path: str | None) -> dict:
     `_apply_env_overrides`). Raises ConfigError on missing file, malformed YAML,
     or a shape mismatch."""
     if path is None:
-        return _apply_env_overrides(DEFAULT_CONFIG)
+        return _apply_env_overrides(_normalize_llm_roles(DEFAULT_CONFIG))
     try:
         with open(path) as f:
             user_config = yaml.safe_load(f) or {}
@@ -169,4 +272,4 @@ def load_config(path: str | None) -> dict:
         raise ConfigError(
             f"top-level of {path} must be a mapping (got {type(user_config).__name__})."
         )
-    return _apply_env_overrides(_deep_merge(DEFAULT_CONFIG, user_config))
+    return _apply_env_overrides(_normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, user_config)))

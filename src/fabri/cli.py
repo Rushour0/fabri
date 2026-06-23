@@ -65,6 +65,29 @@ def _require_api_key(api_key_env: str) -> None:
         sys.exit(1)
 
 
+def _require_role_api_keys(config: dict) -> None:
+    """Pre-flight every distinct api_key_env across all configured roles
+    (main + decompose + planner + narrator). Reports ALL missing vars in a
+    single error so a multi-provider config doesn't fail halfway through
+    setup. CLI wrapper: prints to stderr + exits 1 rather than raising."""
+    from fabri.runtime import find_missing_role_api_keys
+
+    missing = find_missing_role_api_keys(config)
+    if not missing:
+        return
+    lines = [
+        f"  {env} (used by: {', '.join(roles)})"
+        for env, roles in missing.items()
+    ]
+    print(
+        "Missing required API key environment variables:\n"
+        + "\n".join(lines)
+        + "\nExport each before running the live agent.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _open_store(mem_cfg: dict):
     """Open the configured memory backend with a user-friendly error message
     if it's unreachable, instead of leaking a raw qdrant/grpc/sqlite traceback.
@@ -91,7 +114,7 @@ def _open_store(mem_cfg: dict):
 
 def cmd_run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    _require_api_key(config["llm"]["api_key_env"])
+    _require_role_api_keys(config)
     session_id = args.session_id or str(uuid.uuid4())
     configure_logging(session_id, verbose=args.verbose)
     if getattr(args, "ask_user_socket", None):
@@ -161,7 +184,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_ingest_traces(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    _require_api_key(config["llm"]["api_key_env"])
+    _require_role_api_keys(config)
     configure_logging(args.session_id, verbose=args.verbose)
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
@@ -327,7 +350,7 @@ def cmd_replay(args: argparse.Namespace) -> None:
     }
 
     config = load_config(args.config)
-    _require_api_key(config["llm"]["api_key_env"])
+    _require_role_api_keys(config)
     new_session_id = str(uuid.uuid4())
     configure_logging(new_session_id, verbose=args.verbose)
     mem_cfg = config["memory"]

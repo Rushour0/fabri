@@ -31,7 +31,17 @@ def test_load_config_deep_merges_over_defaults(tmp_path):
 
 
 def test_load_config_none_returns_defaults():
-    assert load_config(None) is DEFAULT_CONFIG
+    # load_config now normalizes llm.roles, so the returned dict is a
+    # copy rather than the literal DEFAULT_CONFIG. Check value equality
+    # on the user-visible fields instead of object identity.
+    cfg = load_config(None)
+    assert cfg["agent"] == DEFAULT_CONFIG["agent"]
+    assert cfg["llm"]["provider"] == DEFAULT_CONFIG["llm"]["provider"]
+    assert cfg["llm"]["model"] == DEFAULT_CONFIG["llm"]["model"]
+    assert cfg["memory"] == DEFAULT_CONFIG["memory"]
+    # The new normalized roles dict is populated.
+    assert "roles" in cfg["llm"]
+    assert cfg["llm"]["roles"]["narrator"]["model"] == "claude-haiku-4-5"
 
 
 def test_build_tools_filters_to_enabled_set(tmp_path):

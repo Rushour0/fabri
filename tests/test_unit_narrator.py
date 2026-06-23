@@ -263,44 +263,51 @@ def test_build_narrator_llm_returns_none_when_disabled():
     assert build_narrator_llm(cfg) is None
 
 
-def test_build_narrator_llm_swaps_to_provider_default_on_mismatch(monkeypatch):
-    """An OpenAI run with the haiku default shouldn't crash -- it should
-    fall back to `gpt-4o-mini` instead. Patched `build_llm` so the test
-    runs without the openai SDK installed."""
+def test_build_narrator_llm_uses_explicit_per_role_provider(monkeypatch):
+    """User configures a per-role provider via `llm.narrator.provider`; the
+    resolver instantiates that backend with the right model and base_url
+    (for openrouter). Monkeypatched `_instantiate` so the test runs without
+    the openai SDK installed."""
     from fabri import runtime
     captured = {}
 
-    def fake_build_llm(cfg, tool_defs, *, model_override=None):
-        captured["provider"] = cfg["llm"]["provider"]
-        captured["model"] = model_override or cfg["llm"]["model"]
+    def fake_instantiate(rcfg, tools):
+        captured.update(rcfg)
         return "stub-backend"
 
-    monkeypatch.setattr(runtime, "build_llm", fake_build_llm)
+    monkeypatch.setattr(runtime, "_instantiate", fake_instantiate)
     narrator = runtime.build_narrator_llm({
         "llm": {
-            "provider": "openai",
-            "model": "gpt-4o",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
             "max_tokens": 1024,
-            "api_key_env": "OPENAI_API_KEY",
-            "narrator_model": "claude-haiku-4-5",  # mismatched
-            "narrator_max_tokens": 60,
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "narrator": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-haiku-4-5",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "max_tokens": 60,
+            },
         },
     })
     assert narrator == "stub-backend"
-    assert captured == {"provider": "openai", "model": "gpt-4o-mini"}
+    assert captured["provider"] == "openrouter"
+    assert captured["model"] == "anthropic/claude-haiku-4-5"
+    assert captured["api_key_env"] == "OPENROUTER_API_KEY"
+    assert captured["max_tokens"] == 60
 
 
-def test_build_narrator_llm_keeps_explicit_matched_model(monkeypatch):
-    """User-chosen narrator that matches the provider passes through
-    unchanged."""
+def test_build_narrator_llm_legacy_model_key_still_works(monkeypatch):
+    """A v0.7.x config using the flat `narrator_model` key gets lifted into
+    the normalized role shape and still produces a haiku-class backend."""
     from fabri import runtime
     captured = {}
 
-    def fake_build_llm(cfg, tool_defs, *, model_override=None):
-        captured["model"] = model_override or cfg["llm"]["model"]
+    def fake_instantiate(rcfg, tools):
+        captured.update(rcfg)
         return "stub"
 
-    monkeypatch.setattr(runtime, "build_llm", fake_build_llm)
+    monkeypatch.setattr(runtime, "_instantiate", fake_instantiate)
     runtime.build_narrator_llm({
         "llm": {
             "provider": "anthropic", "model": "claude-sonnet-4-6",
@@ -309,11 +316,14 @@ def test_build_narrator_llm_keeps_explicit_matched_model(monkeypatch):
         },
     })
     assert captured["model"] == "claude-haiku-4-5"
+    # Provider inherits from parent llm.* when the role didn't override.
+    assert captured["provider"] == "anthropic"
+    assert captured["api_key_env"] == "ANTHROPIC_API_KEY"
 
 
 def test_narrator_default_is_haiku_in_default_config():
     """The packaged default config must default narrator to Haiku so users
     get progress updates out of the box without extra wiring."""
     from fabri.config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["llm"]["narrator_model"] == "claude-haiku-4-5"
-    assert DEFAULT_CONFIG["llm"]["narrator_max_tokens"] == 60
+    assert DEFAULT_CONFIG["llm"]["narrator"]["model"] == "claude-haiku-4-5"
+    assert DEFAULT_CONFIG["llm"]["narrator"]["max_tokens"] == 60

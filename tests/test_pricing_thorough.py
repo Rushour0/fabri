@@ -89,6 +89,31 @@ def test_gpt4o_rates_2_5_10():
     assert cost_for(LLMUsage(input_tokens=M, output_tokens=M, model="gpt-4o")) == 12.5
 
 
+def test_openrouter_anthropic_haiku_priced_at_haiku_rate():
+    """OpenRouter ids are namespaced (`<vendor>/<model>`). The explicit
+    entry matches the underlying Anthropic Haiku rate -- reconciled to the
+    OpenRouter invoice once at adoption time."""
+    usage = LLMUsage(input_tokens=M, output_tokens=M, model="anthropic/claude-haiku-4-5")
+    # haiku: $1 input + $5 output = $6 per 1M tokens
+    assert cost_for(usage) == 6.0
+
+
+def test_openrouter_openai_gpt4o_mini_priced_at_mini_rate():
+    usage = LLMUsage(input_tokens=M, output_tokens=M, model="openai/gpt-4o-mini")
+    # gpt-4o-mini: $0.15 input + $0.60 output = $0.75 per 1M tokens
+    assert abs(cost_for(usage) - 0.75) < 1e-9
+
+
+def test_unknown_openrouter_id_returns_none_with_warning(caplog):
+    """A truly novel OpenRouter id with no explicit entry returns None and
+    logs one warning -- same behavior as any other unknown model."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="fabri")
+    usage = LLMUsage(input_tokens=M, model="meta-llama/some-future-model")
+    assert cost_for(usage) is None
+    assert any("no pricing entry" in rec.message for rec in caplog.records)
+
+
 # ---- all four token buckets in one usage -----------------------------------
 
 def test_all_four_buckets_sonnet_hand_computed():
