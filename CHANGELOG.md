@@ -4,6 +4,56 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.5 — 2026-06-23
+
+The "host-integration ergonomics" release. Three host-integration pain
+points surfaced from a long fan-out orchestrator run: the host did the
+work, narrated nothing on the last step, and was reported as a failure.
+
+### Added
+
+- **Terminal `incomplete` / `failed` trace events now carry `text`** — the
+  model's last assistant utterance (last non-empty `final_text` or
+  `thinking_text` from the run). Hosts that surface a recap after a
+  max-steps termination no longer have to scrape `thought` events
+  heuristically. The `final` event keeps its existing `text` (the
+  model's `final_text`) unchanged; `outcome` and `reason` are unchanged
+  on the other two. Strictly additive.
+- **Final-step nudge** — on the LAST allowed step, the agent loop appends
+  a one-shot "this is your FINAL step; stop calling tools and answer
+  now" instruction to the last user message. Converts the common
+  "did-the-work-ran-out-of-narration-budget" case into a clean
+  `success` with real `final_text` instead of an `incomplete`
+  termination. Gated on `max_steps > 1` so single-step runs are not
+  perturbed. Active in both the legacy and planner-item loops.
+- **`agent.subagent.{max_steps, max_cost_usd}`** — independent budget for
+  spawned sub-agents. A host that raises the orchestrator's `max_steps`
+  to give a fan-out room no longer inflates every child's budget too.
+  Each field falls back independently to the parent's value when unset
+  (default `null` for both → identical pre-v0.7.5 behaviour).
+  `agent_runner_tool.py` (the spawn entry point) now also forwards
+  `max_cost_usd` to `run_agent`, which it didn't before.
+- **Design note: `docs/design/repair-loop.md`** — proposed
+  verify → repair → bounded-rerun loop primitive (Item 3 from the host
+  integration triage). Not implemented in this release; the note maps
+  the config shape, loop semantics, cost-budget composition, and the
+  open questions to resolve before coding. Targeted for v0.8.
+
+### Tests
+
+- `tests/test_unit_v075_features.py` — seven new unit tests covering:
+  the `text` field on terminal `incomplete` and `failed` events, the
+  final-step nudge converting `incomplete` → `success` (and the gate
+  that suppresses it at `max_steps=1`), and the three subagent-budget
+  combinations (full override, no override, partial override).
+
+### Notes
+
+- No change to the `Outcome` enum values, the `final` event shape, or
+  `fabri.cli`'s exit-code mapping. The `text` addition to `incomplete` /
+  `failed` is the only on-wire change, and it's a new optional field —
+  existing trace readers ignore it.
+
 ## v0.7.4 — 2026-06-23
 
 ### Fixed

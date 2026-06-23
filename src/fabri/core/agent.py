@@ -233,6 +233,13 @@ def run_agent(
     failed = False
     error_reason = None
     had_tool_failure = False
+    # Track the model's most recent assistant utterance (final_text or
+    # thinking_text) across the loop. Surfaced on terminal INCOMPLETE / FAILED
+    # events so a host that classifies a max-steps run as "completed but
+    # un-narrated" can still show the user the model's last words, instead of
+    # scraping `thought` events heuristically. (FINAL keeps its existing
+    # `text` field — final_text — and is not affected.)
+    last_assistant_text: list[str | None] = [None]
     usage_totals = LLMUsage()
     # Per-model token tally so a mixed-model run (e.g. Sonnet orchestrator +
     # Haiku decompose) prices each model at its own rate instead of assuming
@@ -321,6 +328,47 @@ def run_agent(
                 "reason": "spawn ran <=1 step but cost >0; likely inlinable",
             })
 
+    def _track_last_text(resp) -> None:
+        # Prefer final_text (the model declared "this is my answer"); fall back
+        # to thinking_text. Only overwrite on a non-empty value so a step that
+        # only dispatched tools without narration doesn't clobber the prior
+        # step's recap.
+        if getattr(resp, "final_text", None):
+            last_assistant_text[0] = resp.final_text
+        elif getattr(resp, "thinking_text", None):
+            last_assistant_text[0] = resp.thinking_text
+
+    # 1b: when the agent is about to consume its LAST allowed step, mutate the
+    # last user message in place to add a one-shot "stop calling tools, answer
+    # now" nudge — converting the common "did the work, ran out of narration
+    # budget" case into a clean SUCCESS with final_text instead of an
+    # INCOMPLETE max-steps termination. Idempotent via a sentinel substring so
+    # a re-entrant caller (planner item budget == 1) can't double-stamp.
+    _FINAL_STEP_NUDGE = (
+        "This is your FINAL step in this run. Do NOT call any more tools — "
+        "even if the work feels unfinished. Reply now with your final answer "
+        "summarising what you did and any open items, so the run ends cleanly."
+    )
+
+    def _inject_final_step_nudge(msgs: list[dict]) -> None:
+        if not msgs:
+            return
+        last = msgs[-1]
+        if last.get("role") != "user":
+            return
+        content = last.get("content")
+        if isinstance(content, str):
+            if _FINAL_STEP_NUDGE in content:
+                return
+            last["content"] = content + "\n\n" + _FINAL_STEP_NUDGE
+            return
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" \
+                        and _FINAL_STEP_NUDGE in (block.get("text") or ""):
+                    return
+            content.append({"type": "text", "text": _FINAL_STEP_NUDGE})
+
     def _emit_thought(thinking_text: str | None, step: int) -> None:
         # Whitespace-only thinking is already dropped upstream by LLMResponse,
         # so a truthy check is enough -- emit one `thought` event per step,
@@ -371,9 +419,12 @@ def run_agent(
                 item_error = "cost budget exceeded"
                 break
             log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": global_step})
+            if item_max_steps > 1 and inner_step == item_max_steps - 1:
+                _inject_final_step_nudge(item_messages)
             try:
                 response = llm.step(system, item_messages)
                 _accumulate(response.usage)
+                _track_last_text(response)
                 if response.tool_calls:
                     _emit_thought(response.thinking_text, global_step)
                     step_had_failure = _dispatch_tool_calls(
@@ -561,9 +612,12 @@ def run_agent(
         # event lands before every continue/break/raise out of the step
         # and carries the elapsed wall time + step outcome.
         log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": step_num})
+        if max_steps > 1 and step_num == max_steps - 1:
+            _inject_final_step_nudge(messages)
         try:
             response = llm.step(system, messages)
             _accumulate(response.usage)
+            _track_last_text(response)
             # G7: per-step cost. Priced from THIS step's response.usage alone,
             # so reports can attribute the LLM-call cost to the tools the model
             # dispatched in this step (instead of the v0.7.0 proportional-by-
@@ -663,9 +717,22 @@ def run_agent(
     if success:
         log_event(session_id, {"type": EventType.FINAL.value, "text": final_text, "outcome": outcome.value})
     elif failed:
-        log_event(session_id, {"type": EventType.FAILED.value, "reason": error_reason, "outcome": outcome.value})
+        # 1a: surface the model's last assistant text on the terminal event so a
+        # host can render a recap without scraping `thought` events. Additive
+        # field; the existing `reason`/`outcome` keys are unchanged.
+        log_event(session_id, {
+            "type": EventType.FAILED.value,
+            "reason": error_reason,
+            "outcome": outcome.value,
+            "text": last_assistant_text[0],
+        })
     else:
-        log_event(session_id, {"type": EventType.INCOMPLETE.value, "reason": "max steps reached", "outcome": outcome.value})
+        log_event(session_id, {
+            "type": EventType.INCOMPLETE.value,
+            "reason": "max steps reached",
+            "outcome": outcome.value,
+            "text": last_assistant_text[0],
+        })
 
     # Price this run's own tokens per model, then add the rolled-up sub-agent
     # subtree cost. `cost_by_model` is own tokens only -- a child's cost is a

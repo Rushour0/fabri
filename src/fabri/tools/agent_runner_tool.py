@@ -78,12 +78,25 @@ def main() -> int:
     mem_cfg = config["memory"]
     store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
 
+    # v0.7.5: when agent.subagent.{max_steps,max_cost_usd} is set, it
+    # overrides the parent budget for this child only. Falls back to the
+    # parent values when absent (back-compat). This is the runner entrypoint
+    # for spawn_subagent / agent_tool — i.e. it always runs as a sub-agent,
+    # so the override is unconditional here.
+    subagent_cfg = config["agent"].get("subagent") or {}
+    sub_max_steps = subagent_cfg.get("max_steps")
+    if sub_max_steps is None:
+        sub_max_steps = config["agent"]["max_steps"]
+    sub_max_cost = subagent_cfg.get("max_cost_usd")
+    if sub_max_cost is None:
+        sub_max_cost = config["agent"].get("max_cost_usd")
+
     result = run_agent(
         args["task"],
         llm,
         tools,
         store,
-        max_steps=config["agent"]["max_steps"],
+        max_steps=sub_max_steps,
         top_k=mem_cfg["top_k"],
         max_subquestions=decompose_cfg["max_subquestions"],
         system_prompt=config["agent"].get("system_prompt", ""),
@@ -91,6 +104,7 @@ def main() -> int:
         result_format=tools_cfg.get("result_format", "toon"),
         output_format=config["agent"].get("output_format", "json"),
         decompose_llm=build_decompose_llm(config),
+        max_cost_usd=sub_max_cost,
     )
     # Surface the sub-agent's session_id + trace path so a parent agent (or
     # human reading the parent's trace) can pinpoint which JSONL to open when a

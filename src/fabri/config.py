@@ -42,6 +42,17 @@ DEFAULT_CONFIG = {
             "max_items": 8,
             "auto_token_threshold": 80,
         },
+        # Independent budget for spawned sub-agents (agent_runner_tool.py).
+        # When a field here is non-None, it overrides agent.max_steps /
+        # agent.max_cost_usd for children only — so a host that raises the
+        # orchestrator's step budget to give a fan-out room doesn't
+        # accidentally let every child loop on the same inflated budget.
+        # Both None (the default) preserves pre-v0.7.5 behaviour: children
+        # inherit the parent config's agent.max_steps / agent.max_cost_usd.
+        "subagent": {
+            "max_steps": None,
+            "max_cost_usd": None,
+        },
     },
     "llm": {
         "provider": "anthropic",
