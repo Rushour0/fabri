@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import yaml
@@ -101,14 +102,36 @@ def _deep_merge(base: dict, override: dict, *, path: str = "") -> dict:
     return merged
 
 
+def _apply_env_overrides(cfg: dict) -> dict:
+    """12-factor / container override: when `QDRANT_URL` is set in the
+    environment it WINS over the yaml's `memory.qdrant_url`. A host (e.g. ludexel
+    in Docker) sets QDRANT_URL on the service container; every fabri process it
+    spawns -- the orchestrator, the spawn_subagent tool, and child sub-agents --
+    inherits that env, so the reachable qdrant address (`qdrant:6333`) propagates
+    across the subprocess boundary without having to rewrite each on-disk yaml.
+    Without this, a child loading the repo yaml (`localhost:6333`) dies on
+    connect in-container. Returns a config that never mutates the shared
+    DEFAULT_CONFIG."""
+    url = os.environ.get("QDRANT_URL")
+    if not url:
+        return cfg
+    mem = dict(cfg.get("memory") or {})
+    if mem.get("qdrant_url") == url:
+        return cfg
+    mem["qdrant_url"] = url
+    return {**cfg, "memory": mem}
+
+
 def load_config(path: str | None) -> dict:
     """Load an agent.yaml config, merged on top of DEFAULT_CONFIG so omitted
     fields fall back to today's hardcoded behavior unchanged. `path=None`
     returns the framework defaults as-is -- the same shape a consuming
     project's own agent.yaml would produce, so callers don't special-case it.
-    Raises ConfigError on missing file, malformed YAML, or a shape mismatch."""
+    A `QDRANT_URL` env var, if set, overrides `memory.qdrant_url` (see
+    `_apply_env_overrides`). Raises ConfigError on missing file, malformed YAML,
+    or a shape mismatch."""
     if path is None:
-        return DEFAULT_CONFIG
+        return _apply_env_overrides(DEFAULT_CONFIG)
     try:
         with open(path) as f:
             user_config = yaml.safe_load(f) or {}
@@ -120,4 +143,4 @@ def load_config(path: str | None) -> dict:
         raise ConfigError(
             f"top-level of {path} must be a mapping (got {type(user_config).__name__})."
         )
-    return _deep_merge(DEFAULT_CONFIG, user_config)
+    return _apply_env_overrides(_deep_merge(DEFAULT_CONFIG, user_config))

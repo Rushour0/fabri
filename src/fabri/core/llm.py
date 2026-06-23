@@ -7,6 +7,13 @@ from fabri.core.logging_setup import get_logger
 
 logger = get_logger()
 
+# Upper bound for the one-shot retry after a max_tokens truncation. fabri uses
+# non-streaming requests, which risk SDK HTTP timeouts on very long completions,
+# so the retry cap is held to a non-streaming-comfortable ceiling rather than
+# the model's full output limit. Beyond this, the run fails loud and the agent
+# is told to split the turn.
+MAX_TOKENS_RETRY_CEILING = 16000
+
 
 class LLMError(RuntimeError):
     """Unrecoverable problem talking to the LLM provider: an API error, a rate
@@ -202,30 +209,60 @@ class AnthropicLLMBackend:
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         import anthropic
 
-        t0 = time.monotonic()
-        try:
-            resp = _call_with_retry(
+        def _create(max_tokens: int):
+            return _call_with_retry(
                 lambda: self._client.messages.create(
                     model=self._model,
                     system=self._build_system(system),
                     messages=messages,
                     tools=self._build_tools(),
-                    max_tokens=self._max_tokens,
+                    max_tokens=max_tokens,
                 ),
                 transient=(anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError),
             )
+
+        t0 = time.monotonic()
+        truncated_attempt = None
+        try:
+            resp = _create(self._max_tokens)
+            # A single oversized turn shouldn't nuke a whole multi-step run. On a
+            # max_tokens truncation, retry ONCE at a higher cap (bounded to a
+            # non-streaming-safe ceiling) before giving up. This recovers the
+            # common case -- one content-heavy turn (e.g. writing several files)
+            # -- while still failing loud below if even the bigger cap truncates.
+            # We never accept a truncated answer as success.
+            if resp.stop_reason == "max_tokens":
+                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                if retry_cap > self._max_tokens:
+                    logger.warning(
+                        "anthropic response truncated at max_tokens=%d; retrying once at %d",
+                        self._max_tokens,
+                        retry_cap,
+                    )
+                    truncated_attempt = resp  # still billed -- fold into usage below
+                    resp = _create(retry_cap)
         except anthropic.APIError as e:
             raise LLMError(f"anthropic API error: {e}") from e
 
         elapsed = time.monotonic() - t0
         usage = resp.usage
         # Cache usage fields land on `usage` when prompt caching fires; surface
-        # them so a run's trace shows whether the cache is hitting.
-        cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        # them so a run's trace shows whether the cache is hitting. A discarded
+        # truncated attempt was still billed, so fold its tokens in -- COGS must
+        # reflect what Anthropic charged, not just the kept response.
+        def _u(field: str, src) -> int:
+            return getattr(src, field, 0) or 0 if src is not None else 0
+
+        cache_create = (getattr(usage, "cache_creation_input_tokens", 0) or 0) + _u(
+            "cache_creation_input_tokens", truncated_attempt and truncated_attempt.usage
+        )
+        cache_read = (getattr(usage, "cache_read_input_tokens", 0) or 0) + _u(
+            "cache_read_input_tokens", truncated_attempt and truncated_attempt.usage
+        )
+        t_usage = truncated_attempt.usage if truncated_attempt is not None else None
         call_usage = LLMUsage(
-            input_tokens=usage.input_tokens or 0,
-            output_tokens=usage.output_tokens or 0,
+            input_tokens=(usage.input_tokens or 0) + (_u("input_tokens", t_usage)),
+            output_tokens=(usage.output_tokens or 0) + (_u("output_tokens", t_usage)),
             cache_creation_input_tokens=cache_create,
             cache_read_input_tokens=cache_read,
             model=self._model,
@@ -243,10 +280,15 @@ class AnthropicLLMBackend:
 
         # A response truncated at the token cap can't be trusted: a tool_use
         # block may carry partial/invalid args, and a cut-off text answer is not
-        # a real final answer. Fail rather than dispatch garbage or report a
-        # half-answer as success.
+        # a real final answer. We already retried once at a higher cap above, so
+        # reaching here means even that truncated -- fail rather than dispatch
+        # garbage or report a half-answer as success.
         if resp.stop_reason == "max_tokens":
-            raise LLMError("anthropic response truncated at max_tokens; raise llm.max_tokens for this agent")
+            raise LLMError(
+                f"anthropic response truncated at max_tokens even after retry to "
+                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
+                f"or split this turn into smaller actions (fewer/lighter tool calls)"
+            )
 
         # Claude can return several content blocks in one turn (reasoning text
         # plus one or more tool_use blocks, or parallel tool_use blocks). Collect
@@ -370,16 +412,33 @@ class OpenAILLMBackend:
         for m in messages:
             oa_messages.extend(self._to_openai(m))
 
-        try:
-            resp = _call_with_retry(
+        def _create(max_tokens: int):
+            return _call_with_retry(
                 lambda: self._client.chat.completions.create(
                     model=self._model,
                     messages=oa_messages,
                     tools=self._tools or None,
-                    max_tokens=self._max_tokens,
+                    max_tokens=max_tokens,
                 ),
                 transient=(openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError),
             )
+
+        truncated_attempt = None
+        try:
+            resp = _create(self._max_tokens)
+            # Parity with the Anthropic backend: retry ONCE at a higher cap on a
+            # length truncation before failing the whole run; never accept a
+            # truncated answer as success.
+            if resp.choices[0].finish_reason == "length":
+                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                if retry_cap > self._max_tokens:
+                    logger.warning(
+                        "openai response truncated at max_tokens=%d; retrying once at %d",
+                        self._max_tokens,
+                        retry_cap,
+                    )
+                    truncated_attempt = resp
+                    resp = _create(retry_cap)
         except openai.OpenAIError as e:
             raise LLMError(f"openai API error: {e}") from e
 
@@ -388,16 +447,24 @@ class OpenAILLMBackend:
         logger.info("openai call: model=%s latency=%.2fs finish=%s", self._model, elapsed, choice.finish_reason)
 
         if choice.finish_reason == "length":
-            raise LLMError("openai response truncated at max_tokens; raise llm.max_tokens for this agent")
+            raise LLMError(
+                f"openai response truncated at max_tokens even after retry to "
+                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
+                f"or split this turn into smaller actions"
+            )
 
         oai_usage = getattr(resp, "usage", None)
         # OpenAI surfaces cached prompt tokens under prompt_tokens_details; pull
         # them onto cache_read so a cached run isn't priced at full input rate.
         oai_details = getattr(oai_usage, "prompt_tokens_details", None)
         oai_cache_read = getattr(oai_details, "cached_tokens", 0) or 0
+        # Fold the discarded truncated attempt's tokens in -- it was still billed.
+        t_usage = getattr(truncated_attempt, "usage", None) if truncated_attempt is not None else None
         call_usage = LLMUsage(
-            input_tokens=getattr(oai_usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(oai_usage, "completion_tokens", 0) or 0,
+            input_tokens=(getattr(oai_usage, "prompt_tokens", 0) or 0)
+            + (getattr(t_usage, "prompt_tokens", 0) or 0),
+            output_tokens=(getattr(oai_usage, "completion_tokens", 0) or 0)
+            + (getattr(t_usage, "completion_tokens", 0) or 0),
             cache_read_input_tokens=oai_cache_read,
             model=self._model,
         )

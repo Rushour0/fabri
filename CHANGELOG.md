@@ -4,6 +4,39 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.5.1 — 2026-06-23
+
+Resilience: a single oversized turn no longer nukes a whole run, and qdrant
+reachability propagates across the subprocess boundary in containerized hosts.
+All changes additive/non-breaking.
+
+### Added
+
+- **Retry once on a `max_tokens` truncation before failing the run.** A single
+  content-heavy turn (e.g. writing several files at once) previously hard-failed
+  the entire multi-step run via `LLMError`. Both the Anthropic and OpenAI
+  backends now retry that one step once at a higher cap (`min(max_tokens * 2,
+  MAX_TOKENS_RETRY_CEILING)`, where the ceiling is 16000 — a non-streaming-safe
+  bound) before giving up. We still fail loud if even the retry truncates, and
+  never report a truncated answer as success. The discarded truncated attempt's
+  tokens are folded into the reported `LLMUsage` so per-run cost stays accurate.
+- **`QDRANT_URL` env override in `load_config`.** When `QDRANT_URL` is set in the
+  environment, it wins over `memory.qdrant_url` from the yaml. A containerized
+  host sets it once on the service; the orchestrator, the `spawn_subagent` tool,
+  and every spawned child sub-agent inherit the env, so the reachable qdrant
+  address (e.g. `qdrant:6333`) propagates across the subprocess boundary without
+  rewriting each on-disk config. Fixes child sub-agents dying on connect when
+  spawned with a `config_path` pointing at a repo yaml that still says
+  `localhost:6333` (unreachable in-container). Never mutates the shared
+  `DEFAULT_CONFIG`.
+
+### Tests
+
+- **+105 tests** (pricing edge cases, cost rollup across mixed/unknown models and
+  sub-agent subtrees, both LLM backends incl. truncation-retry / prewarm /
+  model-tagging / cache folding, the `QDRANT_URL` override, system-prompt
+  frugality gating, and `spawn_subagent` command plumbing). Suite 246 → 351.
+
 ## v0.5.0 — 2026-06-23
 
 Per-run COGS (USD cost) with sub-agent rollup, a frugal-by-default base prompt,
