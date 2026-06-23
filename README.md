@@ -255,7 +255,54 @@ script never needs to worry about how the agent loop reports failure.
 anything that escapes it. If you write your own file-touching tool,
 follow the same pattern.
 
-## Agents as tools
+## Orchestration
+
+fabri runs **one agent loop at a time** by default. There is no global
+planner, no message bus, and no coordinator process. The model in the
+loop *is* the orchestrator: at every step it sees the retrieved
+guidelines, the running tool-result tape, and decides the next call.
+
+### The loop
+
+```
+        retrieve top-k guidelines for the task ──► system prompt
+                                                       │
+        ┌──────────────────────────────────────────────┘
+        ▼
+   ┌─────────────┐   tool_use   ┌──────────────┐
+   │ LLM step    │ ───────────► │ tool runner  │ stdin JSON ─► subprocess
+   │ (ReAct)     │ ◄─────────── │              │ ◄── stdout JSON
+   └──────┬──────┘  tool_result └──────────────┘
+          │ writes JSONL trace event per step
+          ▼
+     stop on `final` / max_steps / hard error
+                                                       │
+        ┌──────────────────────────────────────────────┘
+        ▼
+   analyze trace → compress failures → dedup → promote → memory store
+```
+
+The two cost-shaped knobs are the **system prefix** (cached;
+guidelines + tool defs) and the **rolling tape** of tool results
+(re-sent every step). Tool results enter the tape in TOON, not raw
+JSON. Every step emits a `usage` event with token totals and
+`cost_usd` so a host service can attribute COGS without parsing logs.
+
+### Picking a composition primitive
+
+Three ways to do more work per LLM round-trip. **Try them in this
+order** — the cheap path is the default path.
+
+| Primitive       | Use when                                          | Cost     |
+|-----------------|---------------------------------------------------|----------|
+| `batch`         | N known calls, no branching between them          | 1×       |
+| `python_exec`   | N calls with branching, loops, or aggregation     | 1×       |
+| `spawn_subagent`| Independent subtask that would overflow context   | ~15×     |
+
+Rule of thumb: if `batch` or `python_exec` can do it, do not reach for
+`spawn_subagent`.
+
+### Agents as tools
 
 A `tools.agents` entry in `agent.yaml` exposes another agent as a tool
 of this one. Each sub-agent is just another tool call in the parent's
@@ -272,6 +319,135 @@ tools:
       model: claude-haiku-4-5
       max_tokens: 256
 ```
+
+A child invoked this way inherits the parent's memory collection by
+default, so guidelines learned by either side accumulate in the same
+store. Use `memory_collection_suffix` on the call (or a separate
+`memory.collection` in the child config) when you want isolation —
+e.g. a generic `classify` child shared by many parents.
+
+### Parallel fan-out
+
+`spawn_subagent` calls that share a `parallel_group` tag are
+dispatched concurrently by the parent loop, instead of sequentially.
+The parent step that decides to fan out emits one tool_use block per
+child; each `parallel_group` event in the trace marks the wall-clock
+boundary. Cost is additive across children (token usage rolls up
+through `usage.total_cost_usd`), but wall-clock collapses to the
+slowest child.
+
+The cheap path is always: do it inline. Reach for `parallel_group`
+when (a) each child has its own large context to chew through, and
+(b) the children genuinely don't need each other's outputs.
+
+## Multi-agent examples
+
+Three shapes that actually pay for the ~15× sub-agent overhead.
+Anything outside these is almost always cheaper inline.
+
+| Shape                | Use when                                              | Example below |
+|----------------------|-------------------------------------------------------|---------------|
+| Fan-out + synthesize | One question splits into N independent legs          | §1            |
+| Specialist-as-tool   | Some calls deserve a cheaper model or tighter prompt | §2            |
+| Generator + verifier | One context can't hold both roles cleanly            | §3            |
+
+### 1. Fan-out research, single synthesizer
+
+A planner agent decomposes a question, fans out one
+researcher-per-subquestion in parallel, then synthesizes. Each
+researcher burns its own context window on raw pages; the planner's
+context only ever sees their short summaries.
+
+```yaml
+# planner.yaml
+agent: { name: planner, max_steps: 12 }
+llm:   { provider: anthropic, model: claude-sonnet-4-6 }
+tools:
+  manifest_dir: [builtin, tools/agent_tools]
+  enabled: [spawn_subagent, write_file]
+  agents:
+    - name: research_one
+      description: Answer ONE focused subquestion using the web. Returns ≤200 words + citations.
+      config: tools/agent_tools/researcher.yaml
+      model: claude-haiku-4-5   # cheap per-leg; planner stays on Sonnet
+```
+
+Planner's natural action becomes:
+
+```
+spawn_subagent(name=research_one, task="...subq A...", parallel_group="fanout-1")
+spawn_subagent(name=research_one, task="...subq B...", parallel_group="fanout-1")
+spawn_subagent(name=research_one, task="...subq C...", parallel_group="fanout-1")
+→ synthesize from the three short returns
+```
+
+Wall-clock = slowest leg. Cost = sum of legs + planner. Crucially, the
+planner never loads raw pages into *its* context.
+
+### 2. Specialist behind a uniform tool contract
+
+A parent agent on Sonnet, two specialists exposed as tools:
+
+```yaml
+# parent.yaml
+tools:
+  agents:
+    - name: classify_intent     # tiny Haiku classifier, 256-token cap
+      description: Classify a user message into {bug, feature, billing, other}.
+      config: tools/agent_tools/classifier.yaml
+      model: claude-haiku-4-5
+      max_tokens: 256
+    - name: sql_writer          # SQL-only Sonnet, schema-aware
+      description: Turn a natural-language metric request into one SELECT.
+      config: tools/agent_tools/sqlwriter.yaml
+```
+
+The parent learns *when* to call each child through normal memory
+guidelines ("for billing-shaped questions, call `classify_intent`
+first"). Each child has its own tight prompt and its own memory
+collection, so its guidelines don't pollute the parent's retrieval.
+
+### 3. Pipeline with a verifier
+
+Generator → verifier, two agents wired by the parent. Use when a
+single agent confuses itself by holding both roles in one context:
+
+```yaml
+tools:
+  agents:
+    - name: draft
+      description: Produce a candidate answer. May be wrong.
+      config: tools/agent_tools/drafter.yaml
+    - name: verify
+      description: Check a candidate answer against the source. Returns {ok, reasons[]}.
+      config: tools/agent_tools/verifier.yaml
+```
+
+Parent loop: `draft` → `verify` → if not ok, `draft` again with the
+verifier's reasons appended. The verifier never sees the drafter's
+chain-of-thought, only its output — which is the point.
+
+## Designing tools for low token cost
+
+Tools shape the bill more than prompts do. The system prefix is
+cached; tool *results* are not, and they ride in the context every
+step. The short version, as a table:
+
+| Rule                       | What it means                                                            |
+|----------------------------|--------------------------------------------------------------------------|
+| One job, one tool          | A `mode` enum is two tools badly fused. Split them.                      |
+| Description is the contract| Manifest `description` is the only thing the LLM reads. 1–3 sentences.   |
+| Return the minimum         | Slice, truncate, summarize. Every byte rides every subsequent step.      |
+| TOON-friendly shapes       | Flat arrays of records with consistent keys encode much smaller.         |
+| Compose at the tool layer  | If 3 calls always happen together, ship 1 tool.                          |
+| Idempotent or explicit     | Side-effecting tools must be safe to retry, or fail loudly.              |
+| Paths, not payloads        | Write big results to `.fabri/scratch/<id>.json`, return `{path, size}`.  |
+| Code-as-action for loops   | No `for_each` tool. `python_exec` covers it in one LLM step.             |
+| Cap your manifests         | Keep `tools.enabled` tight — every entry sits in the cached prefix.      |
+
+Smell test: if "what would the agent do with the result of this
+tool?" has a one-sentence answer, the tool is probably shaped right.
+If the answer is "it depends what mode you called it in", split it.
 
 ## Using it as a library
 
