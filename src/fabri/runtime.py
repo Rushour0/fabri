@@ -12,23 +12,17 @@ from fabri.tools.registry import ToolRegistry
 
 
 def build_memory_store(mem_cfg: dict):
-    """G16: pick the memory backend based on `memory.backend`.
-
-    - "qdrant" (default): networked, multi-process safe.
-    - "sqlite":  in-process, single-file, no docker required.
-
-    Both expose the same interface (upsert/get/query/query_by_vector/
-    find_similar/delete/count/iterate). The agent loop and orchestrator never
-    know which one they're talking to.
-    """
+    """Pick the memory backend by `memory.backend`. "qdrant" (networked,
+    multi-process safe) or "sqlite" (in-process, single-file). Both expose
+    the same interface so the agent loop is backend-agnostic."""
     backend = (mem_cfg.get("backend") or "qdrant").lower()
     if backend == "qdrant":
         return QdrantMemoryStore(
             url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"]
         )
     if backend == "sqlite":
-        # Imported lazily so a qdrant-only user doesn't pay sqlite-vec's
-        # extension-load cost (and so the import error message is friendlier).
+        # Lazy import so a qdrant-only user doesn't pay sqlite-vec's
+        # extension-load cost.
         from fabri.memory.embedded_store import SqliteMemoryStore
         return SqliteMemoryStore(
             path=mem_cfg.get("sqlite_path", ".fabri/memory.db"),
@@ -38,10 +32,8 @@ def build_memory_store(mem_cfg: dict):
         f"unknown memory.backend: {backend!r} (expected 'qdrant' or 'sqlite')"
     )
 
-# Sentinel a config can put in tools.manifest_dir to pull in the framework's
-# bundled tools (read_file/write_file/web_search/...) without naming a
-# filesystem path -- so a consuming project never hardcodes where fabri
-# happens to be installed (sibling checkout, wheel in site-packages, etc.).
+# Sentinel value for `tools.manifest_dir` — resolves to the framework's
+# bundled tools regardless of where fabri is installed.
 BUILTIN_TOOLS_TOKENS = {"builtin", "builtin:tools"}
 
 
@@ -88,11 +80,10 @@ def build_llm(config: dict, tools_defs: list[dict], *, model_override: str | Non
 
 
 def build_decompose_llm(config: dict):
-    """If `llm.decompose_model` is set, returns a separate LLM backend bound to
-    that (typically cheaper) model so a Sonnet orchestrator can run decompose
-    on Haiku without changing its main backend. No tool defs -- decompose only
-    asks for a plain string list. Returns None when unset; run_agent then
-    reuses the main backend, preserving prior behavior."""
+    """Returns a separate LLM backend bound to `llm.decompose_model` so a
+    Sonnet orchestrator can run decompose on Haiku. No tool defs — decompose
+    only asks for a plain string list. None when unset; run_agent then
+    reuses the main backend."""
     decompose_model = config["llm"].get("decompose_model")
     if not decompose_model:
         return None
@@ -100,12 +91,9 @@ def build_decompose_llm(config: dict):
 
 
 def build_tools(tools_cfg: dict) -> ToolRegistry:
-    # file_read/file_write enforce a path jail against FABRI_SANDBOX_ROOT in
-    # their own subprocess. ToolRegistry passes that env var explicitly to each
-    # tool spawn (see registry.invoke); we deliberately do NOT mutate the
-    # parent's os.environ, so two concurrent registries -- a parent and a
-    # sub-agent with a tighter sandbox -- can coexist without one clobbering
-    # the other's root.
+    # sandbox_root is threaded to each tool spawn via env= (see
+    # registry.invoke) rather than os.environ, so a parent registry and a
+    # sub-agent registry with a tighter sandbox can coexist.
     sandbox_root = str(Path(tools_cfg["sandbox_root"]).resolve())
     manifest_dirs = tools_cfg["manifest_dir"]
     if isinstance(manifest_dirs, str):
@@ -113,11 +101,8 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
     registry = ToolRegistry(
         [_resolve_manifest_dir(d) for d in manifest_dirs], sandbox_root=sandbox_root
     )
-    # P3: `decompose` is a synthetic meta-tool the agent loop injects when
-    # `tools.decompose.enabled` is true (see core/agent.py). A user-shipped
-    # tool of the same name would shadow it and confuse build_tool_defs into
-    # emitting both. Refuse the registry at build time so the failure is loud,
-    # not a silent runtime collision.
+    # `decompose` is a synthetic meta-tool the agent loop injects; a
+    # user-shipped tool of the same name would shadow it. Refuse loudly.
     if DECOMPOSE_TOOL_NAME in registry.tools:
         raise ValueError(
             f"tool name {DECOMPOSE_TOOL_NAME!r} is reserved for the framework "
@@ -125,10 +110,8 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
         )
     for entry in tools_cfg.get("agents", []):
         registry.register(make_agent_tool_manifest(entry))
-    # G19: MCP servers — connect each, list its tools, register them as
-    # callables on the registry. The agent loop then sees them like any
-    # other tool. Connection failures are logged but don't kill the build:
-    # one bad MCP server shouldn't take down an otherwise-working agent.
+    # Connection failures are logged but don't kill the build — one bad
+    # MCP server shouldn't take down an otherwise-working agent.
     for server_cfg in tools_cfg.get("mcp_servers", []) or []:
         try:
             from fabri.tools.mcp_client import build_mcp_tools

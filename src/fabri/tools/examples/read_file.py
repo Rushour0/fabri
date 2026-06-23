@@ -15,16 +15,12 @@ from pathlib import Path
 
 SANDBOX_ROOT_ENV = "FABRI_SANDBOX_ROOT"
 
-# P3 hardening: cap whole-file reads so a single tool call can't blow up the
-# agent's context by ingesting a 100MB log file. Windowed and outline reads
-# are unaffected (they're already bounded by line slicing). The cap is
-# generous (1MB) for normal source files but stops a runaway. The agent gets
-# a clear error pointing it at outline_only / line_start / line_end.
+# Cap on whole-file reads — a single tool call shouldn't be able to ingest
+# a 100MB log. Windowed and outline reads are unaffected. The agent gets a
+# clear error pointing it at outline_only / line_start / line_end.
 READ_FILE_MAX_BYTES = 1_000_000
 
-# def/class for Python/JS/Go-ish, markdown/ini headings, ALL_CAPS = ... constants.
-# Deliberately language-agnostic and shallow -- the goal is a coarse map, not a
-# parse tree. Extend per-language if it ever matters.
+# Language-agnostic, shallow outline: def/class/fn/headings/ALL_CAPS=...
 _OUTLINE_RE = re.compile(
     r"^("
     r"\s*(?:def|class|async\s+def|fn|func|function|interface|type|impl|module|package)\b.*"
@@ -64,9 +60,8 @@ def main() -> int:
         print(_err(f"no such file: {args['path']}"))
         return 1
 
-    # P3: refuse to slurp a huge file. If the agent really wants the whole
-    # thing, it can window through it; this is a back-pressure signal, not a
-    # silent truncation.
+    # Back-pressure signal, not silent truncation — the agent can window
+    # through if it really needs the whole file.
     size = target.stat().st_size
     if size > READ_FILE_MAX_BYTES:
         print(_err(
@@ -92,7 +87,6 @@ def main() -> int:
         return 0
 
     if line_start is None and line_end is None:
-        # Back-compat: behave exactly like the pre-windowing tool.
         print(json.dumps({"path": rel_path, "content": raw}))
         return 0
 
@@ -104,8 +98,7 @@ def main() -> int:
     if end < start:
         print(_err(f"line_end ({end}) < line_start ({start})"))
         return 1
-    # Clamp to file bounds; asking for [1, 1_000_000] on a 50-line file is a
-    # reasonable "read to EOF" gesture, not an error.
+    # [1, 1_000_000] on a 50-line file is "read to EOF", not an error.
     end = min(end, total)
     if start > total:
         content = ""

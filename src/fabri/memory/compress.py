@@ -1,13 +1,6 @@
-"""Memory-side LLM helpers: compress a failure/success summary into one short
-guideline, with a hard token-cap backstop.
-
-Tokenizer choice (TODO.md fix): model-aware encoding instead of the historical
-hard-coded `cl100k_base`. For OpenAI gpt-4o and Claude 4.x we use `o200k_base`
-(closer to both tokenizers than cl100k); for unknown models we fall back to
-`cl100k_base` and log once. The cap is a backstop — we now truncate at a
-*word boundary* and append "..." rather than slicing mid-token, so a
-guideline never ends in a meaningless half-syllable.
-"""
+"""Memory-side LLM helpers: compress a failure/success summary into one
+short guideline, with a hard token-cap backstop. Truncates at a word
+boundary so a guideline never ends mid-syllable."""
 import logging
 import tiktoken
 
@@ -17,10 +10,9 @@ DEFAULT_MAX_TOKENS = 30
 
 _logger = logging.getLogger("fabri.memory")
 
-# Anthropic doesn't publish a public Claude tokenizer; o200k_base is the best
-# tiktoken approximation per several open comparisons. The error vs the real
-# Claude tokenizer is ~10-15% on plain English. Good enough for a max-tokens
-# backstop.
+# Anthropic doesn't publish a public Claude tokenizer; o200k_base is the
+# best tiktoken approximation (~10-15% off vs the real Claude tokenizer
+# on plain English). Good enough for a max-tokens backstop.
 _ENCODING_FOR_MODEL = {
     "gpt-4o": "o200k_base",
     "gpt-4o-mini": "o200k_base",
@@ -61,9 +53,7 @@ def _encoding_for(model: str | None) -> tiktoken.Encoding:
     return cached
 
 
-# Back-compat: ENCODING used to be a module-level constant. Some external
-# callers (and a small number of tests) import it directly. Keep it pointing
-# at the cl100k default so the public surface doesn't break.
+# Back-compat: ENCODING was a module-level constant some callers import.
 ENCODING = tiktoken.get_encoding(_DEFAULT_ENCODING)
 
 
@@ -76,20 +66,15 @@ def enforce_token_cap(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str | None = None,
 ) -> str:
-    """Hard backstop: truncate to max_tokens regardless of what the LLM returned,
-    so a verbose synthesis never silently bloats the memory store.
-
-    TODO.md hardening: cuts now respect word boundaries — the historical
-    cl100k slice could produce nonsense mid-token endings.
-    """
+    """Hard backstop: truncate to max_tokens regardless of LLM output, so a
+    verbose synthesis can't silently bloat the memory store. Cuts respect
+    word boundaries — falls back to the raw slice if the window has no
+    whitespace at all (rather than returning an empty string)."""
     enc = _encoding_for(model)
     tokens = enc.encode(text)
     if len(tokens) <= max_tokens:
         return text
     decoded = enc.decode(tokens[:max_tokens])
-    # Step back to the previous whitespace so we don't cut mid-word. If the
-    # whole window is one solid token (no spaces), fall back to the raw slice
-    # rather than returning an empty string.
     rstripped = decoded.rstrip()
     if " " in rstripped:
         decoded = rstripped.rsplit(" ", 1)[0]
@@ -100,9 +85,9 @@ def synthesize_success_pattern(
     success_summary: str, llm: LLMBackend, max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str | None = None,
 ) -> str:
-    """A4: compress a successful run summary into a short reusable guideline.
+    """Compress a successful run summary into a short reusable guideline.
     Mirrors `synthesize_guideline` but framed as a 'what worked' pattern so
-    later retrieval can blend it alongside the failure-derived guidelines."""
+    retrieval can blend it alongside the failure-derived ones."""
     prompt = (
         "Summarize the following successful agent run as one short, generalized "
         f"guideline (max {max_tokens} tokens) capturing what worked and would "

@@ -1,15 +1,21 @@
 # fabri
 
+[![PyPI](https://img.shields.io/pypi/v/fabri.svg)](https://pypi.org/project/fabri/)
+[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/fabri.svg)](https://pypi.org/project/fabri/)
+
 Ever-evolving prompting and context engineering for LLM agents through
 active memory and result analysis.
 
 fabri is **source-available** under the [Business Source License
-1.1](LICENSE). You can install it from PyPI, build agents with it, and
-rely on the CLI and config surface. Individuals and organizations under
-US $1M in annual revenue can use it in production for free; larger
-organizations and anyone embedding fabri in a hosted/distributed product
-need a commercial license — see [COMMERCIAL.md](COMMERCIAL.md). Every
-version automatically converts to Apache 2.0 on 2030-06-23. The
+1.1](https://github.com/Rushour0/fabri/blob/main/LICENSE). You can
+install it from PyPI, build agents with it, and rely on the CLI and
+config surface. Individuals and organizations under US $1M in annual
+revenue can use it in production for free; larger organizations and
+anyone embedding fabri in a hosted/distributed product need a commercial
+license — see
+[COMMERCIAL.md](https://github.com/Rushour0/fabri/blob/main/COMMERCIAL.md).
+Every version automatically converts to Apache 2.0 on 2030-06-23. The
 internals and the direction of the project are not open for
 contribution.
 
@@ -190,6 +196,14 @@ tools:
   decompose:
     enabled: false               # turn on for research-shaped tasks
     max_subquestions: 5
+  mcp_servers:                   # optional: pull tools from MCP servers
+    - name: fs                   # stdio transport
+      command: ["npx", "@modelcontextprotocol/server-filesystem", "/srv/data"]
+    - name: web                  # http transport
+      url: "https://mcp.example.com/jsonrpc"
+      headers: {Authorization: "Bearer ..."}
+  # Remote tools are wrapped as `mcp_<server>_<remote_tool>`. A server
+  # that fails to start is logged and skipped, not fatal.
 
 memory:
   collection: my_fabri           # separate Qdrant collection per agent
@@ -282,12 +296,26 @@ result = run_agent(
 )
 ```
 
+To skip Qdrant entirely, swap the store for the in-process sqlite-vec
+backend — same interface, no other code changes:
+
+```python
+from fabri import SqliteMemoryStore
+
+store = SqliteMemoryStore(
+    path=".fabri/memory.db",
+    collection=config["memory"]["collection"],
+)
+```
+
 ## License
 
-[Business Source License 1.1](LICENSE) © Rushikesh Patade. Free for
-individuals and organizations under US $1M in annual revenue; commercial
-license required above that or for hosted/embedded redistribution — see
-[COMMERCIAL.md](COMMERCIAL.md). Auto-converts to
+[Business Source License 1.1](https://github.com/Rushour0/fabri/blob/main/LICENSE)
+© Rushikesh Patade. Free for individuals and organizations under US $1M
+in annual revenue; commercial license required above that or for
+hosted/embedded redistribution — see
+[COMMERCIAL.md](https://github.com/Rushour0/fabri/blob/main/COMMERCIAL.md).
+Auto-converts to
 [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) on 2030-06-23.
 Not open for contribution.
 

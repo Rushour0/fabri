@@ -4,6 +4,60 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.6 — 2026-06-23
+
+The "public source release" pass. No agent-loop semantics change; no
+config-shape change; no memory schema migration. A host service that
+uses fabri as a library needs zero changes.
+
+### Added
+
+- **`SqliteMemoryStore` re-exported from `fabri`** — `from fabri import
+  SqliteMemoryStore` now works alongside `QdrantMemoryStore`, matching
+  the in-process backend that `pip install 'fabri[sqlite]'` promotes.
+  The library example in the README and `docs/creating-an-agent.md`
+  picks it up; existing code keeps working unchanged.
+- **`ToolHandler` type alias** in `tools/registry.py` for callable-backed
+  tools; tightens the type hints around `register_callable()` (was
+  previously `dict[str, "callable"]`, a stringified built-in).
+
+### Changed — docs & READMEs
+
+- **README licence + PyPI links rewritten as absolute GitHub URLs** so
+  they resolve on the rendered PyPI page (previously relative paths
+  404'd outside the repo). Added BUSL-1.1 / PyPI / Python-version
+  badges.
+- **MCP-servers documented in the config-schema section** of the README.
+  The feature has shipped since v0.7.2; it was previously discoverable
+  only by reading `config.py`.
+- **TODO.md P3 backlog cleaned up** — the items marked open in v0.7.1's
+  hardening pass (read_file/edit_file byte cap, decompose fence strip,
+  admin gate warning, reserved decompose name, embed() empty/whitespace
+  reject, OpenAI parallel-tool-call) are now correctly checked off, each
+  with a `_(v0.7.1)_` annotation.
+
+### Changed — code comments
+
+- **Internal ticket-prefix comments (`# G9`, `# A1`, `# S2`, `# P3`,
+  `# F2`, ...) stripped or rewritten as plain English** across
+  `config.py`, `core/agent.py`, `cli.py`, `runtime.py`,
+  `orchestrator/retrieval.py`, `tools/registry.py`,
+  `tools/agent_runner_tool.py`, `tools/examples/read_file.py`,
+  `memory/store.py`, `memory/compress.py`. Internal-tracker shorthand
+  meant nothing to anyone outside the project. The few comments that
+  carried genuine WHY (tool-filter invariants, A4 dedup semantics,
+  tokenizer-approximation note, provider-quirk fallbacks) survive
+  verbatim.
+- **Narrative WHAT-blocks collapsed** in `core/agent.py` (system-prompt
+  policy block, cost-rollup, sub-agent telemetry) and `config.py`
+  (DEFAULT_CONFIG inline narration). Behaviour unchanged; the modules
+  read in one screen instead of three.
+
+### Tests
+
+- Suite stays green at 449 passing. Comment-only edits and the
+  `SqliteMemoryStore` re-export don't touch observable behaviour.
+
 ## v0.7.5 — 2026-06-23
 
 The "host-integration ergonomics" release. Three host-integration pain

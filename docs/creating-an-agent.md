@@ -188,6 +188,17 @@ result = run_agent("do the task", llm, tools, store, max_steps=config["agent"]["
 `build_tools`/`build_llm`/`build_tool_defs` are the same helpers `cli.py` uses,
 so a programmatic agent behaves identically to the CLI one.
 
+To skip Qdrant and run with the in-process sqlite-vec backend instead — same
+interface, no other code changes:
+
+```python
+from fabri import SqliteMemoryStore
+
+store = SqliteMemoryStore(
+    path=".fabri/memory.db", collection=config["memory"]["collection"]
+)
+```
+
 ## 6. Worked example: a content-authoring agent for a game project
 
 `ludexel` (a GBA game) wires this framework up as a story/content authoring

@@ -85,15 +85,14 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 
 ## P3 — hardening & nits
 
-- [ ] `read_file.py`/`edit_file.py`: cap bytes read (other tools already cap).
-- [ ] `core/decompose.py:21`: strip ```` ``` ```` fences before `json.loads`.
-- [ ] `core/agent.py:69`: reserve/namespace the `decompose` tool name.
-- [ ] `core/llm.py:133`: OpenAI takes only the first tool call (parallel-call
-  truncation, mirrors Anthropic).
+- [x] `read_file.py`/`edit_file.py`: cap bytes read (other tools already cap). _(v0.7.1: 1 MB cap with outline_only / line-window hint.)_
+- [x] `core/decompose.py:21`: strip ```` ``` ```` fences before `json.loads`. _(v0.7.1.)_
+- [x] `core/agent.py:69`: reserve/namespace the `decompose` tool name. _(v0.7.1: `build_tools` refuses a registry containing one.)_
+- [x] `core/llm.py:133`: OpenAI parallel-tool-call truncation. _(Already fixed; TODO was stale — see v0.7.1 changelog.)_
 - [ ] `memory/pruning.py`: confirm `evict_stale` is reachable/useful — it may be
   effectively dead given how `hit_count` grows with promotion.
-- [ ] `memory/embeddings.py:16`: reject empty/whitespace text before embedding.
-- [ ] `admin.py:20`: open-by-default admin gate should at least log a warning.
+- [x] `memory/embeddings.py:16`: reject empty/whitespace text before embedding. _(v0.7.1.)_
+- [x] `admin.py:20`: open-by-default admin gate should at least log a warning. _(v0.7.1.)_
 - [ ] `tools/manifest_schema.py:23`: command-arg→absolute-path rewriting is
   over-eager (rewrites any token matching a sibling filename).
 

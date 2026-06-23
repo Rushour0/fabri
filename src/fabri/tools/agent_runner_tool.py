@@ -43,9 +43,8 @@ def main() -> int:
                         help="Path to a Unix socket the ask_user tool routes questions to (A1).")
     cli_args = parser.parse_args()
     if cli_args.ask_user_socket is not None:
-        # Tools inherit this via os.environ; the ToolRegistry's run_tool
-        # subprocess only sets extra_env for sandbox-root, so plain inheritance
-        # is enough -- no registry plumbing needed.
+        # Tools inherit this via os.environ; run_tool's extra_env only
+        # carries sandbox-root, so plain inheritance is enough here.
         os.environ["FABRI_ASK_USER_SOCKET"] = cli_args.ask_user_socket
     args = json.loads(sys.stdin.read())
     config = load_config(cli_args.config_path)
@@ -78,11 +77,10 @@ def main() -> int:
     mem_cfg = config["memory"]
     store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
 
-    # v0.7.5: when agent.subagent.{max_steps,max_cost_usd} is set, it
-    # overrides the parent budget for this child only. Falls back to the
-    # parent values when absent (back-compat). This is the runner entrypoint
-    # for spawn_subagent / agent_tool — i.e. it always runs as a sub-agent,
-    # so the override is unconditional here.
+    # agent.subagent.{max_steps,max_cost_usd} override the parent budget
+    # for this child only; absent fields fall back to the parent values.
+    # This entrypoint always runs as a sub-agent, so the override fires
+    # unconditionally here.
     subagent_cfg = config["agent"].get("subagent") or {}
     sub_max_steps = subagent_cfg.get("max_steps")
     if sub_max_steps is None:
@@ -106,15 +104,10 @@ def main() -> int:
         decompose_llm=build_decompose_llm(config),
         max_cost_usd=sub_max_cost,
     )
-    # Surface the sub-agent's session_id + trace path so a parent agent (or
-    # human reading the parent's trace) can pinpoint which JSONL to open when a
-    # sub-agent fails. The contract stays additive: existing readers that only
-    # look at final_text/outcome are unaffected.
-    # `usage` carries the child's token totals AND its `total_cost_usd` (own
-    # tokens + any grandchildren). The parent's dispatch loop reads
-    # total_cost_usd to roll this whole subtree into its own COGS -- without it
-    # the parent only ever sees the orchestrator's tokens and undercounts a
-    # fan-out build by the entire sub-agent cost.
+    # Surface session_id + trace path so a parent agent / human reader can
+    # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`
+    # carries own tokens + grandchildren; the parent's dispatch loop reads
+    # it to roll this subtree into its own COGS.
     print(json.dumps({
         "final_text": result["final_text"],
         "outcome": result["outcome"],

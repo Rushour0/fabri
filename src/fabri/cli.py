@@ -128,19 +128,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         tool_retrieval_always_include=tuple(
             tools_cfg.get("retrieval", {}).get("always_include", [])
         ),
-        # G9: cost-budget enforcement (opt-in via config; None = no budget)
         max_cost_usd=config["agent"].get("max_cost_usd"),
     )
     print(json.dumps(result, indent=2))
-    # An LLM-error / max-steps / no-final outcome must surface to the
-    # process exit code -- host services dispatch on `fabri run`'s
-    # returncode to decide whether to record a run as succeeded. Without
-    # this, an Anthropic rate-limit failure still exits 0 and downstream
-    # ledgers (e.g. ludexel's `runs` collection) mark the run succeeded
-    # despite having no final_text.
+    # Surface a non-success outcome via exit code — host services dispatch
+    # on `fabri run`'s returncode. Without this, a rate-limit failure exits
+    # 0 and downstream ledgers mark the run succeeded.
+    # BUDGET_EXCEEDED is a deliberate halt, not a SUCCESS — it flows into
+    # the failure branch below via the outcome check.
     success_outcomes = {Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value}
-    # G9: BUDGET_EXCEEDED is a deliberate user-requested halt, not a SUCCESS,
-    # so it falls into the run_failed branch via the outcome check below.
     run_failed = not result.get("success") or result.get("outcome") not in success_outcomes
 
     compress_llm = build_llm(config, [])
@@ -675,8 +671,7 @@ def main() -> None:
     p_inspect.add_argument("--top-k", dest="top_k", type=int, default=5)
     p_inspect.set_defaults(func=cmd_inspect_memory)
 
-    # G2: `fabri memory show / list` — listing/inspection of guidelines.
-    p_mem = sub.add_parser("memory", help="Show or list stored guidelines (G2)")
+    p_mem = sub.add_parser("memory", help="Show or list stored guidelines")
     mem_sub = p_mem.add_subparsers(dest="memory_command", required=True)
 
     p_mem_show = mem_sub.add_parser("show", help="Human-readable listing of guidelines")
@@ -692,23 +687,20 @@ def main() -> None:
     p_mem_list.add_argument("--limit", type=int, default=None)
     p_mem_list.set_defaults(func=cmd_memory_list)
 
-    # G3: `fabri memory diff <A> <B>` — what the agent learned between two sessions.
-    p_mem_diff = mem_sub.add_parser("diff", help="Compare guidelines between two sessions (G3)")
+    p_mem_diff = mem_sub.add_parser("diff", help="Compare guidelines between two sessions")
     p_mem_diff.add_argument("session_a", help="The earlier session id")
     p_mem_diff.add_argument("session_b", help="The later session id")
     p_mem_diff.add_argument("--markdown", action="store_true", help="Render as markdown")
     p_mem_diff.set_defaults(func=cmd_memory_diff)
 
-    # G5: `fabri replay <session>` — re-run the task with current memory.
-    p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state (G5)")
+    p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
     p_replay.add_argument("session_id")
     p_replay.set_defaults(func=cmd_replay)
 
-    # G14: `fabri tool init <lang> <name>` — scaffold a new tool in any language.
     p_tool = sub.add_parser("tool", help="Tool-related helpers (scaffold a new tool)")
     tool_sub = p_tool.add_subparsers(dest="tool_command", required=True)
 
-    p_tool_init = tool_sub.add_parser("init", help="Scaffold a new tool (G14)")
+    p_tool_init = tool_sub.add_parser("init", help="Scaffold a new tool")
     p_tool_init.add_argument("language", choices=SUPPORTED_LANGUAGES,
                              help="Language of the new tool's executable")
     p_tool_init.add_argument("name", help="Tool name (alphanumeric + underscore)")
@@ -718,8 +710,7 @@ def main() -> None:
                              help="Overwrite existing files")
     p_tool_init.set_defaults(func=cmd_tool_init)
 
-    # G6/G7/G8/G20: `fabri report` — usage report across recent sessions.
-    p_report = sub.add_parser("report", help="Aggregate cost/outcome across recent sessions (G6)")
+    p_report = sub.add_parser("report", help="Aggregate cost/outcome across recent sessions")
     p_report.add_argument("--since", default=None,
                           help="Only sessions in the last X (e.g. 7d, 24h, 30m). Default: all.")
     p_report.add_argument("--limit", type=int, default=None,
@@ -730,8 +721,8 @@ def main() -> None:
                           help="Write to this file instead of stdout (always used with --format html).")
     p_report.set_defaults(func=cmd_report)
 
-    # admin: config/dashboard inspection. Gated by require_admin() -- a stub
-    # shared-secret check (FABRI_ADMIN_TOKEN), not real auth. See admin.py.
+    # Gated by require_admin() — stub shared-secret check (FABRI_ADMIN_TOKEN),
+    # not real auth. See admin.py.
     p_admin = sub.add_parser("admin", help="Admin-only: inspect a config and its resolved tools/memory")
     p_admin.add_argument("--admin-token", dest="admin_token", default=None)
     admin_sub = p_admin.add_subparsers(dest="admin_command", required=True)

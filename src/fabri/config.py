@@ -15,40 +15,32 @@ DEFAULT_CONFIG = {
     "agent": {
         "name": "default",
         "max_steps": 10,
-        # G9: cost-budget enforcement. When set, the run breaks out with
+        # None = no budget. When set, the run breaks out with
         # Outcome.BUDGET_EXCEEDED before issuing an LLM call whose result
-        # would carry total COGS over this threshold. None = no budget (the
-        # historical default; existing configs keep working unchanged).
+        # would push total COGS past this threshold.
         "max_cost_usd": None,
-        # If `system_prompt` is set, it REPLACES the framework's generic
-        # boilerplate ("You are an autonomous agent..."). If `system_prompt_prefix`
-        # is set, it is prepended to whatever follows. Both empty = original
-        # behavior. Consuming projects use these to inject domain-specific
-        # identity, format contracts, few-shots, etc.
+        # If set, REPLACES the framework's generic "You are an autonomous
+        # agent..." boilerplate. `system_prompt_prefix` is prepended to
+        # whatever follows.
         "system_prompt": "",
         "system_prompt_prefix": "",
-        # Format the model is asked to PRODUCE structured output in (decompose).
-        # "json" is the reliable default; "toon" is opt-in (always json-fallback).
-        # Native tool-call arguments are always provider JSON regardless.
+        # Format the model is asked to PRODUCE structured output in
+        # (decompose). Native tool-call arguments are always provider JSON
+        # regardless. "toon" is opt-in with json fallback.
         "output_format": "json",
-        # A2: planner/executor split. `off` (default) keeps the historical
-        # single-loop behaviour. `auto` runs the planner only on tasks long
-        # enough to benefit. `force` always runs it. `model` overrides which
-        # LLM does the plan call; falls back to llm.decompose_model, then
-        # the main llm.
+        # Planner/executor split. `off` keeps the single-loop behaviour;
+        # `auto` runs the planner only on tasks long enough to benefit;
+        # `force` always runs it.
         "planner": {
             "enabled": False,
             "mode": "off",
             "max_items": 8,
             "auto_token_threshold": 80,
         },
-        # Independent budget for spawned sub-agents (agent_runner_tool.py).
-        # When a field here is non-None, it overrides agent.max_steps /
-        # agent.max_cost_usd for children only — so a host that raises the
-        # orchestrator's step budget to give a fan-out room doesn't
-        # accidentally let every child loop on the same inflated budget.
-        # Both None (the default) preserves pre-v0.7.5 behaviour: children
-        # inherit the parent config's agent.max_steps / agent.max_cost_usd.
+        # Independent budget for spawned sub-agents. Each non-None field
+        # overrides agent.max_steps / agent.max_cost_usd for children only,
+        # so a fan-out doesn't let every child loop on the parent's inflated
+        # budget. Both None: children inherit the parent's agent.* values.
         "subagent": {
             "max_steps": None,
             "max_cost_usd": None,
@@ -59,44 +51,39 @@ DEFAULT_CONFIG = {
         "model": "claude-sonnet-4-6",
         "max_tokens": 1024,
         "api_key_env": "ANTHROPIC_API_KEY",
-        # G21: opt-in extended prompt caching. When true, marks the last
-        # message's tail block with cache_control so the conversation history
-        # prefix reads from Anthropic's 5-min ephemeral cache on the next
-        # turn (~0.1x input bill on the cached prefix). Default off; turn
-        # on for multi-step runs that re-send a long context.
+        # Opt-in extended prompt caching. When true, marks the last
+        # message's tail block with cache_control so the history prefix
+        # reads from Anthropic's 5-min ephemeral cache on the next turn
+        # (~0.1x input bill on the cached prefix).
         "cache_messages": False,
     },
     "tools": {
         "manifest_dir": str(DEFAULT_TOOLS_DIR),
         "enabled": None,
         "sandbox_root": ".",
-        "agents": [],  # other agent.yaml configs exposed as tools -- see tools/agent_tool.py
-        # How tool results are serialized INTO the model's context. "toon" (default)
-        # saves input tokens; the framework encodes this end, so there's no model
-        # reliability risk. Set "json" to opt out.
+        "agents": [],
+        # How tool results are serialized INTO the model's context. "toon"
+        # saves input tokens; the framework encodes this end so there's no
+        # model reliability risk. "json" to opt out.
         "result_format": "toon",
         "decompose": {"enabled": False, "max_subquestions": DEFAULT_MAX_SUBQUESTIONS},
-        # A1: narrow the system prompt + provider tool list to a task-relevant
-        # subset via cosine similarity against each tool's description. Default
-        # off for back-compat. `always_include` lists tools the orchestrator
-        # prompt assumes exist regardless of how the task is worded
-        # (`spawn_subagent`, `ask_user`, `decompose`).
+        # Narrow the system prompt + provider tool list to a task-relevant
+        # subset via cosine similarity against each tool's description.
+        # `always_include` lists tools the orchestrator prompt assumes exist
+        # regardless of how the task is worded.
         "retrieval": {
             "enabled": False,
             "top_k": 6,
             "always_include": ["spawn_subagent", "ask_user", "decompose"],
         },
-        # G19: MCP servers — each entry is connected at agent-build time and
-        # its tools are wrapped as fabri tools with names prefixed by the
-        # server name (mcp_<server>_<remote_tool>). Connection failures are
-        # logged + skipped, not fatal. Default empty list = MCP disabled.
+        # Each entry is connected at agent-build time and its tools are
+        # wrapped as fabri tools named `mcp_<server>_<remote_tool>`.
+        # Connection failures are logged and skipped, not fatal.
         "mcp_servers": [],
     },
     "memory": {
-        # G16: backend selector. "qdrant" (default, networked) or "sqlite" (in-process,
-        # file-backed, no docker required). The two are interchangeable from the
-        # agent's perspective. Use sqlite for demos/dev/CI; qdrant when multiple
-        # processes share a memory store or at production scale.
+        # "qdrant" (networked) or "sqlite" (in-process, file-backed, no
+        # docker). The two are interchangeable from the agent's perspective.
         "backend": "qdrant",
         "collection": COLLECTION_NAME,
         "qdrant_url": "http://localhost:6333",
@@ -121,9 +108,8 @@ def _deep_merge(base: dict, override: dict, *, path: str = "") -> dict:
         here = f"{path}.{key}" if path else key
         base_val = merged.get(key)
         if isinstance(base_val, dict):
-            # Refuse to silently drop a whole subtree because the user wrote a
-            # scalar where a dict belongs. The pre-fix behavior overwrote and
-            # surfaced as a KeyError several layers deeper, which is opaque.
+            # Refuse a scalar overriding a dict — silently dropping the
+            # subtree surfaces as an opaque KeyError several layers deeper.
             if not isinstance(value, dict):
                 raise ConfigError(
                     f"config key {here!r} must be a mapping (got {type(value).__name__}); "
@@ -136,15 +122,10 @@ def _deep_merge(base: dict, override: dict, *, path: str = "") -> dict:
 
 
 def _apply_env_overrides(cfg: dict) -> dict:
-    """12-factor / container override: when `QDRANT_URL` is set in the
-    environment it WINS over the yaml's `memory.qdrant_url`. A host (e.g. ludexel
-    in Docker) sets QDRANT_URL on the service container; every fabri process it
-    spawns -- the orchestrator, the spawn_subagent tool, and child sub-agents --
-    inherits that env, so the reachable qdrant address (`qdrant:6333`) propagates
-    across the subprocess boundary without having to rewrite each on-disk yaml.
-    Without this, a child loading the repo yaml (`localhost:6333`) dies on
-    connect in-container. Returns a config that never mutates the shared
-    DEFAULT_CONFIG."""
+    """`QDRANT_URL` env var, if set, overrides `memory.qdrant_url` so a
+    container host can propagate the in-cluster address (`qdrant:6333`)
+    across the subprocess boundary without rewriting each on-disk yaml.
+    Never mutates the shared DEFAULT_CONFIG."""
     url = os.environ.get("QDRANT_URL")
     if not url:
         return cfg

@@ -22,16 +22,11 @@ class QdrantMemoryStore:
             )
             return
 
-        # Existing collection: verify it matches the current embedding model's
-        # dimension + distance. A mismatch (someone swapped the embedding model,
-        # or pointed at a collection from a different project) would otherwise
-        # surface as an opaque Qdrant error on upsert or, worse, return garbage
-        # neighbors from an incompatible vector space.
+        # Verify the existing collection matches the current embedding
+        # model. A mismatch would surface as an opaque Qdrant upsert error or
+        # (worse) return garbage neighbors from an incompatible vector space.
         info = self.client.get_collection(self.collection)
         params = info.config.params.vectors
-        # Qdrant returns either a VectorParams (single unnamed vector) or a
-        # dict of named ones. We use the single-vector shape, so this is a
-        # config error if it's anything else.
         if not isinstance(params, qmodels.VectorParams):
             raise RuntimeError(
                 f"collection {self.collection!r} uses named vectors; fabri expects a single "
@@ -99,9 +94,9 @@ class QdrantMemoryStore:
     def find_similar(
         self, text: str, threshold: float = 0.85, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
-        # kind=None searches every entry regardless of tactical/strategic, so a
-        # recurrence of an already-promoted guideline still matches its
-        # strategic entry instead of being re-inserted as a fresh tactical dup.
+        # kind=None searches across tactical+strategic so a recurrence of an
+        # already-promoted guideline matches its strategic entry instead of
+        # being re-inserted as a fresh tactical dup.
         results = self.query(text, top_k=1, kind=kind)
         if results and results[0][1] >= threshold:
             return results[0]
@@ -124,9 +119,8 @@ class QdrantMemoryStore:
     def iterate(
         self, kind: str | None = None, limit: int | None = None
     ) -> list[MemoryEntry]:
-        """G2: stream every entry (optionally filtered by kind) so `fabri
-        memory show` can list what's in the store. Uses Qdrant's scroll API
-        rather than search to avoid embedding cost — the caller already knows
+        """Stream every entry (optionally filtered by kind) via Qdrant's
+        scroll API, avoiding embedding cost — the caller already knows
         what they want."""
         query_filter = None
         if kind is not None:
@@ -134,8 +128,6 @@ class QdrantMemoryStore:
                 must=[qmodels.FieldCondition(key="kind", match=qmodels.MatchValue(value=kind))]
             )
         out: list[MemoryEntry] = []
-        # `scroll` paginates by an opaque offset; loop until the server stops
-        # returning a next-page token (or we hit `limit`).
         offset = None
         page_size = 128
         while True:
