@@ -2,7 +2,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
 from fabri.memory.embeddings import EMBEDDING_DIM, embed
-from fabri.memory.schema import MemoryEntry
+from fabri.memory.schema import EMBEDDING_MODEL_VERSION, MemoryEntry
 
 COLLECTION_NAME = "fabri"
 
@@ -43,6 +43,25 @@ class QdrantMemoryStore:
                 f"collection {self.collection!r} uses distance {params.distance}, but fabri "
                 f"expects cosine. Recreate the collection or use a different one."
             )
+
+        # Embedding-model fingerprint check: same vector size + cosine doesn't
+        # guarantee the same embedding space. A 384-dim collection produced by
+        # a different model would silently return garbage neighbors. Probe one
+        # existing point's payload for model_version; mismatch -> hard fail.
+        points, _ = self.client.scroll(
+            collection_name=self.collection,
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if points:
+            stored = points[0].payload.get("model_version")
+            if stored and stored != EMBEDDING_MODEL_VERSION:
+                raise RuntimeError(
+                    f"collection {self.collection!r} was written with embedding model "
+                    f"{stored!r}, but fabri is now using {EMBEDDING_MODEL_VERSION!r}. "
+                    f"Recreate the collection or set memory.collection to a fresh name."
+                )
 
     def upsert(self, entry: MemoryEntry) -> str:
         vector = embed(entry.text)

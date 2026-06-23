@@ -13,7 +13,7 @@ from fabri.core.agent import run_agent
 from fabri.core.outcome import Outcome
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.traces import trace_path
-from fabri.runtime import build_decompose_llm, build_llm, build_tool_defs, build_tools
+from fabri.runtime import build_decompose_llm, build_llm, build_narrator_llm, build_tool_defs, build_tools
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -103,6 +103,7 @@ def main() -> int:
         output_format=config["agent"].get("output_format", "json"),
         decompose_llm=build_decompose_llm(config),
         max_cost_usd=sub_max_cost,
+        narrator_llm=build_narrator_llm(config),
     )
     # Surface session_id + trace path so a parent agent / human reader can
     # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`

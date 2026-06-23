@@ -13,6 +13,7 @@ from fabri.core.outcome import Outcome
 from fabri.orchestrator.pipeline import process_trace
 from fabri.runtime import (
     build_decompose_llm,
+    build_narrator_llm,
     build_llm,
     build_memory_store,
     build_tool_defs,
@@ -129,6 +130,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             tools_cfg.get("retrieval", {}).get("always_include", [])
         ),
         max_cost_usd=config["agent"].get("max_cost_usd"),
+        narrator_llm=build_narrator_llm(config),
     )
     print(json.dumps(result, indent=2))
     # Surface a non-success outcome via exit code — host services dispatch
@@ -352,6 +354,7 @@ def cmd_replay(args: argparse.Namespace) -> None:
         result_format=tools_cfg.get("result_format", "toon"),
         output_format=config["agent"].get("output_format", "json"),
         decompose_llm=build_decompose_llm(config),
+        narrator_llm=build_narrator_llm(config),
     )
     new_summary = {
         "outcome": result.get("outcome", "?"),

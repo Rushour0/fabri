@@ -56,6 +56,18 @@ DEFAULT_CONFIG = {
         # reads from Anthropic's 5-min ephemeral cache on the next turn
         # (~0.1x input bill on the cached prefix).
         "cache_messages": False,
+        # Cheap-model backend used to generate short user-facing status
+        # updates between steps -- "Reading config.py", "Spawned 2 sub-agents",
+        # etc. Emitted as `narration` trace events alongside step machinery so
+        # a host UI can stream them. Defaults to Haiku because at <100 tokens
+        # per update it's effectively free; set to None (yaml: `null`) to
+        # silence narration. An OpenAI provider can override with e.g.
+        # `gpt-4o-mini`. The narrator never participates in the agent's
+        # decisions -- it only describes what just happened.
+        "narrator_model": "claude-haiku-4-5",
+        # Max tokens for one narration string. Kept tiny on purpose -- the
+        # whole point is short status lines, not paragraphs.
+        "narrator_max_tokens": 60,
     },
     "tools": {
         "manifest_dir": str(DEFAULT_TOOLS_DIR),

@@ -86,22 +86,3 @@ def ingest_guideline(
         logger.debug("inserted new %s guideline: %r tools=%s", kind, entry.text, entry.tools)
         store.upsert(entry)
         return entry
-
-
-def evict_stale(store: QdrantMemoryStore, min_hit_count: int = 1) -> int:
-    """Remove strategic entries that never proved useful. Intended to run
-    periodically (e.g. a maintenance cron), not on every ingest."""
-    removed = 0
-    offset = None
-    while True:
-        points, offset = store.client.scroll(
-            collection_name=store.collection, limit=100, offset=offset
-        )
-        for p in points:
-            entry = MemoryEntry.from_payload(p.payload)
-            if entry.kind == "strategic" and entry.hit_count < min_hit_count:
-                store.delete(entry.id)
-                removed += 1
-        if offset is None:
-            break
-    return removed

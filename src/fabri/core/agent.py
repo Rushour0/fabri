@@ -152,6 +152,7 @@ def run_agent(
     tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K,
     tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
     max_cost_usd: float | None = None,
+    narrator_llm: LLMBackend | None = None,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -316,6 +317,62 @@ def run_agent(
                     return
             content.append({"type": "text", "text": _FINAL_STEP_NUDGE})
 
+    # State for the optional Haiku-class narrator. Holds the last emitted
+    # update so the next call can reference it and avoid repeating itself.
+    narration_state = {"last": None}
+
+    _NARRATOR_SYSTEM = (
+        "You are an agent's narrator. In one sentence (<= 12 words), tell the "
+        "user what the agent is doing right now. Active voice, present tense, "
+        "no preamble (no 'The agent is...'). Never repeat the previous update "
+        "verbatim. Plain text only -- no markdown, no quotes."
+    )
+
+    def _summarize_call_for_narrator(call: ToolCall) -> str:
+        # Trim args to keep the narrator prompt small. The narrator doesn't
+        # need full payloads, just enough to pick a verb.
+        args = call.args or {}
+        snippet = json.dumps(args, default=str)
+        if len(snippet) > 160:
+            snippet = snippet[:160] + "..."
+        return f"{call.name}({snippet})"
+
+    def _emit_narration(calls: list[ToolCall] | None, step: int, kind: str) -> None:
+        if narrator_llm is None:
+            return
+        try:
+            if calls:
+                tool_lines = "\n".join(f"- {_summarize_call_for_narrator(c)}" for c in calls)
+                user = (
+                    f"Task: {task[:200]}\n"
+                    f"Previous update: {narration_state['last'] or '(none)'}\n"
+                    f"Step {step} just dispatched these tools:\n{tool_lines}\n"
+                    f"Tell the user what the agent is doing now."
+                )
+            else:
+                user = (
+                    f"Task: {task[:200]}\n"
+                    f"Previous update: {narration_state['last'] or '(none)'}\n"
+                    f"Trigger: {kind}\n"
+                    f"Tell the user what the agent is doing now."
+                )
+            resp = narrator_llm.step(_NARRATOR_SYSTEM, [{"role": "user", "content": user}])
+            text = (resp.final_text or "").strip()
+            if not text:
+                return
+            if text == narration_state["last"]:
+                return
+            narration_state["last"] = text
+            _accumulate(resp.usage)
+            log_event(session_id, {
+                "type": EventType.NARRATION.value,
+                "step": step,
+                "text": text,
+                "trigger": kind,
+            })
+        except Exception as e:  # narration is best-effort; never break the run
+            logger.debug("narrator skipped (%s): %s", type(e).__name__, e)
+
     def _emit_thought(thinking_text: str | None, step: int) -> None:
         # Whitespace-only thinking is dropped upstream by LLMResponse.
         if thinking_text:
@@ -368,6 +425,7 @@ def run_agent(
                 _track_last_text(response)
                 if response.tool_calls:
                     _emit_thought(response.thinking_text, global_step)
+                    _emit_narration(response.tool_calls, global_step, "tools")
                     step_had_failure = _dispatch_tool_calls(
                         response.tool_calls, tools, decompose_llm or llm, item_task, max_subquestions,
                         session_id, item_messages, global_step, result_format, output_format,
@@ -558,6 +616,7 @@ def run_agent(
                 # Emit reasoning BEFORE tool_call events so trace readers see
                 # "Let me check X first..." preceding the tool that checks it.
                 _emit_thought(response.thinking_text, step_num)
+                _emit_narration(response.tool_calls, step_num, "tools")
                 step_had_failure = _dispatch_tool_calls(
                     response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
                     session_id, messages, step_num, result_format, output_format,

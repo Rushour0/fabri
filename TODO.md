@@ -44,6 +44,20 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 
 ## P2 — integrity & robustness
 
+- [ ] **Postmortem-to-qdrant: failure pattern memory** (requested by ludexel
+  2026-06-24). Today's qdrant write path indexes *successful* run summaries
+  (orchestrator's `TASK: … VALIDATION: pass` block) — but the heavy
+  token cost comes from runs that took 6+ retries to converge on the
+  same fix. Push to qdrant on EVERY run regardless of outcome:
+  `{task, errors[], retry_count, tool_calls_total, final_diff, fix_pattern}`.
+  Retrieve at planning time matched by (current task description) AND
+  (predicted error kind from the user prompt or first tool failure). The
+  agent gets "you tried X 3 times last week, that loop's a sceneregistry
+  orphan — delete the file first" as a single line in context, instead of
+  rediscovering the playbook. Hard part: extracting `fix_pattern` from a
+  noisy transcript — start with the diff between the failure point and
+  the successful end-state.
+
 - [x] **Non-atomic ingest → lost updates.** `memory/pruning.py`. The
   find_similar→update→upsert critical section now runs under a per-collection
   `fcntl` flock at `.fabri/locks/<collection>.ingest.lock` (`_collection_lock`).
@@ -51,10 +65,10 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
   On an existing collection, asserts `VectorParams.size == EMBEDDING_DIM` and
   `distance == COSINE`, raising a clear message naming the collection on
   mismatch instead of an opaque Qdrant upsert error.
-- [ ] **`model_version` stored but never enforced.** `memory/schema.py:18` +
-  `memory/embeddings.py`. Swapping the embedding model silently mixes embedding
-  spaces in one collection. → Namespace collection by model version or
-  reject/migrate on mismatch.
+- [x] **`model_version` stored but never enforced.** `memory/store.py:_ensure_collection`
+  now scrolls one existing point and raises if its payload `model_version`
+  differs from `EMBEDDING_MODEL_VERSION` — fail-fast with a recreate-or-rename
+  message instead of silently mixing embedding spaces.
 - [x] **`build_tools` mutates global `os.environ`.** `runtime.py` +
   `tools/registry.py` + `tools/runner.py`. Sandbox root is stored on the
   `ToolRegistry` and passed via `subprocess.Popen(env=...)` per invocation;
@@ -78,10 +92,11 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
   `INCOMPLETE_WITH_TOOL_FAILURE` outcome. (SUCCESS = "produced text" is
   still the documented contract; a real completion signal remains a future
   change.)
-- [ ] **Token cap uses the wrong tokenizer.** `memory/compress.py:5,19`.
-  `tiktoken cl100k_base` ≠ Claude/gpt-4o tokenizer; hard mid-clause truncation
-  can produce a meaningless guideline. → Use the model's encoding (OpenAI) /
-  document as approximate (Anthropic); prefer regenerating shorter over cutting.
+- [x] **Token cap uses the wrong tokenizer.** `memory/compress.py` now maps each
+  known model id to its tiktoken encoding (`o200k_base` for gpt-4o + Claude as
+  a documented approximation), tolerates date-suffixed ids via longest-prefix
+  match, warns once on unknown ids, and `enforce_token_cap` snaps to a word
+  boundary instead of mid-syllable.
 
 ## P3 — hardening & nits
 
@@ -89,12 +104,15 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 - [x] `core/decompose.py:21`: strip ```` ``` ```` fences before `json.loads`. _(v0.7.1.)_
 - [x] `core/agent.py:69`: reserve/namespace the `decompose` tool name. _(v0.7.1: `build_tools` refuses a registry containing one.)_
 - [x] `core/llm.py:133`: OpenAI parallel-tool-call truncation. _(Already fixed; TODO was stale — see v0.7.1 changelog.)_
-- [ ] `memory/pruning.py`: confirm `evict_stale` is reachable/useful — it may be
-  effectively dead given how `hit_count` grows with promotion.
+- [x] `memory/pruning.py`: `evict_stale` was dead (no callers, and a strategic
+  entry by definition has `hit_count ≥ promotion threshold` so the gate could
+  never fire). Removed.
 - [x] `memory/embeddings.py:16`: reject empty/whitespace text before embedding. _(v0.7.1.)_
 - [x] `admin.py:20`: open-by-default admin gate should at least log a warning. _(v0.7.1.)_
-- [ ] `tools/manifest_schema.py:23`: command-arg→absolute-path rewriting is
-  over-eager (rewrites any token matching a sibling filename).
+- [x] `tools/manifest_schema.py`: command-arg rewriting now gates on
+  path-shaped tokens only (script extension or contains `/`), so a `bash -c
+  "ls grep.py"` data arg no longer gets rewritten just because `grep.py`
+  exists next to the manifest. Bare execs and CLI flags still pass through.
 
 ## Test coverage to add
 

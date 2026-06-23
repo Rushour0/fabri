@@ -79,6 +79,62 @@ def build_llm(config: dict, tools_defs: list[dict], *, model_override: str | Non
     raise ValueError(f"unknown llm provider: {provider}")
 
 
+# Provider-specific cheap-tier defaults used when the user's configured
+# narrator_model doesn't match the agent's provider (e.g. an openai run that
+# inherits the global haiku default). Keeps "default to haiku" working without
+# blowing up on an openai-only setup.
+_NARRATOR_PROVIDER_DEFAULTS = {
+    "anthropic": "claude-haiku-4-5",
+    "openai": "gpt-4o-mini",
+}
+
+
+def _is_anthropic_model_id(model: str) -> bool:
+    return model.startswith("claude-")
+
+
+def _is_openai_model_id(model: str) -> bool:
+    return model.startswith(("gpt-", "o1-", "o3-", "o4-"))
+
+
+def build_narrator_llm(config: dict):
+    """Cheap backend used for short user-facing status updates between steps.
+    Defaults to a Haiku-class model so narration is essentially free; set
+    `llm.narrator_model: null` to silence it. If the configured narrator
+    model is for a different provider than the main run (e.g. haiku default
+    on an openai provider), falls back to that provider's cheap-tier default
+    rather than failing the build. No tool defs -- the narrator only
+    produces a plain string."""
+    llm_cfg = config["llm"]
+    narrator_model = llm_cfg.get("narrator_model")
+    if not narrator_model:
+        return None
+    provider = (llm_cfg.get("provider") or "anthropic").lower()
+    # Provider/model mismatch -> swap to the provider's cheap default.
+    mismatched = (
+        (provider == "openai" and _is_anthropic_model_id(narrator_model))
+        or (provider == "anthropic" and _is_openai_model_id(narrator_model))
+    )
+    if mismatched:
+        fallback = _NARRATOR_PROVIDER_DEFAULTS.get(provider)
+        if not fallback:
+            return None
+        narrator_model = fallback
+    max_tokens = int(llm_cfg.get("narrator_max_tokens") or 60)
+    cfg = {
+        **config,
+        "llm": {
+            **llm_cfg,
+            "model": narrator_model,
+            "max_tokens": max_tokens,
+            # The narrator's prompt is one-shot per call (not the agent's
+            # growing history) so message caching is wasted bytes.
+            "cache_messages": False,
+        },
+    }
+    return build_llm(cfg, [], model_override=narrator_model)
+
+
 def build_decompose_llm(config: dict):
     """Returns a separate LLM backend bound to `llm.decompose_model` so a
     Sonnet orchestrator can run decompose on Haiku. No tool defs — decompose
