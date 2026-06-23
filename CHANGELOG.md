@@ -4,47 +4,19 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
-## v0.5.1 — 2026-06-23
+## v0.6.0 — 2026-06-23
 
-Resilience: a single oversized turn no longer nukes a whole run, and qdrant
-reachability propagates across the subprocess boundary in containerized hosts.
-All changes additive/non-breaking.
+**License change: Apache-2.0 → Business Source License 1.1.** v0.6.0 and every
+later release is BSL-licensed; free for individuals and for organizations with
+≤ US $1M annual gross revenue, with a commercial license required above that
+or when embedding fabri into a hosted/distributed product. Every BSL version
+auto-converts to Apache 2.0 on **2030-06-23** (the Change Date). See
+[COMMERCIAL.md](COMMERCIAL.md) for who needs a license and how to get one.
+Versions ≤ 0.4.6 remain Apache-2.0. v0.5.0 and v0.5.1 were withdrawn from
+PyPI prior to general availability and are not supported; their functionality
+is rolled into this release.
 
-### Added
-
-- **Retry once on a `max_tokens` truncation before failing the run.** A single
-  content-heavy turn (e.g. writing several files at once) previously hard-failed
-  the entire multi-step run via `LLMError`. Both the Anthropic and OpenAI
-  backends now retry that one step once at a higher cap (`min(max_tokens * 2,
-  MAX_TOKENS_RETRY_CEILING)`, where the ceiling is 16000 — a non-streaming-safe
-  bound) before giving up. We still fail loud if even the retry truncates, and
-  never report a truncated answer as success. The discarded truncated attempt's
-  tokens are folded into the reported `LLMUsage` so per-run cost stays accurate.
-- **`QDRANT_URL` env override in `load_config`.** When `QDRANT_URL` is set in the
-  environment, it wins over `memory.qdrant_url` from the yaml. A containerized
-  host sets it once on the service; the orchestrator, the `spawn_subagent` tool,
-  and every spawned child sub-agent inherit the env, so the reachable qdrant
-  address (e.g. `qdrant:6333`) propagates across the subprocess boundary without
-  rewriting each on-disk config. Fixes child sub-agents dying on connect when
-  spawned with a `config_path` pointing at a repo yaml that still says
-  `localhost:6333` (unreachable in-container). Never mutates the shared
-  `DEFAULT_CONFIG`.
-
-### Tests
-
-- **+105 tests** (pricing edge cases, cost rollup across mixed/unknown models and
-  sub-agent subtrees, both LLM backends incl. truncation-retry / prewarm /
-  model-tagging / cache folding, the `QDRANT_URL` override, system-prompt
-  frugality gating, and `spawn_subagent` command plumbing). Suite 246 → 351.
-
-## v0.5.0 — 2026-06-23
-
-Per-run COGS (USD cost) with sub-agent rollup, a frugal-by-default base prompt,
-and cache pre-warming. All changes are additive/non-breaking: the `usage` event
-and `run_agent` return gained fields; existing token fields, tool contracts, and
-outcome semantics are unchanged.
-
-### Added
+### Added (carried from withdrawn v0.5.0)
 
 - **Per-run USD cost (COGS).** `LLMUsage` gained a `model` field (filled by both
   the Anthropic and OpenAI backends). New `fabri.pricing` module prices token
@@ -67,6 +39,26 @@ outcome semantics are unchanged.
   backends). Trims first-call latency; the cache-write itself is paid once
   either way, so fire it before a burst of same-prefix runs, not on a 24/7 loop.
 
+### Added (carried from withdrawn v0.5.1)
+
+- **Retry once on a `max_tokens` truncation before failing the run.** A single
+  content-heavy turn (e.g. writing several files at once) previously hard-failed
+  the entire multi-step run via `LLMError`. Both the Anthropic and OpenAI
+  backends now retry that one step once at a higher cap (`min(max_tokens * 2,
+  MAX_TOKENS_RETRY_CEILING)`, where the ceiling is 16000 — a non-streaming-safe
+  bound) before giving up. We still fail loud if even the retry truncates, and
+  never report a truncated answer as success. The discarded truncated attempt's
+  tokens are folded into the reported `LLMUsage` so per-run cost stays accurate.
+- **`QDRANT_URL` env override in `load_config`.** When `QDRANT_URL` is set in the
+  environment, it wins over `memory.qdrant_url` from the yaml. A containerized
+  host sets it once on the service; the orchestrator, the `spawn_subagent` tool,
+  and every spawned child sub-agent inherit the env, so the reachable qdrant
+  address (e.g. `qdrant:6333`) propagates across the subprocess boundary without
+  rewriting each on-disk config. Fixes child sub-agents dying on connect when
+  spawned with a `config_path` pointing at a repo yaml that still says
+  `localhost:6333` (unreachable in-container). Never mutates the shared
+  `DEFAULT_CONFIG`.
+
 ### Changed
 
 - **Frugal-by-default base prompt.** `DEFAULT_AGENT_IDENTITY` is now
@@ -82,6 +74,13 @@ outcome semantics are unchanged.
   ("EXPENSIVE … spawn ONLY when a subtask is independent, parallelizable, and
   too large for your own context") and to document the new `usage` return field
   whose `total_cost_usd` rolls the subtree's cost up to the parent.
+
+### Tests
+
+- **+105 tests** (pricing edge cases, cost rollup across mixed/unknown models and
+  sub-agent subtrees, both LLM backends incl. truncation-retry / prewarm /
+  model-tagging / cache folding, the `QDRANT_URL` override, system-prompt
+  frugality gating, and `spawn_subagent` command plumbing). Suite 246 → 351.
 
 ## v0.4.6 — 2026-06-22
 

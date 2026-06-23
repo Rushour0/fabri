@@ -1,11 +1,11 @@
 [project]
 name = "fabri"
-version = "0.5.1"
+version = "0.6.0"
 description = "Ever-evolving prompting and context engineering for LLM agents through active memory and result analysis."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "BUSL-1.1"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Rushikesh Patade", email = "pataderushikesh@gmail.com" }]
 keywords = [
     "llm", "agent", "agents", "memory", "anthropic", "claude", "openai",

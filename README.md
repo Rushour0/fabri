@@ -3,10 +3,15 @@
 Ever-evolving prompting and context engineering for LLM agents through
 active memory and result analysis.
 
-fabri is **not open source**, but it is **open for public use** as a
-package on PyPI. You can install it, build agents with it, and rely on
-the CLI and config surface. The internals and the direction of the
-project are not open for contribution.
+fabri is **source-available** under the [Business Source License
+1.1](LICENSE). You can install it from PyPI, build agents with it, and
+rely on the CLI and config surface. Individuals and organizations under
+US $1M in annual revenue can use it in production for free; larger
+organizations and anyone embedding fabri in a hosted/distributed product
+need a commercial license — see [COMMERCIAL.md](COMMERCIAL.md). Every
+version automatically converts to Apache 2.0 on 2030-06-23. The
+internals and the direction of the project are not open for
+contribution.
 
 ## Philosophy
 
@@ -267,5 +272,11 @@ result = run_agent(
 
 ## License
 
-[Apache-2.0](LICENSE) © Rushikesh Patade. Free to use. Not open for
-contribution.
+[Business Source License 1.1](LICENSE) © Rushikesh Patade. Free for
+individuals and organizations under US $1M in annual revenue; commercial
+license required above that or for hosted/embedded redistribution — see
+[COMMERCIAL.md](COMMERCIAL.md). Auto-converts to
+[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) on 2030-06-23.
+Not open for contribution.
+
+Versions ≤ 0.4.6 were released under Apache 2.0 and remain so.
