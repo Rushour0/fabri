@@ -120,3 +120,37 @@ class QdrantMemoryStore:
                 must=[qmodels.FieldCondition(key="kind", match=qmodels.MatchValue(value=kind))]
             )
         return self.client.count(collection_name=self.collection, count_filter=query_filter).count
+
+    def iterate(
+        self, kind: str | None = None, limit: int | None = None
+    ) -> list[MemoryEntry]:
+        """G2: stream every entry (optionally filtered by kind) so `fabri
+        memory show` can list what's in the store. Uses Qdrant's scroll API
+        rather than search to avoid embedding cost — the caller already knows
+        what they want."""
+        query_filter = None
+        if kind is not None:
+            query_filter = qmodels.Filter(
+                must=[qmodels.FieldCondition(key="kind", match=qmodels.MatchValue(value=kind))]
+            )
+        out: list[MemoryEntry] = []
+        # `scroll` paginates by an opaque offset; loop until the server stops
+        # returning a next-page token (or we hit `limit`).
+        offset = None
+        page_size = 128
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection,
+                scroll_filter=query_filter,
+                limit=page_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in points:
+                out.append(MemoryEntry.from_payload(p.payload))
+                if limit is not None and len(out) >= limit:
+                    return out
+            if offset is None:
+                break
+        return out

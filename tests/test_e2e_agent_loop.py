@@ -275,6 +275,8 @@ def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
         # COGS: own-token cost, per-model breakdown, rolled-up sub-agent cost,
         # and the end-to-end total a host persists as the build's cost.
         "cost_usd", "cost_by_model", "subagent_cost_usd", "total_cost_usd",
+        # G4: guideline reuse rate (cross-session learning signal).
+        "guideline_reuse_rate", "guidelines_retrieved", "guidelines_from_prior_sessions",
     }
     assert usage["step_count"] == 1
     assert usage["wall_time_s"] >= 0

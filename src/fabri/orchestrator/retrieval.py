@@ -88,6 +88,43 @@ def _word_mentioned(word: str, text: str) -> bool:
     return pattern.search(text) is not None
 
 
+def retrieve_context_with_meta(
+    store: QdrantMemoryStore,
+    task: str,
+    top_k: int = DEFAULT_TOP_K,
+    tool_names: list[str] | None = None,
+    tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
+) -> tuple[str, dict]:
+    """G4: same as `retrieve_context` but also returns retrieval metadata so
+    callers (the agent loop) can emit the guideline-reuse-rate metric.
+
+    Metadata shape:
+      {
+        "retrieved": int,             # total guidelines surfaced
+        "from_prior_sessions": int,   # subset confirmed by >1 session (hit_count>=2 OR len(session_ids)>=2)
+        "strategic": int,             # subset already promoted to strategic
+      }
+
+    "Reuse rate" is then `from_prior_sessions / retrieved`. We deliberately do
+    NOT count "guidelines that exist in the store" as reuse — that's just "we
+    had data". Reuse means "the retrieved data was already validated by a
+    different session", which is the cross-session learning signal.
+    """
+    text, merged = _retrieve_inner(
+        store, task, top_k=top_k, tool_names=tool_names,
+        tag_hit_score_floor=tag_hit_score_floor,
+    )
+    meta = {
+        "retrieved": len(merged),
+        "from_prior_sessions": sum(
+            1 for entry, _ in merged
+            if (entry.hit_count or 0) >= 2 or len(entry.session_ids or []) >= 2
+        ),
+        "strategic": sum(1 for entry, _ in merged if entry.kind == "strategic"),
+    }
+    return text, meta
+
+
 def retrieve_context(
     store: QdrantMemoryStore,
     task: str,
@@ -107,11 +144,27 @@ def retrieve_context(
     guidelines even when their wording is too dissimilar for vector search alone
     to rank them in the top-k, but without a stale low-relevance entry crowding
     out vector hits."""
+    text, _merged = _retrieve_inner(
+        store, task, top_k=top_k, tool_names=tool_names,
+        tag_hit_score_floor=tag_hit_score_floor,
+    )
+    return text
+
+
+def _retrieve_inner(
+    store: QdrantMemoryStore,
+    task: str,
+    top_k: int = DEFAULT_TOP_K,
+    tool_names: list[str] | None = None,
+    tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
+):
+    """Internal: returns (rendered_text, list_of_(entry, score)) so the
+    metadata-returning wrapper can compute reuse-rate without re-querying."""
     # Cold store: nothing to retrieve against, so skip the (expensive) embed
     # call entirely. This means a fresh `fabri init` + first `fabri run` never
     # has to load the 44MB sentence-transformers model.
     if store.count() == 0:
-        return ""
+        return "", []
 
     # Word-boundary match so `read_file` doesn't trigger on every task that
     # happens to contain "read" as a substring of "already", "ready", etc.
@@ -170,6 +223,7 @@ def retrieve_context(
             merged.append((entry, score))
 
     if not merged:
-        return ""
+        return "", []
     lines = [f"- [{entry.kind}] {entry.text}" for entry, _score in merged]
-    return "Relevant guidelines from past sessions:\n" + "\n".join(lines)
+    text = "Relevant guidelines from past sessions:\n" + "\n".join(lines)
+    return text, merged

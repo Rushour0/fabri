@@ -11,7 +11,7 @@ from fabri import cli
 from fabri.core.outcome import Outcome
 
 
-def _invoke_cmd_run(monkeypatch, result):
+def _invoke_cmd_run(monkeypatch, result, *, entries=()):
     monkeypatch.setattr(cli, "load_config", lambda _p: {
         "llm": {"api_key_env": "FAKE_KEY"},
         "memory": {
@@ -30,7 +30,10 @@ def _invoke_cmd_run(monkeypatch, result):
     monkeypatch.setattr(cli, "build_llm", lambda *a, **k: object())
     monkeypatch.setattr(cli, "build_decompose_llm", lambda *a, **k: object())
     monkeypatch.setattr(cli, "run_agent", lambda *a, **k: result)
-    monkeypatch.setattr(cli, "process_trace", lambda *a, **k: [])
+    # Per-call override of process_trace so a test can assert on the
+    # "Synthesized N guideline(s)" UX without the helper stomping its setup.
+    entries_list = list(entries)
+    monkeypatch.setattr(cli, "process_trace", lambda *a, **k: entries_list)
 
     args = argparse.Namespace(
         config=None, task="t", session_id="sid", verbose=False, ask_user_socket=None,
@@ -91,10 +94,10 @@ def test_cmd_run_prints_synthesized_guideline_summary(monkeypatch, capsys):
         hit_count=1,
         created_at=0.0,
     )
-    monkeypatch.setattr(cli, "process_trace", lambda *a, **k: [entry])
     code = _invoke_cmd_run(
         monkeypatch,
         {"success": True, "outcome": Outcome.SUCCESS.value, "final_text": "ok"},
+        entries=[entry],
     )
     out = capsys.readouterr().out
     assert code == 0

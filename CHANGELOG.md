@@ -4,6 +4,113 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.0 — 2026-06-23
+
+**The "make the claim true" release.** A strategic positioning review (see
+`decks/internal/code-gaps.md`) identified ten gaps between fabri's pitch
+("self-improving agent runtime with honest COGS") and the codebase. This
+release ships all ten, end-to-end, with tests. The pitch is now demonstrable
+in `fabri report` — not just instrumented under the hood.
+
+### Added — observability (G6/G7/G8/G20)
+
+- **`fabri report` CLI.** Aggregates `.fabri/traces/*.jsonl` into a usage
+  report: total / by-model / by-tool cost, outcome distribution, per-session
+  detail. `--since 7d/24h/30m` time filter, `--limit N`, `--format md|json|html`,
+  `-o <file>` for write-to-file. Backed by a new `fabri.reports` module
+  (`aggregate`, `render`, `chart`).
+- **Cost-by-tool attribution (G7).** Proportional split of each session's
+  `cost_usd` across its tool calls. Surfaced in markdown + HTML reports under
+  "cost by tool" and via `SessionSummary.cost_by_tool`. A per-step attribution
+  (LLM cost of step N → tools dispatched at step N) is a follow-up; this is a
+  good-enough first cut.
+- **COGS trendline chart (G8).** ASCII sparkline (`reports.chart.ascii_sparkline`)
+  for the terminal output of `fabri report --since 30d`; self-contained SVG
+  trendline (`reports.chart.svg_trendline`) embedded in the HTML report.
+- **Static HTML report (G20).** `fabri report --format html -o report.html`
+  writes a self-contained HTML file — no external CSS/JS, no fetches. Pastable
+  into a deck/blog; seed of the eventual hosted dashboard.
+
+### Added — memory observability (G2/G4)
+
+- **`fabri memory show` / `fabri memory list`.** `show` is a human-readable
+  listing of guidelines (filter by `--strategic` / `--tactical`, `--limit N`,
+  `--markdown` output suitable for pasting into a deck). `list` is the
+  pipeable JSONL counterpart. Backed by a new `QdrantMemoryStore.iterate()`
+  (paginates Qdrant's scroll API) and a matching method on the new
+  `SqliteMemoryStore`.
+- **Guideline reuse rate metric (G4).** `retrieve_context_with_meta()` returns
+  (text, meta) with `retrieved` / `from_prior_sessions` / `strategic` counts;
+  the agent loop emits these in the `usage` event next to `cost_usd` as
+  `guideline_reuse_rate`, `guidelines_retrieved`,
+  `guidelines_from_prior_sessions`. "From prior sessions" =
+  `hit_count >= 2 OR len(session_ids) >= 2` — the cross-session-learning
+  signal, not just "memory had data."
+
+### Added — embedded vector store (G16)
+
+- **sqlite-vec memory backend.** New `fabri.memory.embedded_store.SqliteMemoryStore`
+  with the same interface as `QdrantMemoryStore`. Selected via
+  `memory.backend: sqlite` + `memory.sqlite_path: .fabri/memory.db`. Demos /
+  CI / single-process deployments no longer require docker. Install via
+  `pip install 'fabri[sqlite]'`. Production users keep Qdrant.
+- **`fabri.runtime.build_memory_store(mem_cfg)` factory.** The agent loop, the
+  CLI, and the benchmark harness all build their store through this factory;
+  switching backends is a one-line config change.
+
+### Added — benchmark harness (G1)
+
+- **`fabri.benchmarks.session_delta` runner.** Runs the same task N times,
+  records per-run cost / outcome / step count / guideline reuse rate, computes
+  the cost delta between the first run and the median of the last three.
+  CLI: `python -m fabri.benchmarks.session_delta --config agent.yaml
+  --task "..." --runs 5`. Emits markdown + JSON under
+  `.fabri/benchmarks/<ts>/`.
+- **LongMemEval scaffold.** `fabri.benchmarks.longmemeval` directory in place
+  with a porting plan in `README.md`. Dataset port is a follow-up
+  (decks/internal/code-gaps.md G1).
+
+### Added — MCP client (G19)
+
+- **Minimal MCP stdio client.** `fabri.tools.mcp_client.MCPStdioClient` speaks
+  JSON-RPC 2.0 over NDJSON (line-delimited). One server per process, server
+  banner tolerance (skips up to 10 non-JSON lines), JSON-RPC error → tool_error
+  conversion. `build_mcp_tools(server_cfg)` connects, lists, and wraps each
+  remote tool as a `ToolManifest`. Config: `tools.mcp_servers: [{name, command, env?}]`.
+- **`ToolRegistry.register_callable(manifest, handler, owns=...)`.** New hook
+  for non-subprocess tools. MCP tools go through this path; agent-as-tool and
+  manifest-discovered tools are unchanged. The `owns` reference keeps the
+  backing MCP client alive for the registry's lifetime.
+
+### Added — starter templates (G18)
+
+- **`fabri init --template research|code-review|data-cleanup`.** Three vetted
+  starter packs, each with a tailored `agent.yaml` (right max_steps, right
+  planner mode, sqlite backend so no docker required) and 1–2 example tools
+  (fetch_url for research, run_shell for code-review).
+- **`fabri.scaffold.SCAFFOLD_TEMPLATES` registry** so future templates land
+  by adding one dict.
+
+### Changed
+
+- **Default config gained `memory.backend` / `memory.sqlite_path` keys** —
+  back-compat: omitted keys default to `qdrant` + the existing URL.
+- **Default config gained `tools.mcp_servers: []`** — empty by default, MCP
+  disabled.
+- **`fabri init` accepts `--template`.** Default behavior (no flag) is the
+  same as before — the existing hello-tool scaffold.
+
+### Tests
+
+- **+37 tests** across `test_unit_reports.py` (reports module: aggregation,
+  markdown/json/html rendering, sparkline + SVG chart), `test_unit_mcp_client.py`
+  (JSON-RPC framing, error handling, EOF detection, sanitization),
+  `test_unit_scaffold_templates.py` (every template scaffolds + parses).
+  Suite 359 → 396.
+- Fixed `test_cmd_run_prints_synthesized_guideline_summary` (added in v0.6.1) —
+  its helper was overriding `process_trace` after the test set it. The helper
+  now accepts an `entries=` keyword.
+
 ## v0.6.1 — 2026-06-23
 
 ### Fixed

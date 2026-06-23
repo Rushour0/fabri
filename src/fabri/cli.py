@@ -10,24 +10,34 @@ from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
 from fabri.core.logging_setup import configure_logging
 from fabri.core.outcome import Outcome
-from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.pipeline import process_trace
-from fabri.runtime import build_decompose_llm, build_llm, build_tool_defs, build_tools
-from fabri.scaffold import next_steps, scaffold
+from fabri.runtime import (
+    build_decompose_llm,
+    build_llm,
+    build_memory_store,
+    build_tool_defs,
+    build_tools,
+)
+from fabri.scaffold import SCAFFOLD_TEMPLATES, next_steps, scaffold
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    result = scaffold(args.dir, force=args.force)
+    template = getattr(args, "template", "default") or "default"
+    try:
+        result = scaffold(args.dir, force=args.force, template=template)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     where = "current directory" if args.dir in (".", "") else args.dir
     if result["created"]:
-        print(f"Scaffolded a starter fabri project in {where}:")
+        print(f"Scaffolded a {template!r} fabri project in {where}:")
         for rel in result["created"]:
             print(f"  + {rel}")
     if result["skipped"]:
         print("\nLeft existing files untouched (pass --force to overwrite):")
         for rel in result["skipped"]:
             print(f"  . {rel}")
-    print("\n" + next_steps(args.dir))
+    print("\n" + next_steps(args.dir, template=template))
 
 
 def _planner_mode_from_cfg(planner_cfg: dict) -> str:
@@ -53,17 +63,27 @@ def _require_api_key(api_key_env: str) -> None:
         sys.exit(1)
 
 
-def _open_store(mem_cfg: dict) -> QdrantMemoryStore:
-    """Open Qdrant with a user-friendly error if it's unreachable, instead of
-    leaking the raw qdrant_client/grpc traceback."""
+def _open_store(mem_cfg: dict):
+    """Open the configured memory backend with a user-friendly error message
+    if it's unreachable, instead of leaking a raw qdrant/grpc/sqlite traceback.
+
+    Picks Qdrant or sqlite-vec based on `memory.backend` — see
+    `runtime.build_memory_store`.
+    """
+    backend = (mem_cfg.get("backend") or "qdrant").lower()
     try:
-        return QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+        return build_memory_store(mem_cfg)
     except Exception as e:
-        print(
-            f"Could not reach Qdrant at {mem_cfg['qdrant_url']}: {e}\n"
-            f"Start it with: docker compose up -d  (or `docker run -p 6333:6333 qdrant/qdrant`).",
-            file=sys.stderr,
-        )
+        if backend == "qdrant":
+            print(
+                f"Could not reach Qdrant at {mem_cfg.get('qdrant_url')}: {e}\n"
+                "Start it with: docker compose up -d  (or `docker run -p 6333:6333 qdrant/qdrant`).\n"
+                "Or switch to the embedded backend: set memory.backend: sqlite in agent.yaml "
+                "(pip install 'fabri[sqlite]').",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Could not open memory backend {backend!r}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -162,6 +182,108 @@ def cmd_inspect_memory(args: argparse.Namespace) -> None:
     if args.query:
         for entry, score in store.query(args.query, top_k=args.top_k):
             print(f"  [{entry.kind}] ({score:.2f}) {entry.text}")
+
+
+def cmd_memory_show(args: argparse.Namespace) -> None:
+    """G2: list guidelines in the store, filterable by kind, with --markdown
+    output suitable for pasting into a deck/X/blog. By default both tactical
+    and strategic are shown."""
+    config = load_config(args.config)
+    store = _open_store(config["memory"])
+    kinds: list[str | None]
+    if args.strategic:
+        kinds = ["strategic"]
+    elif args.tactical:
+        kinds = ["tactical"]
+    else:
+        kinds = ["strategic", "tactical"]
+
+    counts = {k: store.count(kind=k) for k in ("strategic", "tactical")}
+    total = counts["strategic"] + counts["tactical"]
+
+    if args.markdown:
+        print(f"# fabri memory ({total} guidelines: "
+              f"{counts['strategic']} strategic + {counts['tactical']} tactical)\n")
+    else:
+        print(f"{total} guidelines total "
+              f"({counts['strategic']} strategic + {counts['tactical']} tactical)\n")
+
+    for kind in kinds:
+        entries = store.iterate(kind=kind, limit=args.limit)
+        if not entries:
+            continue
+        if args.markdown:
+            print(f"## {kind} ({len(entries)} shown)\n")
+            for e in entries:
+                age = ""
+                if e.session_ids:
+                    age = f"  _(seen in {len(e.session_ids)} session(s), hit_count={e.hit_count})_"
+                tools = ""
+                if e.tools:
+                    tools = f"  `tools: {', '.join(e.tools)}`"
+                print(f"- {e.text}{age}{tools}")
+            print()
+        else:
+            print(f"--- {kind} ({len(entries)} shown) ---")
+            for e in entries:
+                hint = f"hit_count={e.hit_count}, sessions={len(e.session_ids or [])}"
+                tools = f", tools={','.join(e.tools)}" if e.tools else ""
+                print(f"  • {e.text}\n    ({hint}{tools})")
+
+
+def cmd_memory_list(args: argparse.Namespace) -> None:
+    """Lower-level cousin of memory show: just dump entries as JSONL so a
+    pipeline can grep / jq / pipe them. Mirrors `kubectl get -o json` shape."""
+    config = load_config(args.config)
+    store = _open_store(config["memory"])
+    kind = None
+    if args.strategic:
+        kind = "strategic"
+    elif args.tactical:
+        kind = "tactical"
+    entries = store.iterate(kind=kind, limit=args.limit)
+    for e in entries:
+        print(json.dumps(e.to_payload()))
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    """G6/G7/G8/G20: aggregate JSONL traces into a usage report. Output in
+    markdown (default), json, or self-contained HTML."""
+    from fabri.reports import aggregate, collect_sessions, render_html, render_json, render_markdown
+
+    since_seconds = None
+    if args.since:
+        # Accept "7d", "24h", "30m" — humane shorthand.
+        unit = args.since[-1].lower()
+        try:
+            n = float(args.since[:-1])
+        except ValueError:
+            print(f"--since: expected like '7d', '24h', '30m', got {args.since!r}",
+                  file=sys.stderr)
+            sys.exit(1)
+        multipliers = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+        if unit not in multipliers:
+            print(f"--since: unknown unit {unit!r} (expected d/h/m/s)", file=sys.stderr)
+            sys.exit(1)
+        since_seconds = n * multipliers[unit]
+
+    sessions = collect_sessions(since_seconds=since_seconds, limit=args.limit)
+    report = aggregate(sessions)
+
+    if args.format == "json":
+        output = render_json(report)
+    elif args.format == "html":
+        output = render_html(report)
+    else:
+        output = render_markdown(report)
+
+    if args.output:
+        from pathlib import Path
+        Path(args.output).write_text(output)
+        print(f"wrote {args.output} ({len(output)} bytes, {report.session_count} sessions)",
+              file=sys.stderr)
+    else:
+        print(output)
 
 
 def cmd_admin_config(args: argparse.Namespace) -> None:
@@ -367,6 +489,13 @@ def main() -> None:
     p_init = sub.add_parser("init", help="Scaffold a starter fabri project (agent.yaml, tools, docker-compose)")
     p_init.add_argument("dir", nargs="?", default=".", help="Target directory (default: current)")
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
+    p_init.add_argument(
+        "--template",
+        choices=sorted(SCAFFOLD_TEMPLATES.keys()),
+        default="default",
+        help="Starter pack: default (hello), research, code-review, data-cleanup. "
+             "Non-default templates use the sqlite-vec backend (no docker required).",
+    )
     p_init.set_defaults(func=cmd_init)
 
     p_run = sub.add_parser("run", help="Run the agent on a task")
@@ -384,6 +513,35 @@ def main() -> None:
     p_inspect.add_argument("query", nargs="?", default=None)
     p_inspect.add_argument("--top-k", dest="top_k", type=int, default=5)
     p_inspect.set_defaults(func=cmd_inspect_memory)
+
+    # G2: `fabri memory show / list` — listing/inspection of guidelines.
+    p_mem = sub.add_parser("memory", help="Show or list stored guidelines (G2)")
+    mem_sub = p_mem.add_subparsers(dest="memory_command", required=True)
+
+    p_mem_show = mem_sub.add_parser("show", help="Human-readable listing of guidelines")
+    p_mem_show.add_argument("--strategic", action="store_true", help="Only strategic guidelines")
+    p_mem_show.add_argument("--tactical", action="store_true", help="Only tactical guidelines")
+    p_mem_show.add_argument("--limit", type=int, default=50)
+    p_mem_show.add_argument("--markdown", action="store_true", help="Render as markdown (paste into a deck)")
+    p_mem_show.set_defaults(func=cmd_memory_show)
+
+    p_mem_list = mem_sub.add_parser("list", help="JSONL listing of guidelines (pipeable)")
+    p_mem_list.add_argument("--strategic", action="store_true")
+    p_mem_list.add_argument("--tactical", action="store_true")
+    p_mem_list.add_argument("--limit", type=int, default=None)
+    p_mem_list.set_defaults(func=cmd_memory_list)
+
+    # G6/G7/G8/G20: `fabri report` — usage report across recent sessions.
+    p_report = sub.add_parser("report", help="Aggregate cost/outcome across recent sessions (G6)")
+    p_report.add_argument("--since", default=None,
+                          help="Only sessions in the last X (e.g. 7d, 24h, 30m). Default: all.")
+    p_report.add_argument("--limit", type=int, default=None,
+                          help="Cap to the N most recent sessions after --since.")
+    p_report.add_argument("--format", choices=["md", "json", "html"], default="md",
+                          help="Output format. md (default) is human-readable; html is self-contained.")
+    p_report.add_argument("--output", "-o", default=None,
+                          help="Write to this file instead of stdout (always used with --format html).")
+    p_report.set_defaults(func=cmd_report)
 
     # admin: config/dashboard inspection. Gated by require_admin() -- a stub
     # shared-secret check (FABRI_ADMIN_TOKEN), not real auth. See admin.py.

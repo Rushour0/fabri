@@ -6,8 +6,34 @@ from pathlib import Path
 from fabri.config import DEFAULT_TOOLS_DIR
 from fabri.core.agent import DECOMPOSE_TOOL_NAME
 from fabri.core.llm import AnthropicLLMBackend, OpenAILLMBackend
+from fabri.memory.store import QdrantMemoryStore
 from fabri.tools.agent_tool import make_agent_tool_manifest
 from fabri.tools.registry import ToolRegistry
+
+
+def build_memory_store(mem_cfg: dict):
+    """G16: pick the memory backend based on `memory.backend`.
+
+    - "qdrant" (default): networked, multi-process safe.
+    - "sqlite":  in-process, single-file, no docker required.
+
+    Both expose the same interface (upsert/get/query/query_by_vector/
+    find_similar/delete/count/iterate). The agent loop and orchestrator never
+    know which one they're talking to.
+    """
+    backend = (mem_cfg.get("backend") or "qdrant").lower()
+    if backend == "qdrant":
+        return QdrantMemoryStore(
+            url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"]
+        )
+    if backend == "sqlite":
+        # Imported lazily so a qdrant-only user doesn't pay sqlite-vec's
+        # extension-load cost (and so the import error message is friendlier).
+        from fabri.memory.embedded_store import SqliteMemoryStore
+        return SqliteMemoryStore(path=mem_cfg.get("sqlite_path", ".fabri/memory.db"))
+    raise ValueError(
+        f"unknown memory.backend: {backend!r} (expected 'qdrant' or 'sqlite')"
+    )
 
 # Sentinel a config can put in tools.manifest_dir to pull in the framework's
 # bundled tools (read_file/write_file/web_search/...) without naming a
@@ -85,6 +111,22 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
     )
     for entry in tools_cfg.get("agents", []):
         registry.register(make_agent_tool_manifest(entry))
+    # G19: MCP servers — connect each, list its tools, register them as
+    # callables on the registry. The agent loop then sees them like any
+    # other tool. Connection failures are logged but don't kill the build:
+    # one bad MCP server shouldn't take down an otherwise-working agent.
+    for server_cfg in tools_cfg.get("mcp_servers", []) or []:
+        try:
+            from fabri.tools.mcp_client import build_mcp_tools
+            client, pairs = build_mcp_tools(server_cfg)
+            for manifest, handler in pairs:
+                registry.register_callable(manifest, handler, owns=client)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MCP server %r failed to start (skipping): %s",
+                server_cfg.get("name") or "?", e,
+            )
     if tools_cfg["enabled"] is not None:
         registry.tools = {name: m for name, m in registry.tools.items() if name in tools_cfg["enabled"]}
     return registry

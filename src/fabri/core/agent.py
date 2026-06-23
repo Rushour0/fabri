@@ -14,7 +14,13 @@ from fabri.events import EventType, StepReason
 from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
 from fabri.memory.store import QdrantMemoryStore
-from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, DEFAULT_TOP_K, retrieve_context, retrieve_tools
+from fabri.orchestrator.retrieval import (
+    DEFAULT_TOOL_TOP_K,
+    DEFAULT_TOP_K,
+    retrieve_context,
+    retrieve_context_with_meta,
+    retrieve_tools,
+)
 from fabri.orchestrator.traces import log_event
 from fabri.tools.registry import ToolRegistry
 
@@ -181,7 +187,9 @@ def run_agent(
     session_id = session_id or str(uuid.uuid4())
     logger.info("agent run starting: task=%r session_id=%s", task, session_id)
 
-    context_block = retrieve_context(store, task, top_k=top_k, tool_names=[t.name for t in tools.list()])
+    context_block, retrieval_meta = retrieve_context_with_meta(
+        store, task, top_k=top_k, tool_names=[t.name for t in tools.list()]
+    )
     # A1: when retrieval is on, narrow the system prompt + provider tool list
     # to a task-relevant subset (top-K by description-vs-task similarity, plus
     # always-include meta-tools). The filtered subset is the same for the whole
@@ -571,6 +579,13 @@ def run_agent(
             own_cost += c
     own_cost = round(own_cost, 6)
     subagent_cost = round(subagent_cost_total[0], 6)
+    # G4: guideline reuse rate — what fraction of retrieved guidelines were
+    # already confirmed by a prior session (hit_count>=2 OR len(session_ids)>=2).
+    # This is the "memory loop is genuinely re-using cross-session lessons"
+    # signal. None when nothing was retrieved.
+    g_retrieved = retrieval_meta.get("retrieved", 0)
+    g_from_prior = retrieval_meta.get("from_prior_sessions", 0)
+    reuse_rate = round(g_from_prior / g_retrieved, 4) if g_retrieved else None
     usage_dict = {
         "input_tokens": usage_totals.input_tokens,
         "output_tokens": usage_totals.output_tokens,
@@ -582,6 +597,10 @@ def run_agent(
         "cost_by_model": cost_by_model,
         "subagent_cost_usd": subagent_cost,
         "total_cost_usd": round(own_cost + subagent_cost, 6),
+        # G4
+        "guideline_reuse_rate": reuse_rate,
+        "guidelines_retrieved": g_retrieved,
+        "guidelines_from_prior_sessions": g_from_prior,
     }
     log_event(session_id, {"type": EventType.USAGE.value, **usage_dict})
 

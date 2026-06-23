@@ -1,6 +1,6 @@
 [project]
 name = "fabri"
-version = "0.6.1"
+version = "0.7.0"
 description = "Ever-evolving prompting and context engineering for LLM agents through active memory and result analysis."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,6 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]               # only needed for `llm.provider: openai`
+sqlite = ["sqlite-vec>=0.1.6"]         # G16: embedded vector store (no docker)
 dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0"]
 
 [project.urls]
@@ -48,6 +49,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["fabri*"]
+# Benchmarks ship in the wheel so users can `python -m fabri.benchmarks.session_delta`.
+# (Their __init__.py qualifies them as a proper subpackage.)
 
 # The bundled example tools are data, not importable modules: a manifest is a
 # .json + an executable in any language (Python/Go/...). Without this, a wheel

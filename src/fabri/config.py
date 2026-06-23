@@ -64,10 +64,21 @@ DEFAULT_CONFIG = {
             "top_k": 6,
             "always_include": ["spawn_subagent", "ask_user", "decompose"],
         },
+        # G19: MCP servers — each entry is connected at agent-build time and
+        # its tools are wrapped as fabri tools with names prefixed by the
+        # server name (mcp_<server>_<remote_tool>). Connection failures are
+        # logged + skipped, not fatal. Default empty list = MCP disabled.
+        "mcp_servers": [],
     },
     "memory": {
+        # G16: backend selector. "qdrant" (default, networked) or "sqlite" (in-process,
+        # file-backed, no docker required). The two are interchangeable from the
+        # agent's perspective. Use sqlite for demos/dev/CI; qdrant when multiple
+        # processes share a memory store or at production scale.
+        "backend": "qdrant",
         "collection": COLLECTION_NAME,
         "qdrant_url": "http://localhost:6333",
+        "sqlite_path": ".fabri/memory.db",
         "top_k": DEFAULT_TOP_K,
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "promotion_threshold_sessions": PROMOTION_THRESHOLD_SESSIONS,

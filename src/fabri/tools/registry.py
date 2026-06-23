@@ -46,6 +46,14 @@ class ToolRegistry:
             sandbox = LocalSandbox()
         self.sandbox = sandbox
         self.tools: dict[str, ToolManifest] = {}
+        # G19: callable-backed tools (e.g. MCP) bypass the subprocess sandbox
+        # and run their handler in-process. Kept as a parallel dict rather
+        # than a manifest-level flag so existing manifest discovery is
+        # untouched.
+        self._callables: dict[str, "callable"] = {}
+        # Hold references to long-lived backing objects (e.g. MCPStdioClient
+        # instances) so they aren't GC'd while their handlers are registered.
+        self._owned_resources: list[object] = []
         for manifest_dir in dirs:
             for path in sorted(manifest_dir.glob("*.json")):
                 manifest = ToolManifest.from_file(path)
@@ -57,6 +65,25 @@ class ToolRegistry:
         which are generated per-config rather than read from a JSON file."""
         self.tools[manifest.name] = manifest
 
+    def register_callable(
+        self,
+        manifest: ToolManifest,
+        handler: "callable",
+        owns: object | None = None,
+    ) -> None:
+        """G19: register a tool whose invocation is an in-process callable
+        instead of a subprocess. `handler(args)` must return a tool-result
+        dict (`{ok, result?, error?}` — use tool_ok/tool_error helpers).
+
+        `owns`, if given, is held in a list on the registry so the handler's
+        backing resource (e.g. an MCPStdioClient with a live subprocess) isn't
+        GC'd while the registry is alive.
+        """
+        self.tools[manifest.name] = manifest
+        self._callables[manifest.name] = handler
+        if owns is not None:
+            self._owned_resources.append(owns)
+
     def list(self) -> list[ToolManifest]:
         return list(self.tools.values())
 
@@ -66,6 +93,13 @@ class ToolRegistry:
         manifest = self.tools.get(name)
         if manifest is None:
             return tool_error(f"unknown tool: {name}")
+        # G19: callable-backed tools (e.g. MCP) bypass the subprocess sandbox.
+        # Checked AFTER manifest existence so an unknown-name still 404s.
+        if name in self._callables:
+            try:
+                return self._callables[name](args)
+            except Exception as e:
+                return tool_error(f"{name}: handler raised {type(e).__name__}: {e}")
         extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else None
         return self.sandbox.run_tool(manifest, args, extra_env=extra_env)
 
