@@ -54,12 +54,22 @@ class SqliteMemoryStore:
     similarity_threshold thresholds carry across backends without retuning).
     """
 
-    def __init__(self, path: str | Path = ".fabri/memory.db"):
+    def __init__(
+        self,
+        path: str | Path = ".fabri/memory.db",
+        collection: str = "fabri",
+    ):
         if not _HAS_SQLITE_VEC:
             raise RuntimeError(_INSTALL_HINT)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        # `collection` is exposed for parity with QdrantMemoryStore — used by
+        # memory/pruning.py to derive its per-collection ingest lock filename.
+        # For sqlite the underlying db file IS the collection; this attribute
+        # just labels it so multiple sqlite-backed agents in the same process
+        # don't share an ingest lock when they share a Python interpreter.
+        self.collection = collection
         self.conn = sqlite3.connect(str(path))
         # Enable sqlite-vec extension on this connection.
         self.conn.enable_load_extension(True)

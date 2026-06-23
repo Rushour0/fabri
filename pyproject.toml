@@ -1,6 +1,6 @@
 [project]
 name = "fabri"
-version = "0.7.3"
+version = "0.7.4"
 description = "Ever-evolving prompting and context engineering for LLM agents through active memory and result analysis."
 readme = "README.md"
 requires-python = ">=3.11"

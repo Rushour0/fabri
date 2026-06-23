@@ -30,7 +30,10 @@ def build_memory_store(mem_cfg: dict):
         # Imported lazily so a qdrant-only user doesn't pay sqlite-vec's
         # extension-load cost (and so the import error message is friendlier).
         from fabri.memory.embedded_store import SqliteMemoryStore
-        return SqliteMemoryStore(path=mem_cfg.get("sqlite_path", ".fabri/memory.db"))
+        return SqliteMemoryStore(
+            path=mem_cfg.get("sqlite_path", ".fabri/memory.db"),
+            collection=mem_cfg.get("collection", "fabri"),
+        )
     raise ValueError(
         f"unknown memory.backend: {backend!r} (expected 'qdrant' or 'sqlite')"
     )

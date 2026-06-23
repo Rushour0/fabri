@@ -4,6 +4,31 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.4 — 2026-06-23
+
+### Fixed
+
+- **`SqliteMemoryStore` was missing a `collection` attribute** that
+  `memory/pruning.py` reads to derive its per-collection ingest-lock file
+  name. As a result, any sqlite-backed agent run that produced a
+  `success_pattern` (or any other guideline) crashed during post-run trace
+  mining with `AttributeError: 'SqliteMemoryStore' object has no attribute
+  'collection'`. Found by the first real `session_delta` benchmark run
+  against `configs/benchmark.yaml`. The end-to-end fabri × sqlite path was
+  green at the store-API layer (the dedicated tests for the backend pass)
+  but the pipeline integration had never been exercised.
+- `SqliteMemoryStore.__init__` now takes a `collection: str = "fabri"`
+  argument and stores it on the instance.
+- `runtime.build_memory_store` passes `mem_cfg.get("collection", "fabri")`
+  through to it, matching what it already does for `QdrantMemoryStore`.
+
+### Tests
+
+- The fix is covered by the existing per-store test pass plus a smoke check
+  from the failing benchmark run; a dedicated pipeline-integration test for
+  the sqlite backend lands in v0.7.5 (it requires a scripted-LLM end-to-end
+  fixture for trace mining and is a follow-up).
+
 ## v0.7.3 — 2026-06-23
 
 The "benchmark methodology lockdown" release. Ships two canonical configs +
