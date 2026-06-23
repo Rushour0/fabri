@@ -9,6 +9,7 @@ from fabri.admin import AdminAuthError, describe_config, render_dashboard, requi
 from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
 from fabri.core.logging_setup import configure_logging
+from fabri.core.outcome import Outcome
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.pipeline import process_trace
 from fabri.runtime import build_decompose_llm, build_llm, build_tool_defs, build_tools
@@ -114,7 +115,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     # this, an Anthropic rate-limit failure still exits 0 and downstream
     # ledgers (e.g. ludexel's `runs` collection) mark the run succeeded
     # despite having no final_text.
-    run_failed = not result.get("success") or result.get("outcome") != "succeeded"
+    success_outcomes = {Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value}
+    run_failed = not result.get("success") or result.get("outcome") not in success_outcomes
 
     compress_llm = build_llm(config, [])
     entries = process_trace(

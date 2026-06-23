@@ -4,6 +4,20 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.6.1 — 2026-06-23
+
+### Fixed
+
+- **CLI no longer exits non-zero on `success_with_recovery` outcome.** The
+  `fabri run` exit-code check compared `result["outcome"]` against the literal
+  `"succeeded"`, which is not a value of the `Outcome` enum. Any run that
+  recovered from a transient tool failure ended with `outcome="success_with_recovery"`
+  and `success=True`, but the CLI still exited 1 — so host services that
+  dispatch on the return code (e.g. ludexel's `runs` collection) mislabeled
+  successful runs as failures and surfaced the agent's success summary as the
+  error body. The check now positively matches `Outcome.SUCCESS` and
+  `Outcome.SUCCESS_WITH_RECOVERY`.
+
 ## v0.6.0 — 2026-06-23
 
 **License change: Apache-2.0 → Business Source License 1.1.** v0.6.0 and every
