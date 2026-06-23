@@ -19,3 +19,8 @@ build/
 
 # build artifacts
 dist/
+
+# private strategy / decks / signed licenses — never push
+decks/
+licenses-issued/
+
