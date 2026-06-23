@@ -26,11 +26,17 @@ class ToolCall:
 @dataclass
 class LLMUsage:
     """Per-call token accounting. All fields default to 0 so a scripted backend
-    that doesn't fill them in still aggregates cleanly in run_agent's totals."""
+    that doesn't fill them in still aggregates cleanly in run_agent's totals.
+
+    `model` carries the model id the tokens were billed under so run_agent can
+    price a mixed-model run (e.g. Sonnet orchestrator + Haiku decompose) per
+    model instead of assuming a single rate. None on a scripted backend or any
+    call where the model is unknown -> priced as 0 with a logged warning."""
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    model: str | None = None
 
 
 @dataclass
@@ -99,6 +105,10 @@ class ScriptedLLMBackend:
         # No-op: scripted backend doesn't model the provider tool list.
         return None
 
+    def prewarm(self, system: str) -> LLMUsage:
+        # No provider cache to warm; uniform no-op so callers don't special-case.
+        return LLMUsage()
+
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         if self._i >= len(self._script):
             raise RuntimeError("ScriptedLLMBackend script exhausted")
@@ -147,6 +157,48 @@ class AnthropicLLMBackend:
         marked[-1] = {**marked[-1], "cache_control": {"type": "ephemeral"}}
         return marked
 
+    def prewarm(self, system: str) -> LLMUsage:
+        """Write the static system+tools prefix into Anthropic's ephemeral cache
+        without generating output, via a `max_tokens=0` request. The next real
+        `step()` with the same prefix then reads the cache (~0.1x input) instead
+        of paying full price + the 1.25x cache-write.
+
+        IMPORTANT: this trims first-call LATENCY, not cost -- the cache-write is
+        paid once by whoever hits the cold prefix first (this call or a real
+        step), and the cache TTL is ~5 minutes. Fire it just before a burst of
+        runs that share this prefix; a 24/7 warmer just pays write premiums for
+        nothing. No-op (returns zero usage) when prompt caching is disabled.
+        Returns the call's LLMUsage so a caller can confirm the write landed
+        (cache_creation_input_tokens > 0) or that it was already warm
+        (cache_read_input_tokens > 0)."""
+        if not self._enable_prompt_cache:
+            return LLMUsage(model=self._model)
+        import anthropic
+
+        try:
+            resp = _call_with_retry(
+                lambda: self._client.messages.create(
+                    model=self._model,
+                    system=self._build_system(system),
+                    messages=[{"role": "user", "content": "warmup"}],
+                    tools=self._build_tools(),
+                    max_tokens=0,
+                ),
+                transient=(anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError),
+            )
+        except anthropic.APIError as e:
+            raise LLMError(f"anthropic prewarm error: {e}") from e
+        u = resp.usage
+        cc = getattr(u, "cache_creation_input_tokens", 0) or 0
+        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+        logger.info("anthropic prewarm: model=%s cache_create=%d cache_read=%d", self._model, cc, cr)
+        return LLMUsage(
+            input_tokens=u.input_tokens or 0,
+            cache_creation_input_tokens=cc,
+            cache_read_input_tokens=cr,
+            model=self._model,
+        )
+
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         import anthropic
 
@@ -176,6 +228,7 @@ class AnthropicLLMBackend:
             output_tokens=usage.output_tokens or 0,
             cache_creation_input_tokens=cache_create,
             cache_read_input_tokens=cache_read,
+            model=self._model,
         )
         logger.info(
             "anthropic call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d cache_create=%d cache_read=%d stop=%s",
@@ -262,6 +315,11 @@ class OpenAILLMBackend:
     def set_tools(self, tool_defs: list[dict]) -> None:
         self._tools = self._to_openai_tools(tool_defs or [])
 
+    def prewarm(self, system: str) -> LLMUsage:
+        # OpenAI prompt caching is automatic and not a separate write step the
+        # way Anthropic's ephemeral cache is; no explicit warm path. No-op.
+        return LLMUsage(model=self._model)
+
     @staticmethod
     def _to_openai(m: dict) -> list[dict]:
         """Translate one agent-history message (string content, or a list of
@@ -333,9 +391,15 @@ class OpenAILLMBackend:
             raise LLMError("openai response truncated at max_tokens; raise llm.max_tokens for this agent")
 
         oai_usage = getattr(resp, "usage", None)
+        # OpenAI surfaces cached prompt tokens under prompt_tokens_details; pull
+        # them onto cache_read so a cached run isn't priced at full input rate.
+        oai_details = getattr(oai_usage, "prompt_tokens_details", None)
+        oai_cache_read = getattr(oai_details, "cached_tokens", 0) or 0
         call_usage = LLMUsage(
             input_tokens=getattr(oai_usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(oai_usage, "completion_tokens", 0) or 0,
+            cache_read_input_tokens=oai_cache_read,
+            model=self._model,
         )
 
         message = choice.message

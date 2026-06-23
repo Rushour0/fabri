@@ -3,9 +3,11 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
 from fabri.core.llm import LLMBackend, LLMError, LLMUsage, ToolCall
+from fabri.pricing import cost_for
 from fabri.core.planner import DEFAULT_MAX_PLAN_ITEMS, PlanItem, plan as run_plan, topological_order
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType, StepReason
@@ -34,7 +36,41 @@ class AgentProtocolError(RuntimeError):
     which the loop maps to Outcome.FAILED rather than raising.)"""
 
 
-DEFAULT_AGENT_IDENTITY = "You are an autonomous agent. Use tools when needed, and stop once the task is done."
+DEFAULT_AGENT_IDENTITY = "You are an autonomous agent. Complete the task, then stop."
+
+# Frugality stance, appended to EVERY run (even when a domain config replaces the
+# identity wholesale), so cost discipline survives a custom system_prompt. The
+# levers are grounded: be deliberate before acting (TALE, arXiv:2412.18547),
+# prefer decisive calls over many exploratory ones (each round-trip re-sends the
+# whole context), and treat the step budget as finite (BudgetThinker,
+# arXiv:2508.17196). It carries no tool names, so it's always safe to append.
+FRUGALITY_POLICY = (
+    "Be deliberate: every tool call re-sends the whole context, so prefer one "
+    "decisive call over many exploratory ones, and if you can already answer or "
+    "act, do that instead of probing. Your step budget is finite."
+)
+
+# Curbs gratuitous sub-agent spawning -- the user's "stops randomly calling
+# agents because they're available" complaint. Grounded in Anthropic's
+# multi-agent post (a multi-agent run costs ~15x a chat; one query once spawned
+# 50 sub-agents) and Cognition's "Don't Build Multi-Agents" (single-threaded by
+# default; coordination is ~37% of agent failures). Gated on spawn_subagent
+# actually being in the registry so it never references an absent tool.
+DELEGATION_POLICY = (
+    "Do the work inline by default. Spawn a sub-agent ONLY for a subtask that is "
+    "independent, parallelizable, AND too large for your own context -- never for "
+    "sequential/dependent steps or just because the tool exists. A spawn re-runs "
+    "the whole loop, so an unnecessary one multiplies cost."
+)
+
+# Code-as-action: one script that batches operations beats many small tool
+# calls. Grounded in CodeAct (ICML 2024, arXiv:2402.01030: -30% steps) and
+# smolagents (-28% tokens). Gated on a code/batch tool actually being present.
+CODE_ACTION_POLICY = (
+    "Prefer code as action: when a job needs several operations, do them in one "
+    "`python_exec` script (or one `batch` call) that branches over the results, "
+    "rather than many separate tool calls."
+)
 
 # Steers the model toward surgical edits over whole-file rewrites. Whole-file
 # `write_file` calls dominate output-token spend on a file-gen workload --
@@ -81,11 +117,23 @@ def build_system_prompt(
         re.search(r"\bedit_file\b", tool_descriptions or "") is not None
         and re.search(r"\bwrite_file\b", tool_descriptions or "") is not None
     )
+    # Gate the frugality add-ons on the tools they name actually being present,
+    # same registry-aware pattern as FILE_EDIT_POLICY. DELEGATION/CODE_ACTION
+    # reference specific tools; FRUGALITY names none and is always appended.
+    desc = tool_descriptions or ""
+    has_spawn = re.search(r"\bspawn_subagent\b", desc) is not None
+    has_code_action = (
+        re.search(r"\bpython_exec\b", desc) is not None
+        or re.search(r"\bbatch\b", desc) is not None
+    )
     parts = [
         system_prompt_prefix,
         identity,
         f"Available tools:\n{tool_descriptions}" if tool_descriptions else "",
         FILE_EDIT_POLICY if has_edit_tools else "",
+        FRUGALITY_POLICY,
+        DELEGATION_POLICY if has_spawn else "",
+        CODE_ACTION_POLICY if has_code_action else "",
         TOON_RESULT_NOTE if result_format == "toon" else "",
         context_block,
     ]
@@ -177,6 +225,18 @@ def run_agent(
     error_reason = None
     had_tool_failure = False
     usage_totals = LLMUsage()
+    # Per-model token tally so a mixed-model run (e.g. Sonnet orchestrator +
+    # Haiku decompose) prices each model at its own rate instead of assuming
+    # one. Keyed by model id; None-model calls (scripted backend) bucket under
+    # "" and price to 0.
+    usage_by_model: dict[str, LLMUsage] = {}
+    # Σ of spawned sub-agents' end-to-end cost. A spawn_subagent runs as a
+    # separate `fabri run` subprocess with its own trace, so its tokens never
+    # reach `_accumulate` here -- the only way the parent learns a child's cost
+    # is the number the child reports back through the tool result. Rolling it
+    # up here is what makes the parent's `total_cost_usd` the true end-to-end
+    # build cost (own tokens + whole sub-agent subtree).
+    subagent_cost_total = [0.0]
     step_count = 0
     run_t0 = time.monotonic()
 
@@ -187,6 +247,14 @@ def run_agent(
         usage_totals.output_tokens += resp_usage.output_tokens
         usage_totals.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
         usage_totals.cache_read_input_tokens += resp_usage.cache_read_input_tokens
+        bucket = usage_by_model.setdefault(resp_usage.model or "", LLMUsage(model=resp_usage.model))
+        bucket.input_tokens += resp_usage.input_tokens
+        bucket.output_tokens += resp_usage.output_tokens
+        bucket.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
+        bucket.cache_read_input_tokens += resp_usage.cache_read_input_tokens
+
+    def _accumulate_subagent_cost(cost: float) -> None:
+        subagent_cost_total[0] += cost
 
     def _emit_thought(thinking_text: str | None, step: int) -> None:
         # Whitespace-only thinking is already dropped upstream by LLMResponse,
@@ -234,6 +302,7 @@ def run_agent(
                     step_had_failure = _dispatch_tool_calls(
                         response.tool_calls, tools, decompose_llm or llm, item_task, max_subquestions,
                         session_id, item_messages, global_step, result_format, output_format,
+                        on_subagent_cost=_accumulate_subagent_cost,
                     )
                     item_had_failure |= step_had_failure
                     log_event(session_id, {
@@ -413,6 +482,7 @@ def run_agent(
                 step_had_failure = _dispatch_tool_calls(
                     response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
                     session_id, messages, step_num, result_format, output_format,
+                    on_subagent_cost=_accumulate_subagent_cost,
                 )
                 had_tool_failure |= step_had_failure
                 log_event(session_id, {
@@ -488,6 +558,19 @@ def run_agent(
     else:
         log_event(session_id, {"type": EventType.INCOMPLETE.value, "reason": "max steps reached", "outcome": outcome.value})
 
+    # Price this run's own tokens per model, then add the rolled-up sub-agent
+    # subtree cost. `cost_by_model` is own tokens only -- a child's cost is a
+    # single USD figure that can't be re-split by model here. `cost_usd` is own
+    # tokens; `total_cost_usd` is the number a host persists as the build's COGS.
+    cost_by_model: dict[str, float] = {}
+    own_cost = 0.0
+    for model_id, bucket in usage_by_model.items():
+        c = cost_for(bucket)
+        if c is not None:
+            cost_by_model[model_id or "unknown"] = c
+            own_cost += c
+    own_cost = round(own_cost, 6)
+    subagent_cost = round(subagent_cost_total[0], 6)
     usage_dict = {
         "input_tokens": usage_totals.input_tokens,
         "output_tokens": usage_totals.output_tokens,
@@ -495,6 +578,10 @@ def run_agent(
         "cache_read_input_tokens": usage_totals.cache_read_input_tokens,
         "step_count": step_count,
         "wall_time_s": round(time.monotonic() - run_t0, 3),
+        "cost_usd": own_cost,
+        "cost_by_model": cost_by_model,
+        "subagent_cost_usd": subagent_cost,
+        "total_cost_usd": round(own_cost + subagent_cost, 6),
     }
     log_event(session_id, {"type": EventType.USAGE.value, **usage_dict})
 
@@ -538,12 +625,18 @@ def _dispatch_tool_calls(
     step_num: int,
     result_format: str = "toon",
     output_format: str = "json",
+    on_subagent_cost: Callable[[float], None] | None = None,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
     tool_use blocks and one user turn with all the matching tool_result blocks --
     the Anthropic API rejects a tool_use that isn't paired with a tool_result.
-    Returns whether any call failed."""
+    Returns whether any call failed.
+
+    `on_subagent_cost`, when given, is called with each spawned sub-agent's
+    end-to-end `total_cost_usd` so the parent run can roll the sub-agent subtree
+    into its own COGS. Optional + keyword-only so existing callers (and the F2
+    timing tests that call this directly) are unaffected."""
     had_failure = False
     real_ids = all(c.id is not None for c in calls)
     assistant_blocks, result_blocks = [], []
@@ -645,6 +738,21 @@ def _dispatch_tool_calls(
         if not result.get("ok"):
             had_failure = True
             logger.warning("step %d: tool %s failed: %s", step_num, call.name, result.get("error"))
+
+        # Roll a spawned sub-agent's end-to-end cost into the parent. The child
+        # printed `{... "usage": {... "total_cost_usd": N}}`; the runner wraps
+        # its stdout JSON under `result`. Prefer total (includes grandchildren),
+        # fall back to the child's own cost_usd. Defensive: a child on an old
+        # fabri without cost fields contributes 0, not a crash.
+        if on_subagent_cost is not None and call.name == SPAWN_SUBAGENT_TOOL_NAME and result.get("ok"):
+            child = result.get("result")
+            child_usage = child.get("usage") if isinstance(child, dict) else None
+            if isinstance(child_usage, dict):
+                child_cost = child_usage.get("total_cost_usd")
+                if child_cost is None:
+                    child_cost = child_usage.get("cost_usd")
+                if isinstance(child_cost, (int, float)):
+                    on_subagent_cost(float(child_cost))
 
         event = {
             "type": EventType.TOOL_CALL.value,

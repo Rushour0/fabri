@@ -1,6 +1,6 @@
 {
   "name": "spawn_subagent",
-  "description": "Spawn a fabri sub-agent dynamically by config path. Use when the parent agent needs to pick a sub-agent at runtime (vs. the static `tools.agents[]` form, which fixes the choice at config load). The sub-agent runs as a fresh agent_runner_tool.py subprocess; optional system_prompt_inline / system_prompt_path overrides the sub-agent's configured prompt for this one call. `additional_context` is prepended to the task. `parallel_group` is a metadata tag the parent runner loop reads to fan out spawn calls concurrently (see F2). `memory_collection_suffix` optionally namespaces the child's qdrant memory collection as `<parent_collection>_<suffix>` (sanitized to lowercase `[a-z0-9_-]`, capped at 32 chars); omit to inherit the parent's collection unchanged. Returns the sub-agent's {final_text, outcome, session_id, trace_path}.",
+  "description": "Spawn a fabri sub-agent as a fresh subprocess. EXPENSIVE: a sub-agent re-runs the entire agent loop, so it costs far more than doing the work inline. Spawn ONLY when a subtask is genuinely independent of your other work, can run in parallel with it, AND is large enough to overflow your own context. Do NOT spawn for sequential or dependent steps, for work you can do yourself in this loop, or just because the tool exists -- handle those inline. When you do spawn, give a self-contained task and expect a short summary back, not a transcript. Mechanics: optional system_prompt_inline / system_prompt_path overrides the sub-agent's configured prompt for this one call; `additional_context` is prepended to the task; `parallel_group` is a tag the parent loop reads to fan out genuinely-parallel spawns concurrently (see F2); `memory_collection_suffix` optionally namespaces the child's qdrant collection as `<parent_collection>_<suffix>` (sanitized lowercase `[a-z0-9_-]`, capped 32 chars), omit to inherit the parent's. Returns the sub-agent's {final_text, outcome, session_id, trace_path, usage} (usage.total_cost_usd rolls the whole subtree's cost up to the parent).",
   "command": ["python3", "spawn_subagent.py"],
   "input_schema": {
     "type": "object",
@@ -22,7 +22,11 @@
       "final_text": {"type": "string"},
       "outcome": {"type": "string"},
       "session_id": {"type": "string"},
-      "trace_path": {"type": "string"}
+      "trace_path": {"type": "string"},
+      "usage": {
+        "type": "object",
+        "description": "Child token totals + cost. `total_cost_usd` = own tokens + grandchildren; the parent rolls it into its own COGS."
+      }
     }
   },
   "timeout_s": 600

@@ -96,11 +96,17 @@ def main() -> int:
     # human reading the parent's trace) can pinpoint which JSONL to open when a
     # sub-agent fails. The contract stays additive: existing readers that only
     # look at final_text/outcome are unaffected.
+    # `usage` carries the child's token totals AND its `total_cost_usd` (own
+    # tokens + any grandchildren). The parent's dispatch loop reads
+    # total_cost_usd to roll this whole subtree into its own COGS -- without it
+    # the parent only ever sees the orchestrator's tokens and undercounts a
+    # fan-out build by the entire sub-agent cost.
     print(json.dumps({
         "final_text": result["final_text"],
         "outcome": result["outcome"],
         "session_id": result["session_id"],
         "trace_path": str(trace_path(result["session_id"])),
+        "usage": result.get("usage"),
     }))
     return 0 if result["outcome"] in (Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value) else 1
 

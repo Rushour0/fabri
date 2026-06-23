@@ -4,6 +4,52 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.5.0 — 2026-06-23
+
+Per-run COGS (USD cost) with sub-agent rollup, a frugal-by-default base prompt,
+and cache pre-warming. All changes are additive/non-breaking: the `usage` event
+and `run_agent` return gained fields; existing token fields, tool contracts, and
+outcome semantics are unchanged.
+
+### Added
+
+- **Per-run USD cost (COGS).** `LLMUsage` gained a `model` field (filled by both
+  the Anthropic and OpenAI backends). New `fabri.pricing` module prices token
+  usage per model (Sonnet 4.6, Haiku 4.5, Opus tier, gpt-4o; cache-write 1.25×,
+  cache-read 0.10×; prefix-matches date-suffixed ids). `run_agent`'s `usage`
+  trace event AND its return dict now carry `cost_usd` (this run's own tokens),
+  `cost_by_model`, `subagent_cost_usd`, and `total_cost_usd`. An unknown/absent
+  model prices to `None` (never a misleading 0).
+- **Sub-agent cost rollup.** `agent_runner_tool` / `spawn_subagent` now return
+  the child's `usage`; the parent's dispatch loop rolls each child's
+  `total_cost_usd` into `subagent_cost_usd`, so a parent's `total_cost_usd` is
+  the true end-to-end cost of itself **plus its whole sub-agent subtree**.
+  Previously a sub-agent ran as a separate subprocess with its own trace, so its
+  tokens were invisible to the parent and a fan-out run was massively
+  undercounted. `_dispatch_tool_calls` gained an optional keyword-only
+  `on_subagent_cost` callback (existing direct callers are unaffected).
+- **Cache pre-warm.** `AnthropicLLMBackend.prewarm(system)` writes the static
+  system+tools prefix into Anthropic's ephemeral cache via a `max_tokens=0`
+  request and returns the call's `LLMUsage` (no-op on the scripted/OpenAI
+  backends). Trims first-call latency; the cache-write itself is paid once
+  either way, so fire it before a burst of same-prefix runs, not on a 24/7 loop.
+
+### Changed
+
+- **Frugal-by-default base prompt.** `DEFAULT_AGENT_IDENTITY` is now
+  deliberation-first. A `FRUGALITY_POLICY` is appended to **every** run (even
+  when a domain config replaces the identity wholesale), plus registry-gated
+  `DELEGATION_POLICY` (only when `spawn_subagent` is in the registry) and
+  `CODE_ACTION_POLICY` (only when `python_exec`/`batch` is present). Together
+  they steer the agent toward decisive calls over exploratory probing,
+  single-threaded-by-default delegation, and code-as-action — grounded in
+  CodeAct (arXiv:2402.01030), ReWOO (arXiv:2305.18323), Anthropic's multi-agent
+  engineering post, and Cognition's *Don't Build Multi-Agents*.
+- **`spawn_subagent` tool description** rewritten to gate delegation
+  ("EXPENSIVE … spawn ONLY when a subtask is independent, parallelizable, and
+  too large for your own context") and to document the new `usage` return field
+  whose `total_cost_usd` rolls the subtree's cost up to the parent.
+
 ## v0.4.6 — 2026-06-22
 
 ### Changed

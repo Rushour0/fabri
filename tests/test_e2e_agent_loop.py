@@ -261,7 +261,7 @@ def test_run_agent_with_tool_retrieval_narrows_system_prompt(tmp_path):
 
 def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
     # A5: every run ends with a `usage` event and the return dict carries a
-    # `usage` subobject with the six per-run fields.
+    # `usage` subobject with the per-run token + cost fields.
     tools = _sandbox(tmp_path)
     store = _store()
     script = [LLMResponse(final_text="hello")]
@@ -272,12 +272,20 @@ def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
         "input_tokens", "output_tokens",
         "cache_creation_input_tokens", "cache_read_input_tokens",
         "step_count", "wall_time_s",
+        # COGS: own-token cost, per-model breakdown, rolled-up sub-agent cost,
+        # and the end-to-end total a host persists as the build's cost.
+        "cost_usd", "cost_by_model", "subagent_cost_usd", "total_cost_usd",
     }
     assert usage["step_count"] == 1
     assert usage["wall_time_s"] >= 0
-    # Scripted backend leaves LLMResponse.usage=None, so token totals stay 0.
+    # Scripted backend leaves LLMResponse.usage=None, so token totals stay 0 and
+    # every cost field is 0 with no per-model entries.
     assert usage["input_tokens"] == 0
     assert usage["output_tokens"] == 0
+    assert usage["cost_usd"] == 0.0
+    assert usage["subagent_cost_usd"] == 0.0
+    assert usage["total_cost_usd"] == 0.0
+    assert usage["cost_by_model"] == {}
 
     from fabri.events import EventType
     from fabri.orchestrator.traces import read_trace

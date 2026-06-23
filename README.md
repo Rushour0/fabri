@@ -64,6 +64,37 @@ Two operating principles fall out of that:
   stdout returns JSON, the runner normalizes errors. Agents can be
   composed as tools of other agents through the same contract.
 
+## Frugality by default
+
+A token spent is a token billed. The base system prompt steers every run
+toward fewer, better-aimed actions, and the defaults make the cheap path
+the default path:
+
+- **Be sure before you call.** The agent states what it expects a call to
+  return before making it; if it can already act, it acts instead of
+  probing. One decisive call beats many exploratory ones — every
+  round-trip re-sends the whole context. (TALE, arXiv:2412.18547.)
+- **Single-threaded by default; delegate as the exception.** `spawn_subagent`
+  re-runs the entire loop, so it's reserved for subtasks that are
+  independent, parallelizable, *and* large enough to overflow the parent's
+  context — never sequential steps, never "because the tool exists." A
+  multi-agent run costs ~15× a single agent; coordination is a top failure
+  source. (Anthropic, *Building a multi-agent research system*; Cognition,
+  *Don't Build Multi-Agents*.)
+- **Code as action.** When a job needs several operations, the agent does
+  them in one `python_exec` script (or one `batch` call) that branches over
+  the results, instead of narrating each step as its own tool call. (CodeAct,
+  arXiv:2402.01030: −30% steps; smolagents: −28% tokens.)
+- **Surgical edits, windowed reads, prompt caching, TOON results.** Prefer
+  `edit_file` over whole-file rewrites; read only the slice you need; the
+  static system+tools prefix is cached; tool results enter context in
+  compact TOON.
+
+Every run emits a `usage` trace event carrying token totals **and**
+`cost_usd` (priced per model), plus `subagent_cost_usd` and `total_cost_usd`
+— the end-to-end cost of the run and its whole sub-agent subtree — so a host
+service can track COGS without parsing logs. See `fabri.pricing`.
+
 ## Install
 
 ```bash
