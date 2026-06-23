@@ -9,9 +9,13 @@
 > **forward feature work**. Reference card IDs (`F1`, `F2`, …) in commit
 > messages and PR titles.
 >
-> **TODO.md status (as of v0.2.0):** P0 + P1 + P2 closed except (a)
-> embedding `model_version` enforcement and (b) the `compress.py`
-> tokenizer mismatch. P3 nits remain.
+> **Status:** this file froze around v0.2.x. Tracks F/S/A/R below
+> describe the original framework-rewrite roadmap; everything from
+> v0.3.0 onward (memory-store backends, host-integration ergonomics, the
+> public-source release, etc.) is tracked in `CHANGELOG.md`, which is
+> authoritative for what has shipped. Treat the "In Progress" / "Done"
+> sections here as a historical snapshot — if a card isn't reflected in
+> the changelog, it didn't ship under that ID.
 >
 > **Card format:** `ID • Title • Track • Owner • Acceptance`
 
@@ -30,7 +34,7 @@ features for any future consumer.
 
 ## In Progress
 
-_(none — F1/F2/F5a/S1/S2/A1 all shipped in v0.2.1.)_
+_(none tracked here — see `CHANGELOG.md` for current release work.)_
 
 ## Backlog
 
