@@ -46,6 +46,7 @@ def _make_backend(enable: bool, tools=None):
     b._max_tokens = 32
     b._tools = tools or []
     b._enable_prompt_cache = enable
+    b._cache_messages = False  # G21: tests don't exercise message caching here
     return b
 
 

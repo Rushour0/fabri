@@ -43,6 +43,7 @@ def _backend(responses, max_tokens=4096):
     b._max_tokens = max_tokens
     b._tools = []
     b._enable_prompt_cache = False
+    b._cache_messages = False  # G21: not exercised by these tests
     b._client = _SeqClient(responses)
     return b
 

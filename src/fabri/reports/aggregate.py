@@ -84,13 +84,12 @@ class SessionSummary:
         return _dt.datetime.fromtimestamp(self.started_at).isoformat(timespec="seconds")
 
 
-def _attribute_cost_by_tool(
+def _attribute_cost_by_tool_proportional(
     cost_usd: float | None, tool_counts: dict[str, int]
 ) -> dict[str, float]:
-    """G7: proportional split of session cost across tool calls. Crude but
-    well-defined: doesn't pretend to know which tool actually drove which
-    tokens. A per-turn split (LLM cost of step N attributed to the tools
-    dispatched at step N) is a follow-up."""
+    """v0.7.0 proportional fallback. Kept for sessions whose trace doesn't
+    carry per-step cost (older runs, scripted backends with no priced model).
+    """
     if cost_usd is None or not tool_counts:
         return {}
     total_calls = sum(tool_counts.values())
@@ -100,6 +99,46 @@ def _attribute_cost_by_tool(
         name: round(cost_usd * count / total_calls, 6)
         for name, count in tool_counts.items()
     }
+
+
+def _attribute_cost_by_tool_per_step(events: list[dict]) -> dict[str, float] | None:
+    """G7 per-step attribution: walk the trace, keep a step → list-of-tool-names
+    map and a step → cost_usd map; the cost of step N gets split equally across
+    the tools dispatched at step N.
+
+    This is more accurate than proportional-by-total: a single read_file in a
+    cheap-context step doesn't inherit cost from an expensive code-generation
+    step.
+
+    Returns None when no `step_finished` event carries a `cost_usd` field
+    (legacy traces) so the caller can fall back to the proportional split.
+    """
+    step_tools: dict[int, list[str]] = {}
+    step_cost: dict[int, float] = {}
+    saw_any_cost = False
+    for ev in events:
+        kind = ev.get("type")
+        if kind == "tool_call":
+            step = ev.get("step")
+            if step is None:
+                continue
+            step_tools.setdefault(step, []).append(ev.get("name", "?"))
+        elif kind == "step_finished":
+            c = ev.get("cost_usd")
+            if c is not None:
+                saw_any_cost = True
+                step_cost[ev.get("step", -1)] = float(c)
+    if not saw_any_cost:
+        return None
+    out: dict[str, float] = {}
+    for step, tools in step_tools.items():
+        cost = step_cost.get(step, 0.0)
+        if not tools or cost == 0.0:
+            continue
+        share = cost / len(tools)
+        for name in tools:
+            out[name] = out.get(name, 0.0) + share
+    return {k: round(v, 6) for k, v in out.items()}
 
 
 def summarize_session(events: list[dict], session_id: str) -> SessionSummary:
@@ -143,9 +182,15 @@ def summarize_session(events: list[dict], session_id: str) -> SessionSummary:
                 "guidelines_from_prior_sessions", 0
             )
 
-    summary.cost_by_tool = _attribute_cost_by_tool(
-        summary.cost_usd, summary.tool_counts
-    )
+    # G7: prefer per-step attribution from the trace itself; fall back to the
+    # v0.7.0 proportional split for legacy traces with no per-step cost field.
+    per_step = _attribute_cost_by_tool_per_step(events)
+    if per_step is not None:
+        summary.cost_by_tool = per_step
+    else:
+        summary.cost_by_tool = _attribute_cost_by_tool_proportional(
+            summary.cost_usd, summary.tool_counts
+        )
     return summary
 
 

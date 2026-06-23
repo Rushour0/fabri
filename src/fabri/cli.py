@@ -128,6 +128,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         tool_retrieval_always_include=tuple(
             tools_cfg.get("retrieval", {}).get("always_include", [])
         ),
+        # G9: cost-budget enforcement (opt-in via config; None = no budget)
+        max_cost_usd=config["agent"].get("max_cost_usd"),
     )
     print(json.dumps(result, indent=2))
     # An LLM-error / max-steps / no-final outcome must surface to the
@@ -137,6 +139,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     # ledgers (e.g. ludexel's `runs` collection) mark the run succeeded
     # despite having no final_text.
     success_outcomes = {Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value}
+    # G9: BUDGET_EXCEEDED is a deliberate user-requested halt, not a SUCCESS,
+    # so it falls into the run_failed branch via the outcome check below.
     run_failed = not result.get("success") or result.get("outcome") not in success_outcomes
 
     compress_llm = build_llm(config, [])
@@ -293,6 +297,92 @@ def cmd_memory_diff(args: argparse.Namespace) -> None:
     _render(f"new in {b[:8]}", new_in_b)
     _render(f"shared between {a[:8]} and {b[:8]}", shared)
     _render(f"only in {a[:8]}", only_in_a)
+
+
+def cmd_replay(args: argparse.Namespace) -> None:
+    """G5: re-run the task from a prior session against the *current* memory
+    state. Prints a before/after table so the user can see whether the memory
+    loop actually changed the agent's behaviour.
+
+    Caveats: the LLM is non-deterministic. Outcome / step_count / cost can
+    differ even with no memory change. Read the comparison as a directional
+    signal, not proof; pair with `fabri.benchmarks.session_delta` for a
+    statistically meaningful answer.
+    """
+    from fabri.orchestrator.traces import read_trace
+
+    original_events = read_trace(args.session_id)
+    if not original_events:
+        print(f"no trace at .fabri/traces/{args.session_id}.jsonl", file=sys.stderr)
+        sys.exit(1)
+    start = next((e for e in original_events if e.get("type") == "start"), None)
+    if start is None or not start.get("task"):
+        print("trace has no start event with a task", file=sys.stderr)
+        sys.exit(1)
+    task = start["task"]
+    final = next((e for e in original_events if e.get("type") == "final"), None)
+    usage_evt = next((e for e in original_events if e.get("type") == "usage"), None)
+    original_summary = {
+        "outcome": (final or {}).get("outcome", "?"),
+        "cost_usd": (usage_evt or {}).get("cost_usd"),
+        "step_count": (usage_evt or {}).get("step_count", "?"),
+    }
+
+    config = load_config(args.config)
+    _require_api_key(config["llm"]["api_key_env"])
+    new_session_id = str(uuid.uuid4())
+    configure_logging(new_session_id, verbose=args.verbose)
+    mem_cfg = config["memory"]
+    store = _open_store(mem_cfg)
+    tools_cfg = config["tools"]
+    tools = build_tools(tools_cfg)
+    decompose_cfg = tools_cfg["decompose"]
+    llm = build_llm(config, build_tool_defs(tools, decompose_cfg))
+
+    print(f"replay task: {task!r}", file=sys.stderr)
+    print(f"  original session: {args.session_id[:8]} "
+          f"outcome={original_summary['outcome']} "
+          f"cost={_fmt_usd_or_dash(original_summary['cost_usd'])} "
+          f"steps={original_summary['step_count']}", file=sys.stderr)
+
+    result = run_agent(
+        task, llm, tools, store,
+        session_id=new_session_id,
+        max_steps=config["agent"]["max_steps"],
+        top_k=mem_cfg["top_k"],
+        max_subquestions=decompose_cfg["max_subquestions"],
+        system_prompt=config["agent"].get("system_prompt", ""),
+        system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
+        result_format=tools_cfg.get("result_format", "toon"),
+        output_format=config["agent"].get("output_format", "json"),
+        decompose_llm=build_decompose_llm(config),
+    )
+    new_summary = {
+        "outcome": result.get("outcome", "?"),
+        "cost_usd": (result.get("usage") or {}).get("cost_usd"),
+        "step_count": (result.get("usage") or {}).get("step_count", "?"),
+    }
+    print(f"  replay session:   {new_session_id[:8]} "
+          f"outcome={new_summary['outcome']} "
+          f"cost={_fmt_usd_or_dash(new_summary['cost_usd'])} "
+          f"steps={new_summary['step_count']}", file=sys.stderr)
+
+    if (original_summary["cost_usd"] is not None
+            and new_summary["cost_usd"] is not None):
+        delta = new_summary["cost_usd"] - original_summary["cost_usd"]
+        pct = (delta / original_summary["cost_usd"] * 100.0) if original_summary["cost_usd"] else 0.0
+        arrow = "↓" if delta < 0 else "↑" if delta > 0 else "→"
+        print(f"\ncost delta: {arrow}{abs(pct):.0f}%", file=sys.stderr)
+
+    print(json.dumps({
+        "task": task,
+        "original": {**original_summary, "session_id": args.session_id},
+        "replay": {**new_summary, "session_id": new_session_id},
+    }, indent=2))
+
+
+def _fmt_usd_or_dash(v) -> str:
+    return f"${v:.4f}" if isinstance(v, (int, float)) else "—"
 
 
 def cmd_tool_init(args: argparse.Namespace) -> None:
@@ -608,6 +698,11 @@ def main() -> None:
     p_mem_diff.add_argument("session_b", help="The later session id")
     p_mem_diff.add_argument("--markdown", action="store_true", help="Render as markdown")
     p_mem_diff.set_defaults(func=cmd_memory_diff)
+
+    # G5: `fabri replay <session>` — re-run the task with current memory.
+    p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state (G5)")
+    p_replay.add_argument("session_id")
+    p_replay.set_defaults(func=cmd_replay)
 
     # G14: `fabri tool init <lang> <name>` — scaffold a new tool in any language.
     p_tool = sub.add_parser("tool", help="Tool-related helpers (scaffold a new tool)")

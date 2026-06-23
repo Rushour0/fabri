@@ -1,5 +1,5 @@
-"""G19: Minimal MCP (Model Context Protocol) client — connect to MCP servers
-over stdio and wrap each remote tool as a fabri ToolManifest.
+"""G19: MCP (Model Context Protocol) client — connect to MCP servers and
+wrap each remote tool as a fabri ToolManifest.
 
 MCP is the emerging standard tool-call protocol used by Claude Code, OpenAI
 Agents SDK, Mastra, etc. Supporting it as a *client* widens fabri's available
@@ -7,22 +7,36 @@ tool ecosystem without writing a tool per integration — point a config at an
 MCP server (filesystem, github, postgres, ...) and its tools land in the
 registry.
 
-This implementation is deliberately minimal:
-- stdio transport only (HTTP+SSE transport is a follow-up)
-- NDJSON framing (line-delimited JSON-RPC 2.0)
-- one server per process; the client process is the MCP server's parent
+Transports:
+- **stdio (default)** — JSON-RPC over NDJSON (line-delimited). The server is
+  spawned as a subprocess by the client.
+- **http (v0.7.2 G19 follow-up)** — JSON-RPC over POST to a single endpoint.
+  Plain request/response, no SSE streaming. SSE is a planned follow-up; the
+  POST-only mode covers most stateless MCP servers.
 
-Config shape (`agent.yaml`):
+Config shapes:
+
+    # stdio
     tools:
       mcp_servers:
-        - name: fs                # used as a name prefix (mcp_fs_<tool>)
+        - name: fs
           command: ["npx", "@modelcontextprotocol/server-filesystem", "/srv/data"]
-          env:                    # optional
-            FOO: bar
+          env: {FOO: bar}
+
+    # http
+    tools:
+      mcp_servers:
+        - name: fs
+          url: "https://mcp.example.com/jsonrpc"
+          headers: {Authorization: "Bearer ..."}
+
+build_mcp_tools picks the transport by which field is set (command vs url).
 
 Caveats:
-- An MCP server's stdout is JSON-RPC. Any debug output it emits MUST go to
+- A stdio MCP server's stdout is JSON-RPC. Any debug output it emits MUST go to
   stderr (it'll otherwise corrupt the framing).
+- HTTP transport is request/response; tools that need streaming (resources,
+  notifications) won't surface partial state — they'll get the final payload.
 - Errors from the server come back wrapped in the standard fabri tool result
   shape (`{ok: False, error: ...}`), so the agent loop sees no special case.
 """
@@ -160,6 +174,81 @@ class MCPStdioClient:
                 pass
 
 
+@dataclass
+class MCPHttpClient:
+    """JSON-RPC-over-HTTP client. Same surface as MCPStdioClient
+    (initialize / list_tools / call_tool / close) so build_mcp_tools can
+    treat them interchangeably.
+
+    Plain POST: the JSON-RPC request is the body; the response is parsed from
+    the body. No SSE; servers that ONLY support streaming responses are not
+    supported by this v0 transport — the planned SSE follow-up adds that.
+    """
+
+    url: str
+    headers: dict[str, str] | None = None
+    name: str = "mcp"
+    timeout_s: float = 30.0
+    _next_id: int = field(default=0, init=False, repr=False)
+
+    def start(self) -> None:
+        # No persistent connection; nothing to do here. Kept for API parity.
+        return
+
+    def _request(self, method: str, params=None):
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        self._next_id += 1
+        msg = {"jsonrpc": "2.0", "id": self._next_id, "method": method}
+        if params is not None:
+            msg["params"] = params
+        body = _json.dumps(msg).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.headers:
+            headers.update(self.headers)
+        req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            raise MCPProtocolError(
+                f"MCP HTTP {self.url} → HTTP {e.code}: {e.read()[:200]!r}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise MCPProtocolError(f"MCP HTTP {self.url} → URLError: {e}") from e
+        try:
+            payload = _json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            raise MCPProtocolError(f"MCP HTTP {self.url} → non-JSON body: {e}") from e
+        if isinstance(payload, dict) and "error" in payload:
+            raise MCPProtocolError(f"MCP {method} → error: {payload['error']}")
+        return (payload or {}).get("result") if isinstance(payload, dict) else None
+
+    def initialize(self):
+        return self._request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "fabri", "version": "0.7.2"},
+            },
+        )
+
+    def list_tools(self):
+        result = self._request("tools/list") or {}
+        return result.get("tools", []) or []
+
+    def call_tool(self, name: str, arguments: dict):
+        return self._request(
+            "tools/call", {"name": name, "arguments": arguments}
+        ) or {}
+
+    def close(self) -> None:
+        return
+
+
 def _sanitize_name(s: str) -> str:
     """Tool names go into both the LLM tool-call schema and our registry —
     keep them to ascii-alnum-underscore."""
@@ -168,19 +257,34 @@ def _sanitize_name(s: str) -> str:
 
 def build_mcp_tools(
     server_cfg: dict,
-) -> tuple[MCPStdioClient, list[tuple[ToolManifest, "callable"]]]:
-    """Connect to one MCP server. Returns the live client and a list of
-    (manifest, handler) pairs to register with the ToolRegistry.
+):
+    """Connect to one MCP server (stdio or HTTP). Returns the live client and
+    a list of (manifest, handler) pairs to register with the ToolRegistry.
 
-    The caller is responsible for `close()`-ing the client when done (the
-    registry holds a reference so it stays alive for the agent's lifetime).
+    Picks transport by which of `command` / `url` is set in server_cfg. The
+    caller is responsible for `close()`-ing the client when done (the registry
+    holds a reference so it stays alive for the agent's lifetime).
     """
     name = server_cfg.get("name") or "mcp"
     command = server_cfg.get("command")
-    if not command:
-        raise ValueError(f"mcp server {name!r}: missing 'command' (list of str)")
-    env = server_cfg.get("env")
-    client = MCPStdioClient(command=command, env=env, name=name)
+    url = server_cfg.get("url")
+    if command and url:
+        raise ValueError(
+            f"mcp server {name!r}: provide either 'command' (stdio) or "
+            f"'url' (http), not both"
+        )
+    if url:
+        client = MCPHttpClient(
+            url=url, headers=server_cfg.get("headers"), name=name,
+            timeout_s=float(server_cfg.get("timeout_s", 30.0)),
+        )
+    elif command:
+        env = server_cfg.get("env")
+        client = MCPStdioClient(command=command, env=env, name=name)
+    else:
+        raise ValueError(
+            f"mcp server {name!r}: must set 'command' (stdio) or 'url' (http)"
+        )
     client.start()
     client.initialize()
     remote_tools = client.list_tools()

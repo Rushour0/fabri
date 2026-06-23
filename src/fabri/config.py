@@ -15,6 +15,11 @@ DEFAULT_CONFIG = {
     "agent": {
         "name": "default",
         "max_steps": 10,
+        # G9: cost-budget enforcement. When set, the run breaks out with
+        # Outcome.BUDGET_EXCEEDED before issuing an LLM call whose result
+        # would carry total COGS over this threshold. None = no budget (the
+        # historical default; existing configs keep working unchanged).
+        "max_cost_usd": None,
         # If `system_prompt` is set, it REPLACES the framework's generic
         # boilerplate ("You are an autonomous agent..."). If `system_prompt_prefix`
         # is set, it is prepended to whatever follows. Both empty = original
@@ -43,6 +48,12 @@ DEFAULT_CONFIG = {
         "model": "claude-sonnet-4-6",
         "max_tokens": 1024,
         "api_key_env": "ANTHROPIC_API_KEY",
+        # G21: opt-in extended prompt caching. When true, marks the last
+        # message's tail block with cache_control so the conversation history
+        # prefix reads from Anthropic's 5-min ephemeral cache on the next
+        # turn (~0.1x input bill on the cached prefix). Default off; turn
+        # on for multi-step runs that re-send a long context.
+        "cache_messages": False,
     },
     "tools": {
         "manifest_dir": str(DEFAULT_TOOLS_DIR),

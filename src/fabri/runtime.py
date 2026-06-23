@@ -72,6 +72,7 @@ def build_llm(config: dict, tools_defs: list[dict], *, model_override: str | Non
             tools=tools_defs,
             max_tokens=llm_cfg["max_tokens"],
             api_key_env=llm_cfg["api_key_env"],
+            cache_messages=bool(llm_cfg.get("cache_messages", False)),
         )
     if provider == "openai":
         return OpenAILLMBackend(

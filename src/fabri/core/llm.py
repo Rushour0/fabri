@@ -132,6 +132,7 @@ class AnthropicLLMBackend:
         max_tokens: int = 1024,
         api_key_env: str = "ANTHROPIC_API_KEY",
         enable_prompt_cache: bool = True,
+        cache_messages: bool = False,
     ):
         import os
 
@@ -146,6 +147,13 @@ class AnthropicLLMBackend:
         # prefix to ~10% billing on cache hits. Flag exists so cost-sensitive
         # smoke tests / scripted backends can opt out.
         self._enable_prompt_cache = enable_prompt_cache
+        # G21: also cache the *conversation history prefix*. Anthropic permits
+        # up to 4 cache breakpoints; we use 2 (system, tools) by default and
+        # add a 3rd on the last message when this is on. Most useful on
+        # multi-step runs where each step re-sends the growing history; the
+        # cache cuts the per-step re-bill on the prefix from ~100% to ~10%.
+        # Off by default (untested at scale; the user opts in via config).
+        self._cache_messages = cache_messages and enable_prompt_cache
 
     def set_tools(self, tool_defs: list[dict]) -> None:
         self._tools = list(tool_defs or [])
@@ -163,6 +171,33 @@ class AnthropicLLMBackend:
         marked = [dict(t) for t in self._tools]
         marked[-1] = {**marked[-1], "cache_control": {"type": "ephemeral"}}
         return marked
+
+    def _build_messages(self, messages: list[dict]) -> list[dict]:
+        """G21: when cache_messages is on, mark the LAST message's last content
+        block with cache_control. Anthropic caches everything up to and
+        including the marker, so on the next turn the whole conversation
+        prefix reads from cache (~0.1x input cost) instead of being re-billed.
+
+        We mutate a shallow copy — caller's messages stay untouched.
+        """
+        if not self._cache_messages or not messages:
+            return messages
+        out = [dict(m) for m in messages]
+        last = out[-1]
+        content = last.get("content")
+        if isinstance(content, str):
+            # Promote to block form so we have somewhere to attach cache_control.
+            last["content"] = [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+            ]
+        elif isinstance(content, list) and content:
+            new_content = [dict(b) if isinstance(b, dict) else b for b in content]
+            tail = new_content[-1]
+            if isinstance(tail, dict):
+                tail["cache_control"] = {"type": "ephemeral"}
+            new_content[-1] = tail
+            last["content"] = new_content
+        return out
 
     def prewarm(self, system: str) -> LLMUsage:
         """Write the static system+tools prefix into Anthropic's ephemeral cache
@@ -214,7 +249,7 @@ class AnthropicLLMBackend:
                 lambda: self._client.messages.create(
                     model=self._model,
                     system=self._build_system(system),
-                    messages=messages,
+                    messages=self._build_messages(messages),
                     tools=self._build_tools(),
                     max_tokens=max_tokens,
                 ),

@@ -178,6 +178,7 @@ def run_agent(
     tool_retrieval_enabled: bool = False,
     tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K,
     tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
+    max_cost_usd: float | None = None,
 ) -> dict:
     # result_format: how tool results are serialized INTO the model's context
     #   (toon = fewer input tokens; we control this end so it's reliability-free).
@@ -261,6 +262,20 @@ def run_agent(
         bucket.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
         bucket.cache_read_input_tokens += resp_usage.cache_read_input_tokens
 
+    # G9: cost budget enforcement. Returns True when the budget is set and the
+    # current run's COGS (own + subagent subtree) has crossed it. Called after
+    # each LLM-call usage is accumulated; the loop breaks out cleanly with
+    # Outcome.BUDGET_EXCEEDED instead of issuing another expensive turn.
+    def _budget_breached() -> bool:
+        if max_cost_usd is None:
+            return False
+        own = 0.0
+        for bucket in usage_by_model.values():
+            c = cost_for(bucket)
+            if c is not None:
+                own += c
+        return (own + subagent_cost_total[0]) >= max_cost_usd
+
     def _accumulate_subagent_cost(cost: float) -> None:
         subagent_cost_total[0] += cost
 
@@ -343,6 +358,18 @@ def run_agent(
             global_step = step_offset + inner_step
             steps_used = inner_step + 1
             t0 = time.monotonic()
+            # G9: same cost-budget check as the legacy loop. Item-level break
+            # — the surrounding planner loop sees the item finished early and
+            # honours the budget on subsequent items via the same check.
+            if _budget_breached():
+                log_event(session_id, {
+                    "type": "budget_exceeded",
+                    "step": global_step,
+                    "max_cost_usd": max_cost_usd,
+                })
+                item_failed = True
+                item_error = "cost budget exceeded"
+                break
             log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": global_step})
             try:
                 response = llm.step(system, item_messages)
@@ -512,10 +539,22 @@ def run_agent(
     # step budget item-by-item; skip the legacy single-loop body entirely
     # rather than materialising a range(max_steps) we won't iterate.
     legacy_steps: range | list[int] = [] if plan_engaged else range(max_steps)
+    budget_breached_legacy = False
     for step_num in legacy_steps:
         step_count = step_num + 1
         logger.debug("step %d: calling llm", step_num)
         t0 = time.monotonic()
+        # G9: cost-budget check before issuing a new LLM call. If the run's
+        # COGS has already crossed agent.max_cost_usd, break out cleanly
+        # rather than paying for another turn whose result we'd discard.
+        if _budget_breached():
+            budget_breached_legacy = True
+            log_event(session_id, {
+                "type": "budget_exceeded",
+                "step": step_num,
+                "max_cost_usd": max_cost_usd,
+            })
+            break
         # Step boundary: gives the host UI a clean separator between
         # turns so it can group thought + tool_call + tool_result events
         # under one collapsible block per step. The paired `step_finished`
@@ -525,6 +564,12 @@ def run_agent(
         try:
             response = llm.step(system, messages)
             _accumulate(response.usage)
+            # G7: per-step cost. Priced from THIS step's response.usage alone,
+            # so reports can attribute the LLM-call cost to the tools the model
+            # dispatched in this step (instead of the v0.7.0 proportional-by-
+            # call-count split). cost_for returns None on an unknown model;
+            # we surface that as None too rather than fabricating a 0.
+            step_cost = cost_for(response.usage) if response.usage else None
             if response.tool_calls:
                 # Emit any inline reasoning BEFORE the tool_call events so
                 # trace readers see "Let me check X first..." preceding the
@@ -543,6 +588,7 @@ def run_agent(
                     "reason": StepReason.TOOLS.value,
                     "tool_failure": step_had_failure,
                     "tool_count": len(response.tool_calls),
+                    "cost_usd": step_cost,  # G7
                 })
                 continue
         except LLMError as e:
@@ -574,6 +620,7 @@ def run_agent(
                 "step": step_num,
                 "elapsed_s": round(time.monotonic() - t0, 3),
                 "reason": StepReason.FINAL.value,
+                "cost_usd": step_cost,  # G7
             })
             break
 
@@ -599,7 +646,18 @@ def run_agent(
         })
         raise AgentProtocolError(reason)
 
-    outcome = _classify_outcome(success, had_tool_failure, failed)
+    # G9: a budget-induced break wins outcome classification — both legacy
+    # and planner paths set budget_breached_legacy / item_error="cost budget
+    # exceeded". A run that hit the budget but produced final_text first is
+    # still SUCCESS; the budget is a backstop, not a retroactive invalidator.
+    if not success and (budget_breached_legacy or any(
+        e == "cost budget exceeded" for e in [error_reason]
+    )):
+        outcome = Outcome.BUDGET_EXCEEDED
+        failed = True  # treat budget breach as a failure for exit-code purposes
+        error_reason = error_reason or "cost budget exceeded"
+    else:
+        outcome = _classify_outcome(success, had_tool_failure, failed)
     logger.info("agent run finished: outcome=%s session_id=%s", outcome.value, session_id)
 
     if success:

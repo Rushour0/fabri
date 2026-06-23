@@ -4,6 +4,120 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.2 — 2026-06-23
+
+The "clear the deferred backlog" release. All eight deferred items from
+v0.7.1's CHANGELOG land here. Two are opt-in (G9 budget, G21 caching) so
+ludexel keeps current behaviour unless it sets the new config keys.
+
+### Added — opt-in features (default off; zero impact unless configured)
+
+- **G9 cost-budget enforcement.** New `agent.max_cost_usd` config knob. When
+  set, the run breaks out cleanly with `Outcome.BUDGET_EXCEEDED` before
+  issuing an LLM call whose result would push total COGS (own + sub-agent
+  subtree) past the threshold. Default: `null` (no budget; current behavior).
+  Emits a `budget_exceeded` trace event with the step + threshold for
+  observability.
+- **G21 extended prompt caching.** New `llm.cache_messages` config knob
+  (Anthropic-only). When true, marks the LAST message's tail content block
+  with `cache_control: ephemeral`, so the conversation history prefix reads
+  from Anthropic's 5-min cache (~0.1× input bill on the cached prefix) on
+  subsequent turns. Default: `false`. Mutates a shallow copy — caller's
+  messages list is untouched. Anthropic's 4-breakpoint limit is respected
+  (system + tools + last-message uses 3 of 4).
+
+### Added — CLI (G5)
+
+- **`fabri replay <session_id>`.** Re-runs the original task from a recorded
+  trace against the *current* memory state. Prints a before/after summary
+  (outcome, cost, steps) plus a JSON dump. Useful for "did the memory loop
+  actually change behavior?" — but the LLM is non-deterministic, so read it
+  as a directional signal and pair with `session_delta` for statistical
+  weight.
+
+### Added — reports (G7)
+
+- **Per-step cost attribution.** `step_finished` events now carry a
+  `cost_usd` field (priced from the step's `response.usage` alone), and
+  `reports.aggregate` walks the trace step-by-step to split each step's LLM
+  cost across the tools dispatched that step. v0.7.0's proportional-by-
+  total-call-count split is the fallback for legacy traces without
+  per-step cost.
+
+### Added — MCP (HTTP transport, server side)
+
+- **`MCPHttpClient`.** JSON-RPC over HTTP POST. Same surface as
+  `MCPStdioClient` (`initialize` / `list_tools` / `call_tool` / `close`).
+  No SSE streaming yet — that's the next follow-up. Server config gains
+  `url` + optional `headers` fields:
+
+      tools:
+        mcp_servers:
+          - name: fs
+            url: "https://mcp.example.com/jsonrpc"
+            headers: {Authorization: "Bearer ..."}
+
+  `build_mcp_tools` picks transport by which field is set (errors loudly
+  on both / neither).
+
+- **`fabri.tools.mcp_server`** — expose a fabri agent as an MCP server over
+  stdio. Run as `python -m fabri.tools.mcp_server --config agent.yaml
+  [--tool-name fabri_agent]`. Exposes ONE tool whose input is `{task:
+  string}`; the call invokes `run_agent` and returns the agent's final text
+  in the standard MCP `content[]` shape with `isError` set by the run's
+  `success` field. Lazy-inits the tool registry + store on first call so
+  list-tools-only clients don't pay setup cost.
+
+### Added — LongMemEval benchmark (G1 follow-up)
+
+- **`fabri.benchmarks.longmemeval`** — full end-to-end runner.
+  - HuggingFace dataset downloader (lazy, cached at `~/.cache/fabri/
+    longmemeval/`). Falls back to a clear install hint if `datasets` isn't
+    installed.
+  - Per-case isolated memory collection so cross-case leakage doesn't
+    inflate scores.
+  - Exact-match scorer (case + whitespace normalized) shipped; LLM-judge
+    scorer scaffolded behind `--judge`.
+  - Per-category aggregation.
+  - CLI: `python -m fabri.benchmarks.longmemeval --config agent.yaml
+    --limit 10` (full eval is ~10k cases, several hours).
+
+  **Status:** runner end-to-end + scoring helpers under test; the publish-
+  worthy ~10k-case number needs a user-side run with real API credits.
+  Single highest-leverage marketing artifact once it lands.
+
+### Changed — memory/compress.py hardening (TODO.md)
+
+- **Model-aware tokenizer.** `count_tokens` and `enforce_token_cap` now
+  pick a tiktoken encoding per model (`o200k_base` for Claude 4.x and
+  gpt-4o; `cl100k_base` fallback for unknown). The historical hard-coded
+  `cl100k_base` could mis-count by ~10-15% on Claude.
+- **Word-boundary truncation.** `enforce_token_cap` no longer slices a
+  guideline mid-token — it backs up to the previous whitespace before
+  appending `…`. Stops guidelines that end in a meaningless half-syllable.
+
+### Tests
+
+- **+19 tests** in `test_unit_v072_features.py` covering G7 per-step
+  attribution + legacy fallback, G9 budget outcome + default, G21 message
+  cache marking + non-mutation, tokenizer word-boundary + model-aware,
+  MCP HTTP serialization, build_mcp_tools transport-picking rejection,
+  MCP server initialize / list / unknown-method / notification handling,
+  LongMemEval scoring + by-category aggregation. Suite 423 → 442.
+
+### Deferred (need separate work)
+
+- **MCP HTTP+SSE** — POST request/response works; streaming responses
+  (the SSE variant) is the next follow-up.
+- **`model_version` enforcement** in `memory/schema.py` — would invalidate
+  existing collections; needs a migration story (rename collection on
+  mismatch? raise + ask user to recreate?) before shipping.
+- **Concurrent-ingest + wheel-packaging + multi-block tests** — TODO.md
+  test-coverage holes. Tests-only changes; tracked for v0.7.3.
+- **manifest_schema over-eager path rewriting** (`tools/manifest_schema.py
+  :23`). Could affect ludexel's tool configs; needs a targeted test before
+  changing.
+
 ## v0.7.1 — 2026-06-23
 
 The "close the gaps that don't touch ludexel" release. P3 hardening pass +

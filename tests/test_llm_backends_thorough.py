@@ -76,6 +76,7 @@ def _anthropic_backend(responses, *, max_tokens=4096, enable_cache=False, model=
     b._max_tokens = max_tokens
     b._tools = []
     b._enable_prompt_cache = enable_cache
+    b._cache_messages = False  # G21: not exercised in this thorough sweep
     b._client = _AnthropicSeqClient(responses)
     return b
 

@@ -88,7 +88,9 @@ def test_build_decompose_llm_uses_override_model(monkeypatch):
     captured = {}
 
     class _Stub:
-        def __init__(self, model, tools, max_tokens, api_key_env):
+        def __init__(self, model, tools, max_tokens, api_key_env, **kwargs):
+            # **kwargs absorbs G21-era additions (cache_messages) so this
+            # stub doesn't need touching every time we widen the constructor.
             captured["model"] = model
             captured["max_tokens"] = max_tokens
 
