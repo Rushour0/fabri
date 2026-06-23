@@ -4,6 +4,91 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.7 — 2026-06-24
+
+Multi-provider per-role LLM + OpenRouter, plus a Haiku-class narrator that
+emits short user-facing status updates between tool steps. Backward
+compatible: existing v0.7.x `agent.yaml` files keep working unchanged.
+
+### Added
+
+- **Per-role LLM provider/model selection.** `llm.decompose`, `llm.planner`,
+  and `llm.narrator` accept either a model-id string (legacy shorthand) or
+  a full dict `{provider, model, api_key_env, max_tokens, base_url,
+  cache_messages}`. Each role bills against its own API key; the four
+  roles can run on three different providers simultaneously. Inherits any
+  missing field from the parent `llm.*` defaults.
+- **New provider keyword: `openrouter`.** OpenAI-API-compatible; the
+  backend pins `base_url=https://openrouter.ai/api/v1` automatically.
+  Model ids are namespaced (e.g. `anthropic/claude-haiku-4-5`).
+- **`OpenAILLMBackend(base_url=...)` kwarg.** Optional; lets the same
+  backend talk to any OpenAI-compatible endpoint. Pure addition — old
+  callers see no signature change.
+- **Haiku narrator emits `narration` trace events between tool steps.**
+  Configured via `llm.narrator` (defaults to `claude-haiku-4-5`,
+  effectively free per run); set to `null` to silence. Failures are
+  swallowed so narration never breaks a run; usage rolls into the run's
+  `total_cost_usd`. New `run_agent(narrator_llm=...)` parameter.
+- **`runtime.build_role_llm(config, role, tool_defs=None)`** — single
+  resolver that powers `build_llm` / `build_decompose_llm` /
+  `build_narrator_llm` (now one-line shims). Adding a new provider means
+  one branch in `runtime._instantiate`.
+- **`runtime.find_missing_role_api_keys(config)`** — walks every
+  configured role and returns `{env_var: [roles]}` for the env vars that
+  aren't set. CLI + benchmark pre-flight now reports ALL missing keys in
+  one error instead of failing on the first.
+- **Pricing entries for common OpenRouter model ids** —
+  `anthropic/claude-{haiku-4-5,sonnet-4-6,opus-4-8}`,
+  `openai/{gpt-4o,gpt-4o-mini}` — match the underlying provider's list
+  price; reconciled to the OpenRouter invoice on adoption.
+
+### Changed
+
+- **`config._normalize_llm_roles`** runs inside `load_config` (and lazily
+  inside `runtime._resolve_role_cfg` for callers that bypass
+  `load_config`). Lifts legacy flat keys (`decompose_model`,
+  `narrator_model`, `narrator_max_tokens`) into the new role shape with
+  no warning. If both legacy and new exist for the same role, the new
+  dict wins — clean incremental migration.
+- **Memory store now fail-fasts on embedding-model mismatch.**
+  `_ensure_collection` scrolls one existing point and raises with a
+  clear "recreate-or-rename" message when its `model_version` differs
+  from the running embedding model. Previously this would silently mix
+  embedding spaces.
+- **Tool manifest arg-rewriting tightened.** A token like `grep.py` in
+  `bash -c "ls grep.py"` no longer gets rewritten to an absolute path
+  just because a sibling file named `grep.py` exists. Only path-shaped
+  tokens (script extension or containing `/`) qualify.
+
+### Removed
+
+- **Dead `evict_stale` in `memory/pruning.py`.** No callers, and the
+  gate could never fire given how promotion grows `hit_count`.
+- **Narrator provider-mismatch heuristic (`_NARRATOR_PROVIDER_DEFAULTS`,
+  `_is_anthropic_model_id`, `_is_openai_model_id`)** in `runtime.py` —
+  ~30 lines. The per-role `provider` keyword replaces it; the heuristic
+  was guesswork the user can now state explicitly.
+
+### Compatibility
+
+- No DB / disk format change. No on-wire trace event change (new
+  `narration` event is purely additive).
+- `LLMBackend`, `run_agent`, `build_llm`, `build_decompose_llm`,
+  `build_narrator_llm`, `AnthropicLLMBackend`, `OpenAILLMBackend` all
+  preserve their existing signatures. `OpenAILLMBackend.__init__` gains
+  one optional kwarg.
+- A v0.7.6-shape `agent.yaml` produces the same backend selection it
+  always did. A pin-test (`test_legacy_config_unchanged_backend_selection`)
+  guards against drift in the lift logic.
+
+### Tests
+
+490 passed (469 without the optional `openai` extra). New:
+`test_unit_role_resolution.py` (15 cases incl. legacy-config pin),
+`test_unit_openrouter_backend.py` (3 cases), 3 OpenRouter pricing cases,
+narrator dedup/empty-drop/multi-step/usage-rollup coverage in
+`test_unit_narrator.py`.
+
 ## v0.7.6 — 2026-06-23
 
 The "public source release" pass. No agent-loop semantics change; no
