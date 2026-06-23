@@ -1,0 +1,76 @@
+# fabri — canonical benchmark config
+#
+# THIS FILE IS LOAD-BEARING for reproducibility.
+#
+# Every fabri-published benchmark number (session_delta, LongMemEval, etc.)
+# is produced against this exact config. Changes here change the published
+# numbers — bump fabri's minor version (0.7.x → 0.8.0) when you do, so
+# anyone re-running a chart with a fabri version >= the chart's version
+# gets the same number ±LLM jitter.
+#
+# Rule of thumb when editing:
+# - Adding a comment, fixing a typo: same version.
+# - Changing a value (model, max_steps, similarity_threshold, ...): minor bump
+#   AND a note in BENCHMARKS.md explaining the change.
+#
+# Run a benchmark with this config:
+#   pip install 'fabri[sqlite]'
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   python -m fabri.benchmarks.session_delta \
+#     --config configs/benchmark.yaml \
+#     --task "your fixed task" --runs 10
+#
+# Why these choices (each line is a strategic call, not a default):
+# - claude-sonnet-4-6: mid-tier, most-published; what Mastra reports on.
+# - sqlite backend: deterministic, no docker timing variance, free to spin up
+#   for CI / one-off bench machines.
+# - max_steps 10: matches the LongMemEval paper's per-session budget.
+# - planner / decompose OFF: the published number measures the memory loop,
+#   not the planner. Turn either on in your own runs if you want to measure
+#   them — but document the deviation.
+# - result_format toon: the published frugality story depends on it.
+# - mcp_servers []: no external tool deps for reproducibility — anyone with
+#   the model + sqlite-vec can reproduce.
+
+agent:
+  name: benchmark
+  max_steps: 10
+  output_format: json
+  planner:
+    enabled: false
+    mode: off
+    max_items: 8
+    auto_token_threshold: 80
+  max_cost_usd: null               # no budget cap during benchmarks
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  max_tokens: 2048
+  api_key_env: ANTHROPIC_API_KEY
+  cache_messages: false            # off by default — turn on per-experiment + note in BENCHMARKS.md
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, write_file, list_dir]
+  sandbox_root: .
+  result_format: toon
+  agents: []
+  decompose:
+    enabled: false
+    max_subquestions: 5
+  retrieval:
+    enabled: false
+    top_k: 6
+    always_include: [spawn_subagent, ask_user, decompose]
+  mcp_servers: []
+
+memory:
+  backend: sqlite
+  collection: benchmark
+  sqlite_path: .fabri/benchmark.db
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30

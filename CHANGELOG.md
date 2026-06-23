@@ -4,6 +4,48 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## v0.7.3 — 2026-06-23
+
+The "benchmark methodology lockdown" release. Ships two canonical configs +
+a methodology doc so every future benchmark number is reproducible against
+a specific fabri version.
+
+### Added
+
+- **`configs/example.yaml`** — runnable starter config (sqlite-vec memory,
+  Sonnet 4.6, minimal tool surface). Allowed to drift across releases;
+  it's a teaching artifact, not a contract.
+- **`configs/benchmark.yaml`** — the LOAD-BEARING config every published
+  fabri benchmark runs against. Locked per minor version: any value
+  change requires a minor version bump AND a results-table note in
+  `BENCHMARKS.md`. Each field carries an inline comment explaining the
+  strategic call.
+- **`configs/README.md`** — short pointer at the two files + quickstart.
+- **`BENCHMARKS.md`** at the repo root — methodology, reproduction
+  commands for both `session_delta` and LongMemEval, and empty results
+  tables ready to accept rows as real runs land. Cites the comparison
+  numbers (Mastra 94.87% on LongMemEval, Letta, Mem0, Zep) inline so the
+  comparison is honest when the first fabri row gets filled in.
+- **README hero block** updated with the no-docker `pip install
+  'fabri[sqlite]'` path + a pointer at `configs/` and `BENCHMARKS.md`.
+
+### Why this lands before any real benchmark number
+
+The number you publish is only worth what you'd let someone re-run it.
+Locking `configs/benchmark.yaml` first means every future "fabri got X% on
+Y" can be reproduced against a specific fabri version, not just "whatever
+config the demo happened to use." This is the spine the benchmark platform
+work hangs off of.
+
+### Operational
+
+- No code changes; pure docs + configs.
+- `configs/*` is included via setuptools defaults (no `package-data`
+  change needed — these live at the repo root, not in the wheel; they're
+  cloned/forked from GitHub).
+- Tests: suite stays at 442 (no new tests; configs are validated by
+  `load_config()` round-tripping in `__main__`, see release notes).
+
 ## v0.7.2 — 2026-06-23
 
 The "clear the deferred backlog" release. All eight deferred items from

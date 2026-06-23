@@ -1,0 +1,43 @@
+# fabri — example agent config
+#
+# A minimal, opinionated, runnable starter. Drop-in for a first run on a
+# fresh checkout — no docker required (uses the embedded sqlite-vec memory
+# backend shipped in v0.7.0).
+#
+# Run:
+#   pip install 'fabri[sqlite]'
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   fabri --config configs/example.yaml run "list every README in src/"
+#
+# Tweak this for your project (rename `agent.name`, point `sandbox_root`
+# at the directory you want the agent to read/write inside, enable more
+# tools as you need them). For benchmark reproducibility, use
+# `configs/benchmark.yaml` instead — the example config is allowed to
+# drift over time.
+
+agent:
+  name: example
+  max_steps: 10
+
+llm:
+  provider: anthropic              # or "openai" (pip install 'fabri[openai]')
+  model: claude-sonnet-4-6
+  max_tokens: 2048
+  api_key_env: ANTHROPIC_API_KEY
+  cache_messages: false            # G21 opt-in: cache conversation prefix on turn 2+
+
+tools:
+  manifest_dir:
+    - builtin                      # bundled tools (read_file, write_file, list_dir, ...)
+  enabled: [read_file, write_file, list_dir]
+  sandbox_root: .                  # file tools are jailed to this directory
+  result_format: toon              # compact tool results -> fewer input tokens
+
+memory:
+  backend: sqlite                  # in-process, no docker required
+  collection: example
+  sqlite_path: .fabri/example.db
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30

@@ -108,6 +108,18 @@ docker run -p 6333:6333 qdrant/qdrant   # vector store for memory
 export ANTHROPIC_API_KEY=...
 ```
 
+Or, to skip docker entirely (in-process sqlite-vec memory backend):
+
+```bash
+pip install 'fabri[sqlite]'
+export ANTHROPIC_API_KEY=...
+fabri --config configs/example.yaml run "your task"   # or `fabri init` to scaffold
+```
+
+See [`configs/`](configs/) for the canonical example and benchmark configs,
+and [`BENCHMARKS.md`](BENCHMARKS.md) for the methodology + how to reproduce
+published numbers.
+
 For OpenAI models: `pip install "fabri[openai]"` and set
 `llm.provider: openai` in your config.
 
