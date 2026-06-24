@@ -6,6 +6,31 @@ that ships.
 
 ## Unreleased
 
+## 0.7.8 — 2026-06-25
+
+### COGS accuracy fixes
+
+- **Planner LLM usage is now accumulated.** `core.planner.plan()` accepts an
+  `on_usage` callback; `run_agent` passes its `_accumulate` so a planner
+  step's tokens (often a full-context Sonnet pass) land in the run's
+  reported `cost_usd` / `total_cost_usd` instead of silently leaking.
+- **Decompose LLM usage is now accumulated.** `core.decompose.decompose()`
+  accepts `on_usage`; threaded through `_dispatch_tool_calls` so every
+  `decompose` tool call rolls into COGS.
+- **Memory-compression LLM usage is captured.** `synthesize_guideline` and
+  `synthesize_success_pattern` accept `on_usage`; `orchestrator.pipeline.
+  process_trace` threads it through. `cli.cmd_run` accumulates and emits a
+  new `post_run_usage` trace event after `process_trace` completes so a
+  host can merge the cost onto the run's recorded totals.
+- **`cost_unaccounted` event for crashed sub-agents.** When `spawn_subagent`
+  fails without surfacing usage (e.g. qdrant down → runner crashed before
+  printing its final JSON), the parent now emits an explicit
+  `cost_unaccounted` event with `tool`, `step`, `reason`,
+  `child_returncode`, and `child_stderr_tail` so a host can warn that
+  recorded COGS is a lower bound for the run rather than silently
+  under-reporting.
+- New `EventType.COST_UNACCOUNTED` and `EventType.POST_RUN_USAGE`.
+
 ### Orchestration internals & CLI consolidation
 
 - **`AgentRunConfig`** (`fabri.core.run_config`) — a single value object for

@@ -1,8 +1,9 @@
 import json
 import re
+from typing import Callable
 
 from fabri import toon
-from fabri.core.llm import LLMBackend
+from fabri.core.llm import LLMBackend, LLMUsage
 from fabri.tools.result import tool_error, tool_ok
 
 DEFAULT_MAX_SUBQUESTIONS = 5
@@ -23,6 +24,7 @@ def decompose(
     task: str,
     max_subquestions: int = DEFAULT_MAX_SUBQUESTIONS,
     output_format: str = "json",
+    on_usage: Callable[[LLMUsage], None] | None = None,
 ) -> dict:
     """Ask the LLM (a separate step() call, not a recursive run_agent) to break a
     research task into concrete sub-questions. Returns the same {ok, result}
@@ -45,6 +47,11 @@ def decompose(
         "You decompose research tasks into concrete sub-questions.",
         [{"role": "user", "content": prompt}],
     )
+    # Surface this step's tokens to the agent's accumulator — decompose runs
+    # on the same shared LLM as the orchestrator, so silently dropping its
+    # usage understates COGS by a real Sonnet/Opus call per invocation.
+    if on_usage is not None and response.usage is not None:
+        on_usage(response.usage)
     text = (response.final_text or "").strip()
     subquestions = _parse_string_list(text, prefer=output_format)
     if subquestions is None:

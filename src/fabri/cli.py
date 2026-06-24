@@ -8,10 +8,14 @@ import uuid
 from fabri.admin import AdminAuthError, describe_config, render_dashboard, require_admin
 from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
+from fabri.core.llm import LLMUsage
 from fabri.core.logging_setup import configure_logging
 from fabri.core.outcome import Outcome
 from fabri.core.run_config import AgentRunConfig
+from fabri.events import EventType
 from fabri.orchestrator.pipeline import process_trace
+from fabri.orchestrator.traces import log_event
+from fabri.pricing import cost_for
 from fabri.runtime import (
     build_llm,
     build_memory_store,
@@ -138,6 +142,24 @@ def cmd_run(args: argparse.Namespace) -> None:
     run_failed = not result.get("success") or result.get("outcome") not in success_outcomes
 
     compress_llm = build_llm(config, [])
+    # Accumulate memory-compression LLM usage so the host can roll it onto
+    # the run's totals — these calls happen AFTER the run's `usage` event
+    # is emitted, so they need to ride out as a follow-up POST_RUN_USAGE
+    # event the host adds rather than replaces.
+    post_run_usage = LLMUsage()
+    post_run_by_model: dict[str, LLMUsage] = {}
+
+    def _accumulate_post_run(u: LLMUsage) -> None:
+        post_run_usage.input_tokens += u.input_tokens
+        post_run_usage.output_tokens += u.output_tokens
+        post_run_usage.cache_creation_input_tokens += u.cache_creation_input_tokens
+        post_run_usage.cache_read_input_tokens += u.cache_read_input_tokens
+        bucket = post_run_by_model.setdefault(u.model or "", LLMUsage(model=u.model))
+        bucket.input_tokens += u.input_tokens
+        bucket.output_tokens += u.output_tokens
+        bucket.cache_creation_input_tokens += u.cache_creation_input_tokens
+        bucket.cache_read_input_tokens += u.cache_read_input_tokens
+
     entries = process_trace(
         session_id,
         store,
@@ -146,7 +168,28 @@ def cmd_run(args: argparse.Namespace) -> None:
         similarity_threshold=mem_cfg["similarity_threshold"],
         promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
         record_postmortem=mem_cfg.get("record_postmortems", False),
+        on_usage=_accumulate_post_run,
     )
+    if (post_run_usage.input_tokens or post_run_usage.output_tokens
+            or post_run_usage.cache_creation_input_tokens
+            or post_run_usage.cache_read_input_tokens):
+        post_cost_by_model: dict[str, float] = {}
+        post_cost_total = 0.0
+        for model_id, bucket in post_run_by_model.items():
+            c = cost_for(bucket)
+            if c is not None:
+                post_cost_by_model[model_id or "unknown"] = c
+                post_cost_total += c
+        log_event(session_id, {
+            "type": EventType.POST_RUN_USAGE.value,
+            "source": "memory_compression",
+            "input_tokens": post_run_usage.input_tokens,
+            "output_tokens": post_run_usage.output_tokens,
+            "cache_creation_input_tokens": post_run_usage.cache_creation_input_tokens,
+            "cache_read_input_tokens": post_run_usage.cache_read_input_tokens,
+            "cost_usd": round(post_cost_total, 6),
+            "cost_by_model": post_cost_by_model,
+        })
     if entries:
         print(f"\nSynthesized {len(entries)} guideline(s) from this run:")
         for e in entries:

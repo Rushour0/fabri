@@ -48,6 +48,19 @@ class EventType(str, Enum):
     # validation problems) so a trace shows how many retries the typed
     # answer cost. Absent when no response_schema is configured.
     STRUCTURED_OUTPUT = "structured_output"
+    # A sub-agent spawn produced no usable usage payload (child crashed before
+    # emitting its final JSON, or returned an error envelope without `usage`).
+    # The tokens it burned hit the provider but can't be rolled into the
+    # parent's `total_cost_usd` — emitted so a host (and human reviewer) can
+    # surface "real COGS may exceed the recorded number" instead of silently
+    # under-reporting. Carries the failing tool name and any stderr_tail the
+    # spawn wrapper salvaged.
+    COST_UNACCOUNTED = "cost_unaccounted"
+    # Post-run LLM usage (memory compression in process_trace, etc.) emitted
+    # AFTER the main `usage` event so the host can merge it onto the run's
+    # totals. Same shape as `usage` but flagged so a consumer knows to add
+    # rather than replace.
+    POST_RUN_USAGE = "post_run_usage"
 
 
 def emit_discrepancy(session_id: str, path: str, reason: str) -> None:

@@ -1,4 +1,6 @@
-from fabri.core.llm import LLMBackend
+from typing import Callable
+
+from fabri.core.llm import LLMBackend, LLMUsage
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType
 from fabri.memory.compress import (
@@ -99,6 +101,7 @@ def process_trace(
     similarity_threshold: float = SIMILARITY_THRESHOLD,
     promotion_threshold_sessions: int = PROMOTION_THRESHOLD_SESSIONS,
     record_postmortem: bool = False,
+    on_usage: Callable[[LLMUsage], None] | None = None,
 ) -> list[MemoryEntry]:
     """Mine a session's trace for failures, synthesize each into a compressed
     guideline, and ingest it into memory (dedup/promote per pruning rules).
@@ -154,7 +157,9 @@ def process_trace(
                 f"Plan: tools used in order = {tool_names}\n"
                 f"Outcome: {final_event.get('outcome', 'success')}"
             )
-            success_text = synthesize_success_pattern(success_summary, llm, max_tokens=guideline_max_tokens)
+            success_text = synthesize_success_pattern(
+                success_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
+            )
             logger.debug(
                 "synthesized success pattern (%d tokens): %r",
                 count_tokens(success_text), success_text,
@@ -190,7 +195,9 @@ def process_trace(
             f"Task: {task}\nTool: {event['name']}\nArgs: {event['args']}\n"
             f"Failure: {event['result'].get('error')}"
         )
-        guideline_text = synthesize_guideline(failure_summary, llm, max_tokens=guideline_max_tokens)
+        guideline_text = synthesize_guideline(
+            failure_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
+        )
         logger.debug(
             "synthesized guideline (%d tokens) for tool %s: %r",
             count_tokens(guideline_text),

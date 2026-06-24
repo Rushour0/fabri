@@ -2,9 +2,11 @@
 short guideline, with a hard token-cap backstop. Truncates at a word
 boundary so a guideline never ends mid-syllable."""
 import logging
+from typing import Callable
+
 import tiktoken
 
-from fabri.core.llm import LLMBackend
+from fabri.core.llm import LLMBackend, LLMUsage
 
 DEFAULT_MAX_TOKENS = 30
 
@@ -84,10 +86,15 @@ def enforce_token_cap(
 def synthesize_success_pattern(
     success_summary: str, llm: LLMBackend, max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str | None = None,
+    on_usage: Callable[[LLMUsage], None] | None = None,
 ) -> str:
     """Compress a successful run summary into a short reusable guideline.
     Mirrors `synthesize_guideline` but framed as a 'what worked' pattern so
-    retrieval can blend it alongside the failure-derived ones."""
+    retrieval can blend it alongside the failure-derived ones.
+
+    `on_usage` is invoked with the synthesis call's LLMUsage so post-run
+    callers (process_trace -> cli) can roll memory-compression COGS back
+    into the host's recorded total."""
     prompt = (
         "Summarize the following successful agent run as one short, generalized "
         f"guideline (max {max_tokens} tokens) capturing what worked and would "
@@ -97,6 +104,8 @@ def synthesize_success_pattern(
         "You compress agent successes into short reusable guidelines.",
         [{"role": "user", "content": prompt}],
     )
+    if on_usage is not None and response.usage is not None:
+        on_usage(response.usage)
     text = response.final_text or success_summary
     return enforce_token_cap(text.strip(), max_tokens, model=model)
 
@@ -104,9 +113,12 @@ def synthesize_success_pattern(
 def synthesize_guideline(
     failure_summary: str, llm: LLMBackend, max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str | None = None,
+    on_usage: Callable[[LLMUsage], None] | None = None,
 ) -> str:
     """Ask the LLM to compress a failure/trace summary into one short, generalized
-    guideline, then enforce the token cap as a hard backstop regardless of output."""
+    guideline, then enforce the token cap as a hard backstop regardless of output.
+
+    See `synthesize_success_pattern` for `on_usage` semantics."""
     prompt = (
         "Summarize the following agent failure as one short, generalized guideline "
         f"(max {max_tokens} tokens) that would help avoid it next time:\n\n{failure_summary}"
@@ -115,5 +127,7 @@ def synthesize_guideline(
         "You compress agent failures into short actionable guidelines.",
         [{"role": "user", "content": prompt}],
     )
+    if on_usage is not None and response.usage is not None:
+        on_usage(response.usage)
     text = response.final_text or failure_summary
     return enforce_token_cap(text.strip(), max_tokens, model=model)

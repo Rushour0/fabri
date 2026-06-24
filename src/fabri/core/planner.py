@@ -15,8 +15,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
-from fabri.core.llm import LLMBackend
+from fabri.core.llm import LLMBackend, LLMUsage
 
 DEFAULT_MAX_PLAN_ITEMS = 8
 
@@ -52,6 +53,7 @@ def plan(
     *,
     max_items: int = DEFAULT_MAX_PLAN_ITEMS,
     prompt: str | None = None,
+    on_usage: Callable[[LLMUsage], None] | None = None,
 ) -> list[PlanItem]:
     """Ask `llm` to break `task` into at most `max_items` plan items.
 
@@ -60,12 +62,19 @@ def plan(
     unparseable falls back to a one-item plan whose goal is the original
     task -- the executor still does useful work; we just don't get the
     cross-step token savings on this run.
+
+    `on_usage` is invoked with the planner step's LLMUsage so callers (the
+    agent loop) can roll its tokens into the run's totals — without this,
+    a non-trivial planner call (often a full-context Sonnet pass) silently
+    leaks from the COGS the host reports.
     """
     system_prompt = prompt or DEFAULT_PLANNER_PROMPT
     user_prompt = (
         f"Plan this task in at most {max_items} items.\n\nTask: {task}"
     )
     response = llm.step(system_prompt, [{"role": "user", "content": user_prompt}])
+    if on_usage is not None and response.usage is not None:
+        on_usage(response.usage)
     text = (response.final_text or "").strip()
     items = _parse_plan(text, fallback_goal=task)
     if not items:

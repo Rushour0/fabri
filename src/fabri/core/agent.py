@@ -525,6 +525,7 @@ def run_agent(
                         on_subagent_cost=_accumulate_subagent_cost,
                         on_subagent_finished=_on_subagent_finished,
                         on_budget_check=_budget_breached,
+                        on_llm_usage=_accumulate,
                     )
                     item_had_failure |= step_had_failure
                     log_event(session_id, {
@@ -587,7 +588,9 @@ def run_agent(
     if plan_engaged:
         planner_backend = planner_llm or decompose_llm or llm
         try:
-            plan_items = run_plan(task, planner_backend, max_items=planner_max_items)
+            plan_items = run_plan(
+                task, planner_backend, max_items=planner_max_items, on_usage=_accumulate,
+            )
         except LLMError as e:
             failed = True
             error_reason = f"planner failed: {e}"
@@ -846,6 +849,7 @@ def _dispatch_tool_calls(
     on_subagent_cost: Callable[[float], None] | None = None,
     on_subagent_finished: Callable[..., None] | None = None,
     on_budget_check: Callable[[], bool] | None = None,
+    on_llm_usage: Callable[[LLMUsage], None] | None = None,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
@@ -877,6 +881,7 @@ def _dispatch_tool_calls(
             return decompose(
                 llm, call.args.get("task", default_task),
                 max_subquestions=max_subquestions, output_format=output_format,
+                on_usage=on_llm_usage,
             )
         # Budget tripwire for sub-agent spawns: `_budget_breached()` is checked
         # per-step, but a single step can emit K parallel spawns. Re-check right
@@ -987,6 +992,21 @@ def _dispatch_tool_calls(
                     child_cost = child_usage.get("cost_usd")
                 if isinstance(child_cost, (int, float)):
                     on_subagent_cost(float(child_cost))
+            # A spawn that failed without surfacing usage (e.g. qdrant down ->
+            # the runner crashed before printing its final JSON) almost always
+            # burned real provider tokens that the parent can't roll into its
+            # COGS. Emit a cost_unaccounted marker so a host can warn instead
+            # of silently under-reporting the run's true spend.
+            if not ok and not isinstance(child_usage, dict):
+                err_payload = child if isinstance(child, dict) else {}
+                log_event(session_id, {
+                    "type": EventType.COST_UNACCOUNTED.value,
+                    "step": step_num,
+                    "tool": call.name,
+                    "reason": result.get("error") or "sub-agent produced no usage",
+                    "child_returncode": err_payload.get("returncode"),
+                    "child_stderr_tail": err_payload.get("stderr_tail"),
+                })
             if on_subagent_finished is not None:
                 on_subagent_finished(
                     call, ok,
