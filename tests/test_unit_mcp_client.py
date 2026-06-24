@@ -128,3 +128,36 @@ def test_sanitize_name_strips_specials():
     assert _sanitize_name("foo/bar.baz") == "foo_bar_baz"
     assert _sanitize_name("foo-bar") == "foo_bar"
     assert _sanitize_name("good_name") == "good_name"
+
+
+def test_stdio_start_merges_env_instead_of_replacing(monkeypatch):
+    """Popen's env= REPLACES the environment; a server launched with only the
+    configured overrides would lose PATH/FABRI_HOME and likely fail to start.
+    start() must merge the overrides onto os.environ."""
+    import fabri.tools.mcp_client as mc
+
+    captured = {}
+
+    def _fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs.get("env")
+        return _FakeProc([])
+
+    monkeypatch.setattr(mc.subprocess, "Popen", _fake_popen)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    client = MCPStdioClient(command=["my-server"], name="t", env={"MCP_TOKEN": "xyz"})
+    client.start()
+
+    assert captured["env"]["MCP_TOKEN"] == "xyz"   # override present
+    assert captured["env"]["PATH"] == "/usr/bin:/bin"  # inherited, not stripped
+
+
+def test_stdio_start_uses_none_env_when_no_overrides(monkeypatch):
+    import fabri.tools.mcp_client as mc
+
+    captured = {}
+    monkeypatch.setattr(mc.subprocess, "Popen",
+                        lambda command, **kw: captured.update(env=kw.get("env")) or _FakeProc([]))
+    MCPStdioClient(command=["s"], name="t").start()  # no env=
+    assert captured["env"] is None  # inherit the parent env wholesale

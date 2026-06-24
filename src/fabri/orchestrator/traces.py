@@ -1,5 +1,6 @@
 import fcntl
 import json
+import re
 import time
 from pathlib import Path
 
@@ -8,8 +9,16 @@ from fabri.paths import traces_dir
 
 logger = get_logger()
 
+# Session ids are framework-generated uuid4s (plus optional `_suffix`); anything
+# outside this charset is rejected so a `session_id` like `../../etc/passwd`
+# can't escape the traces dir on the read/replay/ingest paths a host may feed
+# externally-supplied ids into.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
 
 def trace_path(session_id: str) -> Path:
+    if not session_id or not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"invalid session_id {session_id!r}: must match {_SESSION_ID_RE.pattern}")
     return traces_dir() / f"{session_id}.jsonl"
 
 

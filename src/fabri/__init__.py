@@ -3,6 +3,7 @@ from fabri.config import DEFAULT_CONFIG, load_config
 from fabri.core.agent import AgentProtocolError, run_agent
 from fabri.core.llm import AnthropicLLMBackend, LLMBackend, LLMError, OpenAILLMBackend, ScriptedLLMBackend
 from fabri.core.outcome import Outcome
+from fabri.core.structured import StructuredOutputError, parse_response, validate
 from fabri.memory.embedded_store import SqliteMemoryStore
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.pipeline import process_trace
@@ -22,6 +23,7 @@ __all__ = [
     "QdrantMemoryStore",
     "ScriptedLLMBackend",
     "SqliteMemoryStore",
+    "StructuredOutputError",
     "ToolRegistry",
     "build_llm",
     "build_tool_defs",
@@ -30,8 +32,10 @@ __all__ = [
     "load_config",
     "make_agent_tool_manifest",
     "memory_summary",
+    "parse_response",
     "process_trace",
     "render_dashboard",
     "require_admin",
     "run_agent",
+    "validate",
 ]

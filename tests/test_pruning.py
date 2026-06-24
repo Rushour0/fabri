@@ -1,6 +1,8 @@
+import threading
 import uuid
 
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, ingest_guideline
+from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
 
 COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
@@ -102,3 +104,39 @@ def test_tools_accumulate_across_merges_not_overwritten():
     assert set(e2.tools) == {"broken", "sum"}
 
     store.delete(e2.id)
+
+
+def test_concurrent_ingest_does_not_lose_updates():
+    """Two ingests of the SAME guideline racing on one collection must BOTH be
+    counted: the per-collection flock serializes find_similar->update->upsert so
+    the final hit_count equals the number of ingests (regression for the
+    lost-update race the flock was added to fix)."""
+    text = "Concurrent lesson that must survive a race without a lost update."
+    n = 8
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+
+    def _worker(i: int) -> None:
+        try:
+            # Each thread gets its own store/client + its own lock-file fd, so
+            # the flock genuinely arbitrates across them (not a single in-proc fd).
+            barrier.wait(timeout=10)
+            ingest_guideline(QdrantMemoryStore(collection=COLLECTION), text, session_id=f"c{i}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, errors
+    store = make_store()
+    entry_id = MemoryEntry(text=text, kind="tactical").id  # deterministic id
+    merged = store.get(entry_id)
+    assert merged is not None
+    assert merged.hit_count == n  # no update was dropped
+    assert len(set(merged.session_ids)) == n
+    assert store.count() == 1
+    store.delete(entry_id)

@@ -143,3 +143,28 @@ def test_missing_question_returns_error():
     assert proc.returncode == 1
     payload = json.loads(proc.stdout)
     assert "missing required field" in payload["error"]
+
+
+def test_socket_empty_reply_falls_back_to_default(short_socket_dir):
+    """An empty answer over the socket must apply the question's `default`
+    (parity with the stdin transport, which already did)."""
+    socket_path = str(short_socket_dir / "ask.sock")
+    stop = threading.Event()
+
+    def reply_for(payload):
+        return {"question_id": payload["question_id"], "answer": ""}
+
+    t = threading.Thread(target=_serve_one, args=(socket_path, reply_for, stop), daemon=True)
+    t.start()
+
+    env = os.environ.copy()
+    env["FABRI_ASK_USER_SOCKET"] = socket_path
+    proc = subprocess.run(
+        [sys.executable, str(TOOL_SCRIPT)],
+        input=json.dumps({"question": "proceed?", "default": "yes"}),
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    t.join(timeout=5)
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["answer"] == "yes"

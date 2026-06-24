@@ -127,6 +127,52 @@ def test_additional_context_prepended_to_task(tmp_path):
     assert payload["session_id"] == "fake"
 
 
+def test_spawn_refused_at_max_depth(tmp_path, monkeypatch):
+    """Recursion backstop: at the depth ceiling the tool refuses to spawn
+    rather than fork-bombing breadth^depth subprocesses."""
+    monkeypatch.setenv("FABRI_SUBAGENT_DEPTH", "5")  # == DEFAULT_MAX_DEPTH
+    fake_cfg = tmp_path / "agent.yaml"
+    fake_cfg.write_text("# unused\n")
+    proc = _run_tool(json.dumps({"config_path": str(fake_cfg), "task": "go"}))
+    assert proc.returncode == 1
+    err = json.loads(proc.stdout)["error"]
+    assert "recursion depth" in err and "FABRI_SUBAGENT_MAX_DEPTH" in err
+
+
+def test_spawn_increments_depth_for_child(tmp_path, monkeypatch):
+    """The child must see depth = parent_depth + 1 so the cap bounds the whole
+    subtree, not just the immediate parent."""
+    monkeypatch.setenv("FABRI_SUBAGENT_DEPTH", "0")
+    runner = _make_fake_runner(tmp_path, """
+        import json, os, sys
+        json.loads(sys.stdin.read())
+        print(json.dumps({
+            "final_text": os.environ.get("FABRI_SUBAGENT_DEPTH", "unset"),
+            "outcome": "success", "session_id": "d", "trace_path": "/tmp/d.jsonl",
+        }))
+    """)
+    fake_cfg = tmp_path / "agent.yaml"
+    fake_cfg.write_text("# unused\n")
+    proc = _run_tool(json.dumps({"config_path": str(fake_cfg), "task": "go"}), fake_runner=runner)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["final_text"] == "1"
+
+
+def test_custom_max_depth_env_allows_deeper(tmp_path, monkeypatch):
+    monkeypatch.setenv("FABRI_SUBAGENT_DEPTH", "5")
+    monkeypatch.setenv("FABRI_SUBAGENT_MAX_DEPTH", "8")
+    runner = _make_fake_runner(tmp_path, """
+        import json, sys
+        json.loads(sys.stdin.read())
+        print(json.dumps({"final_text": "ok", "outcome": "success",
+                          "session_id": "x", "trace_path": "/tmp/x.jsonl"}))
+    """)
+    fake_cfg = tmp_path / "agent.yaml"
+    fake_cfg.write_text("# unused\n")
+    proc = _run_tool(json.dumps({"config_path": str(fake_cfg), "task": "go"}), fake_runner=runner)
+    assert proc.returncode == 0, proc.stderr  # 5 < 8, allowed
+
+
 def test_passes_through_runner_stdout_verbatim(tmp_path):
     runner = _make_fake_runner(tmp_path, """
         import json

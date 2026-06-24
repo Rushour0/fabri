@@ -4,6 +4,7 @@ real auth backend yet -- FABRI_ADMIN_TOKEN is a placeholder seam, not a
 security boundary. Every admin entry point funnels through require_admin() so
 real auth (SSO, an API gateway, whatever the deployment needs) has exactly one
 place to be wired in later, instead of being scattered across call sites."""
+import hmac
 import logging
 import os
 
@@ -39,7 +40,9 @@ def require_admin(token: str | None) -> None:
             "with a real auth layer.", ADMIN_TOKEN_ENV,
         )
         return
-    if token != expected:
+    # Constant-time compare so a wrong token can't be recovered byte-by-byte
+    # via response timing.
+    if not hmac.compare_digest(token or "", expected):
         raise AdminAuthError(f"admin token required (pass --admin-token, must match ${ADMIN_TOKEN_ENV})")
 
 

@@ -135,7 +135,12 @@ def test_grep_on_single_file(reg, tmp_path):
 
 @pytest.fixture
 def http_server():
-    """Tiny in-process server so fetch_url tests don't need internet."""
+    """Tiny in-process server so fetch_url tests don't need internet. The server
+    is on 127.0.0.1, which fetch_url's SSRF guard blocks by default; opt into
+    private hosts for the duration of these tests."""
+    prev = os.environ.get("FABRI_FETCH_ALLOW_PRIVATE")
+    os.environ["FABRI_FETCH_ALLOW_PRIVATE"] = "1"
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/ok":
@@ -157,6 +162,10 @@ def http_server():
             yield f"http://127.0.0.1:{port}"
         finally:
             srv.shutdown()
+            if prev is None:
+                os.environ.pop("FABRI_FETCH_ALLOW_PRIVATE", None)
+            else:
+                os.environ["FABRI_FETCH_ALLOW_PRIVATE"] = prev
 
 
 def test_fetch_url_returns_body(reg, http_server):

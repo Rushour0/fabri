@@ -11,9 +11,10 @@ import sys
 from fabri.config import load_config
 from fabri.core.agent import run_agent
 from fabri.core.outcome import Outcome
+from fabri.core.run_config import AgentRunConfig
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.traces import trace_path
-from fabri.runtime import build_decompose_llm, build_llm, build_narrator_llm, build_tool_defs, build_tools
+from fabri.runtime import build_run_llms, build_tool_defs, build_tools
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -72,7 +73,7 @@ def main() -> int:
     tools_cfg = config["tools"]
     tools = build_tools(tools_cfg)
     decompose_cfg = tools_cfg["decompose"]
-    llm = build_llm(config, build_tool_defs(tools, decompose_cfg))
+    llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
 
     mem_cfg = config["memory"]
     store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
@@ -80,7 +81,8 @@ def main() -> int:
     # agent.subagent.{max_steps,max_cost_usd} override the parent budget
     # for this child only; absent fields fall back to the parent values.
     # This entrypoint always runs as a sub-agent, so the override fires
-    # unconditionally here.
+    # unconditionally here. Every other knob (planner, retrieval, prompts)
+    # is inherited so a child orchestrates the way the parent config says.
     subagent_cfg = config["agent"].get("subagent") or {}
     sub_max_steps = subagent_cfg.get("max_steps")
     if sub_max_steps is None:
@@ -89,21 +91,17 @@ def main() -> int:
     if sub_max_cost is None:
         sub_max_cost = config["agent"].get("max_cost_usd")
 
+    run_cfg = AgentRunConfig.from_config(config).for_subagent(sub_max_steps, sub_max_cost)
+
     result = run_agent(
         args["task"],
-        llm,
+        llms["llm"],
         tools,
         store,
-        max_steps=sub_max_steps,
-        top_k=mem_cfg["top_k"],
-        max_subquestions=decompose_cfg["max_subquestions"],
-        system_prompt=config["agent"].get("system_prompt", ""),
-        system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
-        result_format=tools_cfg.get("result_format", "toon"),
-        output_format=config["agent"].get("output_format", "json"),
-        decompose_llm=build_decompose_llm(config),
-        max_cost_usd=sub_max_cost,
-        narrator_llm=build_narrator_llm(config),
+        decompose_llm=llms["decompose_llm"],
+        planner_llm=llms["planner_llm"],
+        narrator_llm=llms["narrator_llm"],
+        **run_cfg.as_kwargs(),
     )
     # Surface session_id + trace path so a parent agent / human reader can
     # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`
@@ -111,6 +109,7 @@ def main() -> int:
     # it to roll this subtree into its own COGS.
     print(json.dumps({
         "final_text": result["final_text"],
+        "structured_output": result.get("structured_output"),
         "outcome": result["outcome"],
         "session_id": result["session_id"],
         "trace_path": str(trace_path(result["session_id"])),

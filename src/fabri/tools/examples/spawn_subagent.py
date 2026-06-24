@@ -41,6 +41,30 @@ RUNNER_SCRIPT = (
 
 DEFAULT_TIMEOUT_S = 600
 
+# Recursion backstop. A spawned child runs run_agent with a registry that may
+# itself include spawn_subagent, so without a cap a confused (or prompt-injected)
+# agent can fork-bomb: breadth^depth subprocesses, each with its OWN fresh cost
+# budget. We thread the current depth through the env, increment it on every
+# spawn, and refuse once it reaches the max. Override the ceiling with
+# FABRI_SUBAGENT_MAX_DEPTH.
+DEPTH_ENV = "FABRI_SUBAGENT_DEPTH"
+MAX_DEPTH_ENV = "FABRI_SUBAGENT_MAX_DEPTH"
+DEFAULT_MAX_DEPTH = 5
+
+
+def _current_depth() -> int:
+    try:
+        return max(0, int(os.environ.get(DEPTH_ENV, "0")))
+    except ValueError:
+        return 0
+
+
+def _max_depth() -> int:
+    try:
+        return max(0, int(os.environ.get(MAX_DEPTH_ENV, str(DEFAULT_MAX_DEPTH))))
+    except ValueError:
+        return DEFAULT_MAX_DEPTH
+
 
 def sanitize_collection_suffix(raw: str) -> str:
     """Qdrant collection names accept a narrow charset; sanitize to lowercase
@@ -106,6 +130,19 @@ def main() -> int:
         print(json.dumps({"error": "missing required field: config_path or task"}))
         return 1
 
+    depth = _current_depth()
+    max_depth = _max_depth()
+    if depth >= max_depth:
+        logger.warning("spawn_subagent: refused at depth %d (max %d)", depth, max_depth)
+        print(json.dumps({
+            "error": (
+                f"spawn_subagent refused: recursion depth {depth} reached the limit "
+                f"of {max_depth}. Do this subtask inline instead of spawning, or raise "
+                f"{MAX_DEPTH_ENV} if deeper nesting is genuinely intended."
+            ),
+        }))
+        return 1
+
     try:
         cmd = build_runner_command(args)
     except ValueError as e:
@@ -119,6 +156,12 @@ def main() -> int:
 
     timeout_s = int(args.get("timeout_s", DEFAULT_TIMEOUT_S))
 
+    # Hand the child its depth so ITS spawn_subagent calls (if any) count from
+    # here, not from zero. This is what makes the recursion cap actually bound
+    # the whole subtree rather than just the immediate parent.
+    child_env = os.environ.copy()
+    child_env[DEPTH_ENV] = str(depth + 1)
+
     try:
         proc = subprocess.run(
             cmd,
@@ -126,7 +169,7 @@ def main() -> int:
             capture_output=True,
             text=True,
             timeout=timeout_s,
-            env=os.environ.copy(),
+            env=child_env,
         )
     except subprocess.TimeoutExpired:
         print(json.dumps({"error": f"sub-agent timeout after {timeout_s}s"}))

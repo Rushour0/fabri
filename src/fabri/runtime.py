@@ -164,12 +164,36 @@ def find_missing_role_api_keys(config: dict) -> dict[str, list[str]]:
     return {env: roles for env, roles in needed.items() if not os.environ.get(env)}
 
 
+def build_planner_llm(config: dict):
+    """Returns a separate backend for the planner meta-step from the
+    `llm.planner` role, or None when unset (the agent loop then reuses
+    decompose, then main). Distinct from decompose so a config can point the
+    planner at a stronger model than the per-subquestion decompose calls."""
+    return build_role_llm(config, "planner")
+
+
 def build_narrator_llm(config: dict):
     """Returns a cheap backend that emits short user-facing status updates
     between tool steps, or None when `llm.narrator` is set to null. Defaults
     to Haiku via the DEFAULT_CONFIG entry, and inherits any per-role
     provider override (anthropic / openai / openrouter)."""
     return build_role_llm(config, "narrator")
+
+
+def build_run_llms(config: dict, tool_defs: list[dict]) -> dict:
+    """Build the role backends `run_agent` consumes, keyed by its kwarg names:
+    `llm` (main, the only one carrying the tool defs), `decompose_llm`,
+    `planner_llm`, `narrator_llm`. The non-main roles return None when their
+    `llm.<role>` config is unset; the agent loop falls back accordingly. One
+    builder so every entry point (cli run / replay / agent-as-tool) wires the
+    same backends — previously each entry point built a different subset and
+    `replay` never built the planner backend at all."""
+    return {
+        "llm": build_llm(config, tool_defs),
+        "decompose_llm": build_decompose_llm(config),
+        "planner_llm": build_planner_llm(config),
+        "narrator_llm": build_narrator_llm(config),
+    }
 
 
 def build_tools(tools_cfg: dict) -> ToolRegistry:

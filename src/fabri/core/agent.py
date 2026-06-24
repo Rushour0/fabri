@@ -13,6 +13,7 @@ from fabri.core.logging_setup import get_logger
 from fabri.events import EventType, StepReason
 from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
+from fabri.core.structured import parse_response
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.retrieval import (
     DEFAULT_TOOL_TOP_K,
@@ -23,6 +24,7 @@ from fabri.orchestrator.retrieval import (
 )
 from fabri.orchestrator.traces import log_event
 from fabri.tools.registry import ToolRegistry
+from fabri.tools.result import tool_error
 
 MAX_STEPS = 10
 DECOMPOSE_TOOL_NAME = "decompose"
@@ -153,6 +155,10 @@ def run_agent(
     tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
     max_cost_usd: float | None = None,
     narrator_llm: LLMBackend | None = None,
+    response_schema: dict | None = None,
+    response_retries: int = 1,
+    error_strategy: str = "strict",
+    response_fallback: object | None = None,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -198,6 +204,11 @@ def run_agent(
     log_event(session_id, {"type": EventType.START.value, "task": task, "context_block": context_block})
 
     final_text = None
+    # O1: the validated JSON value when response_schema is configured (None
+    # otherwise, or when validation never succeeded). `schema_failed` flips on
+    # only under error_strategy="strict" when retries are exhausted.
+    structured_output = None
+    schema_failed = False
     success = False
     failed = False
     error_reason = None
@@ -382,6 +393,69 @@ def run_agent(
                 "step": step,
             })
 
+    def _finalize_structured(
+        candidate: str, msgs: list[dict], step: int
+    ) -> tuple[str, bool, str | None, object | None]:
+        """O1: validate a final answer against `response_schema`. Returns
+        ``(resolved_text, ok, error_reason, structured_obj)``. No schema set ->
+        immediate passthrough (no extra LLM call), so the default free-text
+        path is untouched. On a mismatch, re-prompt the model with the errors
+        up to `response_retries` times; if still invalid, resolve per
+        `error_strategy` (strict fails the run; warn returns the text as-is;
+        fallback substitutes `response_fallback`). Mutates `msgs` in place when
+        it retries, matching `_dispatch_tool_calls`' contract."""
+        if not response_schema:
+            return candidate, True, None, None
+        text = candidate
+        value: object | None = None
+        last_errors: list[str] = []
+        for attempt in range(max(0, response_retries) + 1):
+            value, errors = parse_response(text, response_schema)
+            log_event(session_id, {
+                "type": EventType.STRUCTURED_OUTPUT.value,
+                "step": step,
+                "attempt": attempt,
+                "valid": not errors,
+                "errors": errors,
+            })
+            if not errors:
+                return text, True, None, value
+            last_errors = errors
+            if attempt >= max(0, response_retries):
+                break
+            corrective = (
+                "Your previous reply did not match the required response schema.\n"
+                "Validation errors:\n- " + "\n- ".join(errors) + "\n\n"
+                "Return ONLY a JSON value that satisfies this schema "
+                "(no prose, no code fences):\n" + json.dumps(response_schema)
+            )
+            msgs.append({"role": "assistant", "content": text})
+            msgs.append({"role": "user", "content": corrective})
+            try:
+                resp = llm.step(system, msgs)
+            except LLMError as e:
+                return text, False, f"structured-output retry failed: {e}", None
+            _accumulate(resp.usage)
+            _track_last_text(resp)
+            if not resp.final_text:
+                # The model answered with tool calls (or nothing) instead of a
+                # corrected final answer; stop the schema loop and resolve.
+                break
+            text = resp.final_text
+            # Each corrective retry is a real LLM call; stop re-prompting once
+            # the run's cost budget is spent rather than burning more on it.
+            if _budget_breached():
+                break
+        detail = "; ".join(last_errors)
+        if error_strategy == "warn":
+            logger.warning("response_schema not satisfied (returning unvalidated text): %s", detail)
+            return text, True, None, value
+        if error_strategy == "fallback":
+            fb = response_fallback if response_fallback is not None else {}
+            logger.warning("response_schema not satisfied; using response_fallback: %s", detail)
+            return json.dumps(fb), True, None, fb
+        return text, False, f"response did not match response_schema: {detail}", None
+
     # `auto` engages when the task is long enough to benefit; `force` always
     # engages; `off` keeps the single-loop behaviour. The planner is one LLM
     # call ahead of the loop; the executor runs the step body once per plan
@@ -389,14 +463,29 @@ def run_agent(
     plan_engaged = planner_mode == "force" or (
         planner_mode == "auto" and len(task) >= planner_auto_token_threshold
     )
+    if plan_engaged and response_schema:
+        # The planner concatenates per-item outputs into the final answer, so
+        # validating against a single response_schema doesn't apply. Surface
+        # the no-op rather than silently ignoring the schema.
+        logger.warning(
+            "agent.response_schema is set but the planner engaged; structured-output "
+            "validation only applies to the single-loop (non-planner) final answer and "
+            "is skipped for this run"
+        )
 
-    def _run_executor_loop(
+    def _run_step_loop(
         item_messages: list[dict], item_task: str, item_max_steps: int, step_offset: int
     ) -> tuple[str | None, bool, bool, str | None, bool, int]:
         """Run the inner step loop against `item_messages` (mutated in place).
         Returns (final_text, success, failed, error_reason, had_failure, steps_used).
-        Raises AgentProtocolError exactly like the historical loop on a
-        no-tool-no-text response, so existing callers see no behaviour shift."""
+        Raises AgentProtocolError on a no-tool-no-text response.
+
+        This is the single step engine for BOTH paths: the planner executor
+        calls it once per plan item, and the non-planner single loop calls it
+        once for the whole run. Structured-output validation is intentionally
+        NOT done here -- it's a property of the run's *final* answer, so the
+        single-loop caller applies it to the returned text (the planner
+        concatenates per-item outputs and skips it, as documented)."""
         item_final = None
         item_success = False
         item_failed = False
@@ -423,6 +512,10 @@ def run_agent(
                 response = llm.step(system, item_messages)
                 _accumulate(response.usage)
                 _track_last_text(response)
+                # Priced from this step's usage alone so reports can attribute
+                # LLM cost to the tools this step dispatched. None on an unknown
+                # model rather than a fabricated 0.
+                step_cost = cost_for(response.usage) if response.usage else None
                 if response.tool_calls:
                     _emit_thought(response.thinking_text, global_step)
                     _emit_narration(response.tool_calls, global_step, "tools")
@@ -431,6 +524,7 @@ def run_agent(
                         session_id, item_messages, global_step, result_format, output_format,
                         on_subagent_cost=_accumulate_subagent_cost,
                         on_subagent_finished=_on_subagent_finished,
+                        on_budget_check=_budget_breached,
                     )
                     item_had_failure |= step_had_failure
                     log_event(session_id, {
@@ -440,6 +534,7 @@ def run_agent(
                         "reason": StepReason.TOOLS.value,
                         "tool_failure": step_had_failure,
                         "tool_count": len(response.tool_calls),
+                        "cost_usd": step_cost,
                     })
                     continue
             except LLMError as e:
@@ -465,6 +560,7 @@ def run_agent(
                     "step": global_step,
                     "elapsed_s": round(time.monotonic() - t0, 3),
                     "reason": StepReason.FINAL.value,
+                    "cost_usd": step_cost,
                 })
                 return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
 
@@ -508,7 +604,7 @@ def run_agent(
             steps_remaining = max_steps
             per_item_outputs: list[str] = []
             completed: list[str] = []
-            for plan_idx in order:
+            for processed_count, plan_idx in enumerate(order):
                 if steps_remaining <= 0 or failed:
                     break
                 item = plan_items[plan_idx]
@@ -529,9 +625,12 @@ def run_agent(
                     f"Do this single goal, then reply with a brief confirmation."
                 )
                 item_messages = [{"role": "user", "content": item_user}]
-                item_budget = max(1, steps_remaining // max(1, len(order) - len(per_item_outputs)))
+                # Divide remaining steps across the items NOT YET processed.
+                # (Counting only successful items here would starve later items
+                # whenever an earlier one failed/incompleted without appending.)
+                item_budget = max(1, steps_remaining // max(1, len(order) - processed_count))
                 try:
-                    item_final, item_success, item_failed, item_error, item_had_failure, used = _run_executor_loop(
+                    item_final, item_success, item_failed, item_error, item_had_failure, used = _run_step_loop(
                         item_messages, item.goal, item_budget, step_offset=step_count,
                     )
                 except AgentProtocolError:
@@ -583,114 +682,59 @@ def run_agent(
     else:
         plan_engaged = False
 
-    messages = [{"role": "user", "content": task}]
-    # When the planner engaged, the executor has consumed the step budget
-    # item-by-item; skip the single-loop body entirely.
-    legacy_steps: range | list[int] = [] if plan_engaged else range(max_steps)
-    budget_breached_legacy = False
-    for step_num in legacy_steps:
-        step_count = step_num + 1
-        logger.debug("step %d: calling llm", step_num)
-        t0 = time.monotonic()
-        if _budget_breached():
-            budget_breached_legacy = True
-            log_event(session_id, {
-                "type": "budget_exceeded",
-                "step": step_num,
-                "max_cost_usd": max_cost_usd,
-            })
-            break
-        log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": step_num})
-        if max_steps > 1 and step_num == max_steps - 1:
-            _inject_final_step_nudge(messages)
-        try:
-            response = llm.step(system, messages)
-            _accumulate(response.usage)
-            _track_last_text(response)
-            # Priced from this step's response.usage alone so reports can
-            # attribute LLM-call cost to the tools this step dispatched.
-            # cost_for returns None on an unknown model — surface that as
-            # None too rather than fabricating a 0.
-            step_cost = cost_for(response.usage) if response.usage else None
-            if response.tool_calls:
-                # Emit reasoning BEFORE tool_call events so trace readers see
-                # "Let me check X first..." preceding the tool that checks it.
-                _emit_thought(response.thinking_text, step_num)
-                _emit_narration(response.tool_calls, step_num, "tools")
-                step_had_failure = _dispatch_tool_calls(
-                    response.tool_calls, tools, decompose_llm or llm, task, max_subquestions,
-                    session_id, messages, step_num, result_format, output_format,
-                    on_subagent_cost=_accumulate_subagent_cost,
-                )
-                had_tool_failure |= step_had_failure
-                log_event(session_id, {
-                    "type": EventType.STEP_FINISHED.value,
-                    "step": step_num,
-                    "elapsed_s": round(time.monotonic() - t0, 3),
-                    "reason": StepReason.TOOLS.value,
-                    "tool_failure": step_had_failure,
-                    "tool_count": len(response.tool_calls),
-                    "cost_usd": step_cost,
-                })
-                continue
-        except LLMError as e:
-            # Unrecoverable provider problem (API error, rate limit,
-            # truncated response). End as FAILED rather than crashing the
-            # caller with a raw traceback.
-            failed = True
-            error_reason = str(e)
-            logger.error("step %d: unrecoverable llm error: %s", step_num, e)
-            log_event(session_id, {"type": EventType.ERROR.value, "reason": error_reason, "outcome": Outcome.FAILED.value})
-            log_event(session_id, {
-                "type": EventType.STEP_FINISHED.value,
-                "step": step_num,
-                "elapsed_s": round(time.monotonic() - t0, 3),
-                "reason": StepReason.LLM_ERROR.value,
-            })
-            break
-        logger.debug("step %d: llm responded in %.2fs", step_num, time.monotonic() - t0)
-
-        if response.final_text:
-            _emit_thought(response.thinking_text, step_num)
-            final_text = response.final_text
-            success = True
-            logger.info("step %d: final answer produced", step_num)
-            log_event(session_id, {
-                "type": EventType.STEP_FINISHED.value,
-                "step": step_num,
-                "elapsed_s": round(time.monotonic() - t0, 3),
-                "reason": StepReason.FINAL.value,
-                "cost_usd": step_cost,
-            })
-            break
-
-        # No tool calls and no usable final text (empty or structurally
-        # malformed): raising beats silently burning every remaining step and
-        # then reporting an empty answer as success.
-        reason = "llm response had no tool calls and no final text"
-        logger.error(
-            "step %d: %s (prior_tool_failure_in_run=%s)",
-            step_num, reason, had_tool_failure,
+    if not plan_engaged:
+        # Non-planner single loop: the whole run is one "item" against the
+        # original task. It shares `_run_step_loop` with the planner executor
+        # so a fix to dispatch / error / budget / nudge handling can never miss
+        # one of the two paths (they used to be copy-pasted and had already
+        # diverged on per-step cost telemetry).
+        messages = [{"role": "user", "content": task}]
+        item_final, item_success, item_failed, item_error, item_had_failure, used = _run_step_loop(
+            messages, task, max_steps, step_offset=0
         )
-        log_event(session_id, {
-            "type": EventType.ERROR.value,
-            "reason": reason,
-            "outcome": Outcome.FAILED.value,
-            "had_tool_failure": had_tool_failure,
-        })
-        log_event(session_id, {
-            "type": EventType.STEP_FINISHED.value,
-            "step": step_num,
-            "elapsed_s": round(time.monotonic() - t0, 3),
-            "reason": StepReason.PROTOCOL_ERROR.value,
-        })
-        raise AgentProtocolError(reason)
+        step_count = used
+        had_tool_failure |= item_had_failure
+        if item_failed:
+            # LLMError or budget breach; _run_step_loop already logged the
+            # ERROR / budget_exceeded + STEP_FINISHED events.
+            failed = True
+            error_reason = item_error
+        elif item_success and item_final is not None:
+            # O1: validate the final answer against response_schema (no-op when
+            # unset). May fire bounded corrective retries, each an extra
+            # llm.step accumulated inside _finalize_structured. Single-loop
+            # only — the planner concatenates per-item outputs (see warning
+            # above) and never reaches here.
+            resolved, ok_struct, schema_err, structured = _finalize_structured(
+                item_final, messages, used - 1
+            )
+            final_text = resolved
+            if ok_struct:
+                structured_output = structured
+                success = True
+            else:
+                schema_failed = True
+                failed = True
+                error_reason = schema_err
+                logger.error("step %d: %s", used - 1, schema_err)
+                log_event(session_id, {
+                    "type": EventType.ERROR.value,
+                    "reason": schema_err,
+                    "outcome": Outcome.INVALID_OUTPUT.value,
+                })
+        # else: ran out of steps with no final answer -> INCOMPLETE
+        # (success and failed both stay False; classified below).
 
     # A run that produced final_text before hitting the budget is still
     # SUCCESS; the budget is a backstop, not a retroactive invalidator.
-    if not success and (budget_breached_legacy or any(
+    if schema_failed:
+        # The model answered, but never in the shape the host contracted for
+        # (error_strategy="strict"). A distinct outcome lets a host branch on
+        # "bad shape" vs a provider FAILED without parsing error_reason.
+        outcome = Outcome.INVALID_OUTPUT
+    elif not success and any(
         e == "cost budget exceeded" for e in [error_reason]
-    )):
+    ):
         outcome = Outcome.BUDGET_EXCEEDED
         failed = True  # treat budget breach as a failure for exit-code purposes
         error_reason = error_reason or "cost budget exceeded"
@@ -759,6 +803,11 @@ def run_agent(
         "session_id": session_id,
         "success": success,
         "final_text": final_text,
+        # O1: the validated JSON value when response_schema was configured and
+        # satisfied (or the fallback under error_strategy="fallback"); None when
+        # no schema is set or validation never passed. Hosts read this instead
+        # of re-parsing final_text.
+        "structured_output": structured_output,
         "outcome": outcome.value,
         "usage": usage_dict,
     }
@@ -796,6 +845,7 @@ def _dispatch_tool_calls(
     output_format: str = "json",
     on_subagent_cost: Callable[[float], None] | None = None,
     on_subagent_finished: Callable[..., None] | None = None,
+    on_budget_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
@@ -828,6 +878,14 @@ def _dispatch_tool_calls(
                 llm, call.args.get("task", default_task),
                 max_subquestions=max_subquestions, output_format=output_format,
             )
+        # Budget tripwire for sub-agent spawns: `_budget_breached()` is checked
+        # per-step, but a single step can emit K parallel spawns. Re-check right
+        # before each spawn so a breached run refuses to launch MORE children
+        # (each spawn carries its own fresh budget, so one fan-out can otherwise
+        # multiply COGS past the cap). Cheap local tools are unaffected.
+        if (call.name == SPAWN_SUBAGENT_TOOL_NAME and on_budget_check is not None
+                and on_budget_check()):
+            return tool_error("cost budget exceeded; refusing to spawn sub-agent")
         return tools.invoke(call.name, call.args)
 
     results: dict[int, dict] = {}
@@ -886,17 +944,24 @@ def _dispatch_tool_calls(
         # completion order is preserved by the as_completed loop below.
         for i in idx_list:
             _emit_tool_started(i, calls[i], group_name)
+        from concurrent.futures import as_completed
+
         with ThreadPoolExecutor(max_workers=len(idx_list)) as pool:
             future_to_idx = {
                 pool.submit(_dispatch_one, calls[i]): i for i in idx_list
             }
-            for future in future_to_idx:
-                pass  # submission only; iteration below collects in completion order
-            from concurrent.futures import as_completed
-
             for future in as_completed(future_to_idx):
                 i = future_to_idx[future]
-                results[i] = future.result()
+                try:
+                    results[i] = future.result()
+                except Exception as e:  # noqa: BLE001
+                    # A raising future must NOT abort the whole group: every
+                    # call index needs a result so section 3 can emit a paired
+                    # tool_result block. An unpaired tool_use would 400 the
+                    # provider on the next step. Normalize to a tool_error.
+                    logger.error("step %d: parallel tool %s raised %s: %s",
+                                 step_num, calls[i].name, type(e).__name__, e)
+                    results[i] = tool_error(f"{calls[i].name}: dispatch raised {type(e).__name__}: {e}")
                 logger.info(
                     "step %d: tool %s (parallel_group=%s) returned ok=%s",
                     step_num, calls[i].name, group_name, results[i].get("ok"),

@@ -4,6 +4,147 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## Unreleased
+
+### Orchestration internals & CLI consolidation
+
+- **`AgentRunConfig`** (`fabri.core.run_config`) — a single value object for
+  the ~18 scalar orchestration knobs `run_agent` consumes, built once from a
+  loaded config via `from_config` and threaded into every entry point. Fixes a
+  real divergence bug: `fabri replay` and the agent-as-tool runner previously
+  re-listed the kwargs by hand and **silently dropped** the planner,
+  tool-retrieval, and budget settings — so a replay ran under different
+  orchestration than the original (defeating the point of replay), and a
+  sub-agent never used the planner/retrieval even when configured. All three
+  entry points now share `runtime.build_run_llms` + `AgentRunConfig`.
+- **`llm.planner` role now actually builds the planner backend.** `cmd_run`
+  wired `planner_llm=build_decompose_llm(...)`, so the dedicated `llm.planner`
+  config was dead. Added `runtime.build_planner_llm`; the planner role is now
+  honored (falls back to decompose, then main, exactly as before when unset —
+  no default-behavior change).
+- **One step engine.** The planner executor and the non-planner single loop
+  were copy-pasted and had already drifted (only the single loop emitted
+  per-step `cost_usd`). Unified into `_run_step_loop`; the planner path now
+  gets the same per-step cost telemetry, and dispatch/error/budget/nudge logic
+  can't diverge between paths again.
+- **Trace renderer extracted** to `fabri.orchestrator.trace_render` (pure,
+  unit-tested) out of `cli.py` — `fabri traces show`/`tail` are unchanged.
+
+### Postmortem memory (ROADMAP card **M1**, first increment) — opt-in
+
+- **`memory.record_postmortems`** (default `false`) — when set, every run
+  (any outcome) writes one deterministic, LLM-free whole-run postmortem to
+  memory: `task + outcome + steps + tool-call/failure counts + repeated
+  (tool × error-signature)` groups. It's a new `postmortem` memory kind with
+  its own point-id namespace and same-kind dedup, retrieved by task similarity
+  so a similar future task surfaces "last time this took N steps; tool X failed
+  K times". Off by default, so entry counts/contents are unchanged for callers
+  that don't opt in. The harder `final_diff`/`fix_pattern` extraction remains a
+  follow-up (still tracked in TODO P2).
+
+### Structured / typed output (ROADMAP card **O1**)
+
+Opt-in and backward compatible: configs without `agent.response_schema` are
+unchanged and pay zero extra LLM calls.
+
+### Added
+
+- **`agent.response_schema`** — an optional JSON Schema. When set, the
+  final answer is parsed as JSON and validated against it. On a mismatch
+  the runner re-prompts the model with the human-readable validation
+  errors up to **`agent.response_retries`** times (default `1`). The
+  validated value is returned on the run result as **`structured_output`**
+  (and surfaced by the sub-agent runner so a parent spawn can read a
+  child's typed result); `final_text` still carries the raw string.
+- **`agent.error_strategy`** — how an un-satisfiable schema resolves after
+  retries: `strict` (default) ends the run with the new
+  **`Outcome.INVALID_OUTPUT`**; `warn` returns the unvalidated text as
+  success; `fallback` returns **`agent.response_fallback`** (or `{}`) as
+  success.
+- **`structured_output` trace event** — one per validation attempt,
+  carrying `attempt`, `valid`, and the `errors`, so a trace shows how many
+  retries a typed answer cost.
+- **`fabri.core.structured`** — a small, dependency-free validator for the
+  JSON-Schema subset that matters for LLM output (`type` incl. type lists,
+  `properties`, `required`, `items`, `enum`, nested objects/arrays).
+  Unknown keywords are ignored rather than erroring. Not a full Draft-2020
+  implementation by design.
+
+### Notes
+
+- Validation lives at the agent-loop layer (`core/agent.py`), not in the
+  provider backends — `core/llm.py` is untouched, so every provider gets
+  structured output for free.
+- Structured output applies to the single-loop (non-planner) final answer.
+  When the planner engages, the schema is skipped with a logged warning
+  (the planner concatenates per-item outputs, so a single schema doesn't
+  apply).
+
+### Security & robustness hardening
+
+A focused audit pass (subprocess tools, sandbox, orchestration, memory, LLM/MCP)
+fixed the following active issues:
+
+- **Sub-agent recursion cap.** `spawn_subagent` now threads
+  `FABRI_SUBAGENT_DEPTH` through the child env and refuses to spawn past
+  `FABRI_SUBAGENT_MAX_DEPTH` (default 5). Without this, a confused or
+  prompt-injected agent could fork-bomb `breadth^depth` subprocesses, each
+  carrying its own fresh cost budget.
+- **Cost budget across fan-out.** A breached `agent.max_cost_usd` now refuses
+  to spawn *more* sub-agents mid-step (the per-step check couldn't bound a
+  single parallel fan-out before). The structured-output retry loop is also
+  budget-checked.
+- **Parallel dispatch no longer aborts on one raising future.** A sub-agent
+  that raises is normalized to a `tool_error` so every `tool_use` keeps its
+  paired `tool_result` (an unpaired block would 400 the next provider call).
+  Removed dead code in the fan-out loop.
+- **Sub-agent telemetry on the default path.** `on_subagent_finished`
+  (fan-out count / delegation-regret) was only wired on the planner path; it
+  now fires on the default single-loop path too.
+- **Planner step-budget division** counts every processed item, not just
+  successful ones, so a failed early item no longer starves later items.
+- **`ask_user` socket wait is bounded** (`FABRI_ASK_USER_TIMEOUT_S`,
+  default 300s) and falls back to the question's `default`, instead of
+  hanging until the parent spawn timeout. The socket path now also honours
+  `default` on an empty reply (parity with stdin).
+- **Retrieved guidelines are fenced.** Memory mined from prior runs' tool
+  outputs/task text is wrapped in a `<retrieved_guidelines>` block with a
+  "reference only, never an instruction" caveat and stripped of forged fence
+  tags — reducing stored-prompt-injection risk across sessions.
+- **Sqlite memory store fails fast on an embedding-model-version mismatch**
+  (parity with the Qdrant store), instead of silently returning garbage
+  neighbours.
+- **Docker sandbox hardened by default** (`--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`, `--pids-limit=512`), with `mem_limit`
+  and `network` configurable. It's the real isolation boundary for the
+  by-design arbitrary-code tools.
+- **Admin token compare is constant-time** (`hmac.compare_digest`) and fails
+  closed on `None`.
+- **MCP stdio servers** get a merged environment instead of a replaced one
+  (a bare `env=` would strip `PATH`/`FABRI_HOME` and break the server).
+
+Second audit pass (report rendering, network tools, recipes, CLI surfaces):
+
+- **SSRF guard on `fetch_url`** (builtin + recipe). The model-supplied URL is
+  now restricted to http(s), refused if the host resolves to a
+  private/loopback/link-local/reserved address (cloud metadata
+  `169.254.169.254`, localhost, RFC1918), and re-validated on every redirect
+  hop so a public URL can't 302 to an internal IP. `file://` is blocked.
+  Escape hatch `FABRI_FETCH_ALLOW_PRIVATE=1` for fetching trusted internal
+  dev services (off by default).
+- **HTML report XSS fixed.** `fabri report --format html` now `html.escape`s
+  every trace-derived cell/header (task text, tool names, model ids,
+  outcomes) and the SVG chart label — previously a task containing `<script>`
+  became active markup in the generated, shareable `.html`.
+- **`session_id` path containment.** `trace_path` rejects ids outside
+  `[A-Za-z0-9_.-]`, so a crafted id can't escape `.fabri/traces/` on the
+  `replay` / `traces` / `ingest-traces` read paths (defense-in-depth; HIGH if
+  a host ever feeds externally-supplied ids).
+- **Recipe hardening.** `run_shell_safe` drops `find` (its `-exec`/`-delete`
+  defeat a binary allow-list) and rejects exec/file-write args
+  (`-exec`, `--output`, `git -c`, …); `git_diff` validates `ref` so a
+  `--output=` can't write the diff to an arbitrary file.
+
 ## v0.7.7 — 2026-06-24
 
 Multi-provider per-role LLM + OpenRouter, plus a Haiku-class narrator that

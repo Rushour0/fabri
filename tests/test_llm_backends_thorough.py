@@ -390,3 +390,24 @@ def test_openai_message_translation_includes_system_prompt():
     sent_messages = b._client.calls[0]["messages"]
     assert sent_messages[0] == {"role": "system", "content": "YOU ARE FABRI"}
     assert sent_messages[1] == {"role": "user", "content": "hi"}
+
+
+def test_anthropic_collects_all_parallel_tool_use_blocks():
+    """Regression for the P1 'returns only the first content block' bug: a turn
+    with several tool_use blocks (parallel tool calls) must yield ALL of them,
+    in order, with ids preserved, and not be treated as a final answer."""
+    resp = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="doing two reads"),
+            SimpleNamespace(type="tool_use", name="read_file", input={"path": "a"}, id="t1"),
+            SimpleNamespace(type="tool_use", name="read_file", input={"path": "b"}, id="t2"),
+        ],
+        stop_reason="tool_use",
+        usage=_au(),
+    )
+    out = _anthropic_backend([resp]).step("sys", [{"role": "user", "content": "go"}])
+    assert [c.name for c in out.tool_calls] == ["read_file", "read_file"]
+    assert [c.id for c in out.tool_calls] == ["t1", "t2"]
+    assert [c.args["path"] for c in out.tool_calls] == ["a", "b"]
+    assert out.final_text is None
+    assert out.thinking_text == "doing two reads"

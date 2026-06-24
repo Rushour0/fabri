@@ -44,19 +44,20 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
 
 ## P2 — integrity & robustness
 
-- [ ] **Postmortem-to-qdrant: failure pattern memory** (requested by ludexel
-  2026-06-24). Today's qdrant write path indexes *successful* run summaries
-  (orchestrator's `TASK: … VALIDATION: pass` block) — but the heavy
-  token cost comes from runs that took 6+ retries to converge on the
-  same fix. Push to qdrant on EVERY run regardless of outcome:
-  `{task, errors[], retry_count, tool_calls_total, final_diff, fix_pattern}`.
-  Retrieve at planning time matched by (current task description) AND
-  (predicted error kind from the user prompt or first tool failure). The
-  agent gets "you tried X 3 times last week, that loop's a sceneregistry
-  orphan — delete the file first" as a single line in context, instead of
-  rediscovering the playbook. Hard part: extracting `fix_pattern` from a
-  noisy transcript — start with the diff between the failure point and
-  the successful end-state.
+- [~] **Postmortem-to-qdrant: failure pattern memory** (requested by ludexel
+  2026-06-24). Also tracked as forward-feature card **M1** in `docs/ROADMAP.md`
+  (Track M) — keep the two in sync; close both when shipped.
+  **First increment SHIPPED** (`memory.record_postmortems`, opt-in): every run
+  now writes one deterministic, LLM-free postmortem
+  `{task, outcome, step_count, tool_calls_total, repeated (tool × error-sig)}`
+  as a new `postmortem` memory kind, retrieved by task similarity — the "you
+  tried X N times" single line in context. See `pipeline.build_postmortem_text`
+  + `tests/test_unit_postmortem.py`.
+  **Still open:** the `final_diff` / `fix_pattern` half — extracting the
+  corrective pattern from the diff between the failure point and the successful
+  end-state (the noisy-transcript hard part), and retrieval matching on
+  *predicted error kind* (not just task text). Flip the default to on once the
+  fix_pattern half lands.
 
 - [x] **Non-atomic ingest → lost updates.** `memory/pruning.py`. The
   find_similar→update→upsert critical section now runs under a per-collection
@@ -114,16 +115,86 @@ Fixed in one pass (`core/llm.py`, `core/agent.py`, `memory/{pruning,store}.py`,
   "ls grep.py"` data arg no longer gets rewritten just because `grep.py`
   exists next to the manifest. Bare execs and CLI flags still pass through.
 
-## Test coverage to add
+## Security/orchestration audit (2026-06-24) — fixed this pass
 
+Four-area parallel audit (tool exec/sandbox, orchestration, memory/injection,
+LLM/MCP/secrets). Active issues fixed (see CHANGELOG "Security & robustness
+hardening" for detail + tests in `tests/test_unit_security_hardening.py`):
+
+- [x] **Sub-agent fork-bomb** — no recursion/spawn cap. Added
+  `FABRI_SUBAGENT_DEPTH`/`FABRI_SUBAGENT_MAX_DEPTH` (default 5).
+- [x] **Budget unbounded across a parallel fan-out** — breached budget now
+  refuses further spawns mid-step; structured-output retries budget-checked.
+- [x] **Parallel future exception aborted the whole group** → unpaired
+  `tool_use` → next-call 400. Now normalized to `tool_error`; dead loop removed.
+- [x] **`on_subagent_finished` dead on the default (non-planner) path.**
+- [x] **Planner item-budget divisor** starved later items after an early failure.
+- [x] **`ask_user` socket blocked forever** — bounded wait + default fallback.
+- [x] **Retrieved guidelines un-fenced** in the system prompt (stored prompt
+  injection) — now wrapped + sanitized.
+- [x] **Sqlite store** missing the embedding-model-version fail-fast.
+- [x] **Docker sandbox** ran with full caps/privs/no pids cap — hardened defaults.
+- [x] **Admin token compare** not constant-time; **MCP stdio** env replaced not merged.
+
+### Second audit pass (2026-06-24) — fixed
+
+- [x] **fetch_url SSRF** (builtin + recipe) — scheme allowlist + resolve/block
+  private-reserved IPs + per-redirect revalidation; `file://` blocked;
+  `FABRI_FETCH_ALLOW_PRIVATE` opt-in escape hatch.
+- [x] **HTML report stored XSS** — `html.escape` on all trace-derived cells +
+  the SVG label.
+- [x] **`session_id` path traversal** — `trace_path` charset-validates the id.
+- [x] **Recipe escapes** — `run_shell_safe` drops `find` + rejects
+  exec/file-write args; `git_diff` validates `ref`.
+
+### Deferred (tracked, not fixed — config/tool-trust or larger scope)
+
+- [ ] **MCP remote tool descriptions** flow into the system prompt verbatim —
+  a malicious server can prompt-inject. Frame `mcp_*` tools as third-party /
+  require per-server allowlist.
+- [ ] **MCP server mode is unauthenticated + unbounded** (`mcp_server.py`):
+  a client can drive the full toolset and read the shared memory store with
+  no per-request cap. Acceptable for the stdio/parent-process trust model;
+  document it and consider a safe-tool allowlist when served.
+- [ ] **Tool subprocesses inherit the full `os.environ`** (incl. provider keys);
+  `bash`/`python_exec` can `echo $ANTHROPIC_API_KEY`. Consider a minimal-env
+  allowlist for non-spawn tools (spawn needs the keys).
+- [ ] **MCP stdio `_read` has no timeout** — a silent server hangs agent build;
+  add a select/poll read timeout mirroring the HTTP transport.
+- [ ] **`grep_dir` recipe** reads any path (no sandbox jail) — confine to a root
+  if promoting it from recipe to a registered tool.
+- [ ] **No memory TTL/eviction** — unbounded growth (slow DoS + retrieval
+  dilution). Add an LRU/least-hit cap in `ingest_guideline`.
+- [ ] **128-bit deterministic point ID** — negligible accidental collision;
+  revisit only if guideline text becomes attacker-grindable.
+- [ ] **TOON decode** raises `IndexError`/`RecursionError` on adversarial
+  model output (currently swallowed by `decompose`'s `except`); add bounds if
+  any caller ever decodes without a broad catch.
+
+## Test coverage
+
+Added this pass (see the named tests):
+- [x] Concurrent ingest (lost-update) — `test_pruning.py::test_concurrent_ingest_does_not_lose_updates`
+  fires 8 parallel ingests and asserts `hit_count == 8` (flock serializes).
+- [x] Strategic re-ingest doesn't demote — `test_pruning.py::test_recurrence_of_promoted_guideline_does_not_demote_or_duplicate`.
+- [x] Multi-block / parallel tool_use — `test_llm_backends_thorough.py::test_anthropic_collects_all_parallel_tool_use_blocks`
+  (Anthropic); OpenAI round-trip + truncation-preserves-tool-calls already covered.
+- [x] Guideline fence + forged-tag sanitization — `test_retrieval.py::test_retrieved_context_is_fenced_and_strips_forged_tags`.
+- [x] Docker security flags (defaults + configurable + argv order) — `test_docker_sandbox.py`.
+- [x] MCP stdio env merge — `test_unit_mcp_client.py::test_stdio_start_merges_env_instead_of_replacing`.
+- [x] ask_user socket default-on-empty + socket timeout — `test_ask_user.py` / `test_unit_security_hardening.py`.
+- [x] SSRF refusals + escape hatch, HTML XSS escaping, trace-path containment,
+  recipe shell/git blocks — `test_unit_security_hardening.py`.
+- [x] Sub-agent recursion-depth cap — `test_spawn_subagent.py`.
+
+Still open:
 - [ ] Wheel-packaging guard: `builtin` resolves to non-empty tools after a real
-  `pip install` of the built wheel (regression test for the P0).
-- [ ] Strategic-dedup demotion / re-ingest of a promoted guideline.
-- [ ] Concurrent ingest (lost-update) behavior — wired the flock; still need a
-  test that fires two ingests at the same collection in parallel and asserts
-  the final `hit_count` equals the number of ingests.
-- [ ] Multi-block / parallel-tool-call / `max_tokens`-truncated LLM responses
-  against both backends.
+  `pip install` of the built wheel (regression for the P0; needs an isolated
+  build+install, so it's a slow/integration test — gate behind a marker).
+- [ ] Planner item-budget division: e2e test that a failed early plan item does
+  not starve the step budget of later items (the `processed_count` fix).
+- [ ] `max_tokens` truncation that carries partial tool_use args — assert the
+  run fails loud rather than dispatching a half-parsed call (both backends).
 
 ## Done this pass
 

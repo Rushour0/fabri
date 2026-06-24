@@ -10,12 +10,12 @@ from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
 from fabri.core.logging_setup import configure_logging
 from fabri.core.outcome import Outcome
+from fabri.core.run_config import AgentRunConfig
 from fabri.orchestrator.pipeline import process_trace
 from fabri.runtime import (
-    build_decompose_llm,
-    build_narrator_llm,
     build_llm,
     build_memory_store,
+    build_run_llms,
     build_tool_defs,
     build_tools,
 )
@@ -40,19 +40,6 @@ def cmd_init(args: argparse.Namespace) -> None:
         for rel in result["skipped"]:
             print(f"  . {rel}")
     print("\n" + next_steps(args.dir, template=template))
-
-
-def _planner_mode_from_cfg(planner_cfg: dict) -> str:
-    """Translate the agent.planner block (which carries both an enabled flag and
-    a mode string for back-compat) into the run_agent.planner_mode argument."""
-    mode = planner_cfg.get("mode", "off")
-    if mode in ("auto", "force", "off"):
-        if not planner_cfg.get("enabled", False) and mode != "off":
-            # `enabled: false` wins over any non-off mode -- so a stale `mode`
-            # value in a config can't surprise-activate the planner.
-            return "off"
-        return mode
-    return "off"
 
 
 def _require_api_key(api_key_env: str) -> None:
@@ -127,33 +114,19 @@ def cmd_run(args: argparse.Namespace) -> None:
     tools = build_tools(tools_cfg)
 
     decompose_cfg = tools_cfg["decompose"]
-    llm = build_llm(config, build_tool_defs(tools, decompose_cfg))
+    llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
+    run_cfg = AgentRunConfig.from_config(config)
 
     result = run_agent(
         args.task,
-        llm,
+        llms["llm"],
         tools,
         store,
         session_id=session_id,
-        max_steps=config["agent"]["max_steps"],
-        top_k=mem_cfg["top_k"],
-        max_subquestions=decompose_cfg["max_subquestions"],
-        system_prompt=config["agent"].get("system_prompt", ""),
-        system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
-        result_format=tools_cfg.get("result_format", "toon"),
-        output_format=config["agent"].get("output_format", "json"),
-        decompose_llm=build_decompose_llm(config),
-        planner_llm=build_decompose_llm(config),
-        planner_mode=_planner_mode_from_cfg(config["agent"].get("planner", {})),
-        planner_max_items=config["agent"].get("planner", {}).get("max_items", 8),
-        planner_auto_token_threshold=config["agent"].get("planner", {}).get("auto_token_threshold", 80),
-        tool_retrieval_enabled=tools_cfg.get("retrieval", {}).get("enabled", False),
-        tool_retrieval_top_k=tools_cfg.get("retrieval", {}).get("top_k", 6),
-        tool_retrieval_always_include=tuple(
-            tools_cfg.get("retrieval", {}).get("always_include", [])
-        ),
-        max_cost_usd=config["agent"].get("max_cost_usd"),
-        narrator_llm=build_narrator_llm(config),
+        decompose_llm=llms["decompose_llm"],
+        planner_llm=llms["planner_llm"],
+        narrator_llm=llms["narrator_llm"],
+        **run_cfg.as_kwargs(),
     )
     print(json.dumps(result, indent=2))
     # Surface a non-success outcome via exit code — host services dispatch
@@ -172,6 +145,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         guideline_max_tokens=mem_cfg["guideline_max_tokens"],
         similarity_threshold=mem_cfg["similarity_threshold"],
         promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
+        record_postmortem=mem_cfg.get("record_postmortems", False),
     )
     if entries:
         print(f"\nSynthesized {len(entries)} guideline(s) from this run:")
@@ -196,6 +170,7 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
         guideline_max_tokens=mem_cfg["guideline_max_tokens"],
         similarity_threshold=mem_cfg["similarity_threshold"],
         promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
+        record_postmortem=mem_cfg.get("record_postmortems", False),
     )
     print(json.dumps([e.to_payload() for e in entries], indent=2))
 
@@ -358,7 +333,10 @@ def cmd_replay(args: argparse.Namespace) -> None:
     tools_cfg = config["tools"]
     tools = build_tools(tools_cfg)
     decompose_cfg = tools_cfg["decompose"]
-    llm = build_llm(config, build_tool_defs(tools, decompose_cfg))
+    llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
+    # Same AgentRunConfig as `run` so replay holds orchestration constant and
+    # varies only the memory state — the whole point of the command.
+    run_cfg = AgentRunConfig.from_config(config)
 
     print(f"replay task: {task!r}", file=sys.stderr)
     print(f"  original session: {args.session_id[:8]} "
@@ -367,17 +345,12 @@ def cmd_replay(args: argparse.Namespace) -> None:
           f"steps={original_summary['step_count']}", file=sys.stderr)
 
     result = run_agent(
-        task, llm, tools, store,
+        task, llms["llm"], tools, store,
         session_id=new_session_id,
-        max_steps=config["agent"]["max_steps"],
-        top_k=mem_cfg["top_k"],
-        max_subquestions=decompose_cfg["max_subquestions"],
-        system_prompt=config["agent"].get("system_prompt", ""),
-        system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
-        result_format=tools_cfg.get("result_format", "toon"),
-        output_format=config["agent"].get("output_format", "json"),
-        decompose_llm=build_decompose_llm(config),
-        narrator_llm=build_narrator_llm(config),
+        decompose_llm=llms["decompose_llm"],
+        planner_llm=llms["planner_llm"],
+        narrator_llm=llms["narrator_llm"],
+        **run_cfg.as_kwargs(),
     )
     new_summary = {
         "outcome": result.get("outcome", "?"),
@@ -480,116 +453,11 @@ def cmd_admin_config(args: argparse.Namespace) -> None:
     print(json.dumps(describe_config(config, tools), indent=2))
 
 
-def _ts_prefix(ev: dict, t0: float) -> str:
-    """Wallclock + relative-delta prefix used by every rendered trace line.
-    Trace events always carry `ts` (orchestrator/traces.py), so this is safe
-    by default -- "time should just work" without extra flags."""
-    import datetime as _dt
-    ts = ev.get("ts", t0)
-    wall = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-    dt = ts - t0
-    return f"  {wall} (+{dt:6.2f}s)"
-
-
-def _wrap_block(text: str, indent: str = "    ", width: int | None = None) -> str:
-    """Wrap a (possibly multi-line) text block under a fixed indent. Preserves
-    intentional newlines; only the long lines get wrapped."""
-    import shutil
-    import textwrap
-    if width is None:
-        width = max(60, shutil.get_terminal_size((100, 20)).columns - len(indent))
-    out = []
-    for line in text.splitlines() or [text]:
-        if not line.strip():
-            out.append("")
-            continue
-        out.extend(textwrap.wrap(line, width=width) or [""])
-    return "\n".join(indent + l for l in out)
-
-
-def _looks_like_code(text: str) -> bool:
-    first = next((l for l in text.splitlines() if l.strip()), "")
-    return first.lstrip().startswith(("def ", "class ", "import ", "from ", "{", "[", "```"))
-
-
-def _format_payload(value, max_lines: int = 40) -> str:
-    """Pretty-print a JSON-ish payload, truncating to `max_lines` so a giant
-    tool result doesn't blow up the viewer (the full payload is still in the
-    JSONL on disk)."""
-    try:
-        s = json.dumps(value, indent=2, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        s = repr(value)
-    lines = s.splitlines()
-    if len(lines) > max_lines:
-        omitted = len(lines) - max_lines
-        lines = lines[:max_lines] + [f"... ({omitted} more lines truncated; see raw JSONL)"]
-    return "\n".join(lines)
-
-
-def _format_thought_body(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith(("{", "[")):
-        try:
-            pretty = _format_payload(json.loads(stripped))
-            return "\n".join("    " + l for l in pretty.splitlines())
-        except json.JSONDecodeError:
-            pass
-    if _looks_like_code(stripped):
-        return "\n".join("    ┃ " + l for l in stripped.splitlines())
-    return _wrap_block(text)
-
-
-def _render_event(ev: dict, t0: float) -> str:
-    kind = ev.get("type", "?")
-    prefix = _ts_prefix(ev, t0)
-    if kind == "tool_call":
-        name = ev.get("name", "?")
-        result = ev.get("result", {}) or {}
-        ok = result.get("ok")
-        tag = ev.get("parallel_group")
-        tag_str = f" [{tag}]" if tag else ""
-        header = f"{prefix} tool_call {name}{tag_str} ok={ok}"
-        parts = [header]
-        if ev.get("args"):
-            parts.append("    args:")
-            parts.append(_wrap_block(_format_payload(ev["args"]), indent="      "))
-        if result:
-            parts.append("    result:")
-            parts.append(_wrap_block(_format_payload(result), indent="      "))
-        return "\n".join(parts)
-    if kind == "thought":
-        body = _format_thought_body(ev.get("text", ""))
-        return f"{prefix} thought\n{body}"
-    if kind == "step_started":
-        return f"{prefix} ── step {ev.get('step')} ──"
-    if kind == "step_finished":
-        bits = [f"step {ev.get('step')} done"]
-        for k in ("elapsed_s", "reason", "tool_count", "tool_failure"):
-            if k in ev:
-                bits.append(f"{k}={ev[k]}")
-        return f"{prefix} ── {' '.join(bits)} ──"
-    if kind == "start":
-        return f"{prefix} start task={ev.get('task', '')!r}"
-    if kind == "final":
-        return f"{prefix} final outcome={ev.get('outcome')}\n{_wrap_block(ev.get('text', ''))}"
-    if kind in ("failed", "llm_error"):
-        return f"{prefix} {kind} reason={ev.get('reason', '')!r}"
-    if kind == "ask_user":
-        return f"{prefix} ask_user q={ev.get('question', '')!r}"
-    if kind == "discrepancy":
-        return (
-            f"{prefix} discrepancy path={ev.get('path', '')!r} "
-            f"reason={ev.get('reason', '')!r}"
-        )
-    rest = {k: v for k, v in ev.items() if k != "ts"}
-    return f"{prefix} {kind} {json.dumps(rest, default=str)[:200]}"
-
-
 def cmd_traces_show(args: argparse.Namespace) -> None:
     """Pretty-print a session's JSONL trace. The framework already writes
     every step (start / tool_call / thought / final / failed) to
     .fabri/traces/<sid>.jsonl; this is the human-readable reader."""
+    from fabri.orchestrator.trace_render import render_event
     from fabri.orchestrator.traces import read_trace, trace_path
 
     events = read_trace(args.session_id)
@@ -598,7 +466,7 @@ def cmd_traces_show(args: argparse.Namespace) -> None:
         sys.exit(1)
     t0 = events[0].get("ts", 0.0)
     for ev in events:
-        print(_render_event(ev, t0))
+        print(render_event(ev, t0))
 
 
 def cmd_traces_tail(args: argparse.Namespace) -> None:
@@ -606,6 +474,7 @@ def cmd_traces_tail(args: argparse.Namespace) -> None:
     they arrive. Useful when the agent is running in another shell and you
     want a live view of its tool calls."""
     import time as _time
+    from fabri.orchestrator.trace_render import render_event
     from fabri.orchestrator.traces import trace_path
 
     path = trace_path(args.session_id)
@@ -625,7 +494,7 @@ def cmd_traces_tail(args: argparse.Namespace) -> None:
                     ev = json.loads(line.strip())
                 except json.JSONDecodeError:
                     continue
-                print(_render_event(ev, t_start), flush=True)
+                print(render_event(ev, t_start), flush=True)
         except KeyboardInterrupt:
             pass
 

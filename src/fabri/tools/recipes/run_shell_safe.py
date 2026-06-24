@@ -5,11 +5,21 @@ import shlex
 import subprocess
 import sys
 
+# `find` is intentionally NOT allowed: `-exec`/`-execdir`/`-delete` make it an
+# arbitrary-exec / arbitrary-delete primitive that an allow-list-of-binaries
+# can't contain. Use grep/ls for read-only discovery instead.
 ALLOWED_BINS = {
-    "git", "ls", "cat", "head", "tail", "grep", "find", "wc", "diff",
+    "git", "ls", "cat", "head", "tail", "grep", "wc", "diff",
     "pwd", "echo", "stat", "file", "which",
 }
 DENY_TOKENS = {">", ">>", "|", "&&", "||", ";", "`", "$("}
+# Even within an allowed binary, these args run a command, delete files, or
+# write to an arbitrary path -- reject them regardless of binary so a future
+# allow-list addition can't silently reintroduce the escape.
+DENY_ARGS = {
+    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprintf", "-fprint",
+    "--output", "--upload-pack", "--receive-pack",
+}
 MAX_OUTPUT = 8 * 1024
 
 
@@ -29,6 +39,15 @@ def main() -> int:
             "error": f"refused: binary not in allow-list. "
                      f"allowed={sorted(ALLOWED_BINS)}"
         }))
+        return 1
+    # `git -c <cfg>` can alias a command to a shell (`-c alias.x=!sh`); refuse
+    # the config flag outright. Combined with DENY_ARGS this closes the known
+    # allow-listed-binary exec/file-write escapes.
+    bad = [p for p in parts[1:] if p in DENY_ARGS or p.startswith(tuple(DENY_ARGS))]
+    if parts[0] == "git" and ("-c" in parts[1:] or any(p.startswith("-c") and p != "-c" for p in parts[1:])):
+        bad.append("-c")
+    if bad:
+        print(json.dumps({"error": f"refused: disallowed argument(s) {sorted(set(bad))}"}))
         return 1
     try:
         proc = subprocess.run(parts, capture_output=True, text=True, timeout=20)

@@ -210,17 +210,17 @@ def test_narrator_runs_in_planner_executor_loop():
 
     # We don't actually need to drive `run_plan` -- just confirm narration
     # works inside the executor by calling run_agent with planner_mode=off
-    # and a tool step (the executor and legacy loop share `_emit_narration`).
-    # The dedicated planner path is exercised by other tests; here we assert
-    # the helper is wired in both paths by checking source-level reference.
+    # and a tool step. The planner executor and the single (non-planner) loop
+    # now share ONE step engine (`_run_step_loop`), so there is a single
+    # `_emit_narration` call site that both paths flow through -- they can't
+    # diverge on whether narration fires.
     import fabri.core.agent as agent_mod
     src = agent_mod.__file__
     with open(src) as f:
         text = f.read()
-    # Both the executor loop body and the legacy loop body call _emit_narration.
-    assert text.count("_emit_narration(response.tool_calls") == 2
+    assert text.count("_emit_narration(response.tool_calls") == 1
 
-    # And the legacy-loop case still emits narration end-to-end.
+    # And the single-loop case still emits narration end-to-end.
     _ = plan_script  # silence unused
     result = run_agent(
         "x", ScriptedLLMBackend(main_script), reg, _store(),

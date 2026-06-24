@@ -5,6 +5,15 @@ from dataclasses import dataclass, field
 
 EMBEDDING_MODEL_VERSION = "minilm-l6-v2"
 
+# Per-kind point-id namespace. Kinds NOT listed fall back to "failure"
+# (tactical + strategic share it because promotion mutates kind in place on
+# the same point). success_pattern and postmortem are distinct signals that
+# must not collide with a textually similar failure entry.
+_ID_NAMESPACE = {
+    "success_pattern": "success",
+    "postmortem": "postmortem",
+}
+
 
 @dataclass
 class MemoryEntry:
@@ -26,8 +35,12 @@ class MemoryEntry:
         failure-derived guidelines (tactical / strategic). Tactical and
         strategic share a namespace because promotion mutates kind in place
         on the same point; success_pattern is a different signal entirely
-        and must not collide with a textually similar failure entry."""
-        namespace = "success" if self.kind == "success_pattern" else "failure"
+        and must not collide with a textually similar failure entry.
+
+        M1: postmortem entries (whole-run summaries written on every run when
+        enabled) get their own namespace too -- a postmortem and a tactical
+        guideline can share words without one suppressing the other."""
+        namespace = _ID_NAMESPACE.get(self.kind, "failure")
         digest = hashlib.sha256(f"{namespace}::{self.text.strip().lower()}".encode()).hexdigest()
         return str(uuid.UUID(digest[:32]))
 

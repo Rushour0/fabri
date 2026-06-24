@@ -60,8 +60,12 @@ def ingest_guideline(
         # suppress one of the two signals at retrieval time. Failure-derived
         # kinds (tactical / strategic) still search across both -- that's the
         # promotion path the historical pruning already relied on.
-        if kind == "success_pattern":
-            existing = store.find_similar(text, threshold=similarity_threshold, kind="success_pattern")
+        if kind in ("success_pattern", "postmortem"):
+            # Both are whole-run signals that dedup against their own kind only,
+            # so a "what worked" / "what this run cost" entry never merges into
+            # a textually similar failure-derived guideline (which would
+            # silently suppress one of the two at retrieval time).
+            existing = store.find_similar(text, threshold=similarity_threshold, kind=kind)
         else:
             existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
 

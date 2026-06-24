@@ -43,6 +43,7 @@ Caveats:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
@@ -83,12 +84,16 @@ class MCPStdioClient:
         # text=False so we control encoding explicitly; stderr=PIPE so the
         # server's debug output doesn't pollute the parent terminal but is
         # still visible if a developer wants to drain it.
+        # Popen's `env=` REPLACES the whole environment; passing only the
+        # configured overrides would strip PATH/FABRI_HOME and break the server.
+        # Merge onto the inherited environment instead.
+        child_env = {**os.environ, **self.env} if self.env else None
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=self.env,
+            env=child_env,
             bufsize=0,
         )
 

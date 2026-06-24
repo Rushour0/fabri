@@ -25,20 +25,42 @@ import sys
 import uuid
 
 SOCKET_ENV = "FABRI_ASK_USER_SOCKET"
+TIMEOUT_ENV = "FABRI_ASK_USER_TIMEOUT_S"
+# A wedged host listener (accepts the connection, never replies) must not hang
+# the sub-agent until its parent spawn timeout (default 600s) SIGKILLs the whole
+# tree -- multiplied across concurrent sub-agents. Bound the wait; on timeout we
+# fall back to the question's `default` (or empty), so the run continues.
+DEFAULT_REPLY_TIMEOUT_S = 300
+
+
+def _reply_timeout() -> float:
+    try:
+        return max(1.0, float(os.environ.get(TIMEOUT_ENV, str(DEFAULT_REPLY_TIMEOUT_S))))
+    except ValueError:
+        return float(DEFAULT_REPLY_TIMEOUT_S)
 
 
 def _ask_via_socket(socket_path: str, payload: dict) -> dict:
     """One question, one reply. We use SOCK_STREAM + a single newline as the
     record separator -- the same line-delimited JSON the runner's trace uses,
-    so the host's listener code can reuse the same parser."""
+    so the host's listener code can reuse the same parser. A timeout bounds the
+    blocking read so a silent host can't hang the agent indefinitely."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(_reply_timeout())
     sock.connect(socket_path)
     try:
         sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
         # Use a file-like wrapper to read one line; the host writes one
         # newline-terminated JSON object back.
         f = sock.makefile("r", encoding="utf-8")
-        line = f.readline()
+        try:
+            line = f.readline()
+        except socket.timeout:
+            sys.stderr.write(
+                f"ask_user: no reply on socket within {_reply_timeout():.0f}s; "
+                f"using default\n"
+            )
+            return {"question_id": payload["question_id"], "answer": payload.get("default", "")}
         if not line:
             raise RuntimeError("ask-user socket closed before reply")
         return json.loads(line)
@@ -113,7 +135,12 @@ def main() -> int:
         }))
         return 1
 
-    out: dict = {"answer": reply.get("answer", "")}
+    answer = reply.get("answer", "")
+    # Honour the question's default on an empty reply for BOTH transports (the
+    # stdin path already did this; the socket path previously dropped it).
+    if not answer and args.get("default"):
+        answer = args["default"]
+    out: dict = {"answer": answer}
     if "selected_option" in reply:
         out["selected_option"] = reply["selected_option"]
     print(json.dumps(out))

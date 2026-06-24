@@ -28,6 +28,18 @@ DEFAULT_CONFIG = {
         # (decompose). Native tool-call arguments are always provider JSON
         # regardless. "toon" is opt-in with json fallback.
         "output_format": "json",
+        # O1: structured / typed output. When `response_schema` is a JSON
+        # Schema (dict), the final answer is parsed as JSON and validated
+        # against it; a mismatch re-prompts the model with the validation
+        # errors up to `response_retries` times. After that, `error_strategy`
+        # decides: "strict" fails the run (Outcome.INVALID_OUTPUT), "warn"
+        # returns the unvalidated text as success, "fallback" returns
+        # `response_fallback` (or {}) as success. None disables the whole path
+        # (today's free-text behaviour, zero extra LLM calls).
+        "response_schema": None,
+        "response_retries": 1,
+        "error_strategy": "strict",
+        "response_fallback": None,
         # Planner/executor split. `off` keeps the single-loop behaviour;
         # `auto` runs the planner only on tasks long enough to benefit;
         # `force` always runs it.
@@ -114,6 +126,12 @@ DEFAULT_CONFIG = {
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "promotion_threshold_sessions": PROMOTION_THRESHOLD_SESSIONS,
         "guideline_max_tokens": DEFAULT_MAX_TOKENS,
+        # M1: when true, every run (any outcome) also writes one deterministic
+        # whole-run postmortem to memory — task + outcome + retry/cost signal —
+        # retrieved by task similarity so a similar future task sees "last time
+        # this took N retries; tool X failed K times". Off keeps today's
+        # failure/success-only mining (and unchanged entry counts).
+        "record_postmortems": False,
     },
 }
 

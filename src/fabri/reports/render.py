@@ -6,6 +6,7 @@ post, or a deck.
 """
 from __future__ import annotations
 
+import html
 import json
 from typing import Iterable
 
@@ -238,12 +239,16 @@ _HTML_FOOT = """
 
 
 def _html_table(headers: list[str], rows: Iterable[list[str]]) -> str:
+    # Cells/headers carry trace-derived strings (task text, tool names, model
+    # ids, outcomes). html.escape() every value so a task like `<img onerror=>`
+    # renders as text, not active markup — this report file is meant to be
+    # opened in a browser / served, so an unescaped cell is stored XSS.
     out = ["<table>", "<thead><tr>"]
-    out += [f"<th>{h}</th>" for h in headers]
+    out += [f"<th>{html.escape(str(h))}</th>" for h in headers]
     out.append("</tr></thead>")
     out.append("<tbody>")
     for row in rows:
-        out.append("<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>")
+        out.append("<tr>" + "".join(f"<td>{html.escape(str(c))}</td>" for c in row) + "</tr>")
     out += ["</tbody>", "</table>"]
     return "".join(out)
 

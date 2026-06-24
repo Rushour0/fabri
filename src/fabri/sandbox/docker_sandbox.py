@@ -37,14 +37,51 @@ class DockerBackend:
     `RuntimeError` with the subcommand's stderr -- the sandbox catches
     these and reports `{ok: False}` to the registry, never crashes the
     agent loop.
+
+    Security defaults: because this container is the *actual* isolation
+    boundary for the by-design arbitrary-code tools (bash / python_exec),
+    it ships locked down -- no new privileges, all Linux capabilities
+    dropped, and a generous pids cap so an in-container fork bomb can't
+    exhaust the host. `mem_limit` and `network` are left unset (host default)
+    so existing network-using tools (fetch_url, web_search) keep working;
+    set them to tighten further (e.g. network="none" for fully offline tools).
     """
+
+    def __init__(
+        self,
+        *,
+        cap_drop_all: bool = True,
+        no_new_privileges: bool = True,
+        pids_limit: int | None = 512,
+        mem_limit: str | None = None,
+        network: str | None = None,
+    ) -> None:
+        self.cap_drop_all = cap_drop_all
+        self.no_new_privileges = no_new_privileges
+        self.pids_limit = pids_limit
+        self.mem_limit = mem_limit
+        self.network = network
+
+    def _security_flags(self) -> list[str]:
+        flags: list[str] = []
+        if self.cap_drop_all:
+            flags += ["--cap-drop", "ALL"]
+        if self.no_new_privileges:
+            flags += ["--security-opt", "no-new-privileges"]
+        if self.pids_limit is not None:
+            flags += ["--pids-limit", str(self.pids_limit)]
+        if self.mem_limit is not None:
+            flags += ["--memory", str(self.mem_limit)]
+        if self.network is not None:
+            flags += ["--network", str(self.network)]
+        return flags
 
     def run_detached(self, image: str, *, bind_mounts: dict[str, str], env: dict[str, str]) -> str:
         """Start a container that idle-loops; return its container_id. We
         bind-mount the host's project dir(s) into the container so tool
         subprocesses inside the container see the same paths the host
         agent reasoned about."""
-        cmd = ["docker", "run", "-d", "--rm"]
+        cmd = ["docker", "run", "-d", "--rm", *self._security_flags()]
         for src, dst in bind_mounts.items():
             cmd += ["-v", f"{src}:{dst}"]
         for k, v in env.items():

@@ -196,3 +196,53 @@ def test_real_docker_backend_round_trip(tmp_path):
         assert json.loads(stdout) == {"echo": "hello"}
     finally:
         backend.stop(cid)
+
+
+def test_docker_backend_security_flags_default_locked_down():
+    """The Docker container is the real isolation boundary for the by-design
+    arbitrary-code tools, so it must ship hardened by default."""
+    flags = DockerBackend()._security_flags()
+    joined = " ".join(flags)
+    assert "--cap-drop ALL" in joined
+    assert "--security-opt no-new-privileges" in joined
+    assert "--pids-limit 512" in joined
+    # mem/network left at host default so existing network tools keep working.
+    assert "--network" not in joined
+    assert "--memory" not in joined
+
+
+def test_docker_backend_security_flags_configurable():
+    none_flags = DockerBackend(
+        cap_drop_all=False, no_new_privileges=False, pids_limit=None
+    )._security_flags()
+    assert none_flags == []
+
+    tight = DockerBackend(network="none", mem_limit="512m", pids_limit=64)._security_flags()
+    joined = " ".join(tight)
+    assert "--network none" in joined
+    assert "--memory 512m" in joined
+    assert "--pids-limit 64" in joined
+
+
+def test_security_flags_precede_image_in_run_command(monkeypatch):
+    """run_detached must inject the hardening flags into the actual `docker run`
+    argv, before the image + bind mounts."""
+    captured = {}
+
+    class _Result:
+        returncode = 0
+        stdout = "cid123\n"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    cid = DockerBackend().run_detached("img:latest", bind_mounts={}, env={})
+    assert cid == "cid123"
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["docker", "run", "-d", "--rm"]
+    assert "--cap-drop" in cmd and "--pids-limit" in cmd
+    # image is the last-but-two token (image, "sleep", "infinity")
+    assert cmd[-3:] == ["img:latest", "sleep", "infinity"]

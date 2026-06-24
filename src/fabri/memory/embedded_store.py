@@ -23,7 +23,7 @@ import struct
 from pathlib import Path
 
 from fabri.memory.embeddings import EMBEDDING_DIM, embed
-from fabri.memory.schema import MemoryEntry
+from fabri.memory.schema import EMBEDDING_MODEL_VERSION, MemoryEntry
 
 try:
     import sqlite_vec  # type: ignore[import-not-found]
@@ -95,6 +95,25 @@ class SqliteMemoryStore:
             )"""
         )
         self.conn.commit()
+        self._check_model_version()
+
+    def _check_model_version(self) -> None:
+        """Same embedding-space fingerprint check QdrantMemoryStore does: a db
+        written by a different embedding model (same 384 dims) would silently
+        return garbage neighbours. Probe one existing row's payload and hard-fail
+        on a model_version mismatch rather than degrade retrieval quietly."""
+        row = self.conn.execute(
+            "SELECT payload FROM guidelines LIMIT 1"
+        ).fetchone()
+        if not row:
+            return  # fresh/empty db -- nothing to validate against
+        stored = json.loads(row[0]).get("model_version")
+        if stored and stored != EMBEDDING_MODEL_VERSION:
+            raise RuntimeError(
+                f"sqlite memory db {str(self.path)!r} was written with embedding model "
+                f"{stored!r}, but fabri is now using {EMBEDDING_MODEL_VERSION!r}. "
+                f"Delete the db or point memory.sqlite_path at a fresh file."
+            )
 
     def upsert(self, entry: MemoryEntry) -> str:
         vector = embed(entry.text)

@@ -178,6 +178,12 @@ agent:
   max_steps: 10                  # loop budget; raise for multi-tool tasks
   output_format: json            # what the model is asked to emit (decompose):
                                  # json (reliable) or toon (fewer output tokens)
+  response_schema: null          # O1: a JSON Schema for typed output. When set,
+                                 # the final answer is validated against it and
+                                 # the validated value is returned as
+                                 # `structured_output`; a mismatch re-prompts the
+                                 # model (response_retries), then error_strategy
+                                 # (strict | warn | fallback) resolves it.
 
 llm:
   provider: anthropic            # or "openai"

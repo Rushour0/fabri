@@ -6,6 +6,8 @@ data shape: a list of floats (oldest -> newest), one per session/bucket.
 """
 from __future__ import annotations
 
+import html
+
 # Unicode block elements, lowest to highest.
 _SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 
@@ -101,9 +103,10 @@ def svg_trendline(
         f"<text x='{padding}' y='{height - 6}' fill='#666'>${lo:.4f}</text>"
     )
     if label:
+        # Escape in case a caller ever passes trace-derived text as the label.
         parts.append(
             f"<text x='{width - padding}' y='{padding - 6}' text-anchor='end' "
-            f"fill='#444' font-weight='600'>{label}</text>"
+            f"fill='#444' font-weight='600'>{html.escape(str(label))}</text>"
         )
     parts.append("</svg>")
     return "".join(parts)

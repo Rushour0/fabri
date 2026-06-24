@@ -44,6 +44,22 @@ agent:
   output_format: json           # format the MODEL is asked to emit (decompose): json (default,
                                 # reliable) or toon (opt-in, fewer output tokens, json-fallback)
 
+  # Structured / typed output (O1). Omit response_schema for free-text answers
+  # (the default; no extra LLM calls). When set, the final answer is parsed as
+  # JSON and validated against the schema; a mismatch re-prompts the model with
+  # the errors up to response_retries times, then error_strategy decides.
+  response_schema:              # a JSON Schema (object). null = disabled.
+    type: object
+    required: [answer, confidence]
+    properties:
+      answer: {type: string}
+      confidence: {type: number}
+  response_retries: 1           # corrective re-prompts before giving up
+  error_strategy: strict        # strict -> outcome=invalid_output; warn -> return
+                                # unvalidated text as success; fallback -> use
+                                # response_fallback (or {}) as success
+  response_fallback: null       # value substituted when error_strategy: fallback
+
 llm:
   # The MAIN orchestrator backend. Roles below inherit these defaults
   # for anything they don't override.

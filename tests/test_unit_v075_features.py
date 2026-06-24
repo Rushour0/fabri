@@ -194,8 +194,9 @@ def _stub_runner_runtime(monkeypatch, capture: dict):
     monkeypatch.setattr(art, "run_agent", fake_run_agent)
     monkeypatch.setattr(art, "build_tools", lambda cfg: ToolRegistry([]))
     monkeypatch.setattr(art, "build_tool_defs", lambda tools, dc: [])
-    monkeypatch.setattr(art, "build_llm", lambda cfg, defs: object())
-    monkeypatch.setattr(art, "build_decompose_llm", lambda cfg: None)
+    monkeypatch.setattr(art, "build_run_llms", lambda cfg, defs: {
+        "llm": object(), "decompose_llm": None, "planner_llm": None, "narrator_llm": None,
+    })
 
     class _StubStore:
         def __init__(self, **_):

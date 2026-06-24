@@ -28,7 +28,9 @@ def _invoke_cmd_run(monkeypatch, result, *, entries=()):
     monkeypatch.setattr(cli, "build_tools", lambda _c: [])
     monkeypatch.setattr(cli, "build_tool_defs", lambda *a, **k: [])
     monkeypatch.setattr(cli, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(cli, "build_decompose_llm", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "build_run_llms", lambda *a, **k: {
+        "llm": object(), "decompose_llm": None, "planner_llm": None, "narrator_llm": None,
+    })
     monkeypatch.setattr(cli, "run_agent", lambda *a, **k: result)
     # Per-call override of process_trace so a test can assert on the
     # "Synthesized N guideline(s)" UX without the helper stomping its setup.
