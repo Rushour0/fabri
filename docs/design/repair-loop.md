@@ -1,7 +1,43 @@
 # Design note: generic verify → repair → bounded-rerun loop
 
-Status: **proposal**, not implemented. Lands no earlier than v0.8.
+Status: **implemented** (B8), behind `agent.repair.enabled` (default false).
 Author scope: fabri runtime, not any specific host.
+
+> Implemented as the recommended option **(B)**: the loop lives in
+> `core/agent.py` as `_run_with_repair`, wrapping the single-attempt engine
+> (`_run_single_attempt`). `run_agent` is a thin wrapper that runs once and,
+> only when `repair["enabled"]`, enters the loop. When repair is disabled the
+> path is byte-identical to before this card. The entrypoint wiring (cli /
+> runner / mcp) is deferred per the deliverable plan below; today a host opts
+> in by passing the `agent.repair` config block to `run_agent(repair=...)`.
+
+## Config (implemented)
+
+```yaml
+agent:
+  repair:
+    enabled: false          # master switch; false => zero behaviour change
+    max_attempts: 2         # cap on RE-RUNS (initial run is attempt 0)
+    verify_command: null    # list argv OR a shell string; null => use the run's
+                            # own failure outcome as the signal
+    verify_cwd: null        # where the verifier runs (default: process CWD).
+                            # The verifier is trusted host code, NOT sandboxed.
+    stop_on_no_progress: true   # abort early when the error signature is
+                                # unchanged between attempts
+    repair_prompt: null     # override the built-in neutral instruction;
+                            # `{errors}` is interpolated with the verifier output
+```
+
+A verdict is `{ok, output}`: exit 0 (or stdout JSON `{"ok": true}`) is ok;
+nonzero exit (or `{"ok": false}`) is a failure whose combined stdout+stderr
+becomes the `{errors}` injected into the next attempt. **No-progress stop:**
+the error signature is a sorted, line-number-stripped hash of the verifier
+output; if it matches the previous attempt's signature and
+`stop_on_no_progress` is true, the loop aborts (logged as `repair_aborted`,
+reason `error_signature_unchanged`) rather than burning the rest of the budget.
+Every attempt shares one `session_id`, and the loop emits ad-hoc
+`repair_attempt` / `repair_aborted` trace events (no new `events.py` vocabulary)
+alongside each attempt's own terminal `final`/`failed`/`incomplete` event.
 
 ## Problem
 

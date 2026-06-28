@@ -1,5 +1,7 @@
+import hashlib
 import json
 import re
+import subprocess
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -132,7 +134,7 @@ def _encode_result(result: dict, result_format: str) -> str:
     return json.dumps(result)
 
 
-def run_agent(
+def _run_single_attempt(
     task: str,
     llm: LLMBackend,
     tools: ToolRegistry,
@@ -814,6 +816,205 @@ def run_agent(
         "outcome": outcome.value,
         "usage": usage_dict,
     }
+
+
+# Neutral, project-agnostic repair instruction. Used when the host doesn't
+# supply `agent.repair.repair_prompt`. `{errors}` is interpolated with the
+# verifier's output; it's the only supported placeholder (see the design note).
+DEFAULT_REPAIR_PROMPT = (
+    "A verification check rejected your last attempt. Fix ONLY the issues "
+    "below, building on the current state of the files -- do not redo the whole "
+    "task:\n\n{errors}"
+)
+
+
+def _run_verifier(command: list[str] | str, cwd: str | None) -> dict:
+    """Run the host-supplied verifier as a subprocess and derive a verdict.
+
+    The verifier is trusted host code (same trust class as `tools.manifest_dir`)
+    and runs in the parent environment, NOT under the agent's sandbox_root. The
+    verdict is ``{"ok": bool, "output": str}`` derived from the exit code, with
+    one override: stdout that parses as JSON carrying ``{"ok": true|false}``
+    wins over the exit code (some verifiers exit 0 but report failures in body).
+    """
+    try:
+        if isinstance(command, str):
+            proc = subprocess.run(
+                command, cwd=cwd, shell=True, capture_output=True, text=True
+            )
+        else:
+            proc = subprocess.run(
+                list(command), cwd=cwd, capture_output=True, text=True
+            )
+    except (OSError, ValueError) as e:
+        # A verifier that can't even launch (missing binary, bad cwd) is a
+        # failure to repair, not a crash of the agent run.
+        return {"ok": False, "output": f"verifier failed to launch: {e}"}
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    ok = proc.returncode == 0
+    body = (proc.stdout or "").strip()
+    if body.startswith("{"):
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and "ok" in parsed:
+                ok = bool(parsed["ok"])
+        except json.JSONDecodeError:
+            pass
+    return {"ok": ok, "output": output}
+
+
+def _verdict_from_result(result: dict) -> dict:
+    """Fallback verdict when no `verify_command` is configured: use the run's
+    own outcome as the failure signal. A successful run is ``ok``; otherwise the
+    outcome string is the error output to inject into the repair prompt."""
+    if result.get("success"):
+        return {"ok": True, "output": ""}
+    return {"ok": False, "output": f"previous run outcome: {result.get('outcome')}"}
+
+
+def _error_signature(output: str) -> str:
+    """Stable, set-oriented signature of a verifier's output so a stuck agent
+    stops burning attempts. Line numbers (``:123:``) are stripped because the
+    agent's edits shift them, and lines are sorted so reordering alone doesn't
+    read as progress."""
+    lines = []
+    for line in output.splitlines():
+        line = re.sub(r":\d+", ":", line.strip())
+        if line:
+            lines.append(line)
+    norm = "\n".join(sorted(lines))
+    return hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()
+
+
+def _run_with_repair(
+    task: str, first_result: dict, repair: dict, base_kwargs: dict
+) -> dict:
+    """Bounded verify -> repair -> rerun loop around `_run_single_attempt`.
+
+    The initial run already happened (its result is `first_result`). Each
+    iteration verifies the current state; on failure it re-enters the agent
+    with the verifier's output injected as a fresh instruction and a fresh step
+    budget, sharing the same `session_id` so every attempt lands in one trace.
+    Stops when the check passes, `max_attempts` re-runs are spent, or the error
+    signature is unchanged from the previous attempt (no progress)."""
+    session_id = base_kwargs["session_id"]
+    verify_command = repair.get("verify_command")
+    verify_cwd = repair.get("verify_cwd")
+    max_attempts = int(repair.get("max_attempts", 2) or 0)
+    stop_on_no_progress = repair.get("stop_on_no_progress", True)
+    prompt_template = repair.get("repair_prompt") or DEFAULT_REPAIR_PROMPT
+
+    def _verdict(result: dict) -> dict:
+        if verify_command:
+            return _run_verifier(verify_command, verify_cwd)
+        return _verdict_from_result(result)
+
+    result = first_result
+    prev_signature: str | None = None
+    attempt = 0
+    while attempt < max_attempts:
+        verdict = _verdict(result)
+        if verdict["ok"]:
+            break
+        signature = _error_signature(verdict["output"])
+        if stop_on_no_progress and signature == prev_signature:
+            log_event(session_id, {
+                "type": "repair_aborted",
+                "reason": "error_signature_unchanged",
+                "attempt": attempt,
+            })
+            break
+        prev_signature = signature
+        attempt += 1
+        log_event(session_id, {
+            "type": "repair_attempt",
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "errors": verdict["output"],
+        })
+        repair_task = prompt_template.format(errors=verdict["output"])
+        result = _run_single_attempt(repair_task, **base_kwargs)
+    else:
+        # Loop fell through `attempt < max_attempts`: the budget is spent. One
+        # last verify decides whether the final re-run actually fixed it.
+        if max_attempts > 0 and not _verdict(result)["ok"]:
+            log_event(session_id, {
+                "type": "repair_aborted",
+                "reason": "max_attempts",
+                "attempt": attempt,
+            })
+    return result
+
+
+def run_agent(
+    task: str,
+    llm: LLMBackend,
+    tools: ToolRegistry,
+    store: QdrantMemoryStore,
+    session_id: str | None = None,
+    max_steps: int = MAX_STEPS,
+    top_k: int = DEFAULT_TOP_K,
+    max_subquestions: int = DEFAULT_MAX_SUBQUESTIONS,
+    system_prompt: str = "",
+    system_prompt_prefix: str = "",
+    result_format: str = "toon",
+    output_format: str = "json",
+    decompose_llm: LLMBackend | None = None,
+    planner_llm: LLMBackend | None = None,
+    planner_mode: str = "off",
+    planner_max_items: int = DEFAULT_MAX_PLAN_ITEMS,
+    planner_auto_token_threshold: int = 80,
+    tool_retrieval_enabled: bool = False,
+    tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K,
+    tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
+    max_cost_usd: float | None = None,
+    narrator_llm: LLMBackend | None = None,
+    response_schema: dict | None = None,
+    response_retries: int = 1,
+    error_strategy: str = "strict",
+    response_fallback: object | None = None,
+    repair: dict | None = None,
+) -> dict:
+    """Run the agent on `task` and return the run result dict.
+
+    `repair` is the optional `agent.repair` config block. When it is None or
+    `repair["enabled"]` is false (the default), this is a single agent run with
+    behaviour byte-identical to before the repair loop existed. When enabled, a
+    bounded verify -> repair -> rerun loop runs after the initial attempt (see
+    `_run_with_repair` and docs/design/repair-loop.md); every attempt shares the
+    one `session_id` so the whole arc lands in a single trace."""
+    session_id = session_id or str(uuid.uuid4())
+    base_kwargs = dict(
+        llm=llm,
+        tools=tools,
+        store=store,
+        session_id=session_id,
+        max_steps=max_steps,
+        top_k=top_k,
+        max_subquestions=max_subquestions,
+        system_prompt=system_prompt,
+        system_prompt_prefix=system_prompt_prefix,
+        result_format=result_format,
+        output_format=output_format,
+        decompose_llm=decompose_llm,
+        planner_llm=planner_llm,
+        planner_mode=planner_mode,
+        planner_max_items=planner_max_items,
+        planner_auto_token_threshold=planner_auto_token_threshold,
+        tool_retrieval_enabled=tool_retrieval_enabled,
+        tool_retrieval_top_k=tool_retrieval_top_k,
+        tool_retrieval_always_include=tool_retrieval_always_include,
+        max_cost_usd=max_cost_usd,
+        narrator_llm=narrator_llm,
+        response_schema=response_schema,
+        response_retries=response_retries,
+        error_strategy=error_strategy,
+        response_fallback=response_fallback,
+    )
+    result = _run_single_attempt(task, **base_kwargs)
+    if not (repair and repair.get("enabled")):
+        return result
+    return _run_with_repair(task, result, repair, base_kwargs)
 
 
 SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"

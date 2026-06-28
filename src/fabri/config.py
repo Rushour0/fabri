@@ -57,6 +57,28 @@ DEFAULT_CONFIG = {
             "max_steps": None,
             "max_cost_usd": None,
         },
+        # B8: bounded auto-repair. After a run finishes, if `enabled` and a
+        # failure signal is present, fabri re-enters the agent with the failure
+        # injected as a fresh instruction and a fresh step budget, up to
+        # `max_attempts` re-runs. `verify_command` is an optional host-supplied
+        # check (a list argv or a shell string) run after each attempt; a
+        # nonzero exit (or stdout JSON `{"ok": false}`) is the failure to
+        # repair. When it's null, the run's own failure outcome is the signal.
+        # `verify_cwd` is where the verifier runs (default: the process CWD; the
+        # verifier is trusted host code, NOT sandboxed). `stop_on_no_progress`
+        # aborts early when the error signature is unchanged between attempts so
+        # a stuck agent stops instead of burning the whole budget.
+        # `repair_prompt` (with a `{errors}` placeholder) overrides the built-in
+        # neutral repair instruction. Disabled by default -> zero behaviour
+        # change.
+        "repair": {
+            "enabled": False,
+            "max_attempts": 2,
+            "verify_command": None,
+            "verify_cwd": None,
+            "stop_on_no_progress": True,
+            "repair_prompt": None,
+        },
     },
     "llm": {
         "provider": "anthropic",
