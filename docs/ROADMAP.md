@@ -34,6 +34,7 @@
 - **Track O — Output & streaming.** First-class structured/typed output and token+event streaming so hosts get validated, responsive results instead of post-run JSONL only.
 - **Track M — Memory (failure learning).** Extend the memory loop to mine *failed* and high-retry runs, not just successful summaries, so the agent retrieves "this loop bit you last week" hints.
 - **Track X — Observability & safety.** External trace export (OpenTelemetry/Langfuse), composable guardrail processors, and a general correctness eval harness.
+- **Track B — Builder (idea → running self-improving agent).** Turn the engine into a product factory: scaffold agents, tools, and prompts from intent, package reusable bundles as skills, and embed the whole thing as a self-contained service so building a new product on fabri is faster, not slower. See [vision.md](vision.md) for the layered engine+builder thesis.
 
 Tracks O/M/X were opened from the v0.7.x competitive gap analysis (see
 `/Users/rushour0/.claude/plans/eager-mapping-sketch.md`): they close the
@@ -75,6 +76,29 @@ _(none tracked here — see `CHANGELOG.md` for current release work.)_
 **Suggested build order (not enforced):** O1 → O2, then M1 (consumer-requested),
 then X1 (cheap, high enterprise leverage), then X2 + X3 (quality/safety story).
 
+### Track B — Builder (idea → running self-improving agent)
+
+The engine runs and learns; the builder makes a *new* product on it fast. Every
+card below is project-agnostic — it scaffolds machinery, never domain content.
+
+- **B1** • Ideator (`fabri ideate "<idea>"`) • Track B • — • A natural-language product idea becomes a *reviewable* agent spec: a proposed `agent.yaml` (per-role models + budget tiers), a domain→prompt plan, the list of tools to build, a starter `system_prompt_prefix`, and a suggested `response_schema`. Uses fabri's own structured output (`core/structured.py`) + an LLM role. **Emits files for review; never auto-applies.** Acceptance: from one sentence, `fabri ideate` writes a runnable scaffold dir a human can edit then `fabri run`. Enhanced by B6; builds on B2 + B5. Touches new `builder/ideator.py`, `cli.py`, `core/structured.py`.
+- **B2** • Tool-writer (`fabri tool new --from "<desc>" | --from-signature <file>`) • Track B • — • A description or a Python function signature becomes a **tightened** manifest (real input/output schema, not opaque `{}`), an implementation stub, and a generated local test. Adds `fabri tool test <name> --args '{...}'` and `fabri tool validate <manifest>`. Closes today's friction: opaque schemas, no validation, no local test loop. Extends `tool_scaffold.py`. Acceptance: scaffold → validate → test a new tool without hand-writing JSON or `echo | python` plumbing. **Highest-leverage card — build first.** Touches `tool_scaffold.py`, `tools/manifest_schema.py`, `cli.py`.
+- **B3** • Runner & discovery ergonomics • Track B • — • `fabri tools` (list/search/describe the registry), `fabri tool run <name> <args>` (direct invoke for debug), `fabri agent run --dry-run` (show tool calls without executing); `fabri replay` already exists. Cross-cutting dev ergonomics. Acceptance: a user can answer "what tools do I have / does this one work" without grepping `tools/examples/`. Touches `cli.py`, `runtime.py`, `tools/registry.py`.
+- **B4** • Skills registry (`fabri skills add|list|install`) • Track B • — • A *skill* is a reusable bundle of (prompt template + tool manifests + config snippet) installable into a project, so a capability carries across products. The ideator and tool-writer guide-prompts ship *as* skills. Defines the on-disk skill format + an install path (a portable `skills/` + `install.sh` model). Acceptance: a skill bundle drops prompts + tools + config into a project and the agent picks the capability up. Builds on B2 + B5. Touches new `builder/skills.py`, `cli.py`, `scaffold.py`.
+- **B5** • Prompt-kit (prompt scaffolder + output splitter) • Track B • — • Codify the proven prompt skeleton as a fill-in template: `ABSOLUTE SCOPE → RETRIEVED CONTEXT → CHARTER → WHAT YOU OWN → DECOMPOSITION RULES → VERIFICATION LADDER → TOOL ROUTING → HARD INVARIANTS → OUTPUT FORMAT`. Ship a helper for the user-prose + machine-readable `<!-- AGENT_MEMORY -->` output split so structured memory is mined consistently. Acceptance: a new agent prompt starts from the template, not a blank file; the memory block is parsed by the trace miner. Touches new `builder/prompt_kit.py`, `orchestrator/pipeline.py`.
+- **B6** • Decompose/wave planner as a builder primitive • Track B • — • Generalize the existing `core/decompose.py` + `core/planner.py`: from declared dependency edges, emit a topological wave plan and auto-assign `parallel_group` for fan-out. Mostly a thin helper + docs (planner already exists). Acceptance: declaring "A before B, C independent" yields the right serial/parallel spawn shape without hand-authoring `parallel_group`. Enhances B1. Touches `core/planner.py`, new `builder/waves.py`.
+- **B7** • Self-contained fabri service (`fabri serve`) • Track B • — • Package the service pattern as a project-agnostic embeddable instance: workspace materialization hooks, subprocess spawn of the agent, an event stream (stdio/HTTP/WS over the existing `events.py` vocabulary), runtime YAML-override binding (one template + per-run overrides for multi-tenancy), incremental file-sync hooks, and a budget/cost event surface for billing. This is "a self-contained instance usable anywhere to spawn its own agents." Loosely depends on **O2** (streaming). Acceptance: a non-Python host starts `fabri serve`, submits a task, streams events, and gets results + cost — with no fabri Python imports on the host side. Touches new `service/` package, `events.py`, `core/agent.py`.
+- **B8** • Repair loop (promote `docs/design/repair-loop.md`) • Track B • — • Bounded auto-repair: on a verifier/tool failure, spawn a repair child with the error output injected as context; **stop on no-progress** (same error signature twice); fresh step budget per attempt; capped attempts. Acceptance: a run that fails a verify step self-repairs within N bounded attempts or stops cleanly, instead of spinning or hard-failing the whole orchestrator. Touches `core/agent.py`, `config.py`, `docs/design/repair-loop.md`.
+
+**Suggested build order (not enforced):** B2 (tool-writer) → B5 (prompt-kit) →
+B1 (ideator) → B4 (skills) → B3 (ergonomics) → B7 (service, needs O2) → B8
+(repair) → B6 (waves).
+
+**Future / non-goal-for-now:** a TypeScript client/port over the `agent_runner`
+JSON contract — deferred per the Python-first packaging decision. The **B7**
+service contract is deliberately the seam such a port would target; revisit only
+when a consumer needs a native non-Python builder.
+
 ### Track R — Rename hygiene
 
 _(empty — R1 shipped before v0.1.0; see Done below.)_
@@ -113,6 +137,15 @@ flowchart LR
     X2[X2 guardrails]
     X3[X3 eval harness]
     M1[M1 failure-pattern memory] -.-> LXPM[ludexel postmortem retrieval]
+    B2[B2 tool-writer] --> B5[B5 prompt-kit]
+    B5 --> B1[B1 ideator]
+    B2 --> B4[B4 skills]
+    B5 --> B4
+    B1 --> B4
+    B6[B6 wave planner] --> B1
+    B3[B3 runner ergonomics]
+    O2 --> B7[B7 fabri serve]
+    B8[B8 repair loop]
 ```
 
 **Critical path for ludexel-service-MVP integration:** F0 → F1 → ludexel

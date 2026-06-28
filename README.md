@@ -4,8 +4,14 @@
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/fabri.svg)](https://pypi.org/project/fabri/)
 
-Ever-evolving prompting and context engineering for LLM agents through
-active memory and result analysis.
+**The self-improving agent engine you build products on.** Describe a
+product; fabri scaffolds the agents, tools, and prompts — and they get
+cheaper and more reliable every run.
+
+fabri is split into two layers: an **engine** (a frugal agent loop, per-role
+LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
+own traces) and a **builder** that turns intent into a running agent fast.
+Read [docs/vision.md](docs/vision.md) for the full why.
 
 fabri is **source-available** under the [Business Source License
 1.1](https://github.com/Rushour0/fabri/blob/main/LICENSE). You can
@@ -63,7 +69,11 @@ grow from what the agent actually does.
 
 A failure in session N becomes retrievable context in session N+1,
 without anyone editing the prompt by hand. That loop — trace → analyze
-→ compress → dedup → promote → retrieve — is the whole product.
+→ compress → dedup → promote → retrieve — is the heart of the **engine**.
+On top of it, a **builder** layer (ideator, tool-writer, prompt-kit, skills,
+service) scaffolds a new product onto the engine so building one is faster, not
+slower — see [docs/vision.md](docs/vision.md) and Track B in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 Two operating principles fall out of that:
 
