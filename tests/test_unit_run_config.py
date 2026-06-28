@@ -70,3 +70,19 @@ def test_as_kwargs_matches_run_agent_signature():
     sig = set(inspect.signature(run_agent).parameters)
     for key in AgentRunConfig().as_kwargs():
         assert key in sig, f"as_kwargs produced {key!r} which run_agent does not accept"
+
+
+def test_repair_config_flows_through_and_is_inherited():
+    # agent.repair (off by default) reaches run_agent via as_kwargs, so the
+    # repair loop activates from config at run/replay/agent-runner without a
+    # host passing repair= by hand. Sub-agents inherit the same settings.
+    cfg = _cfg()
+    cfg["agent"]["repair"] = {"enabled": True, "max_attempts": 3,
+                              "verify_command": "true", "verify_cwd": None,
+                              "stop_on_no_progress": True, "repair_prompt": None}
+    rc = AgentRunConfig.from_config(cfg)
+    assert rc.repair == cfg["agent"]["repair"]
+    assert rc.as_kwargs()["repair"] == cfg["agent"]["repair"]
+    assert rc.for_subagent(max_steps=3, max_cost_usd=0.1).repair == cfg["agent"]["repair"]
+    # Default config leaves repair disabled (no behavior change).
+    assert AgentRunConfig.from_config(_cfg()).repair["enabled"] is False

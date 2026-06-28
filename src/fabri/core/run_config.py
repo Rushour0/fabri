@@ -53,6 +53,7 @@ class AgentRunConfig:
     response_retries: int = 1
     error_strategy: str = "strict"
     response_fallback: object | None = None
+    repair: dict | None = None
 
     @classmethod
     def from_config(cls, config: dict) -> "AgentRunConfig":
@@ -86,6 +87,7 @@ class AgentRunConfig:
             response_retries=agent.get("response_retries", cls.response_retries),
             error_strategy=agent.get("error_strategy", cls.error_strategy),
             response_fallback=agent.get("response_fallback"),
+            repair=agent.get("repair"),
         )
 
     def for_subagent(self, max_steps: int, max_cost_usd: float | None) -> "AgentRunConfig":
@@ -117,4 +119,5 @@ class AgentRunConfig:
             "response_retries": self.response_retries,
             "error_strategy": self.error_strategy,
             "response_fallback": self.response_fallback,
+            "repair": self.repair,
         }
