@@ -84,6 +84,38 @@ def test_role_dict_with_openrouter_provider_resolves():
     assert role["api_key_env"] == "OPENROUTER_API_KEY"
 
 
+def test_role_dict_with_gemini_provider_resolves_default_api_key():
+    """A role flipped to `gemini` without an explicit api_key_env falls back to
+    the conventional GEMINI_API_KEY rather than leaking the parent's key."""
+    cfg = _normalize_llm_roles(_flat({
+        "decompose": {"provider": "gemini", "model": "gemini-2.5-flash"},
+    }))
+    role = cfg["llm"]["roles"]["decompose"]
+    assert role["provider"] == "gemini"
+    assert role["model"] == "gemini-2.5-flash"
+    assert role["api_key_env"] == "GEMINI_API_KEY"
+
+
+def test_build_role_llm_routes_gemini_to_gemini_backend(monkeypatch):
+    """`provider: gemini` dispatches to GeminiLLMBackend. Patched so we don't
+    need the google-genai SDK installed."""
+    from fabri import runtime
+    captured = {}
+
+    class _Stub:
+        def __init__(self, model, tools, max_tokens, api_key_env):
+            captured.update(locals())
+
+    monkeypatch.setattr(runtime, "GeminiLLMBackend", _Stub)
+    cfg = _normalize_llm_roles(_flat({
+        "decompose": {"provider": "gemini", "model": "gemini-2.5-pro"},
+    }))
+    backend = build_role_llm(cfg, "decompose")
+    assert isinstance(backend, _Stub)
+    assert captured["model"] == "gemini-2.5-pro"
+    assert captured["api_key_env"] == "GEMINI_API_KEY"
+
+
 def test_explicit_role_dict_wins_over_legacy_key():
     """During an incremental migration the user may have BOTH the legacy
     flat key and the new role dict in the same yaml. The new dict wins."""
@@ -173,6 +205,80 @@ def test_find_missing_role_api_keys_ignores_disabled_roles(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     cfg = _normalize_llm_roles(_flat({"narrator": None}))
     assert find_missing_role_api_keys(cfg) == {}
+
+
+def test_main_provider_gemini_resolves_default_api_key():
+    """Gemini as the parent/main provider gets GEMINI_API_KEY by default, and
+    every role inherits it unless overridden."""
+    cfg = _normalize_llm_roles({
+        "llm": {
+            "provider": "gemini",
+            "model": "gemini-2.5-pro",
+            "max_tokens": 1024,
+        },
+    })
+    main = cfg["llm"]["roles"]["main"]
+    assert main["provider"] == "gemini"
+    assert main["model"] == "gemini-2.5-pro"
+    assert main["api_key_env"] == "GEMINI_API_KEY"
+
+
+def test_find_missing_role_api_keys_reports_gemini_key(monkeypatch):
+    """A mixed Anthropic-main + Gemini-narrator config with both envs unset
+    reports GEMINI_API_KEY alongside ANTHROPIC_API_KEY in one pass."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    cfg = _normalize_llm_roles(_flat({
+        "narrator": {"provider": "gemini", "model": "gemini-2.5-flash-lite", "max_tokens": 60},
+    }))
+    missing = find_missing_role_api_keys(cfg)
+    assert set(missing.keys()) == {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
+    assert "narrator" in missing["GEMINI_API_KEY"]
+
+
+def test_find_missing_role_api_keys_satisfied_when_gemini_key_set(monkeypatch):
+    """All-Gemini config with GEMINI_API_KEY present has nothing missing."""
+    monkeypatch.setenv("GEMINI_API_KEY", "stub")
+    cfg = _normalize_llm_roles({
+        "llm": {
+            "provider": "gemini",
+            "model": "gemini-2.5-pro",
+            "max_tokens": 1024,
+            "narrator": {"model": "gemini-2.5-flash-lite", "max_tokens": 60},
+        },
+    })
+    assert find_missing_role_api_keys(cfg) == {}
+
+
+def test_build_run_llms_wires_all_gemini_roles(monkeypatch):
+    """End-to-end: a gemini main + gemini decompose/narrator config builds the
+    backends run_agent consumes, keyed by its kwarg names. Patched backend so we
+    don't need the google-genai SDK."""
+    from fabri import runtime
+    built = []
+
+    class _Stub:
+        def __init__(self, model, tools, max_tokens, api_key_env):
+            built.append({"model": model, "api_key_env": api_key_env})
+
+    monkeypatch.setattr(runtime, "GeminiLLMBackend", _Stub)
+    cfg = _normalize_llm_roles({
+        "llm": {
+            "provider": "gemini",
+            "model": "gemini-2.5-pro",
+            "max_tokens": 1024,
+            "decompose": {"model": "gemini-2.5-flash"},
+            "narrator": {"model": "gemini-2.5-flash-lite", "max_tokens": 60},
+        },
+    })
+    llms = runtime.build_run_llms(cfg, tool_defs=[])
+    assert isinstance(llms["llm"], _Stub)          # main always present
+    assert isinstance(llms["decompose_llm"], _Stub)
+    assert isinstance(llms["narrator_llm"], _Stub)
+    assert llms["planner_llm"] is None             # unset -> falls back at runtime
+    models = sorted(b["model"] for b in built)
+    assert models == ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
+    assert all(b["api_key_env"] == "GEMINI_API_KEY" for b in built)
 
 
 def test_resolve_role_cfg_normalizes_on_demand():

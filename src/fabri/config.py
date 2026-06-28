@@ -81,14 +81,18 @@ DEFAULT_CONFIG = {
         },
     },
     "llm": {
-        "provider": "anthropic",
-        "model": "claude-sonnet-4-6",
+        # Default provider is Gemini: lowest cost + generous free tier, so a
+        # fresh `fabri run` needs only a GEMINI_API_KEY. Switch to anthropic /
+        # openai / openrouter per-config or per-role; all SDKs ship by default.
+        "provider": "gemini",
+        "model": "gemini-2.5-pro",
         "max_tokens": 1024,
-        "api_key_env": "ANTHROPIC_API_KEY",
+        "api_key_env": "GEMINI_API_KEY",
         # Opt-in extended prompt caching. When true, marks the last
         # message's tail block with cache_control so the history prefix
         # reads from Anthropic's 5-min ephemeral cache on the next turn
-        # (~0.1x input bill on the cached prefix).
+        # (~0.1x input bill on the cached prefix). Anthropic-only; a no-op
+        # on other providers.
         "cache_messages": False,
         # Per-role overrides. Each entry may be:
         #   - null / absent  -> the role inherits provider/model/api_key_env
@@ -102,9 +106,9 @@ DEFAULT_CONFIG = {
         "decompose": None,
         "planner": None,
         # Narrator emits short user-facing status updates between tool steps.
-        # Defaults to Haiku because <100 tokens per update is effectively
-        # free; set this dict to None to silence narration entirely.
-        "narrator": {"model": "claude-haiku-4-5", "max_tokens": 60},
+        # Defaults to Gemini Flash-Lite because <100 tokens per update is
+        # effectively free; set this dict to None to silence narration entirely.
+        "narrator": {"model": "gemini-2.5-flash-lite", "max_tokens": 60},
         # Legacy flat keys -- still honored for backward compatibility.
         # `_normalize_llm_roles` lifts them into the corresponding role
         # dict above when the role dict is absent. Prefer the dict form in
@@ -194,6 +198,7 @@ _PROVIDER_DEFAULT_API_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "gemini": "GEMINI_API_KEY",
 }
 
 
@@ -213,7 +218,7 @@ def _normalize_llm_roles(cfg: dict) -> dict:
     shape (clean incremental migration).
     """
     llm = dict(cfg.get("llm") or {})
-    parent_provider = (llm.get("provider") or "anthropic").lower()
+    parent_provider = (llm.get("provider") or "gemini").lower()
     parent_defaults = {
         "provider": parent_provider,
         "model": llm.get("model"),

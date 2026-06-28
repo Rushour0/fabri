@@ -89,6 +89,23 @@ def test_gpt4o_rates_2_5_10():
     assert cost_for(LLMUsage(input_tokens=M, output_tokens=M, model="gpt-4o")) == 12.5
 
 
+def test_gemini_25_pro_rates_1_25_10():
+    assert cost_for(LLMUsage(input_tokens=M, model="gemini-2.5-pro")) == 1.25
+    assert cost_for(LLMUsage(output_tokens=M, model="gemini-2.5-pro")) == 10.0
+
+
+def test_gemini_flash_variants_priced():
+    assert abs(cost_for(LLMUsage(input_tokens=M, output_tokens=M, model="gemini-2.5-flash")) - 2.80) < 1e-9
+    assert abs(cost_for(LLMUsage(input_tokens=M, output_tokens=M, model="gemini-2.5-flash-lite")) - 0.50) < 1e-9
+    assert abs(cost_for(LLMUsage(input_tokens=M, output_tokens=M, model="gemini-2.0-flash")) - 0.50) < 1e-9
+
+
+def test_prefix_match_gemini_preview_suffix():
+    # google ships preview/date-suffixed ids; the bare base id must still price.
+    u = LLMUsage(input_tokens=M, model="gemini-2.5-pro-preview-06-05")
+    assert cost_for(u) == 1.25  # resolves to gemini-2.5-pro
+
+
 def test_openrouter_anthropic_haiku_priced_at_haiku_rate():
     """OpenRouter ids are namespaced (`<vendor>/<model>`). The explicit
     entry matches the underlying Anthropic Haiku rate -- reconciled to the

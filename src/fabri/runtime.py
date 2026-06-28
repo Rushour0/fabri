@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fabri.config import DEFAULT_TOOLS_DIR
 from fabri.core.agent import DECOMPOSE_TOOL_NAME
-from fabri.core.llm import AnthropicLLMBackend, OpenAILLMBackend
+from fabri.core.llm import AnthropicLLMBackend, GeminiLLMBackend, OpenAILLMBackend
 from fabri.memory.store import QdrantMemoryStore
 from fabri.tools.agent_tool import make_agent_tool_manifest
 from fabri.tools.registry import ToolRegistry
@@ -90,10 +90,10 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
     """Single point of provider dispatch -- adding a fourth provider later
     (Vertex, Bedrock, Groq, ...) means one new branch here and nothing
     else."""
-    provider = (rcfg.get("provider") or "anthropic").lower()
+    provider = (rcfg.get("provider") or "gemini").lower()
     model = rcfg["model"]
     max_tokens = int(rcfg.get("max_tokens") or 1024)
-    api_key_env = rcfg.get("api_key_env") or "ANTHROPIC_API_KEY"
+    api_key_env = rcfg.get("api_key_env") or "GEMINI_API_KEY"
     if provider == "anthropic":
         return AnthropicLLMBackend(
             model=model,
@@ -112,6 +112,13 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
             max_tokens=max_tokens,
             api_key_env=api_key_env,
             base_url=base_url,
+        )
+    if provider == "gemini":
+        return GeminiLLMBackend(
+            model=model,
+            tools=tool_defs,
+            max_tokens=max_tokens,
+            api_key_env=api_key_env,
         )
     raise ValueError(f"unknown llm provider: {provider!r}")
 
@@ -175,8 +182,8 @@ def build_planner_llm(config: dict):
 def build_narrator_llm(config: dict):
     """Returns a cheap backend that emits short user-facing status updates
     between tool steps, or None when `llm.narrator` is set to null. Defaults
-    to Haiku via the DEFAULT_CONFIG entry, and inherits any per-role
-    provider override (anthropic / openai / openrouter)."""
+    to Gemini Flash-Lite via the DEFAULT_CONFIG entry, and inherits any
+    per-role provider override (gemini / anthropic / openai / openrouter)."""
     return build_role_llm(config, "narrator")
 
 
