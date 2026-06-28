@@ -6,6 +6,32 @@ that ships.
 
 ## Unreleased
 
+## 0.7.9 — 2026-06-28
+
+### Google Gemini support + Gemini is now the default provider
+
+- **New `gemini` provider** on Google's native `google-genai` SDK
+  (`core.llm.GeminiLLMBackend`), implementing the full `LLMBackend` contract.
+  Translates fabri's Anthropic-shaped history into Gemini `Content`/`Part`
+  schema and back, routes the system prompt to `system_instruction`, sanitizes
+  tool JSON-schema for `FunctionDeclaration`, and matches a `function_response`
+  to its call by NAME (fabri synthesizes the tool-call id Gemini omits and
+  rebuilds an id→name map each turn). MAX_TOKENS retry, token-folding, and
+  transient-error handling at parity with the Anthropic/OpenAI backends.
+- **Gemini is the default provider.** `DEFAULT_CONFIG` now defaults to
+  `provider: gemini`, `model: gemini-2.5-pro`, narrator `gemini-2.5-flash-lite`
+  (lowest cost + generous free tier). Existing Claude/OpenAI configs keep
+  working unchanged; only the no-provider default moved.
+- **All provider SDKs ship by default.** `google-genai` + `openai` are now core
+  dependencies alongside `anthropic`, so any provider works with no extra
+  install; the `openai`/`gemini` extras are removed. `benchmark.yaml` stays on
+  `claude-sonnet-4-6` to keep published BENCHMARKS reproducible.
+- **Pricing** entries added for `gemini-2.5-pro` / `2.5-flash` / `2.5-flash-lite`
+  / `2.0-flash`, so Gemini runs are priced into COGS like every other model.
+- **`scripts/smoke_gemini.py`** — live end-to-end smoke test that forces a tool
+  call and proves the round-trip via a per-run random token (with a `--mock`
+  harness self-check that needs no API key).
+
 ## 0.7.8 — 2026-06-25
 
 ### COGS accuracy fixes
