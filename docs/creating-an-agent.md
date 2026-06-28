@@ -63,10 +63,10 @@ agent:
 llm:
   # The MAIN orchestrator backend. Roles below inherit these defaults
   # for anything they don't override.
-  provider: anthropic           # "anthropic" | "openai" | "openrouter"
-  model: claude-sonnet-4-6
+  provider: gemini              # "gemini" (default) | "anthropic" | "openai" | "openrouter"
+  model: gemini-2.5-pro
   max_tokens: 1024
-  api_key_env: ANTHROPIC_API_KEY
+  api_key_env: GEMINI_API_KEY
 
   # Per-role overrides. Each role can run on a different provider with its
   # own API key; the four roles bill independently. Each entry may be:

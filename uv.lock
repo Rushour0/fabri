@@ -427,6 +427,8 @@ version = "0.7.8"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "google-genai" },
+    { name = "openai" },
     { name = "pyyaml" },
     { name = "qdrant-client" },
     { name = "sentence-transformers" },
@@ -439,12 +441,6 @@ dev = [
     { name = "pytest" },
     { name = "twine" },
 ]
-gemini = [
-    { name = "google-genai" },
-]
-openai = [
-    { name = "openai" },
-]
 sqlite = [
     { name = "sqlite-vec" },
 ]
@@ -453,8 +449,8 @@ sqlite = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0" },
-    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
+    { name = "google-genai", specifier = ">=1.0" },
+    { name = "openai", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qdrant-client", specifier = ">=1.9" },
@@ -463,7 +459,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0" },
 ]
-provides-extras = ["openai", "gemini", "sqlite", "dev"]
+provides-extras = ["sqlite", "dev"]
 
 [[package]]
 name = "filelock"

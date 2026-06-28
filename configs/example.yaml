@@ -20,11 +20,11 @@ agent:
   max_steps: 10
 
 llm:
-  provider: anthropic              # or "openai" (pip install 'fabri[openai]')
-  model: claude-sonnet-4-6
+  provider: gemini                 # or "anthropic" / "openai" / "openrouter" (all SDKs bundled)
+  model: gemini-2.5-pro
   max_tokens: 2048
-  api_key_env: ANTHROPIC_API_KEY
-  cache_messages: false            # G21 opt-in: cache conversation prefix on turn 2+
+  api_key_env: GEMINI_API_KEY
+  cache_messages: false            # G21 opt-in: cache conversation prefix on turn 2+ (Anthropic-only)
 
 tools:
   manifest_dir:

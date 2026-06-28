@@ -15,10 +15,10 @@ agent:
   max_steps: 10
 
 llm:
-  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
-  model: claude-sonnet-4-6
+  provider: gemini              # or "anthropic" / "openai" / "openrouter" (all SDKs bundled)
+  model: gemini-2.5-pro
   max_tokens: 1024
-  api_key_env: ANTHROPIC_API_KEY
+  api_key_env: GEMINI_API_KEY
 
 tools:
   manifest_dir:
@@ -94,10 +94,10 @@ agent:
     mode: auto
 
 llm:
-  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
-  model: claude-sonnet-4-6
+  provider: gemini              # or "anthropic" / "openai" / "openrouter" (all SDKs bundled)
+  model: gemini-2.5-pro
   max_tokens: 2048
-  api_key_env: ANTHROPIC_API_KEY
+  api_key_env: GEMINI_API_KEY
 
 tools:
   manifest_dir:
@@ -170,10 +170,10 @@ agent:
     Cite file:line for every finding. Prefer concrete patches over vague advice.
 
 llm:
-  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
-  model: claude-sonnet-4-6
+  provider: gemini              # or "anthropic" / "openai" / "openrouter" (all SDKs bundled)
+  model: gemini-2.5-pro
   max_tokens: 2048
-  api_key_env: ANTHROPIC_API_KEY
+  api_key_env: GEMINI_API_KEY
 
 tools:
   manifest_dir:
@@ -243,10 +243,10 @@ agent:
   max_steps: 30
 
 llm:
-  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
-  model: claude-sonnet-4-6
+  provider: gemini              # or "anthropic" / "openai" / "openrouter" (all SDKs bundled)
+  model: gemini-2.5-pro
   max_tokens: 2048
-  api_key_env: ANTHROPIC_API_KEY
+  api_key_env: GEMINI_API_KEY
 
 tools:
   manifest_dir:

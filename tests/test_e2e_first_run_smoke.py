@@ -37,7 +37,7 @@ def test_first_run_scaffold_then_drive(tmp_path, monkeypatch):
     # 2. Load the scaffolded config and build the same objects cli.py does.
     monkeypatch.chdir(tmp_path)  # tools.manifest_dir/sandbox_root are cwd-relative
     config = load_config(str(tmp_path / "agent.yaml"))
-    assert config["llm"]["model"] == "claude-sonnet-4-6"
+    assert config["llm"]["model"] == "gemini-2.5-pro"
     assert "hello" in config["tools"]["enabled"]
 
     tools = build_tools(config["tools"])

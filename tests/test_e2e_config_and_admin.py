@@ -41,7 +41,7 @@ def test_load_config_none_returns_defaults():
     assert cfg["memory"] == DEFAULT_CONFIG["memory"]
     # The new normalized roles dict is populated.
     assert "roles" in cfg["llm"]
-    assert cfg["llm"]["roles"]["narrator"]["model"] == "claude-haiku-4-5"
+    assert cfg["llm"]["roles"]["narrator"]["model"] == "gemini-2.5-flash-lite"
 
 
 def test_build_tools_filters_to_enabled_set(tmp_path):

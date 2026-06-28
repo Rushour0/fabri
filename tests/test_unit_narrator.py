@@ -321,9 +321,10 @@ def test_build_narrator_llm_legacy_model_key_still_works(monkeypatch):
     assert captured["api_key_env"] == "ANTHROPIC_API_KEY"
 
 
-def test_narrator_default_is_haiku_in_default_config():
-    """The packaged default config must default narrator to Haiku so users
-    get progress updates out of the box without extra wiring."""
+def test_narrator_default_is_flash_lite_in_default_config():
+    """The packaged default config must default narrator to a cheap Gemini
+    Flash-Lite so users get progress updates out of the box without extra
+    wiring -- matching the Gemini default provider."""
     from fabri.config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["llm"]["narrator"]["model"] == "claude-haiku-4-5"
+    assert DEFAULT_CONFIG["llm"]["narrator"]["model"] == "gemini-2.5-flash-lite"
     assert DEFAULT_CONFIG["llm"]["narrator"]["max_tokens"] == 60

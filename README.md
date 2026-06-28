@@ -126,12 +126,17 @@ See [`configs/`](configs/) for the canonical example and benchmark configs,
 and [`BENCHMARKS.md`](BENCHMARKS.md) for the methodology + how to reproduce
 published numbers.
 
-For OpenAI models: `pip install "fabri[openai]"` and set
-`llm.provider: openai` in your config.
+**Default provider is Google Gemini** (lowest cost + generous free tier): a
+fresh `fabri run` needs only `GEMINI_API_KEY`. All provider SDKs ship by
+default — no extra install — so switching is a one-line config change:
 
-For Google Gemini models: `pip install "fabri[gemini]"`, set
-`llm.provider: gemini` (model e.g. `gemini-2.5-pro` / `gemini-2.5-flash`),
-and export `GEMINI_API_KEY`.
+- **Gemini** (default): `llm.provider: gemini`, export `GEMINI_API_KEY`
+- **Anthropic / Claude**: `llm.provider: anthropic`, export `ANTHROPIC_API_KEY`
+- **OpenAI**: `llm.provider: openai`, export `OPENAI_API_KEY`
+- **OpenRouter**: `llm.provider: openrouter`, export `OPENROUTER_API_KEY`
+
+Provider can be set per-role too (e.g. a Gemini Pro orchestrator with a
+Flash-Lite narrator), so a run can mix vendors.
 
 Embeddings run locally via `sentence-transformers/all-MiniLM-L6-v2` —
 no embedding API calls.
@@ -190,10 +195,10 @@ agent:
                                  # (strict | warn | fallback) resolves it.
 
 llm:
-  provider: anthropic            # or "openai" / "gemini"
-  model: claude-sonnet-4-6
+  provider: gemini               # or "anthropic" / "openai" / "openrouter"
+  model: gemini-2.5-pro
   max_tokens: 1024
-  api_key_env: ANTHROPIC_API_KEY
+  api_key_env: GEMINI_API_KEY
 
 tools:
   manifest_dir:                  # one path or a list, merged into one registry

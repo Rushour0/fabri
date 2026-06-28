@@ -90,10 +90,10 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
     """Single point of provider dispatch -- adding a fourth provider later
     (Vertex, Bedrock, Groq, ...) means one new branch here and nothing
     else."""
-    provider = (rcfg.get("provider") or "anthropic").lower()
+    provider = (rcfg.get("provider") or "gemini").lower()
     model = rcfg["model"]
     max_tokens = int(rcfg.get("max_tokens") or 1024)
-    api_key_env = rcfg.get("api_key_env") or "ANTHROPIC_API_KEY"
+    api_key_env = rcfg.get("api_key_env") or "GEMINI_API_KEY"
     if provider == "anthropic":
         return AnthropicLLMBackend(
             model=model,
@@ -182,8 +182,8 @@ def build_planner_llm(config: dict):
 def build_narrator_llm(config: dict):
     """Returns a cheap backend that emits short user-facing status updates
     between tool steps, or None when `llm.narrator` is set to null. Defaults
-    to Haiku via the DEFAULT_CONFIG entry, and inherits any per-role
-    provider override (anthropic / openai / openrouter)."""
+    to Gemini Flash-Lite via the DEFAULT_CONFIG entry, and inherits any
+    per-role provider override (gemini / anthropic / openai / openrouter)."""
     return build_role_llm(config, "narrator")
 
 
