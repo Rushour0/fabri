@@ -518,3 +518,102 @@ def test_step_empty_candidate_parts_yields_none_final_text(monkeypatch):
     assert out.tool_calls == []
     assert out.final_text is None
     assert out.usage.model == b._model
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end round-trip through the agent-loop message shape
+#
+# The single most important Gemini-specific property: the id the backend
+# SYNTHESIZES on a tool call (Gemini gives none) must, after the agent loop
+# rebuilds the history with it, resolve back to the right function NAME on the
+# next turn. agent.py:_dispatch_tool_calls builds the blocks like
+# `_loop_blocks_from_call` below and only takes the structured path when every
+# ToolCall.id is non-None ("real_ids"). These tests pin both halves.
+# --------------------------------------------------------------------------- #
+def _loop_blocks_from_call(call, result_content):
+    """Reproduce exactly what agent._dispatch_tool_calls appends to `messages`
+    for one tool call when real_ids is True (agent.py:1031-1038)."""
+    return [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": call.id, "name": call.name, "input": call.args},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": call.id, "content": result_content},
+        ]},
+    ]
+
+
+def test_gemini_tool_calls_always_have_non_none_id_so_loop_stays_structured(monkeypatch):
+    """If any ToolCall.id were None the agent loop would drop to the string
+    fallback path and lose tool structure for Gemini. Every Gemini tool call
+    must carry a synthesized id."""
+    _install_fake_genai(monkeypatch)
+    b = _gemini_backend([_tool_resp()])
+    resp = b.step("sys", [{"role": "user", "content": "go"}])
+    assert resp.tool_calls
+    assert all(c.id is not None for c in resp.tool_calls)
+
+
+def test_synthesized_id_round_trips_back_to_function_name(monkeypatch):
+    """Full closure: step() emits a ToolCall with a synthesized id; the loop
+    rebuilds history with that id; feeding it back through _to_gemini_contents
+    resolves the function_response to the ORIGINAL function name."""
+    _install_fake_genai(monkeypatch)
+    b = _gemini_backend([_tool_resp()])
+
+    # 1. backend turns a Gemini function_call into a ToolCall (synthesized id)
+    first = b.step("sys", [{"role": "user", "content": "read x.txt"}])
+    call = first.tool_calls[0]
+    assert call.name == "read_file"
+
+    # 2. agent loop rebuilds the message history using call.id
+    history = [{"role": "user", "content": "read x.txt"}]
+    history += _loop_blocks_from_call(call, "the file contents")
+
+    # 3. next turn: that history must translate with the response tagged by NAME
+    contents = b._to_gemini_contents(history)
+    # model turn carries the function_call, the following user turn the response
+    model_turn = next(c for c in contents if c.role == "model")
+    assert model_turn.parts[-1].function_call.name == "read_file"
+    user_resp_turn = contents[-1]
+    fr = user_resp_turn.parts[0].function_response
+    assert fr.name == "read_file"          # resolved via the synthesized id
+    assert fr.response == {"result": "the file contents"}
+
+
+def test_parallel_calls_round_trip_each_to_its_own_name(monkeypatch):
+    """Two parallel calls to DIFFERENT tools in one turn must each round-trip to
+    the correct name -- the id->name map must not collapse them."""
+    _install_fake_genai(monkeypatch)
+    parts = [
+        SimpleNamespace(text=None, function_call=SimpleNamespace(name="read_file", args={"path": "a"})),
+        SimpleNamespace(text=None, function_call=SimpleNamespace(name="list_dir", args={"path": "."})),
+    ]
+    candidate = SimpleNamespace(
+        content=SimpleNamespace(parts=parts),
+        finish_reason=SimpleNamespace(name="STOP"),
+    )
+    b = _gemini_backend([SimpleNamespace(candidates=[candidate], usage_metadata=_gum())])
+    resp = b.step("sys", [{"role": "user", "content": "go"}])
+    c0, c1 = resp.tool_calls
+    assert c0.id != c1.id  # distinct ids so the map keeps them apart
+
+    # rebuild one assistant turn with BOTH tool_use blocks + one user turn with
+    # BOTH tool_result blocks, exactly as the loop batches parallel calls.
+    history = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": c0.id, "name": c0.name, "input": c0.args},
+            {"type": "tool_use", "id": c1.id, "name": c1.name, "input": c1.args},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": c0.id, "content": "A"},
+            {"type": "tool_result", "tool_use_id": c1.id, "content": "B"},
+        ]},
+    ]
+    contents = b._to_gemini_contents(history)
+    responses = contents[-1].parts
+    assert [p.function_response.name for p in responses] == ["read_file", "list_dir"]
+    assert [p.function_response.response for p in responses] == [
+        {"result": "A"}, {"result": "B"},
+    ]
