@@ -528,3 +528,262 @@ class OpenAILLMBackend:
             stop_reason=choice.finish_reason,
             usage=call_usage,
         )
+
+
+# JSON-schema keys Gemini's FunctionDeclaration.parameters rejects. The
+# universal tool defs are Anthropic-shaped JSON Schema (often emitted by
+# pydantic / tooling that adds these), so strip them recursively before
+# handing the schema to the google-genai SDK or the call 400s.
+_GEMINI_SCHEMA_DROP_KEYS = frozenset(
+    {"$schema", "$id", "$ref", "additionalProperties", "title", "default", "examples"}
+)
+
+
+def _sanitize_gemini_schema(node):
+    """Recursively drop JSON-schema fields Gemini's parameters schema can't
+    parse. Returns a cleaned copy; leaves the caller's tool defs untouched."""
+    if isinstance(node, dict):
+        return {
+            k: _sanitize_gemini_schema(v)
+            for k, v in node.items()
+            if k not in _GEMINI_SCHEMA_DROP_KEYS
+        }
+    if isinstance(node, list):
+        return [_sanitize_gemini_schema(v) for v in node]
+    return node
+
+
+class GeminiLLMBackend:
+    """Third real provider, on Google's native google-genai SDK (not the
+    OpenAI-compat endpoint), so native-only features (thinking budgets, Google
+    Search grounding) stay reachable later. Same step() contract as the other
+    backends: fabri keeps its message history in Anthropic's
+    tool_use/tool_result block shape, and this backend translates it into
+    Gemini's Content/Part(function_call|function_response) schema on the way
+    out, and Gemini's response parts back into ToolCalls on the way in.
+
+    Two Gemini-specific wrinkles drive the translation:
+      * The system prompt is a separate `system_instruction`, not a message.
+      * A function RESPONSE is matched to its call by function NAME, not by an
+        id (Gemini has no tool-call id). fabri's tool_result blocks carry only
+        `tool_use_id`, so we rebuild an id->name map from each preceding
+        assistant turn's tool_use blocks to fill FunctionResponse.name.
+    Not feature-complete (no streaming/vision)."""
+
+    def __init__(
+        self,
+        model: str = "gemini-2.5-flash",
+        tools: list[dict] | None = None,
+        max_tokens: int = 1024,
+        api_key_env: str = "GEMINI_API_KEY",
+    ):
+        import os
+
+        from google import genai
+
+        self._client = genai.Client(api_key=os.environ.get(api_key_env))
+        self._model = model
+        self._max_tokens = max_tokens
+        self._tools: list[dict] = []
+        self.set_tools(tools or [])
+
+    def set_tools(self, tool_defs: list[dict]) -> None:
+        # Store the sanitized universal defs; defer building the SDK Tool object
+        # to step() so the (lazy) types import stays inside call paths and tests
+        # can stub the SDK without it being imported at construction here.
+        self._tools = [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": _sanitize_gemini_schema(t.get("input_schema") or {"type": "object"}),
+            }
+            for t in (tool_defs or [])
+        ]
+
+    def _build_tools(self):
+        from google.genai import types
+
+        if not self._tools:
+            return None
+        return [
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name=t["name"],
+                        description=t["description"],
+                        parameters=t["parameters"],
+                    )
+                    for t in self._tools
+                ]
+            )
+        ]
+
+    def prewarm(self, system: str) -> LLMUsage:
+        # Gemini implicit caching is automatic; no explicit warm step like
+        # Anthropic's ephemeral cache. Uniform no-op so callers don't special-case.
+        return LLMUsage(model=self._model)
+
+    def _to_gemini_contents(self, messages: list[dict]):
+        """Translate the agent history into a list of Gemini Contents. Builds an
+        id->name map per assistant turn so the function_response that follows can
+        be tagged with the right function name (Gemini matches by name)."""
+        from google.genai import types
+
+        contents = []
+        id_to_name: dict[str, str] = {}
+        for m in messages:
+            role = m["role"]
+            content = m["content"]
+            gem_role = "model" if role == "assistant" else "user"
+
+            if isinstance(content, str):
+                contents.append(types.Content(role=gem_role, parts=[types.Part(text=content)]))
+                continue
+
+            if role == "assistant":
+                parts = []
+                for b in content:
+                    if b.get("type") == "text" and b.get("text"):
+                        parts.append(types.Part(text=b["text"]))
+                    elif b.get("type") == "tool_use":
+                        if b.get("id"):
+                            id_to_name[b["id"]] = b["name"]
+                        parts.append(
+                            types.Part(
+                                function_call=types.FunctionCall(name=b["name"], args=b.get("input") or {})
+                            )
+                        )
+                if parts:
+                    contents.append(types.Content(role="model", parts=parts))
+                continue
+
+            # user turn: tool_result blocks -> function_response parts, plain
+            # blocks -> text. Resolve each result's function name via the map.
+            parts = []
+            for b in content:
+                if b.get("type") == "tool_result":
+                    raw = b.get("content")
+                    resp = raw if isinstance(raw, dict) else {"result": raw if isinstance(raw, str) else json.dumps(raw)}
+                    name = id_to_name.get(b.get("tool_use_id"), b.get("tool_use_id") or "tool")
+                    parts.append(
+                        types.Part(function_response=types.FunctionResponse(name=name, response=resp))
+                    )
+                elif b.get("type") == "text" and b.get("text"):
+                    parts.append(types.Part(text=b["text"]))
+                else:
+                    parts.append(types.Part(text=json.dumps(b)))
+            if parts:
+                contents.append(types.Content(role="user", parts=parts))
+        return contents
+
+    def step(self, system: str, messages: list[dict]) -> LLMResponse:
+        from google.genai import errors as genai_errors
+        from google.genai import types
+
+        contents = self._to_gemini_contents(messages)
+
+        def _create(max_tokens: int):
+            cfg = types.GenerateContentConfig(
+                system_instruction=system or None,
+                tools=self._build_tools(),
+                max_output_tokens=max_tokens,
+            )
+            return _call_with_retry(
+                lambda: self._client.models.generate_content(
+                    model=self._model, contents=contents, config=cfg
+                ),
+                transient=(genai_errors.ServerError,),
+            )
+
+        t0 = time.monotonic()
+        truncated_attempt = None
+        try:
+            resp = _create(self._max_tokens)
+            # Parity with the other backends: a single oversized turn shouldn't
+            # nuke a whole run. Retry ONCE at a higher cap on a MAX_TOKENS finish
+            # before failing; never accept a truncated answer as success.
+            if self._finish_reason(resp) == "MAX_TOKENS":
+                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                if retry_cap > self._max_tokens:
+                    logger.warning(
+                        "gemini response truncated at max_tokens=%d; retrying once at %d",
+                        self._max_tokens,
+                        retry_cap,
+                    )
+                    truncated_attempt = resp
+                    resp = _create(retry_cap)
+        except genai_errors.APIError as e:
+            raise LLMError(f"gemini API error: {e}") from e
+
+        elapsed = time.monotonic() - t0
+        finish = self._finish_reason(resp)
+
+        # The discarded truncated attempt was still billed -- fold its tokens in
+        # so COGS reflects what Google charged, not just the kept response.
+        def _um(src, field: str) -> int:
+            um = getattr(src, "usage_metadata", None) if src is not None else None
+            return getattr(um, field, 0) or 0 if um is not None else 0
+
+        call_usage = LLMUsage(
+            input_tokens=_um(resp, "prompt_token_count") + _um(truncated_attempt, "prompt_token_count"),
+            output_tokens=_um(resp, "candidates_token_count") + _um(truncated_attempt, "candidates_token_count"),
+            cache_read_input_tokens=_um(resp, "cached_content_token_count")
+            + _um(truncated_attempt, "cached_content_token_count"),
+            model=self._model,
+        )
+        logger.info(
+            "gemini call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d cache_read=%d finish=%s",
+            self._model,
+            elapsed,
+            call_usage.input_tokens,
+            call_usage.output_tokens,
+            call_usage.cache_read_input_tokens,
+            finish,
+        )
+
+        if finish == "MAX_TOKENS":
+            raise LLMError(
+                f"gemini response truncated at max_tokens even after retry to "
+                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
+                f"or split this turn into smaller actions"
+            )
+
+        # Walk the candidate's parts: collect text (reasoning prose when it
+        # accompanies calls, the final answer otherwise) and function_calls.
+        # Gemini returns no tool-call id, so synthesize a stable one per call;
+        # the next turn matches the response back by function name via the map.
+        tool_calls = []
+        text_chunks = []
+        candidate = (getattr(resp, "candidates", None) or [None])[0]
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        for i, part in enumerate(parts):
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                tool_calls.append(
+                    ToolCall(name=fc.name, args=dict(fc.args or {}), id=f"{fc.name}-{i}")
+                )
+            elif getattr(part, "text", None):
+                text_chunks.append(part.text)
+        text = "".join(text_chunks).strip()
+
+        if tool_calls:
+            return LLMResponse(
+                tool_calls=tool_calls,
+                stop_reason=finish,
+                thinking_text=text or None,
+                usage=call_usage,
+            )
+        return LLMResponse(
+            final_text=text or None,
+            stop_reason=finish,
+            usage=call_usage,
+        )
+
+    @staticmethod
+    def _finish_reason(resp) -> str | None:
+        candidate = (getattr(resp, "candidates", None) or [None])[0]
+        fr = getattr(candidate, "finish_reason", None)
+        if fr is None:
+            return None
+        # google-genai uses a FinishReason enum; normalize to its name string.
+        return getattr(fr, "name", str(fr))

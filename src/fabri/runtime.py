@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fabri.config import DEFAULT_TOOLS_DIR
 from fabri.core.agent import DECOMPOSE_TOOL_NAME
-from fabri.core.llm import AnthropicLLMBackend, OpenAILLMBackend
+from fabri.core.llm import AnthropicLLMBackend, GeminiLLMBackend, OpenAILLMBackend
 from fabri.memory.store import QdrantMemoryStore
 from fabri.tools.agent_tool import make_agent_tool_manifest
 from fabri.tools.registry import ToolRegistry
@@ -112,6 +112,13 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
             max_tokens=max_tokens,
             api_key_env=api_key_env,
             base_url=base_url,
+        )
+    if provider == "gemini":
+        return GeminiLLMBackend(
+            model=model,
+            tools=tool_defs,
+            max_tokens=max_tokens,
+            api_key_env=api_key_env,
         )
     raise ValueError(f"unknown llm provider: {provider!r}")
 

@@ -15,7 +15,7 @@ agent:
   max_steps: 10
 
 llm:
-  provider: anthropic           # or "openai" (pip install "fabri[openai]")
+  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
   model: claude-sonnet-4-6
   max_tokens: 1024
   api_key_env: ANTHROPIC_API_KEY
@@ -94,7 +94,7 @@ agent:
     mode: auto
 
 llm:
-  provider: anthropic
+  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
   model: claude-sonnet-4-6
   max_tokens: 2048
   api_key_env: ANTHROPIC_API_KEY
@@ -170,7 +170,7 @@ agent:
     Cite file:line for every finding. Prefer concrete patches over vague advice.
 
 llm:
-  provider: anthropic
+  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
   model: claude-sonnet-4-6
   max_tokens: 2048
   api_key_env: ANTHROPIC_API_KEY
@@ -243,7 +243,7 @@ agent:
   max_steps: 30
 
 llm:
-  provider: anthropic
+  provider: anthropic           # or "openai" / "gemini" (pip install "fabri[openai]" or "fabri[gemini]")
   model: claude-sonnet-4-6
   max_tokens: 2048
   api_key_env: ANTHROPIC_API_KEY

@@ -129,6 +129,10 @@ published numbers.
 For OpenAI models: `pip install "fabri[openai]"` and set
 `llm.provider: openai` in your config.
 
+For Google Gemini models: `pip install "fabri[gemini]"`, set
+`llm.provider: gemini` (model e.g. `gemini-2.5-pro` / `gemini-2.5-flash`),
+and export `GEMINI_API_KEY`.
+
 Embeddings run locally via `sentence-transformers/all-MiniLM-L6-v2` —
 no embedding API calls.
 
@@ -186,7 +190,7 @@ agent:
                                  # (strict | warn | fallback) resolves it.
 
 llm:
-  provider: anthropic            # or "openai"
+  provider: anthropic            # or "openai" / "gemini"
   model: claude-sonnet-4-6
   max_tokens: 1024
   api_key_env: ANTHROPIC_API_KEY

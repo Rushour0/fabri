@@ -53,6 +53,15 @@ PRICING: dict[str, tuple[float, float]] = {
     "anthropic/claude-opus-4-8":   (5.0, 25.0),
     "openai/gpt-4o":               (2.5, 10.0),
     "openai/gpt-4o-mini":          (0.15, 0.60),
+    # Google Gemini -- native google-genai backend. gemini-2.5-pro is the
+    # Sonnet-class model for the main role. Base-tier list rates; 2.5-pro's
+    # higher >200k-input-token tier is not modeled (reconciled to invoice like
+    # the rest). Gemini implicit-cache reads land in cache_read_input_tokens and
+    # price at _CACHE_READ_MULT (0.10x) -- an approximation for Gemini's caching.
+    "gemini-2.5-pro":        (1.25, 10.0),
+    "gemini-2.5-flash":      (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.0-flash":      (0.10, 0.40),
 }
 
 

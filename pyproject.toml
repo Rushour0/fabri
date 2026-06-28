@@ -31,6 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]               # only needed for `llm.provider: openai`
+gemini = ["google-genai>=1.0"]         # only needed for `llm.provider: gemini`
 sqlite = ["sqlite-vec>=0.1.6"]         # G16: embedded vector store (no docker)
 dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0"]
 
