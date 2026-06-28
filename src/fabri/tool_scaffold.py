@@ -169,3 +169,64 @@ def scaffold_tool(lang: str, name: str, target_dir: Path, force: bool = False) -
         created.append(str(path.name))
 
     return {"created": created, "skipped": skipped, "language": lang, "name": name}
+
+
+def write_tool(
+    name: str,
+    lang: str,
+    target_dir: Path,
+    *,
+    description: str,
+    input_schema: dict,
+    output_schema: dict,
+    stub_source: str | None = None,
+    timeout_s: float = 10.0,
+    force: bool = False,
+) -> dict:
+    """B2: scaffold a tool with *tightened* schemas.
+
+    Like `scaffold_tool`, but the caller supplies the description and real
+    input/output schemas (instead of the opaque ``{}`` defaults) and may
+    override the executable body via `stub_source` (the `--from-signature`
+    path generates a stub that calls the parsed function). Returns the same
+    {"created", "skipped", "language", "name"} shape.
+    """
+    if lang not in _TEMPLATES:
+        raise ValueError(
+            f"unknown language {lang!r}; pick one of: {SUPPORTED_LANGUAGES}"
+        )
+    if not name.replace("_", "").isalnum():
+        raise ValueError(
+            f"tool name must be alphanumeric+underscore (got {name!r})"
+        )
+    tmpl = _TEMPLATES[lang]
+    exe_name = f"{name}.{tmpl['ext']}"
+    manifest_path = target_dir / f"{name}.json"
+    exe_path = target_dir / exe_name
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_text = json.dumps(
+        {
+            "name": name,
+            "description": description,
+            "command": tmpl["command"](exe_name),
+            "input_schema": input_schema,
+            "output_schema": output_schema,
+            "timeout_s": timeout_s,
+        },
+        indent=2,
+    ) + "\n"
+    stub_text = stub_source if stub_source is not None else tmpl["stub"].format(name=name)
+
+    created, skipped = [], []
+    for path, content in ((manifest_path, manifest_text), (exe_path, stub_text)):
+        if path.exists() and not force:
+            skipped.append(str(path.name))
+            continue
+        path.write_text(content)
+        if tmpl.get("chmod"):
+            path.chmod(0o755)
+        created.append(str(path.name))
+
+    return {"created": created, "skipped": skipped, "language": lang, "name": name}

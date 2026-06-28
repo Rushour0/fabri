@@ -103,8 +103,42 @@ def _open_store(mem_cfg: dict):
         sys.exit(1)
 
 
+def cmd_tools(args: argparse.Namespace) -> None:
+    """B3: list the tools the agent would have available — builtins plus the
+    dirs in `tools.manifest_dir` (or the --manifest-dir overrides) — optionally
+    filtered by --search. Resolves tools the same way a run does, so "what do I
+    have?" matches "what would run"."""
+    from fabri.builder import filter_tools, render_tools_listing
+
+    config = load_config(args.config)
+    tools_cfg = dict(config["tools"])
+    if args.manifest_dir:
+        tools_cfg["manifest_dir"] = list(args.manifest_dir)
+    registry = build_tools(tools_cfg)
+    pairs = filter_tools(registry, args.search)
+    print(render_tools_listing(pairs, search=args.search))
+
+
+def _print_dry_run(config: dict, task: str) -> None:
+    """B3: `fabri run --dry-run` — print the resolved config summary + the tool
+    definitions that WOULD be sent to the model, then return without opening the
+    memory store or constructing any LLM backend. Needs no API key: the whole
+    point is to inspect a run before spending on it."""
+    from fabri.builder import build_dry_run_plan, render_dry_run_plan
+
+    tools = build_tools(config["tools"])
+    tool_defs = build_tool_defs(tools, config["tools"]["decompose"])
+    plan = build_dry_run_plan(config, tool_defs)
+    print(render_dry_run_plan(plan, task=task))
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
+    # B3: --dry-run inspects the plan with no network — resolve and print before
+    # any API-key check, store open, or LLM call.
+    if getattr(args, "dry_run", False):
+        _print_dry_run(config, args.task)
+        return
     _require_role_api_keys(config)
     session_id = args.session_id or str(uuid.uuid4())
     configure_logging(session_id, verbose=args.verbose)
@@ -445,6 +479,234 @@ def cmd_tool_init(args: argparse.Namespace) -> None:
           f"`tools.manifest_dir` of your agent.yaml.")
 
 
+def _build_enrichment_llm():
+    """B2: build an LLM backend for `tool new --from` schema enrichment, but
+    ONLY when the default config's main-role API key is set. Returns None
+    otherwise so the tool-writer degrades to its deterministic fallback. Any
+    construction error -> None (never block the scaffold on the network)."""
+    from fabri.config import load_config
+    from fabri.runtime import find_missing_role_api_keys
+
+    try:
+        config = load_config(None)
+        if find_missing_role_api_keys(config):
+            return None
+        return build_llm(config, [])
+    except Exception:
+        return None
+
+
+def cmd_tool_new(args: argparse.Namespace) -> None:
+    """B2: scaffold a schema-tightened tool from a Python signature, a
+    description, or (default) the tightened starter scaffold."""
+    from fabri.builder import new_tool
+
+    llm = None
+    if args.from_desc is not None and not args.no_llm:
+        llm = _build_enrichment_llm()
+    try:
+        result = new_tool(
+            args.name,
+            lang=args.lang,
+            from_signature=args.from_signature,
+            from_desc=args.from_desc,
+            target_dir=args.dir,
+            force=args.force,
+            llm=llm,
+        )
+    except (ValueError, OSError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    if result["created"]:
+        print(f"Scaffolded a {result['language']!r} tool {args.name!r} "
+              f"({result['mode']}) in {args.dir}:")
+        for f in result["created"]:
+            print(f"  + {f}")
+    if result["skipped"]:
+        print("\nLeft existing files untouched (pass --force to overwrite):")
+        for f in result["skipped"]:
+            print(f"  . {f}")
+    print(f"\nNext: `fabri tool validate {args.dir}/{args.name}.json` "
+          f"then `fabri tool test {args.name} --dir {args.dir}`.")
+
+
+def cmd_tool_validate(args: argparse.Namespace) -> None:
+    """B2: validate a manifest's shape, its schemas, and that its script
+    resolves. Exits nonzero on failure."""
+    from fabri.builder import validate_manifest
+
+    ok, lines = validate_manifest(args.manifest)
+    for line in lines:
+        print(line)
+    if not ok:
+        sys.exit(1)
+
+
+def _invoke_tool_and_print(name: str, raw_json: str | None, target_dir: str,
+                           *, arg_label: str) -> None:
+    """Shared body of `tool test` and `tool run`: parse the JSON args, run the
+    named tool through the existing registry/sandbox, print the normalized
+    {ok, result?, error?} envelope, and exit non-zero on failure. `arg_label`
+    is the user-facing name of the args source (`--args` vs `<json-args>`) so
+    each command reports errors in its own terms."""
+    from fabri.builder import test_tool
+
+    parsed_args: dict = {}
+    if raw_json:
+        try:
+            parsed_args = json.loads(raw_json)
+        except json.JSONDecodeError as e:
+            print(f"{arg_label}: not valid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(parsed_args, dict):
+            print(f"{arg_label}: must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+    try:
+        envelope = test_tool(name, parsed_args, target_dir=target_dir)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(envelope, indent=2))
+    if not envelope.get("ok"):
+        sys.exit(1)
+
+
+def cmd_tool_test(args: argparse.Namespace) -> None:
+    """B2: run a tool locally through the existing registry/sandbox and print
+    the normalized {ok, result?, error?} envelope."""
+    _invoke_tool_and_print(args.name, args.args, args.dir, arg_label="--args")
+
+
+def cmd_tool_run(args: argparse.Namespace) -> None:
+    """B3: direct invoke of a tool via the runner for debugging — the positional
+    cousin of `tool test` (`fabri tool run <name> '<json>'`). Shares
+    `_invoke_tool_and_print` so the two never drift on resolution/normalization."""
+    _invoke_tool_and_print(args.name, args.json_args, args.dir, arg_label="<json-args>")
+
+
+def cmd_prompt_new(args: argparse.Namespace) -> None:
+    """B5: write a starter agent prompt from the proven prompt-kit skeleton,
+    so a new prompt begins from a fill-in template rather than a blank file."""
+    from fabri.builder import new_prompt
+
+    try:
+        result = new_prompt(
+            args.name,
+            role=args.role,
+            output=args.output,
+            force=args.force,
+        )
+    except OSError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    if not result["created"]:
+        print(
+            f"{result['path']} already exists; pass --force to overwrite.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"Wrote starter prompt to {result['path']}.")
+    print("Next: fill the CHARTER, WHAT YOU OWN, and TOOL ROUTING sections, then "
+          "reference it from your agent.yaml `agent.system_prompt`.")
+
+
+def cmd_ideate(args: argparse.Namespace) -> None:
+    """B1: turn a one-sentence product idea into a reviewable agent scaffold
+    (agent.yaml + prompts + tool stubs). Needs an LLM to draft the spec; emits
+    files for review only -- it never auto-applies or touches a running agent."""
+    from fabri.builder import IdeatorError, ideate
+
+    llm = _build_enrichment_llm()
+    if llm is None:
+        print(
+            "`fabri ideate` needs a model to draft the spec, but no provider API "
+            "key is set. Export it first, e.g.: export ANTHROPIC_API_KEY=<key>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        summary = ideate(args.idea, llm, out_dir=args.out, force=args.force)
+    except IdeatorError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Drafted agent {summary['spec'].get('agent_name')!r} into {summary['root']}:")
+    for path in [summary["agent_yaml"], *summary["prompts"], *summary["tools"]]:
+        print(f"  + {path}")
+    if summary["skipped"]:
+        print("\nLeft existing files untouched (pass --force to overwrite):")
+        for path in summary["skipped"]:
+            print(f"  . {path}")
+    print(
+        "\nReview and edit the scaffold, then run it:\n"
+        f"  {summary['next_command']}"
+    )
+
+
+def cmd_skills_list(args: argparse.Namespace) -> None:
+    """B4: list discoverable skills -- the bundled examples plus a project-local
+    skills dir (default ./skills)."""
+    from fabri.builder import discover_skills, render_skills_listing
+
+    skills = discover_skills(args.dir)
+    print(render_skills_listing(skills))
+
+
+def cmd_skills_install(args: argparse.Namespace) -> None:
+    """B4: install a skill into a project -- copy its tools + prompts and merge
+    its config snippet into agent.yaml (additive; existing keys preserved)."""
+    from fabri.builder import SkillError, install_skill
+
+    try:
+        summary = install_skill(
+            args.skill, args.into, skills_dir=args.dir, force=args.force
+        )
+    except SkillError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Installed skill {summary['skill']!r} into {args.into}:")
+    for path in [*summary["tools"], *summary["prompts"]]:
+        print(f"  + {path}")
+    if summary["config"]:
+        keys = ", ".join(summary["config_keys"]) or "(no new top-level keys)"
+        print(f"  ~ {summary['config']} (merged; added: {keys})")
+    if summary["skipped"]:
+        print("\nLeft existing files untouched (pass --force to overwrite):")
+        for path in summary["skipped"]:
+            print(f"  . {path}")
+    if summary["conflicts"]:
+        print("\nConfig conflicts (project values kept, skill's ignored):")
+        for c in summary["conflicts"]:
+            print(f"  ! {c}")
+
+
+def cmd_skills_add(args: argparse.Namespace) -> None:
+    """B4: scaffold a fresh skill skeleton (skill.yaml + config snippet + empty
+    prompts/ and tools/) to author a new reusable capability."""
+    from fabri.builder import SkillError, new_skill
+
+    try:
+        result = new_skill(args.name, target_dir=args.dir, force=args.force)
+    except SkillError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    if result["created"]:
+        print(f"Scaffolded skill {args.name!r} in {result['root']}:")
+        for path in result["created"]:
+            print(f"  + {path}")
+    if result["skipped"]:
+        print("\nLeft existing files untouched (pass --force to overwrite):")
+        for path in result["skipped"]:
+            print(f"  . {path}")
+    print("\nNext: add tool manifest+executable pairs under tools/, prompt "
+          "templates under prompts/, and edit config.yaml, then "
+          f"`fabri skills install {args.name}`.")
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     """G6/G7/G8/G20: aggregate JSONL traces into a usage report. Output in
     markdown (default), json, or self-contained HTML."""
@@ -570,6 +832,29 @@ def cmd_admin_dashboard(args: argparse.Namespace) -> None:
     print(render_dashboard(config, tools, store))
 
 
+def cmd_serve(args: argparse.Namespace) -> None:
+    """B7: start the embeddable HTTP service. A non-Python host POSTs a task and
+    streams events (SSE) without importing fabri. Blocks until Ctrl-C."""
+    from fabri.service.http_server import serve_http
+    from fabri.service.service import FabriService
+
+    service = FabriService(template_config=args.config, home_root=args.home_root)
+    server = serve_http(service, host=args.host, port=args.port)
+    bound_host, bound_port = server.server_address[0], server.server_address[1]
+    print(
+        f"fabri serve listening on http://{bound_host}:{bound_port} "
+        f"(POST /runs, GET /runs/<id>/events, GET /runs/<id>/result)",
+        flush=True,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        service.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fabri")
     parser.add_argument(
@@ -598,6 +883,10 @@ def main() -> None:
     p_run.add_argument("--session-id", dest="session_id", default=None)
     p_run.add_argument("--ask-user-socket", dest="ask_user_socket", default=None,
                        help="Path to a Unix socket the ask_user tool routes questions to (A1).")
+    p_run.add_argument("--dry-run", dest="dry_run", action="store_true",
+                       help="Print the resolved config + the tool defs that would be "
+                            "sent to the model, then exit without any LLM call (B3). "
+                            "Requires no API key.")
     p_run.set_defaults(func=cmd_run)
 
     p_ingest = sub.add_parser("ingest-traces", help="Synthesize guidelines from a session's trace")
@@ -635,6 +924,16 @@ def main() -> None:
     p_replay.add_argument("session_id")
     p_replay.set_defaults(func=cmd_replay)
 
+    # B3: discovery — list the registry's tools without grepping examples/.
+    p_tools = sub.add_parser("tools", help="List available tools (builtin + configured manifest dirs)")
+    p_tools.add_argument("--search", default=None,
+                         help="Filter by case-insensitive substring over name+description")
+    p_tools.add_argument("--manifest-dir", dest="manifest_dir", action="append", default=None,
+                         metavar="DIR",
+                         help="Resolve tools from this dir instead of tools.manifest_dir "
+                              "(repeatable; use 'builtin' for the bundled tools)")
+    p_tools.set_defaults(func=cmd_tools)
+
     p_tool = sub.add_parser("tool", help="Tool-related helpers (scaffold a new tool)")
     tool_sub = p_tool.add_subparsers(dest="tool_command", required=True)
 
@@ -647,6 +946,104 @@ def main() -> None:
     p_tool_init.add_argument("--force", action="store_true",
                              help="Overwrite existing files")
     p_tool_init.set_defaults(func=cmd_tool_init)
+
+    # B2: tool-writer — scaffold a schema-tightened tool, validate it, test it.
+    p_tool_new = tool_sub.add_parser(
+        "new", help="Scaffold a schema-tightened tool from a signature or description")
+    p_tool_new.add_argument("name", help="Tool name (alphanumeric + underscore)")
+    p_tool_new.add_argument("--lang", choices=SUPPORTED_LANGUAGES, default="python",
+                            help="Language of the executable stub (default: python)")
+    p_tool_new.add_argument("--from-signature", dest="from_signature", default=None,
+                            metavar="FILE.py",
+                            help="Derive input/output schema + stub from the first "
+                                 "top-level function in this Python file (no LLM)")
+    p_tool_new.add_argument("--from", dest="from_desc", default=None, metavar="DESC",
+                            help="Use this description; optionally enrich the schema "
+                                 "via an LLM when an API key is set")
+    p_tool_new.add_argument("--no-llm", action="store_true",
+                            help="With --from, skip LLM enrichment (deterministic only)")
+    p_tool_new.add_argument("--dir", default="tools/agent_tools",
+                            help="Where to write the manifest + executable (default: tools/agent_tools)")
+    p_tool_new.add_argument("--force", action="store_true", help="Overwrite existing files")
+    p_tool_new.set_defaults(func=cmd_tool_new)
+
+    p_tool_validate = tool_sub.add_parser(
+        "validate", help="Validate a tool manifest (shape, schemas, script path)")
+    p_tool_validate.add_argument("manifest", help="Path to the tool's <name>.json manifest")
+    p_tool_validate.set_defaults(func=cmd_tool_validate)
+
+    p_tool_test = tool_sub.add_parser(
+        "test", help="Run a tool locally through the runner and print {ok, result?, error?}")
+    p_tool_test.add_argument("name", help="Tool name (matches <name>.json in --dir)")
+    p_tool_test.add_argument("--args", default=None,
+                             help="JSON object of args to send on stdin (default: {})")
+    p_tool_test.add_argument("--dir", default="tools/agent_tools",
+                             help="Directory holding the tool manifest (default: tools/agent_tools)")
+    p_tool_test.set_defaults(func=cmd_tool_test)
+
+    # B3: tool run — positional-args cousin of `tool test`, for quick debugging.
+    p_tool_run = tool_sub.add_parser(
+        "run", help="Directly invoke a tool through the runner (debugging) and print {ok, result?, error?}")
+    p_tool_run.add_argument("name", help="Tool name (matches <name>.json in --dir)")
+    p_tool_run.add_argument("json_args", nargs="?", default=None, metavar="json-args",
+                            help="JSON object of args to send on stdin (default: {})")
+    p_tool_run.add_argument("--dir", default="tools/agent_tools",
+                            help="Directory holding the tool manifest (default: tools/agent_tools)")
+    p_tool_run.set_defaults(func=cmd_tool_run)
+
+    # B5: prompt-kit — scaffold a new agent prompt from the proven skeleton.
+    p_prompt = sub.add_parser("prompt", help="Prompt-related helpers (scaffold a new agent prompt)")
+    prompt_sub = p_prompt.add_subparsers(dest="prompt_command", required=True)
+
+    p_prompt_new = prompt_sub.add_parser(
+        "new", help="Write a starter agent prompt from the prompt-kit skeleton")
+    p_prompt_new.add_argument("name", help="Prompt/agent name (used for the role and default filename)")
+    p_prompt_new.add_argument("--role", default=None,
+                              help="Agent role for the CHARTER section (default: name)")
+    p_prompt_new.add_argument("--output", "-o", default=None,
+                              help="Output file (default: <name>.prompt.md)")
+    p_prompt_new.add_argument("--force", action="store_true", help="Overwrite an existing file")
+    p_prompt_new.set_defaults(func=cmd_prompt_new)
+
+    # B1: ideator — one-sentence idea -> reviewable agent scaffold dir.
+    p_ideate = sub.add_parser(
+        "ideate", help="Draft a reviewable agent scaffold (agent.yaml + prompts + tool stubs) from a one-sentence idea")
+    p_ideate.add_argument("idea", help="A one-sentence product idea, in quotes")
+    p_ideate.add_argument("--out", default=None,
+                          help="Output directory (default: ./<agent_name>-agent)")
+    p_ideate.add_argument("--force", action="store_true",
+                          help="Overwrite existing files / write into a non-empty dir")
+    p_ideate.set_defaults(func=cmd_ideate)
+
+    # B4: skills — install a reusable bundle (prompt + tools + config) into a project.
+    p_skills = sub.add_parser(
+        "skills", help="Discover, install, or author reusable skill bundles (prompt + tools + config)")
+    skills_sub = p_skills.add_subparsers(dest="skills_command", required=True)
+
+    p_skills_list = skills_sub.add_parser(
+        "list", help="List discoverable skills (bundled examples + a project skills/ dir)")
+    p_skills_list.add_argument("--dir", default=None,
+                               help="Project skills directory to scan (default: ./skills)")
+    p_skills_list.set_defaults(func=cmd_skills_list)
+
+    p_skills_install = skills_sub.add_parser(
+        "install", help="Install a skill: copy its tools + prompts and merge its config into agent.yaml")
+    p_skills_install.add_argument("skill", help="Skill name (from `skills list`) or a path to a skill directory")
+    p_skills_install.add_argument("--into", default=".",
+                                  help="Project directory to install into (default: .)")
+    p_skills_install.add_argument("--dir", default=None,
+                                  help="Project skills directory to resolve a name from (default: ./skills)")
+    p_skills_install.add_argument("--force", action="store_true",
+                                  help="Overwrite existing tool/prompt files")
+    p_skills_install.set_defaults(func=cmd_skills_install)
+
+    p_skills_add = skills_sub.add_parser(
+        "add", help="Scaffold a fresh skill skeleton to author")
+    p_skills_add.add_argument("name", help="Skill name (alphanumeric + - or _)")
+    p_skills_add.add_argument("--dir", default="skills",
+                              help="Where to create the skill dir (default: skills)")
+    p_skills_add.add_argument("--force", action="store_true", help="Overwrite existing files")
+    p_skills_add.set_defaults(func=cmd_skills_add)
 
     p_report = sub.add_parser("report", help="Aggregate cost/outcome across recent sessions")
     p_report.add_argument("--since", default=None,
@@ -685,6 +1082,18 @@ def main() -> None:
     p_traces_list = traces_sub.add_parser("list", help="List recent session traces")
     p_traces_list.add_argument("--limit", type=int, default=20)
     p_traces_list.set_defaults(func=cmd_traces_list)
+
+    # B7: embeddable service — a non-Python host submits a task over HTTP and
+    # streams events without importing fabri.
+    p_serve = sub.add_parser(
+        "serve", help="Start the embeddable HTTP service (POST a task, stream events + cost over SSE)")
+    p_serve.add_argument("--config", default=None,
+                         help="Template agent.yaml; per-run overrides deep-merge onto it.")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    p_serve.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080; 0 = OS-assigned)")
+    p_serve.add_argument("--home-root", dest="home_root", default=None,
+                         help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)")
+    p_serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args()
     try:

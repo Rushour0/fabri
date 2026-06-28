@@ -1,5 +1,6 @@
 from typing import Callable
 
+from fabri.builder.prompt_kit import split_agent_output
 from fabri.core.llm import LLMBackend, LLMUsage
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType
@@ -76,6 +77,19 @@ def build_postmortem_text(events: list[dict], max_task_chars: int = 140) -> str:
         f"tool_calls={len(tool_calls)} ({len(failures)} failed). "
         f"Repeated failures: {repeats}."
     )
+
+
+def extract_agent_memory(events: list[dict]) -> dict | None:
+    """B5: when an agent's final text carries a ``<!-- AGENT_MEMORY -->`` block,
+    return its parsed structured form so the miner can fold the agent's own
+    self-reported memory into what it learns from the run. Returns None when the
+    run has no `final` event or the final text has no marker -- so the miner's
+    behaviour is unchanged for the (overwhelming) marker-free case."""
+    final = next((e for e in events if e.get("type") == EventType.FINAL.value), None)
+    if final is None:
+        return None
+    _, memory = split_agent_output(final.get("text") or "")
+    return memory
 
 
 def is_discrepancy(event: dict) -> bool:
@@ -157,6 +171,13 @@ def process_trace(
                 f"Plan: tools used in order = {tool_names}\n"
                 f"Outcome: {final_event.get('outcome', 'success')}"
             )
+            # B5: if the agent emitted a machine-readable memory block, fold its
+            # self-reported facts into the summary the synthesizer sees. Guarded
+            # on the marker being present, so a marker-free run is unaffected.
+            agent_memory = extract_agent_memory(events)
+            if agent_memory:
+                memory_lines = "\n".join(f"{k}: {v}" for k, v in agent_memory.items())
+                success_summary += f"\nAgent-reported memory:\n{memory_lines}"
             success_text = synthesize_success_pattern(
                 success_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
             )
