@@ -6,6 +6,45 @@ that ships.
 
 ## Unreleased
 
+## 0.8.0 — 2026-06-28
+
+### Track B — the builder layer (idea → running self-improving agent)
+
+A new `src/fabri/builder/` package and a `src/fabri/service/` package turn the
+engine into a product factory: scaffold agents, tools, and prompts from intent,
+package reusable bundles as skills, and embed the whole thing as a self-contained
+service. See `docs/vision.md` for the engine+builder thesis.
+
+- **Ideator** (`fabri ideate "<idea>"`) — a one-line product idea becomes a
+  *reviewable* scaffold dir (agent.yaml + prompts + tool stubs) via fabri's own
+  structured output. Emits for review; never auto-applies.
+- **Tool-writer** (`fabri tool new|validate|test`) — a description or a Python
+  function signature becomes a tightened-schema manifest (not opaque `{}`) + a
+  calling stub + a local test. `fabri tool validate` / `fabri tool test` close
+  the no-validation / no-local-test gap.
+- **Prompt-kit** — a nine-section prompt skeleton (`fabri prompt new`) plus a
+  user-prose / `<!-- AGENT_MEMORY -->` output split wired (additively) into the
+  trace miner.
+- **Wave planner** — `builder.waves.plan_waves` topologically layers declared
+  dependency edges and auto-assigns `parallel_group` for fan-out.
+- **Discovery / runner ergonomics** — `fabri tools [--search]`, `fabri tool run`,
+  and `fabri agent run --dry-run` (resolves config + tool defs with no network).
+- **Skills registry** (`fabri skills add|list|install`) — installable bundles of
+  prompt + tool manifests + a config snippet, with a bundled example skill.
+- **Self-contained service** (`fabri serve`) — binds a per-run config from one
+  template + overrides, spawns the agent, streams events by tailing the JSONL
+  trace over stdio + HTTP/SSE, and surfaces cost. A non-Python host can drive a
+  run with no fabri imports. Streams via the trace, so it needs neither O2 nor
+  any change to the agent loop.
+- **Repair loop** (`agent.repair`, **off by default**) — a bounded
+  verify → repair → rerun loop that injects the verifier output as context and
+  stops on no-progress (same error signature twice) or at `max_attempts`, with a
+  fresh step budget per attempt. Threaded through `AgentRunConfig` so it
+  activates from config at run / replay / agent-runner.
+
+All builder code is additive, stdlib-only (no new third-party deps), and
+project-agnostic; 116 new offline tests. Builds on v0.7.9 (Gemini).
+
 ## 0.7.9 — 2026-06-28
 
 ### Google Gemini support + Gemini is now the default provider
