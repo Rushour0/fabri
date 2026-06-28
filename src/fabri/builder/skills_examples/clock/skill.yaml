@@ -1,0 +1,3 @@
+name: clock
+description: A trivial example skill -- adds a tool that returns the current UTC time, a prompt note on using it, and the config to enable the tool.
+version: 0.1.0

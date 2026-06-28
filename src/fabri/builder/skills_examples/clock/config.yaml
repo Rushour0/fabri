@@ -1,0 +1,8 @@
+# Merged into the project's agent.yaml on install. Project values win; lists
+# (manifest_dir, enabled) are unioned, so installing this skill adds `now` to the
+# tool registry without disturbing tools the project already enabled.
+tools:
+  manifest_dir:
+    - tools/agent_tools
+  enabled:
+    - now
