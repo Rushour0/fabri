@@ -6,6 +6,19 @@ that ships.
 
 ## Unreleased
 
+## 0.8.1 — 2026-06-29
+
+### Bounded parallel sub-agent fan-out
+
+- **`tools.max_parallel_spawns`** (default `4`) caps how many `spawn_subagent`
+  calls in one `parallel_group` run concurrently. Each spawn is a fresh
+  subprocess, so an unbounded fan-out (`max_workers=len(group)`) let a wide wave
+  spike memory without limit — enough to OOM-kill the host process in a
+  memory-capped container. Members beyond the cap now queue and run as slots
+  free up: identical group result, bounded peak concurrency (and memory).
+  Threaded through `AgentRunConfig` so sub-agents inherit the parent's cap.
+  Lower it on tight memory budgets.
+
 ## 0.8.0 — 2026-06-28
 
 ### Track B — the builder layer (idea → running self-improving agent)

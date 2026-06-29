@@ -105,6 +105,47 @@ def test_ungrouped_spawns_run_serially():
     assert elapsed >= 0.8, f"expected serial >=0.8s, got {elapsed:.2f}s"
 
 
+def _time_dispatch_capped(reg, n_calls: int, max_parallel_spawns: int) -> float:
+    """Like _time_dispatch_via_registry but for a single group with an
+    explicit concurrency cap, so we can assert batching behaviour."""
+    from fabri.core.agent import _dispatch_tool_calls
+
+    calls = [
+        ToolCall(name="spawn_subagent", args={"parallel_group": "g1"}, id=f"t{i}")
+        for i in range(n_calls)
+    ]
+    t0 = time.monotonic()
+    _dispatch_tool_calls(
+        calls,
+        reg,
+        llm=ScriptedLLMBackend([]),
+        default_task="t",
+        max_subquestions=3,
+        session_id=f"f2-cap-{uuid.uuid4().hex[:8]}",
+        messages=[],
+        step_num=0,
+        max_parallel_spawns=max_parallel_spawns,
+    )
+    return time.monotonic() - t0
+
+
+def test_cap_bounds_group_concurrency():
+    """4 spawns of 0.4s with a cap of 2 must run as two serial batches of two
+    (~0.8s), not all at once (~0.4s). This is the OOM guard: a wide wave can't
+    spike past `max_parallel_spawns` concurrent subprocesses."""
+    reg = _registry_with(_slow_spawn_tool(0.4))
+    elapsed = _time_dispatch_capped(reg, n_calls=4, max_parallel_spawns=2)
+    assert 0.7 <= elapsed < 1.5, f"expected two ~0.4s batches, got {elapsed:.2f}s"
+
+
+def test_cap_above_group_size_runs_all_concurrent():
+    """Inverse: a cap >= group size leaves the existing full-fan-out behaviour
+    intact — all 4 spawns overlap and finish in ~one 0.4s window."""
+    reg = _registry_with(_slow_spawn_tool(0.4))
+    elapsed = _time_dispatch_capped(reg, n_calls=4, max_parallel_spawns=8)
+    assert elapsed < 0.7, f"expected single concurrent batch, got {elapsed:.2f}s"
+
+
 def test_parallel_group_tag_in_trace_events():
     reg = _registry_with(_slow_spawn_tool(0.05))
     script = [

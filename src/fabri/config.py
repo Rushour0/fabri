@@ -3,6 +3,7 @@ from pathlib import Path
 
 import yaml
 
+from fabri.core.agent import DEFAULT_MAX_PARALLEL_SPAWNS
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS
 from fabri.memory.compress import DEFAULT_MAX_TOKENS
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD
@@ -126,6 +127,12 @@ DEFAULT_CONFIG = {
         # saves input tokens; the framework encodes this end so there's no
         # model reliability risk. "json" to opt out.
         "result_format": "toon",
+        # Cap on how many spawn_subagent calls in one parallel_group run
+        # concurrently. Each spawn is a fresh subprocess, so a very wide wave
+        # can spike memory enough to OOM the host in a memory-capped container.
+        # Members beyond the cap queue and run as slots free up — same result,
+        # bounded peak memory. Lower it on tight memory budgets.
+        "max_parallel_spawns": DEFAULT_MAX_PARALLEL_SPAWNS,
         "decompose": {"enabled": False, "max_subquestions": DEFAULT_MAX_SUBQUESTIONS},
         # Narrow the system prompt + provider tool list to a task-relevant
         # subset via cosine similarity against each tool's description.

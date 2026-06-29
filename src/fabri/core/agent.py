@@ -29,6 +29,14 @@ from fabri.tools.registry import ToolRegistry
 from fabri.tools.result import tool_error
 
 MAX_STEPS = 10
+# Upper bound on how many spawn_subagent calls in one `parallel_group` run
+# concurrently. Each spawn is a *fresh fabri subprocess*, so an unbounded
+# fan-out (max_workers=len(group)) lets a wide wave spike memory without
+# limit — enough to OOM-kill the host process in a memory-capped container.
+# Members beyond the cap queue and run as slots free up; the group's result
+# is unchanged, only its peak concurrency (and memory) is bounded. Tunable
+# via `tools.max_parallel_spawns`.
+DEFAULT_MAX_PARALLEL_SPAWNS = 4
 DECOMPOSE_TOOL_NAME = "decompose"
 # The orchestrator prompt references these by name, so they must survive
 # tool-retrieval filtering even when the task wording doesn't match them.
@@ -161,6 +169,7 @@ def _run_single_attempt(
     response_retries: int = 1,
     error_strategy: str = "strict",
     response_fallback: object | None = None,
+    max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -528,6 +537,7 @@ def _run_single_attempt(
                         on_subagent_finished=_on_subagent_finished,
                         on_budget_check=_budget_breached,
                         on_llm_usage=_accumulate,
+                        max_parallel_spawns=max_parallel_spawns,
                     )
                     item_had_failure |= step_had_failure
                     log_event(session_id, {
@@ -974,6 +984,7 @@ def run_agent(
     error_strategy: str = "strict",
     response_fallback: object | None = None,
     repair: dict | None = None,
+    max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
@@ -1010,6 +1021,7 @@ def run_agent(
         response_retries=response_retries,
         error_strategy=error_strategy,
         response_fallback=response_fallback,
+        max_parallel_spawns=max_parallel_spawns,
     )
     result = _run_single_attempt(task, **base_kwargs)
     if not (repair and repair.get("enabled")):
@@ -1051,6 +1063,7 @@ def _dispatch_tool_calls(
     on_subagent_finished: Callable[..., None] | None = None,
     on_budget_check: Callable[[], bool] | None = None,
     on_llm_usage: Callable[[LLMUsage], None] | None = None,
+    max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
@@ -1152,7 +1165,11 @@ def _dispatch_tool_calls(
             _emit_tool_started(i, calls[i], group_name)
         from concurrent.futures import as_completed
 
-        with ThreadPoolExecutor(max_workers=len(idx_list)) as pool:
+        # Bound concurrency: members beyond the cap queue and run as slots
+        # free up. Each spawn is a subprocess, so this caps peak memory even
+        # when the model emits a very wide wave.
+        workers = max(1, min(len(idx_list), max_parallel_spawns))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_idx = {
                 pool.submit(_dispatch_one, calls[i]): i for i in idx_list
             }

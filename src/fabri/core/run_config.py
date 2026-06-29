@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from fabri.core.agent import DEFAULT_MAX_PARALLEL_SPAWNS
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS
 from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, DEFAULT_TOP_K
 
@@ -38,6 +39,7 @@ class AgentRunConfig:
     max_steps: int = 10
     top_k: int = DEFAULT_TOP_K
     max_subquestions: int = DEFAULT_MAX_SUBQUESTIONS
+    max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS
     system_prompt: str = ""
     system_prompt_prefix: str = ""
     result_format: str = "toon"
@@ -70,6 +72,9 @@ class AgentRunConfig:
             max_steps=agent.get("max_steps", cls.max_steps),
             top_k=mem.get("top_k", cls.top_k),
             max_subquestions=decompose.get("max_subquestions", cls.max_subquestions),
+            max_parallel_spawns=tools.get(
+                "max_parallel_spawns", cls.max_parallel_spawns
+            ),
             system_prompt=agent.get("system_prompt", ""),
             system_prompt_prefix=agent.get("system_prompt_prefix", ""),
             result_format=tools.get("result_format", cls.result_format),
@@ -104,6 +109,7 @@ class AgentRunConfig:
             "max_steps": self.max_steps,
             "top_k": self.top_k,
             "max_subquestions": self.max_subquestions,
+            "max_parallel_spawns": self.max_parallel_spawns,
             "system_prompt": self.system_prompt,
             "system_prompt_prefix": self.system_prompt_prefix,
             "result_format": self.result_format,
