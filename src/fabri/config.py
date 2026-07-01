@@ -5,6 +5,7 @@ import yaml
 
 from fabri.core.agent import DEFAULT_MAX_PARALLEL_SPAWNS
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS
+from fabri.core.llm import Provider
 from fabri.memory.compress import DEFAULT_MAX_TOKENS
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD
 from fabri.memory.store import COLLECTION_NAME
@@ -84,8 +85,10 @@ DEFAULT_CONFIG = {
     "llm": {
         # Default provider is Gemini: lowest cost + generous free tier, so a
         # fresh `fabri run` needs only a GEMINI_API_KEY. Switch to anthropic /
-        # openai / openrouter per-config or per-role; all SDKs ship by default.
-        "provider": "gemini",
+        # openai / openrouter / bedrock per-config or per-role; all SDKs ship by
+        # default. `.value` keeps this a plain str (yaml-serializable) while
+        # sourcing the name from the Provider enum.
+        "provider": Provider.GEMINI.value,
         "model": "gemini-2.5-pro",
         "max_tokens": 1024,
         "api_key_env": "GEMINI_API_KEY",
@@ -100,7 +103,7 @@ DEFAULT_CONFIG = {
         #                       from the parent llm.* defaults
         #   - a string       -> just a model id; provider+api_key_env inherit
         #   - a dict         -> any subset of {provider, model, api_key_env,
-        #                        max_tokens, base_url, cache_messages}
+        #                        max_tokens, base_url, cache_messages, aws_region}
         # `_normalize_llm_roles` resolves these into a fully-merged dict per
         # role before any downstream code (runtime.build_role_llm, cli
         # pre-flight, etc.) reads them.
@@ -200,12 +203,15 @@ _LLM_ROLES = ("decompose", "planner", "narrator")
 
 # Per-role default api_key_env when the role's provider differs from the
 # parent llm.provider. Lets a user write `narrator: {provider: openai}`
-# without also having to spell out `api_key_env: OPENAI_API_KEY`.
+# without also having to spell out `api_key_env: OPENAI_API_KEY`. Keyed by the
+# Provider enum; StrEnum members look up by plain string too. Bedrock is
+# intentionally absent -- it has no api_key_env (creds come from the AWS chain),
+# so resolution yields None and the pre-flight skips it.
 _PROVIDER_DEFAULT_API_KEY_ENV = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "gemini": "GEMINI_API_KEY",
+    Provider.ANTHROPIC: "ANTHROPIC_API_KEY",
+    Provider.OPENAI: "OPENAI_API_KEY",
+    Provider.OPENROUTER: "OPENROUTER_API_KEY",
+    Provider.GEMINI: "GEMINI_API_KEY",
 }
 
 
@@ -214,7 +220,7 @@ def _normalize_llm_roles(cfg: dict) -> dict:
     `llm.roles` dict shaped {decompose|planner|narrator: <full role cfg>|None}.
 
     A role's full config is `{provider, model, api_key_env, max_tokens,
-    base_url, cache_messages}`. Missing keys inherit from the parent `llm.*`
+    base_url, cache_messages, aws_region}`. Missing keys inherit from the parent `llm.*`
     defaults. A role entry that is None means the role is disabled (no
     backend built; the agent loop falls back to main for decompose/planner,
     and silences narration for narrator).
@@ -225,14 +231,22 @@ def _normalize_llm_roles(cfg: dict) -> dict:
     shape (clean incremental migration).
     """
     llm = dict(cfg.get("llm") or {})
-    parent_provider = (llm.get("provider") or "gemini").lower()
+    parent_provider = (llm.get("provider") or Provider.GEMINI).lower()
     parent_defaults = {
         "provider": parent_provider,
         "model": llm.get("model"),
-        "api_key_env": llm.get("api_key_env") or _PROVIDER_DEFAULT_API_KEY_ENV.get(parent_provider),
+        # Bedrock has no api_key_env (creds come from the AWS chain), so force it
+        # None even if DEFAULT_CONFIG's gemini api_key_env leaked in via
+        # deep-merge -- otherwise the pre-flight would wrongly demand that key.
+        "api_key_env": None if parent_provider == Provider.BEDROCK
+        else (llm.get("api_key_env") or _PROVIDER_DEFAULT_API_KEY_ENV.get(parent_provider)),
         "max_tokens": llm.get("max_tokens"),
         "cache_messages": bool(llm.get("cache_messages", False)),
         "base_url": llm.get("base_url"),
+        # AWS Bedrock only: region for the bedrock-runtime client. None for
+        # other providers; falls back to AWS_REGION / AWS_DEFAULT_REGION at
+        # client-build time.
+        "aws_region": llm.get("aws_region"),
     }
 
     # Lift legacy flat keys into a synthetic role override, only when the
@@ -266,13 +280,17 @@ def _normalize_llm_roles(cfg: dict) -> dict:
         provider = (raw.get("provider") or parent_defaults["provider"]).lower()
         # When the role overrides the provider but not the api_key_env, pick
         # the provider's conventional env var instead of leaking the parent's.
-        api_key_env = raw.get("api_key_env")
-        if api_key_env is None:
-            api_key_env = (
-                parent_defaults["api_key_env"]
-                if provider == parent_defaults["provider"]
-                else _PROVIDER_DEFAULT_API_KEY_ENV.get(provider)
-            )
+        # Bedrock never uses one (AWS chain), so force None.
+        if provider == Provider.BEDROCK:
+            api_key_env = None
+        else:
+            api_key_env = raw.get("api_key_env")
+            if api_key_env is None:
+                api_key_env = (
+                    parent_defaults["api_key_env"]
+                    if provider == parent_defaults["provider"]
+                    else _PROVIDER_DEFAULT_API_KEY_ENV.get(provider)
+                )
         roles[role] = {
             "provider": provider,
             "model": raw.get("model") or parent_defaults["model"],
@@ -280,6 +298,7 @@ def _normalize_llm_roles(cfg: dict) -> dict:
             "max_tokens": raw.get("max_tokens") or parent_defaults["max_tokens"],
             "cache_messages": bool(raw.get("cache_messages", parent_defaults["cache_messages"])),
             "base_url": raw.get("base_url") or parent_defaults["base_url"],
+            "aws_region": raw.get("aws_region") or parent_defaults["aws_region"],
         }
 
     # `main` is always present; it's the parent llm.* defaults verbatim.

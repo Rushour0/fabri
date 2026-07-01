@@ -144,9 +144,19 @@ default — no extra install — so switching is a one-line config change:
 - **Anthropic / Claude**: `llm.provider: anthropic`, export `ANTHROPIC_API_KEY`
 - **OpenAI**: `llm.provider: openai`, export `OPENAI_API_KEY`
 - **OpenRouter**: `llm.provider: openrouter`, export `OPENROUTER_API_KEY`
+- **AWS Bedrock**: `llm.provider: bedrock`, set `llm.aws_region` (or
+  `AWS_REGION`). Credentials come from the standard AWS chain — env keys, a
+  shared profile, an IAM role, or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`)
+  — so there's no `api_key_env`. One Bedrock backend serves every
+  Converse-capable model: Claude (`us.anthropic.claude-…`), OpenAI `gpt-oss`
+  (`openai.gpt-oss-…`), Llama, Mistral, etc. (Gemini is not on Bedrock — use
+  the `gemini` provider for that.)
 
 Provider can be set per-role too (e.g. a Gemini Pro orchestrator with a
-Flash-Lite narrator), so a run can mix vendors.
+Flash-Lite narrator), so a run can mix vendors. Note that switching the parent
+`llm.provider` repoints every model-only role (one that sets just a model id)
+onto the new provider — give such roles their own `provider`, or set them to
+`null`, when the model id isn't valid on the new provider.
 
 Embeddings run locally via `sentence-transformers/all-MiniLM-L6-v2` —
 no embedding API calls.
@@ -205,10 +215,13 @@ agent:
                                  # (strict | warn | fallback) resolves it.
 
 llm:
-  provider: gemini               # or "anthropic" / "openai" / "openrouter"
+  provider: gemini               # gemini / anthropic / openai / openrouter / bedrock
   model: gemini-2.5-pro
   max_tokens: 1024
   api_key_env: GEMINI_API_KEY
+  # AWS Bedrock only (provider: bedrock): no api_key_env — creds come from the
+  # AWS chain; just set the region. See configs/bedrock.yaml for a full example.
+  # aws_region: us-east-1
 
 tools:
   manifest_dir:                  # one path or a list, merged into one registry

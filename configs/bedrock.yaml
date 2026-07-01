@@ -1,0 +1,71 @@
+# fabri — AWS Bedrock + Moonshot Kimi example (orchestrator + sub-agent worker)
+#
+# main agent  -> moonshot.kimi-k2-thinking   (reasoning model; plans + delegates)
+# sub-agent   -> moonshotai.kimi-k2.5         (general model; does the legwork)
+#
+# Both are region-agnostic Bedrock foundation models (no us./apac. prefix), so
+# they work from any Bedrock region your account has model access in. NB the two
+# ids use DIFFERENT vendor prefixes -- `moonshot.` vs `moonshotai.` -- copy them
+# exactly from the Bedrock console.
+#
+# Setup (no API key var -- creds come from the standard AWS chain):
+#   pip install fabri
+#   export AWS_BEARER_TOKEN_BEDROCK=...   # or AWS_ACCESS_KEY_ID/SECRET, profile, IAM role
+#   export AWS_REGION=ap-south-1          # or set llm.aws_region below
+#   fabri --config configs/bedrock.yaml run "summarize every README under src/"
+#
+# The `worker` tool below is a fabri sub-agent (tools.agents): calling it spawns
+# a fresh agent loop running the bedrock_subagent.yaml config (Kimi K2.5). The
+# orchestrator delegates independent, parallelizable subtasks to it.
+
+agent:
+  name: bedrock-kimi
+  max_steps: 12
+
+llm:
+  provider: bedrock
+  model: moonshot.kimi-k2-thinking
+  aws_region: ap-south-1            # or rely on AWS_REGION / AWS_DEFAULT_REGION
+  # Reasoning models spend output tokens on chain-of-thought, so give the cap
+  # headroom or every turn truncates. (Backend retries once at 2x on truncation.)
+  max_tokens: 8192
+  # The default narrator is a Gemini model; under a bedrock parent it would
+  # inherit provider=bedrock with a Gemini id and fail. Point it at the cheap
+  # K2.5 model instead (it inherits provider=bedrock + aws_region from above).
+  # (`narrator: null` would be cleaner but load_config's deep-merge rejects a
+  # scalar over the default narrator mapping.)
+  narrator:
+    model: moonshotai.kimi-k2.5
+    max_tokens: 60
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, write_file, list_dir, worker]
+  sandbox_root: .
+  result_format: toon
+  # Sub-agent(s) exposed as tools. Each runs its own config in a subprocess and
+  # inherits the AWS creds/region from the environment. Add more entries (or
+  # `model:` overrides) to fan work across several model tiers.
+  agents:
+    - name: worker
+      description: >-
+        Delegate a self-contained, independent subtask to a Kimi K2.5 sub-agent.
+        EXPENSIVE (re-runs the whole agent loop) -- spawn only for genuinely
+        parallel work too large to do inline. Pass a complete task; expect a
+        short summary back.
+      config: configs/bedrock_subagent.yaml
+      timeout_s: 600
+  decompose:
+    enabled: false
+    max_subquestions: 5
+  mcp_servers: []
+
+memory:
+  backend: sqlite
+  collection: bedrock_kimi
+  sqlite_path: .fabri/bedrock_kimi.db
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30

@@ -28,6 +28,7 @@ import yaml
 from fabri.builder.prompt_kit import new_prompt
 from fabri.builder.tool_writer import check_schema, new_tool
 from fabri.core import structured
+from fabri.core.llm import Provider
 from fabri.core.logging_setup import get_logger
 
 logger = get_logger()
@@ -240,7 +241,7 @@ def spec_to_config(spec: dict) -> dict:
             agent_cfg["response_schema"] = response_schema
 
     llm_cfg: dict = {
-        "provider": "anthropic",
+        "provider": Provider.ANTHROPIC.value,
         "model": main.get("model") or "claude-sonnet-4-6",
         "max_tokens": main.get("max_tokens") or 1024,
         "api_key_env": "ANTHROPIC_API_KEY",

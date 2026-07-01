@@ -62,6 +62,25 @@ PRICING: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash":      (0.30, 2.50),
     "gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-2.0-flash":      (0.10, 0.40),
+    # AWS Bedrock -- ids are vendor-namespaced (`anthropic.…`, `openai.…`,
+    # `meta.…`). `_rates_for` prefix-matches from position 0, so a cross-region
+    # inference profile (`us.` / `eu.` / `apac.` prefix) needs its OWN key --
+    # it won't match the bare id. Rates mirror the underlying model's list price
+    # and are reconciled to the Bedrock invoice like every other entry. Extend
+    # as new Bedrock models are adopted.
+    "anthropic.claude-3-5-sonnet":    (3.0, 15.0),
+    "us.anthropic.claude-3-5-sonnet": (3.0, 15.0),
+    "anthropic.claude-3-5-haiku":     (0.80, 4.0),
+    "us.anthropic.claude-3-5-haiku":  (0.80, 4.0),
+    "openai.gpt-oss-120b":            (0.15, 0.60),
+    "openai.gpt-oss-20b":             (0.07, 0.30),
+    # Moonshot AI Kimi on Bedrock -- region-agnostic foundation-model ids (no
+    # us./apac. prefix). NB the two ids use DIFFERENT vendor prefixes
+    # (`moonshot.` vs `moonshotai.`); match the console id exactly. Reasoning
+    # tokens (k2-thinking) bill as output. Rates per published Bedrock pricing,
+    # reconciled to invoice like the rest; ap-south-1 may differ slightly.
+    "moonshot.kimi-k2-thinking":      (0.60, 2.50),
+    "moonshotai.kimi-k2.5":           (0.60, 3.00),
 }
 
 

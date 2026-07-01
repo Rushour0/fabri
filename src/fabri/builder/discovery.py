@@ -19,6 +19,7 @@ LLM backends on the dry-run path.
 """
 from __future__ import annotations
 
+from fabri.core.llm import Provider
 from fabri.core.run_config import AgentRunConfig
 from fabri.runtime import ROLES, _resolve_role_cfg
 from fabri.tools.registry import ToolRegistry
@@ -81,11 +82,15 @@ def build_dry_run_plan(config: dict, tool_defs: list[dict]) -> dict:
         rcfg = _resolve_role_cfg(config, role)
         if rcfg is None or not rcfg.get("model"):
             continue
+        provider = (rcfg.get("provider") or Provider.GEMINI).lower()
         roles[role] = {
-            "provider": (rcfg.get("provider") or "anthropic"),
+            "provider": provider,
             "model": rcfg["model"],
             "max_tokens": int(rcfg.get("max_tokens") or 1024),
-            "api_key_env": rcfg.get("api_key_env") or "ANTHROPIC_API_KEY",
+            # Bedrock has no api_key_env (creds via the AWS chain); surface the
+            # region instead so the user isn't told they need an unrelated key.
+            "api_key_env": rcfg.get("api_key_env"),
+            "aws_region": rcfg.get("aws_region") if provider == Provider.BEDROCK else None,
         }
 
     mem = config.get("memory", {})
@@ -126,9 +131,15 @@ def render_dry_run_plan(plan: dict, *, task: str | None = None) -> str:
     if plan["roles"]:
         width = max(len(r) for r in plan["roles"])
         for role, info in plan["roles"].items():
+            if info["provider"] == Provider.BEDROCK:
+                cred = f"region={info.get('aws_region') or 'AWS_REGION env'}"
+            elif info.get("api_key_env"):
+                cred = f"key={info['api_key_env']}"
+            else:
+                cred = "key=—"
             lines.append(
                 f"  {role.ljust(width)}  {info['provider']}  {info['model']}  "
-                f"(max_tokens={info['max_tokens']}, key={info['api_key_env']})"
+                f"(max_tokens={info['max_tokens']}, {cred})"
             )
     else:
         lines.append("  (none configured)")
