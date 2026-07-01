@@ -6,6 +6,36 @@ that ships.
 
 ## Unreleased
 
+## 0.8.2 — 2026-07-01
+
+### AWS Bedrock provider (Converse API) + Provider enum
+
+- **`llm.provider: bedrock`** — a fifth provider, on the Bedrock **Converse API**
+  via boto3. One backend serves every Converse-capable model (Claude, OpenAI
+  `gpt-oss`, Llama, Mistral, Moonshot Kimi, …). Credentials resolve via the
+  standard AWS chain (env keys / shared profile / IAM role /
+  `AWS_BEARER_TOKEN_BEDROCK`); region from **`llm.aws_region`** or `AWS_REGION` /
+  `AWS_DEFAULT_REGION`. No `api_key_env` — a `bedrock` role forces it to `None`
+  (even if `DEFAULT_CONFIG`'s gemini key leaks in via deep-merge), and a
+  boto3-free region pre-flight replaces the api-key pre-flight so a missing
+  region fails early with a clean message.
+- **`BedrockLLMBackend`** translates fabri's Anthropic-shaped history to/from
+  Converse `toolUse`/`toolResult` blocks, coalesces consecutive same-role turns
+  (Converse requires strict alternation), threads `maxTokens` through
+  `inferenceConfig`, parses response blocks by key presence, keeps the
+  max-tokens retry-once parity, and maps terminal stopReasons (incl.
+  `model_context_window_exceeded`) to `LLMError`. boto3/botocore import lazily,
+  so `import fabri.*` stays dependency-free.
+- **`Provider` (StrEnum)** in `core/llm.py` is now the single source of truth for
+  provider ids — dispatch, the default-api-key map, config normalization,
+  dry-run, and the ideator reference it. Adding a provider = one enum member + a
+  dispatch branch.
+- **Pricing** entries for Bedrock, incl. `us.`-prefixed inference profiles and
+  Moonshot Kimi K2.5 / K2-thinking.
+- New dep: **`boto3>=1.39`** (floor for automatic `AWS_BEARER_TOKEN_BEDROCK`
+  detection). Example configs `configs/bedrock.yaml` (Kimi K2-thinking
+  orchestrator) + `configs/bedrock_subagent.yaml` (Kimi K2.5 worker).
+
 ## 0.8.1 — 2026-06-29
 
 ### Bounded parallel sub-agent fan-out
