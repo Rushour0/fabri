@@ -24,3 +24,5 @@ dist/
 decks/
 licenses-issued/
 
+# local env / secrets (AWS creds, API keys) — never commit
+.env*

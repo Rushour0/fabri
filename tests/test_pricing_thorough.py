@@ -131,6 +131,31 @@ def test_unknown_openrouter_id_returns_none_with_warning(caplog):
     assert any("no pricing entry" in rec.message for rec in caplog.records)
 
 
+# ---- AWS Bedrock: vendor-namespaced ids, incl. region-profile prefixes -----
+
+def test_bedrock_claude_sonnet_priced_at_sonnet_rate():
+    """Bare Bedrock Claude id, plus a date-suffixed model id, both resolve via
+    the `anthropic.claude-3-5-sonnet` prefix entry to the Sonnet rate."""
+    bare = LLMUsage(input_tokens=M, output_tokens=M, model="anthropic.claude-3-5-sonnet")
+    suffixed = LLMUsage(input_tokens=M, output_tokens=M, model="anthropic.claude-3-5-sonnet-20241022-v2:0")
+    assert cost_for(bare) == 18.0  # $3 input + $15 output
+    assert cost_for(suffixed) == 18.0
+
+
+def test_bedrock_region_prefixed_claude_needs_own_entry():
+    """`_rates_for` anchors `startswith` at position 0, so a `us.`-prefixed
+    inference-profile id does NOT match the bare `anthropic.…` key -- it has its
+    own entry and must still price."""
+    usage = LLMUsage(input_tokens=M, output_tokens=M, model="us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+    assert cost_for(usage) == 18.0
+
+
+def test_bedrock_openai_gpt_oss_priced():
+    usage = LLMUsage(input_tokens=M, output_tokens=M, model="openai.gpt-oss-120b")
+    # gpt-oss-120b: $0.15 input + $0.60 output = $0.75 per 1M tokens
+    assert abs(cost_for(usage) - 0.75) < 1e-9
+
+
 # ---- all four token buckets in one usage -----------------------------------
 
 def test_all_four_buckets_sonnet_hand_computed():

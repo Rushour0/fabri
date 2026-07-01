@@ -7,6 +7,7 @@ from fabri.runtime import (
     build_decompose_llm,
     build_narrator_llm,
     build_role_llm,
+    find_bedrock_roles_missing_region,
     find_missing_role_api_keys,
 )
 
@@ -178,6 +179,166 @@ def test_build_role_llm_unknown_provider_raises():
     cfg = _normalize_llm_roles(_flat({"decompose": {"provider": "bogus", "model": "m"}}))
     with pytest.raises(ValueError, match="unknown llm provider"):
         build_role_llm(cfg, "decompose")
+
+
+# --------------------------------------------------------------------------- #
+# AWS Bedrock provider: dispatch, aws_region threading, no api_key_env
+# --------------------------------------------------------------------------- #
+def test_bedrock_main_resolves_no_api_key_and_carries_region():
+    """A bedrock parent resolves api_key_env to None (creds via the AWS chain)
+    and threads aws_region onto every role, including main."""
+    cfg = _normalize_llm_roles({
+        "llm": {
+            "provider": "bedrock",
+            "model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "aws_region": "us-east-1",
+            "max_tokens": 2048,
+        },
+    })
+    main = cfg["llm"]["roles"]["main"]
+    assert main["provider"] == "bedrock"
+    assert main["api_key_env"] is None
+    assert main["aws_region"] == "us-east-1"
+
+
+def test_bedrock_role_override_inherits_parent_region():
+    """A role flipped to bedrock without its own aws_region inherits the parent's."""
+    cfg = _normalize_llm_roles(_flat({
+        "aws_region": "eu-west-1",
+        "decompose": {"provider": "bedrock", "model": "us.anthropic.claude-3-5-haiku-20241022-v1:0"},
+    }))
+    role = cfg["llm"]["roles"]["decompose"]
+    assert role["provider"] == "bedrock"
+    assert role["api_key_env"] is None
+    assert role["aws_region"] == "eu-west-1"
+
+
+def test_bedrock_role_explicit_region_wins_over_parent():
+    cfg = _normalize_llm_roles(_flat({
+        "aws_region": "eu-west-1",
+        "decompose": {"provider": "bedrock", "model": "m", "aws_region": "ap-south-1"},
+    }))
+    assert cfg["llm"]["roles"]["decompose"]["aws_region"] == "ap-south-1"
+
+
+def test_build_role_llm_routes_bedrock_to_bedrock_backend(monkeypatch):
+    """`provider: bedrock` dispatches to BedrockLLMBackend with model + region
+    and NO api_key_env. Patched so we don't need boto3."""
+    from fabri import runtime
+    captured = {}
+
+    class _Stub:
+        def __init__(self, model, tools, max_tokens, region):
+            captured.update(locals())
+
+    monkeypatch.setattr(runtime, "BedrockLLMBackend", _Stub)
+    cfg = _normalize_llm_roles({
+        "llm": {
+            "provider": "bedrock",
+            "model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "aws_region": "us-east-1",
+            "max_tokens": 2048,
+        },
+    })
+    backend = build_role_llm(cfg, "main")
+    assert isinstance(backend, _Stub)
+    assert captured["model"] == "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+    assert captured["region"] == "us-east-1"
+
+
+def test_provider_enum_coerce_and_membership():
+    """The Provider enum is the canonical provider set. coerce is
+    case-insensitive, returns None for unknown/absent, and members compare +
+    hash as their lowercase string (so they work as dict keys and == checks)."""
+    from fabri.config import _PROVIDER_DEFAULT_API_KEY_ENV
+    from fabri.core.llm import Provider
+
+    assert Provider.coerce("BEDROCK") is Provider.BEDROCK
+    assert Provider.coerce("bedrock") == "bedrock"
+    assert Provider.coerce("bogus") is None
+    assert Provider.coerce(None) is None
+    # StrEnum members look up a string-keyed-or-enum-keyed dict by plain string
+    assert _PROVIDER_DEFAULT_API_KEY_ENV.get("anthropic") == "ANTHROPIC_API_KEY"
+    assert _PROVIDER_DEFAULT_API_KEY_ENV.get(Provider.GEMINI) == "GEMINI_API_KEY"
+    assert Provider.BEDROCK not in _PROVIDER_DEFAULT_API_KEY_ENV  # chain-auth
+
+
+def test_normalized_provider_is_plain_str_yaml_safe():
+    """The stored role `provider` must be a plain str (not a StrEnum instance)
+    so a normalized config round-trips through yaml.safe_dump without a custom
+    representer."""
+    import yaml
+    cfg = _normalize_llm_roles({"llm": {"provider": "bedrock", "model": "m", "aws_region": "ap-south-1"}})
+    prov = cfg["llm"]["roles"]["main"]["provider"]
+    assert type(prov) is str  # exactly str, not a Provider subclass instance
+    yaml.safe_dump(cfg)  # must not raise a RepresenterError
+
+
+def test_bedrock_forces_api_key_env_none_even_when_inherited():
+    """Regression: DEFAULT_CONFIG ships api_key_env=GEMINI_API_KEY; once it's
+    deep-merged into a bedrock config that scalar leaks into llm.api_key_env. A
+    bedrock provider must still resolve api_key_env to None so the pre-flight
+    doesn't demand an unrelated key. Covers both parent and role-override."""
+    parent = _normalize_llm_roles({
+        "llm": {
+            "provider": "bedrock",
+            "model": "moonshot.kimi-k2-thinking",
+            "api_key_env": "GEMINI_API_KEY",  # the leaked default
+            "aws_region": "ap-south-1",
+            "narrator": {"provider": "bedrock", "model": "moonshotai.kimi-k2.5", "api_key_env": "GEMINI_API_KEY"},
+        },
+    })
+    assert parent["llm"]["roles"]["main"]["api_key_env"] is None
+    assert parent["llm"]["roles"]["narrator"]["api_key_env"] is None
+
+
+def test_find_missing_role_api_keys_ignores_bedrock(monkeypatch):
+    """A bedrock role has no api_key_env, so the api-key pre-flight reports
+    nothing for it even with no AWS env set."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = _normalize_llm_roles({
+        "llm": {
+            "provider": "bedrock",
+            "model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "aws_region": "us-east-1",
+            "max_tokens": 1024,
+        },
+    })
+    assert find_missing_role_api_keys(cfg) == {}
+
+
+def test_find_bedrock_roles_missing_region_flags_when_unset(monkeypatch):
+    """No aws_region and no AWS_REGION env -> the bedrock role is flagged."""
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    cfg = _normalize_llm_roles({
+        "llm": {"provider": "bedrock", "model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "max_tokens": 1024},
+    })
+    assert "main" in find_bedrock_roles_missing_region(cfg)
+
+
+def test_find_bedrock_roles_missing_region_satisfied_by_config(monkeypatch):
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    cfg = _normalize_llm_roles({
+        "llm": {"provider": "bedrock", "model": "m", "aws_region": "us-east-1", "max_tokens": 1024},
+    })
+    assert find_bedrock_roles_missing_region(cfg) == []
+
+
+def test_find_bedrock_roles_missing_region_satisfied_by_env(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    cfg = _normalize_llm_roles({
+        "llm": {"provider": "bedrock", "model": "m", "max_tokens": 1024},
+    })
+    assert find_bedrock_roles_missing_region(cfg) == []
+
+
+def test_find_bedrock_roles_missing_region_ignores_non_bedrock(monkeypatch):
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    cfg = _normalize_llm_roles(_flat())  # anthropic main
+    assert find_bedrock_roles_missing_region(cfg) == []
 
 
 def test_find_missing_role_api_keys_reports_all(monkeypatch):

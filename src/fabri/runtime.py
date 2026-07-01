@@ -6,7 +6,13 @@ from pathlib import Path
 
 from fabri.config import DEFAULT_TOOLS_DIR
 from fabri.core.agent import DECOMPOSE_TOOL_NAME
-from fabri.core.llm import AnthropicLLMBackend, GeminiLLMBackend, OpenAILLMBackend
+from fabri.core.llm import (
+    AnthropicLLMBackend,
+    BedrockLLMBackend,
+    GeminiLLMBackend,
+    OpenAILLMBackend,
+    Provider,
+)
 from fabri.memory.store import QdrantMemoryStore
 from fabri.tools.agent_tool import make_agent_tool_manifest
 from fabri.tools.registry import ToolRegistry
@@ -87,14 +93,14 @@ def _resolve_role_cfg(config: dict, role: str) -> dict | None:
 
 
 def _instantiate(rcfg: dict, tool_defs: list[dict]):
-    """Single point of provider dispatch -- adding a fourth provider later
-    (Vertex, Bedrock, Groq, ...) means one new branch here and nothing
-    else."""
-    provider = (rcfg.get("provider") or "gemini").lower()
+    """Single point of provider dispatch -- adding a provider means a new
+    Provider enum member (fabri.core.llm) plus one new branch here."""
+    raw_provider = rcfg.get("provider")
+    provider = Provider.coerce(raw_provider) if raw_provider else Provider.GEMINI
     model = rcfg["model"]
     max_tokens = int(rcfg.get("max_tokens") or 1024)
     api_key_env = rcfg.get("api_key_env") or "GEMINI_API_KEY"
-    if provider == "anthropic":
+    if provider == Provider.ANTHROPIC:
         return AnthropicLLMBackend(
             model=model,
             tools=tool_defs,
@@ -102,9 +108,9 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
             api_key_env=api_key_env,
             cache_messages=bool(rcfg.get("cache_messages", False)),
         )
-    if provider in ("openai", "openrouter"):
+    if provider in (Provider.OPENAI, Provider.OPENROUTER):
         base_url = rcfg.get("base_url") or (
-            _OPENROUTER_BASE_URL if provider == "openrouter" else None
+            _OPENROUTER_BASE_URL if provider == Provider.OPENROUTER else None
         )
         return OpenAILLMBackend(
             model=model,
@@ -113,14 +119,25 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
             api_key_env=api_key_env,
             base_url=base_url,
         )
-    if provider == "gemini":
+    if provider == Provider.GEMINI:
         return GeminiLLMBackend(
             model=model,
             tools=tool_defs,
             max_tokens=max_tokens,
             api_key_env=api_key_env,
         )
-    raise ValueError(f"unknown llm provider: {provider!r}")
+    if provider == Provider.BEDROCK:
+        # No api_key_env: Bedrock creds come from boto3's default chain (env
+        # keys / profile / IAM role / AWS_BEARER_TOKEN_BEDROCK). Region comes
+        # from llm.aws_region or AWS_REGION / AWS_DEFAULT_REGION.
+        return BedrockLLMBackend(
+            model=model,
+            tools=tool_defs,
+            max_tokens=max_tokens,
+            region=rcfg.get("aws_region"),
+        )
+    # coerce() returned None (unknown string) or a member with no branch above.
+    raise ValueError(f"unknown llm provider: {raw_provider!r}")
 
 
 def build_role_llm(config: dict, role: str, tool_defs: list[dict] | None = None):
@@ -169,6 +186,25 @@ def find_missing_role_api_keys(config: dict) -> dict[str, list[str]]:
             continue
         needed.setdefault(env, []).append(role)
     return {env: roles for env, roles in needed.items() if not os.environ.get(env)}
+
+
+def find_bedrock_roles_missing_region(config: dict) -> list[str]:
+    """Roles configured with `provider: bedrock` that have no region available
+    (neither `aws_region` nor AWS_REGION / AWS_DEFAULT_REGION). Bedrock has no
+    single api_key_env to pre-flight, but Converse needs a region; this gives
+    the CLI a cheap, boto3-free fail-early check mirroring the api-key
+    pre-flight the other providers get. Credentials themselves still validate
+    lazily on the first call (wrapped in LLMError)."""
+    if os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"):
+        return []
+    missing: list[str] = []
+    for role in ROLES:
+        rcfg = _resolve_role_cfg(config, role)
+        if rcfg is None or not rcfg.get("model"):
+            continue
+        if (rcfg.get("provider") or "").lower() == Provider.BEDROCK and not rcfg.get("aws_region"):
+            missing.append(role)
+    return missing
 
 
 def build_planner_llm(config: dict):

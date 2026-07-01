@@ -58,22 +58,32 @@ def _require_api_key(api_key_env: str) -> None:
 
 def _require_role_api_keys(config: dict) -> None:
     """Pre-flight every distinct api_key_env across all configured roles
-    (main + decompose + planner + narrator). Reports ALL missing vars in a
-    single error so a multi-provider config doesn't fail halfway through
-    setup. CLI wrapper: prints to stderr + exits 1 rather than raising."""
-    from fabri.runtime import find_missing_role_api_keys
+    (main + decompose + planner + narrator), plus a boto3-free region check for
+    any bedrock role (Bedrock has no api_key_env -- creds come from the AWS
+    chain -- but Converse still needs a region). Reports ALL problems in a
+    single error so a multi-provider config doesn't fail halfway through setup.
+    CLI wrapper: prints to stderr + exits 1 rather than raising."""
+    from fabri.runtime import (
+        find_bedrock_roles_missing_region,
+        find_missing_role_api_keys,
+    )
 
-    missing = find_missing_role_api_keys(config)
-    if not missing:
-        return
     lines = [
         f"  {env} (used by: {', '.join(roles)})"
-        for env, roles in missing.items()
+        for env, roles in find_missing_role_api_keys(config).items()
     ]
+    bedrock_no_region = find_bedrock_roles_missing_region(config)
+    if bedrock_no_region:
+        lines.append(
+            f"  AWS region for bedrock role(s): {', '.join(bedrock_no_region)} "
+            f"(set llm.aws_region or AWS_REGION)"
+        )
+    if not lines:
+        return
     print(
-        "Missing required API key environment variables:\n"
+        "Missing required LLM credentials/configuration:\n"
         + "\n".join(lines)
-        + "\nExport each before running the live agent.",
+        + "\nExport/set each before running the live agent.",
         file=sys.stderr,
     )
     sys.exit(1)

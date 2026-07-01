@@ -1,0 +1,40 @@
+# fabri — Bedrock Kimi K2.5 sub-agent (spawned by configs/bedrock.yaml's `worker`)
+#
+# Runs as a subprocess via agent_runner_tool.py; inherits AWS creds + region from
+# the parent's environment. Kept lean: file tools only, no further spawning, its
+# own memory namespace. Point a `tools.agents[].model` override here if you want
+# the same yaml served by a different Kimi/Bedrock model per worker.
+
+agent:
+  name: bedrock-kimi-worker
+  max_steps: 10
+
+llm:
+  provider: bedrock
+  model: moonshotai.kimi-k2.5
+  aws_region: ap-south-1            # or rely on AWS_REGION / AWS_DEFAULT_REGION
+  max_tokens: 4096
+  # Inherits provider=bedrock + aws_region; keeps narration off the Gemini default.
+  narrator:
+    model: moonshotai.kimi-k2.5
+    max_tokens: 60
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, write_file, list_dir]
+  sandbox_root: .
+  result_format: toon
+  decompose:
+    enabled: false
+    max_subquestions: 5
+  mcp_servers: []
+
+memory:
+  backend: sqlite
+  collection: bedrock_kimi_worker
+  sqlite_path: .fabri/bedrock_kimi.db
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30

@@ -1,11 +1,41 @@
 import json
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Callable, Protocol
 
 from fabri.core.logging_setup import get_logger
 
 logger = get_logger()
+
+
+class Provider(StrEnum):
+    """Canonical LLM provider ids -- the single source of truth for which
+    providers exist. Adding a provider = add a member here, a default api-key
+    entry in config._PROVIDER_DEFAULT_API_KEY_ENV (or leave it out for
+    chain-auth providers like Bedrock), and a dispatch branch in
+    runtime._instantiate. StrEnum so a member compares/hashes as its lowercase
+    string value -- it matches the `llm.provider` yaml field directly, works as
+    a dict key looked up by plain string, and serializes back to yaml cleanly."""
+
+    GEMINI = "gemini"
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+    OPENROUTER = "openrouter"
+    BEDROCK = "bedrock"
+
+    @classmethod
+    def coerce(cls, value: "str | Provider | None") -> "Provider | None":
+        """Map a raw `llm.provider` value to a member (case-insensitive), or None
+        if absent/unknown. Callers decide how to treat None -- the default
+        (`gemini`) lives in the caller; an unknown string surfaces as the
+        user-facing 'unknown llm provider' error at dispatch."""
+        if value is None:
+            return None
+        try:
+            return cls(str(value).lower())
+        except ValueError:
+            return None
 
 # Upper bound for the one-shot retry after a max_tokens truncation. fabri uses
 # non-streaming requests, which risk SDK HTTP timeouts on very long completions,
@@ -787,3 +817,276 @@ class GeminiLLMBackend:
             return None
         # google-genai uses a FinishReason enum; normalize to its name string.
         return getattr(fr, "name", str(fr))
+
+
+# Converse stopReasons that are terminal failures, NOT a recoverable truncation:
+# returning the (empty/partial) message as a real answer would be wrong, so the
+# backend maps these to LLMError. model_context_window_exceeded means the INPUT
+# is too big -- raising maxTokens can't help, so it must NOT go through the
+# max_tokens retry path.
+_BEDROCK_FAILURE_STOP_REASONS = frozenset(
+    {
+        "content_filtered",
+        "guardrail_intervened",
+        "malformed_tool_use",
+        "malformed_model_output",
+        "model_context_window_exceeded",
+    }
+)
+
+
+class BedrockLLMBackend:
+    """Fourth real provider, on AWS Bedrock's Converse API via boto3. Converse is
+    a single unified request/response shape (incl. tool use) that works across
+    every Converse-capable Bedrock model -- Claude, OpenAI gpt-oss, Llama,
+    Mistral, etc. -- so one backend covers them all.
+
+    Same step() contract as the other backends: fabri keeps its history in
+    Anthropic's tool_use/tool_result block shape, and this backend translates it
+    into Converse's toolUse/toolResult content blocks on the way out, and the
+    response content blocks back into ToolCalls on the way in. Two Converse
+    wrinkles drive the translation:
+      * `maxTokens` lives in `inferenceConfig`, not as a top-level arg, and
+        `system` is a list of blocks, not a string.
+      * Converse requires strict user/assistant alternation and does NOT merge
+        consecutive same-role turns, so `_to_converse_messages` coalesces them.
+
+    Credentials resolve via boto3's default chain (env keys, shared profile, IAM
+    role, or the AWS_BEARER_TOKEN_BEDROCK API key); region comes from the
+    `aws_region` config field or AWS_REGION / AWS_DEFAULT_REGION. Not
+    feature-complete (no streaming/vision; prompt caching needs explicit
+    cachePoint blocks, which fabri doesn't insert, so the cache usage fields stay
+    zero)."""
+
+    def __init__(
+        self,
+        model: str = "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        tools: list[dict] | None = None,
+        max_tokens: int = 1024,
+        region: str | None = None,
+    ):
+        import os
+
+        import boto3
+        from botocore.config import Config
+
+        resolved_region = (
+            region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        )
+        try:
+            # max_attempts=1 so fabri's _call_with_retry owns retry rather than
+            # double-retrying on top of botocore's default standard mode. boto3
+            # raises NoRegionError here when no region is resolvable -- wrap it so
+            # the failure names the fix instead of leaking a botocore traceback.
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=resolved_region,
+                config=Config(retries={"mode": "standard", "max_attempts": 1}),
+            )
+        except Exception as e:
+            raise LLMError(
+                f"bedrock client init failed (set llm.aws_region or AWS_REGION, and "
+                f"AWS credentials): {e}"
+            ) from e
+        self._model = model
+        self._max_tokens = max_tokens
+        self._tools: list[dict] = []
+        self.set_tools(tools or [])
+
+    def set_tools(self, tool_defs: list[dict]) -> None:
+        # Converse wants each tool wrapped in a `toolSpec` with the JSON Schema
+        # under `inputSchema.json`. Stored ready-to-send; passed only when
+        # non-empty (Converse 400s on an empty toolConfig.tools).
+        self._tools = [
+            {
+                "toolSpec": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "inputSchema": {"json": t.get("input_schema") or {"type": "object"}},
+                }
+            }
+            for t in (tool_defs or [])
+        ]
+
+    @staticmethod
+    def _to_converse_messages(messages: list[dict]) -> list[dict]:
+        """Translate the agent history (string content, or Anthropic-style
+        tool_use/tool_result blocks) into Converse messages, coalescing
+        consecutive same-role turns into one (Converse requires strict
+        alternation and won't merge them itself)."""
+        out: list[dict] = []
+
+        def _emit(role: str, blocks: list[dict]) -> None:
+            if not blocks:
+                return
+            if out and out[-1]["role"] == role:
+                out[-1]["content"].extend(blocks)
+            else:
+                out.append({"role": role, "content": blocks})
+
+        for m in messages:
+            role = "assistant" if m["role"] == "assistant" else "user"
+            content = m["content"]
+            if isinstance(content, str):
+                if content.strip():
+                    _emit(role, [{"text": content}])
+                continue
+
+            blocks: list[dict] = []
+            for b in content:
+                btype = b.get("type")
+                if btype == "text":
+                    if (b.get("text") or "").strip():
+                        blocks.append({"text": b["text"]})
+                elif btype == "tool_use":
+                    blocks.append(
+                        {
+                            "toolUse": {
+                                "toolUseId": b.get("id"),
+                                "name": b["name"],
+                                "input": b.get("input") or {},
+                            }
+                        }
+                    )
+                elif btype == "tool_result":
+                    raw = b.get("content")
+                    rc = [{"text": raw}] if isinstance(raw, str) else [{"json": raw}]
+                    blocks.append(
+                        {"toolResult": {"toolUseId": b.get("tool_use_id"), "content": rc}}
+                    )
+                else:
+                    blocks.append({"text": json.dumps(b)})
+            _emit(role, blocks)
+        return out
+
+    def prewarm(self, system: str) -> LLMUsage:
+        # Converse has no separate cache-write step (prompt caching needs explicit
+        # cachePoint blocks, which fabri doesn't insert); uniform no-op so callers
+        # don't special-case.
+        return LLMUsage(model=self._model)
+
+    def step(self, system: str, messages: list[dict]) -> LLMResponse:
+        import botocore.exceptions
+
+        # Resolve the transient tuple HERE (not in __init__) so a backend built
+        # via __new__ in tests -- which skips __init__ -- still works, mirroring
+        # the Gemini backend's in-step error import.
+        transient = (
+            self._client.exceptions.ThrottlingException,
+            self._client.exceptions.ModelTimeoutException,
+            self._client.exceptions.InternalServerException,
+            self._client.exceptions.ServiceUnavailableException,
+            self._client.exceptions.ModelNotReadyException,
+            botocore.exceptions.EndpointConnectionError,
+        )
+
+        conv_messages = self._to_converse_messages(messages)
+        system_blocks = [{"text": system}] if system and system.strip() else None
+
+        def _create(max_tokens: int):
+            kwargs: dict = {
+                "modelId": self._model,
+                "messages": conv_messages,
+                "inferenceConfig": {"maxTokens": max_tokens},
+            }
+            if system_blocks:
+                kwargs["system"] = system_blocks
+            if self._tools:
+                kwargs["toolConfig"] = {"tools": self._tools}
+            return _call_with_retry(
+                lambda: self._client.converse(**kwargs), transient=transient
+            )
+
+        t0 = time.monotonic()
+        truncated_attempt = None
+        try:
+            resp = _create(self._max_tokens)
+            # Parity with the other backends: retry ONCE at a higher cap on a
+            # max_tokens truncation before failing; never accept a truncated
+            # answer as success.
+            if resp.get("stopReason") == "max_tokens":
+                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                if retry_cap > self._max_tokens:
+                    logger.warning(
+                        "bedrock response truncated at max_tokens=%d; retrying once at %d",
+                        self._max_tokens,
+                        retry_cap,
+                    )
+                    truncated_attempt = resp
+                    resp = _create(retry_cap)
+        except botocore.exceptions.ClientError as e:
+            raise LLMError(f"bedrock API error: {e}") from e
+        except botocore.exceptions.BotoCoreError as e:
+            raise LLMError(
+                f"bedrock client error (check AWS region/credentials): {e}"
+            ) from e
+
+        elapsed = time.monotonic() - t0
+        stop_reason = resp.get("stopReason")
+
+        # The discarded truncated attempt was still billed -- fold its tokens in.
+        # Cache keys may be absent on a usage dict, so .get-default them to 0.
+        def _u(src, key: str) -> int:
+            return ((src or {}).get("usage") or {}).get(key, 0) or 0
+
+        call_usage = LLMUsage(
+            input_tokens=_u(resp, "inputTokens") + _u(truncated_attempt, "inputTokens"),
+            output_tokens=_u(resp, "outputTokens") + _u(truncated_attempt, "outputTokens"),
+            cache_read_input_tokens=_u(resp, "cacheReadInputTokens")
+            + _u(truncated_attempt, "cacheReadInputTokens"),
+            cache_creation_input_tokens=_u(resp, "cacheWriteInputTokens")
+            + _u(truncated_attempt, "cacheWriteInputTokens"),
+            model=self._model,
+        )
+        logger.info(
+            "bedrock call: model=%s latency=%.2fs input_tokens=%d output_tokens=%d "
+            "cache_read=%d cache_write=%d stop=%s",
+            self._model,
+            elapsed,
+            call_usage.input_tokens,
+            call_usage.output_tokens,
+            call_usage.cache_read_input_tokens,
+            call_usage.cache_creation_input_tokens,
+            stop_reason,
+        )
+
+        if stop_reason == "max_tokens":
+            raise LLMError(
+                f"bedrock response truncated at max_tokens even after retry to "
+                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
+                f"or split this turn into smaller actions"
+            )
+        if stop_reason in _BEDROCK_FAILURE_STOP_REASONS:
+            raise LLMError(
+                f"bedrock returned stopReason={stop_reason!r} (model={self._model}); "
+                f"cannot treat as a valid answer"
+            )
+
+        # Converse response blocks are bare dicts keyed by content type -- there
+        # is NO `type` field. Parse by key presence; toolUse.input is already a
+        # dict (no json.loads). Text accompanying tool calls is reasoning prose.
+        message = (resp.get("output") or {}).get("message") or {}
+        tool_calls = []
+        text_chunks = []
+        for block in message.get("content") or []:
+            if "toolUse" in block:
+                tu = block["toolUse"]
+                tool_calls.append(
+                    ToolCall(name=tu["name"], args=tu.get("input") or {}, id=tu.get("toolUseId"))
+                )
+            elif block.get("text"):
+                text_chunks.append(block["text"])
+        text = "".join(text_chunks).strip()
+
+        if tool_calls:
+            return LLMResponse(
+                tool_calls=tool_calls,
+                stop_reason=stop_reason,
+                thinking_text=text or None,
+                usage=call_usage,
+            )
+        return LLMResponse(
+            final_text=text or None,
+            stop_reason=stop_reason,
+            usage=call_usage,
+        )
