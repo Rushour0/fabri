@@ -1,0 +1,8 @@
+# Merged into the project's agent.yaml on install. Registers a `syslog` ingest
+# adapter backed by the bundled polyglot executable, so `fabri ingest app.log
+# --adapter syslog` works with no Python on the host side.
+ingest:
+  adapters:
+    - name: syslog
+      kind: tool
+      manifest: tools/agent_tools/syslog_adapter.json

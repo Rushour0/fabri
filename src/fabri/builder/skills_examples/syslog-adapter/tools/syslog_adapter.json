@@ -1,0 +1,8 @@
+{
+  "name": "syslog_adapter",
+  "description": "Polyglot ingest adapter: reads {\"lines\": [...]} and returns {\"sessions\": [...]} of fabri events. Parses simple `key=value` log lines (trace=, tool=, status=, error=, task=).",
+  "command": ["python3", "syslog_adapter.py"],
+  "input_schema": {"type": "object", "properties": {"lines": {"type": "array"}, "options": {"type": "object"}}},
+  "output_schema": {"type": "object", "properties": {"sessions": {"type": "array"}}},
+  "timeout_s": 30
+}

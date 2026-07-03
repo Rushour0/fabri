@@ -6,6 +6,48 @@ that ships.
 
 ## Unreleased
 
+### The Improver — plug-and-play log ingestion (`fabri.readlogs`)
+
+The self-improving memory loop could only ever learn from fabri's *own* runs —
+`process_trace` was hard-wired to read a native-schema trace off disk. The
+**Improver** opens that loop to any log you already have: point fabri at app
+logs, CI output, or OTel/OpenAI traces and the failures + successes in them mine
+into the *same* memory the agent retrieves from.
+
+- **SDK-first.** `fabri.readlogs(source, *, adapter="auto", synthesize=False,
+  store=None, config=None, ...)` returns an `IngestSummary` (sessions, events,
+  `by_kind`, `skipped_lines`, `.entries`, and honest `llm_cost_usd`). The
+  reusable object form is `fabri.Improver` / `Improver.from_config(...)` with
+  `.ingest(...)` (batch: file, dir, stdin, or iterator) and `.ingest_stream(...)`
+  (one summary per session as it flushes). Omit `store`/`config` and it resolves
+  them from `agent.yaml`, so an ingested guideline lands in the collection the
+  agent already reads.
+- **Deterministic-first ($0).** The default path is LLM-free — it mines
+  postmortems, deterministic failure/success text keyed on
+  `(task, tool, error-signature)` (so repeats dedup/merge like postmortems), and
+  never calls a provider (a `NoOpLLM` sentinel enforces it). `synthesize=True`
+  (or `--synthesize`) turns on LLM guideline compression at token cost.
+- **Adapters plug in three ways** behind one open registry: the
+  `@fabri.adapter("name")` decorator, a declarative config field-map
+  (`ConfigMapAdapter`, zero code), and a polyglot executable via the tool
+  contract (`ToolAdapter`). Built-ins ship for `jsonl` (native passthrough),
+  `regex` (plaintext), and `otel`/`openai` (structured traces), with
+  `adapter="auto"` sniffing. Third-party adapters are discovered via the
+  `fabri.adapters` setuptools entry-point group (log-and-skip on a bad plugin;
+  `ingest.load_plugins: false` disables discovery).
+- **CLI.** `fabri ingest SOURCE [--adapter NAME] [--synthesize] [--option K=V]
+  [--dry-run] [--json]` (`-` = stdin), plus `fabri ingest --list-adapters`.
+- **Config.** New `ingest` section (`default_adapter`, `synthesize`,
+  `load_plugins`, `record_postmortems`, `adapters: []`). Declared `configmap`/
+  `tool` adapters are addressable by name with no Python.
+- **Enabling refactor.** `process_trace` gains backward-compatible `events=` and
+  `synthesize=` params — pass an in-memory event list instead of reading a trace
+  file, and swap the two LLM miners for deterministic text. Every existing caller
+  is byte-identical (full suite green with Qdrant).
+- **Example skill** `syslog-adapter` demonstrates the polyglot `ToolAdapter`
+  path end to end (`fabri skills install` → `fabri ingest app.log --adapter
+  syslog`). New package `src/fabri/ingest/`; 22 offline tests.
+
 ## 0.8.2 — 2026-07-01
 
 ### AWS Bedrock provider (Converse API) + Provider enum

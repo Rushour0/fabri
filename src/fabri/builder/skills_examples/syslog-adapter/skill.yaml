@@ -1,0 +1,7 @@
+name: syslog-adapter
+description: >-
+  Example Improver skill -- a polyglot log-ingestion adapter. Ships a standalone
+  executable that reads raw log lines and emits fabri sessions, plus the config
+  to register it as the `syslog` ingest adapter. Demonstrates the tool-contract
+  (any-language) path: `fabri ingest app.log --adapter syslog`.
+version: 0.1.0

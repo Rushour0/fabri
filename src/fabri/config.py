@@ -169,6 +169,26 @@ DEFAULT_CONFIG = {
         # failure/success-only mining (and unchanged entry counts).
         "record_postmortems": False,
     },
+    # The Improver (fabri.readlogs / `fabri ingest`): feed EXTERNAL logs into the
+    # same self-improving memory loop. All keys default so omission = today's
+    # behaviour (the loop only ever mined fabri's own runs).
+    "ingest": {
+        "default_adapter": "auto",
+        # Deterministic-first: the default ingest path is LLM-free ($0). Flip to
+        # true (or pass --synthesize) to compress mined signals into richer
+        # guidelines at token cost.
+        "synthesize": False,
+        # Honor third-party adapters registered via the `fabri.adapters`
+        # setuptools entry-point group. Set false on a locked-down host to only
+        # use in-repo/config-declared adapters.
+        "load_plugins": True,
+        # External logs default to writing the whole-run postmortem signal.
+        "record_postmortems": True,
+        # Declarative adapters addressable by name with no Python. Each entry:
+        #   {name, kind: configmap|tool, mapping|manifest: ...}. See
+        #   fabri/ingest/adapters/configmap.py for the mapping keys.
+        "adapters": [],
+    },
 }
 
 

@@ -262,6 +262,60 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
     print(json.dumps([e.to_payload() for e in entries], indent=2))
 
 
+def _parse_options(pairs: list[str] | None) -> dict:
+    """Turn repeated ``--option KEY=VALUE`` into a dict passed to the adapter.
+    Dotted keys are kept flat (the adapter interprets them)."""
+    opts: dict = {}
+    for item in pairs or []:
+        if "=" not in item:
+            print(f"--option must be KEY=VALUE (got {item!r})", file=sys.stderr)
+            sys.exit(1)
+        k, v = item.split("=", 1)
+        opts[k] = v
+    return opts
+
+
+def cmd_ingest(args: argparse.Namespace) -> None:
+    """The Improver CLI: normalize an external log via an adapter and mine it
+    into the same memory the agent retrieves from. Thin wrapper over
+    ``fabri.readlogs`` (SDK-first — the CLI adds nothing the SDK can't do)."""
+    from fabri.ingest import list_adapters, readlogs
+
+    config = load_config(args.config)
+    if getattr(args, "list_adapters", False):
+        for name in list_adapters():
+            print(name)
+        return
+    if not args.source:
+        print("fabri ingest: SOURCE is required (a file, directory, or '-' for stdin)", file=sys.stderr)
+        sys.exit(1)
+    # LLM synthesis spends tokens; pre-flight the same api keys `run` needs.
+    if args.synthesize:
+        _require_role_api_keys(config)
+    configure_logging(args.session_id or "ingest", verbose=args.verbose)
+    store = _open_store(config["memory"])
+    source = sys.stdin if args.source == "-" else args.source
+    summary = readlogs(
+        source,
+        adapter=args.adapter,
+        config=config,
+        store=store,
+        synthesize=args.synthesize,
+        adapter_options=_parse_options(args.option),
+        dry_run=args.dry_run,
+    )
+    if args.json:
+        print(json.dumps(summary.to_dict(), indent=2))
+    else:
+        d = summary.to_dict()
+        print(
+            f"ingested {d['sessions']} session(s), {d['events']} event(s) via '{d['adapter']}' "
+            f"-> {d['entries']} memory entr{'y' if d['entries'] == 1 else 'ies'} "
+            f"{d['by_kind']}; skipped {d['skipped_lines']} line(s); "
+            f"cost ${d['llm_cost_usd']:.4f}"
+        )
+
+
 def cmd_inspect_memory(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     store = _open_store(config["memory"])
@@ -902,6 +956,26 @@ def main() -> None:
     p_ingest = sub.add_parser("ingest-traces", help="Synthesize guidelines from a session's trace")
     p_ingest.add_argument("session_id")
     p_ingest.set_defaults(func=cmd_ingest_traces)
+
+    p_ing = sub.add_parser(
+        "ingest",
+        help="Mine an EXTERNAL log into memory via a plug-and-play adapter (the Improver)",
+    )
+    p_ing.add_argument("source", nargs="?", default=None,
+                       help="Log file, directory, or '-' for stdin. Omit with --list-adapters.")
+    p_ing.add_argument("--adapter", default="auto",
+                       help="Adapter name (jsonl|regex|otel|openai|<plugin>) or 'auto' to sniff.")
+    p_ing.add_argument("--synthesize", action="store_true",
+                       help="Run LLM guideline compression (costs tokens). Default is deterministic ($0).")
+    p_ing.add_argument("--option", action="append", metavar="KEY=VALUE",
+                       help="Adapter option (repeatable), e.g. --option pattern='tool=(?P<tool>\\S+)'.")
+    p_ing.add_argument("--session-id", dest="session_id", default=None, help="Log session id label.")
+    p_ing.add_argument("--dry-run", dest="dry_run", action="store_true",
+                       help="Parse + count without writing to the memory store.")
+    p_ing.add_argument("--json", action="store_true", help="Emit the summary as JSON.")
+    p_ing.add_argument("--list-adapters", dest="list_adapters", action="store_true",
+                       help="List available ingest adapters and exit.")
+    p_ing.set_defaults(func=cmd_ingest)
 
     p_inspect = sub.add_parser("inspect-memory", help="Inspect stored memory, optionally querying it")
     p_inspect.add_argument("query", nargs="?", default=None)
