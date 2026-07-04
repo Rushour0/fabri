@@ -51,12 +51,15 @@ class _StubStore:
         self._entries[key] = entry
 
     def delete(self, point_id: str) -> None:
-        # Match by stub id (patched above)
+        # Mirror the real store contract: pruning deletes by ``entry.id`` (the
+        # content-derived point id), so match on that. Entries that share an id
+        # (identical text) are removed one-per-call, exactly as a real store's
+        # point-id delete behaves when the caller iterates the to-delete list.
         for k, e in list(self._entries.items()):
-            if getattr(e, "_stub_id", None) == point_id:
+            if e.id == point_id:
                 del self._entries[k]
                 return
-        # Fallback: try the key directly
+        # Fallback: try the stub key / raw id directly.
         self._entries.pop(point_id, None)
 
 
