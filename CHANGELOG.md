@@ -6,6 +6,13 @@ that ships.
 
 ## Unreleased
 
+## 0.9.1 — 2026-07-04
+
+### Docs patch
+
+- `TODO.md`: v0.9.0 retrieval items marked done; open follow-ups tracked (query expansion, reranking, agent namespacing, TTL/eviction).
+- `docs/ROADMAP.md`: M2 card added (hybrid retrieval, shipped v0.9.0); Track M description and mermaid diagram updated; suggested build order updated.
+
 ## 0.9.0 — 2026-07-04
 
 ### Hybrid & Advanced Retrieval — BM25+Vector fusion, temporal decay, MMR, domain routing
