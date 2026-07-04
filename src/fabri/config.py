@@ -168,6 +168,28 @@ DEFAULT_CONFIG = {
         # this took N retries; tool X failed K times". Off keeps today's
         # failure/success-only mining (and unchanged entry counts).
         "record_postmortems": False,
+        # Advanced retrieval — all default to the pre-hybrid behaviour (opt-in).
+        # "dense"      — vector similarity only (default, current behaviour)
+        # "sparse"     — BM25 only (SQLite FTS5 / Qdrant client-side BM25)
+        # "hybrid"     — RRF fusion of dense + sparse
+        # "hybrid+mmr" — hybrid + MMR diversification on final candidate pool
+        "retrieval_strategy": "dense",
+        # Exponential temporal decay: score *= exp(-ln(2)*age_days/half_life).
+        # Recent entries get ~1.0; entries half_life_days old get ~0.5.
+        "temporal_decay": False,
+        "temporal_half_life_days": 30.0,
+        # MMR lambda: 0=pure diversity, 1=pure relevance. Only applies when
+        # retrieval_strategy is "hybrid+mmr".
+        "mmr_lambda": 0.7,
+        # Keyword heuristic domain classifier (code/planning/search/api/generic).
+        # When true, entries whose domain matches the query get a 1.15× score boost.
+        "domain_routing": False,
+        # Importance weight: 0=off. Boosts entries by hit_count + strategic bonus.
+        # importance = min(1, hit_count/10 + 0.3 if strategic). Applied as
+        # score *= (1 + importance_weight * importance).
+        "importance_weight": 0.2,
+        # Reserved for future multi-query expansion — no-op when False.
+        "query_expansion": False,
     },
 }
 

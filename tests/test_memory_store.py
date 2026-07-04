@@ -1,4 +1,7 @@
+import time
 import uuid
+
+import pytest
 
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
@@ -59,3 +62,59 @@ def test_find_similar_matches_paraphrase():
     assert match is not None
 
     store.delete(entry.id)
+
+
+# ---------------------------------------------------------------------------
+# Schema backward-compat: new fields default gracefully from old payloads
+# ---------------------------------------------------------------------------
+
+def test_schema_new_fields_default_on_old_payload():
+    """Old payloads stored before the schema extension must round-trip safely."""
+    old_payload = {
+        "text": "use the correct tool",
+        "kind": "tactical",
+        "session_ids": ["s1"],
+        "tags": [],
+        "tools": [],
+        "hit_count": 1,
+        "created_at": time.time(),
+        "model_version": "minilm-l6-v2",
+        # No domain, outcome, agent_id, task_embedding_hash
+    }
+    entry = MemoryEntry.from_payload(old_payload)
+    assert entry.domain == "generic"
+    assert entry.outcome == "unknown"
+    assert entry.agent_id is None
+    assert entry.task_embedding_hash is None
+
+
+def test_schema_new_fields_round_trip():
+    """New fields survive to_payload → from_payload."""
+    entry = MemoryEntry(
+        text="call the api endpoint correctly",
+        kind="success_pattern",
+        domain="api",
+        outcome="success",
+        agent_id="agent-42",
+        task_embedding_hash="deadbeef",
+    )
+    payload = entry.to_payload()
+    restored = MemoryEntry.from_payload(payload)
+    assert restored.domain == "api"
+    assert restored.outcome == "success"
+    assert restored.agent_id == "agent-42"
+    assert restored.task_embedding_hash == "deadbeef"
+
+
+def test_schema_id_unchanged_by_new_fields():
+    """Adding new optional fields must not change the deterministic ID."""
+    base = MemoryEntry(text="read the file carefully", kind="tactical")
+    extended = MemoryEntry(
+        text="read the file carefully",
+        kind="tactical",
+        domain="code",
+        outcome="failure",
+        agent_id="some-agent",
+        task_embedding_hash="abc12345",
+    )
+    assert base.id == extended.id

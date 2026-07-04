@@ -20,6 +20,7 @@ from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.retrieval import (
     DEFAULT_TOOL_TOP_K,
     DEFAULT_TOP_K,
+    RetrievalConfig,
     retrieve_context,
     retrieve_context_with_meta,
     retrieve_tools,
@@ -170,6 +171,7 @@ def _run_single_attempt(
     error_strategy: str = "strict",
     response_fallback: object | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
+    retrieval_config: RetrievalConfig | None = None,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -178,7 +180,8 @@ def _run_single_attempt(
     logger.info("agent run starting: task=%r session_id=%s", task, session_id)
 
     context_block, retrieval_meta = retrieve_context_with_meta(
-        store, task, top_k=top_k, tool_names=[t.name for t in tools.list()]
+        store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
+        retrieval_config=retrieval_config,
     )
     # When retrieval is on, the filtered subset stays constant for the whole
     # run so the prompt cache still hits across steps. The model is given the
@@ -985,6 +988,7 @@ def run_agent(
     response_fallback: object | None = None,
     repair: dict | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
+    retrieval_config: RetrievalConfig | None = None,
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
@@ -1022,6 +1026,7 @@ def run_agent(
         error_strategy=error_strategy,
         response_fallback=response_fallback,
         max_parallel_spawns=max_parallel_spawns,
+        retrieval_config=retrieval_config,
     )
     result = _run_single_attempt(task, **base_kwargs)
     if not (repair and repair.get("enabled")):

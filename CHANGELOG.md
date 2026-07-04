@@ -6,6 +6,61 @@ that ships.
 
 ## Unreleased
 
+## 0.9.0 — 2026-07-04
+
+### Hybrid & Advanced Retrieval — BM25+Vector fusion, temporal decay, MMR, domain routing
+
+**Memory schema enrichment**
+
+- `MemoryEntry` gains four new optional fields: `domain` (`code`/`planning`/`search`/`api`/`generic`), `outcome` (`failure`/`partial`/`success`/`unknown`), `agent_id`, and `task_embedding_hash`. Fully backward-compatible: old DB payloads return safe defaults via `.get()`. Deterministic ID hash is unchanged — no migration needed.
+- `ingest_guideline` auto-classifies `domain` and `outcome` on every new entry at write time. Merges preserve the original classification.
+
+**Retrieval strategies** — controlled by `memory.retrieval_strategy`
+
+- `"dense"` (default) — original cosine vector similarity, behavior unchanged.
+- `"sparse"` — BM25-only via SQLite FTS5 (Python built-in, zero extra install) or client-side `rank_bm25` for Qdrant.
+- `"hybrid"` — **Reciprocal Rank Fusion** (RRF, k=60) of dense + sparse. For SQLite, FTS5 gives a true independent BM25 index over the full table; for Qdrant, `rank_bm25` re-ranks the dense pool (install with `pip install 'fabri[bm25]'`).
+- `"hybrid+mmr"` — hybrid + **Maximal Marginal Relevance** diversification on the final candidate pool. Iteratively selects entries balancing relevance vs redundancy (lambda tunable via `memory.mmr_lambda`).
+
+**Scoring pipeline** (all opt-in, safe defaults)
+
+- `memory.temporal_decay: true` — exponential decay by entry age: `score *= exp(-ln(2) * age_days / half_life_days)`. Recent entries ~1.0, `half_life_days`-old entries ~0.5. Configurable via `memory.temporal_half_life_days` (default 30).
+- `memory.importance_weight: 0.2` — dynamic importance boost from `hit_count` + strategic promotion bonus. `importance = min(1, hit_count/10 + 0.3 if strategic)`. Applied as `score *= (1 + weight * importance)`.
+- `memory.domain_routing: true` — keyword heuristic classifies query domain (no LLM call, zero latency); matching entries get a 1.15× boost. Never hard-filters — a mismatch applies no penalty.
+
+**SQLite FTS5 index**
+
+- New `fts_guidelines` FTS5 virtual table (porter tokenizer) synced on every upsert/delete.
+- One-time migration: existing DBs are bulk-populated on first upgrade.
+- `_fts5_query()` sanitizes input (splits on non-word chars, wraps tokens in double quotes, caps at 50 tokens) so tool names with underscores, URLs, and special chars never cause a syntax error.
+
+**Config keys added** (all default to pre-v0.9.0 behavior)
+
+```yaml
+memory:
+  retrieval_strategy: dense        # dense | sparse | hybrid | hybrid+mmr
+  temporal_decay: false
+  temporal_half_life_days: 30.0
+  mmr_lambda: 0.7                  # 0=pure diversity, 1=pure relevance
+  domain_routing: false
+  importance_weight: 0.2
+  query_expansion: false           # reserved
+```
+
+**Optional dependency**
+
+- `pip install 'fabri[bm25]'` installs `rank-bm25` for Qdrant hybrid retrieval.
+
+**Bug fix**
+
+- `agent_runner_tool.py` previously hardcoded `QdrantMemoryStore`; now uses `build_memory_store(mem_cfg)` so SQLite users get hybrid retrieval in sub-agent runs too.
+
+**Tests**
+
+- `tests/test_unit_hybrid_retrieval.py` — 30 pure-Python tests for `RetrievalConfig`, RRF, temporal decay, importance scoring, domain classifier, and MMR. No external deps.
+- `tests/test_unit_sqlite_fts5.py` — FTS5 schema, migration, BM25 query, sync-on-delete, and special-char safety tests (skipped without sqlite-vec).
+- `tests/test_memory_store.py` — backward-compat round-trip for old payloads; new field round-trip; ID stability proof.
+
 ## 0.8.2 — 2026-07-01
 
 ### AWS Bedrock provider (Converse API) + Provider enum

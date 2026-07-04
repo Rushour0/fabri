@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from fabri.core.logging_setup import get_logger
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
+from fabri.orchestrator.retrieval import _classify_domain
 from fabri.paths import locks_dir
 
 SIMILARITY_THRESHOLD = 0.85
@@ -86,7 +87,21 @@ def ingest_guideline(
             store.upsert(entry)
             return entry
 
-        entry = MemoryEntry(text=text, kind=kind, session_ids=[session_id], tags=tags, tools=tools)
-        logger.debug("inserted new %s guideline: %r tools=%s", kind, entry.text, entry.tools)
+        auto_domain = _classify_domain(text, tools) if kind != "postmortem" else "generic"
+        auto_outcome = (
+            "success" if kind == "success_pattern"
+            else "failure" if kind in ("tactical", "strategic")
+            else "unknown"
+        )
+        entry = MemoryEntry(
+            text=text,
+            kind=kind,
+            session_ids=[session_id],
+            tags=tags,
+            tools=tools,
+            domain=auto_domain,
+            outcome=auto_outcome,
+        )
+        logger.debug("inserted new %s guideline: %r tools=%s domain=%s", kind, entry.text, entry.tools, entry.domain)
         store.upsert(entry)
         return entry
