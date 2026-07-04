@@ -32,7 +32,7 @@
 - **Track A — Ask-user primitive.** Block on a clarifying question routed to a host process; enable interactive agents without coupling the framework to any UI.
 - **Track R — Rename hygiene.** Sweep the `agent_memory` → `fabri` rename across env vars, trace dirs, and import shims.
 - **Track O — Output & streaming.** First-class structured/typed output and token+event streaming so hosts get validated, responsive results instead of post-run JSONL only.
-- **Track M — Memory (failure learning).** Extend the memory loop to mine *failed* and high-retry runs, not just successful summaries, so the agent retrieves "this loop bit you last week" hints.
+- **Track M — Memory (failure learning + retrieval quality).** Extend the memory loop to mine *failed* and high-retry runs, not just successful summaries, so the agent retrieves "this loop bit you last week" hints. Also covers retrieval quality: hybrid search, temporal decay, MMR diversification, domain routing (M2 shipped v0.9.0).
 - **Track X — Observability & safety.** External trace export (OpenTelemetry/Langfuse), composable guardrail processors, and a general correctness eval harness.
 - **Track B — Builder (idea → running self-improving agent).** Turn the engine into a product factory: scaffold agents, tools, and prompts from intent, package reusable bundles as skills, and embed the whole thing as a self-contained service so building a new product on fabri is faster, not slower. See [vision.md](vision.md) for the layered engine+builder thesis.
 
@@ -63,9 +63,22 @@ _(none tracked here — see `CHANGELOG.md` for current release work.)_
 
 - **O2** • Streaming (token + event) • Track O • — • `LLMBackend` gains a streaming variant; `run_agent` exposes an event/token stream (generator or callback) that emits the existing `events.py` vocabulary live instead of only writing JSONL post-run. Non-streaming path stays the default so frugality/caching behavior is unchanged. Acceptance: a caller can consume tokens + tool/step events as they happen; trace JSONL output is byte-identical to today for a non-streaming run. Loosely depends on O1. Touches `core/llm.py`, `core/agent.py`, `orchestrator/traces.py`. **Single most common capability fabri is missing (6/10 surveyed frameworks stream).**
 
-### Track M — Memory (failure learning)
+### Track M — Memory (failure learning + retrieval quality)
 
 - **M1** • Postmortem-to-qdrant failure-pattern memory • Track M • _partially shipped_ • (= `TODO.md` P2, requested by ludexel 2026-06-24.) **Shipped (opt-in, `memory.record_postmortems`):** every run writes one deterministic, LLM-free postmortem `{task, outcome, step_count, tool_calls_total, repeated (tool × error-sig)}` as a new `postmortem` memory kind, retrieved by task similarity — the one-line "you tried X N times" hint. See `pipeline.build_postmortem_text`. **Remaining:** `final_diff`/`fix_pattern` extraction (the noisy-transcript hard part) + retrieval matching on predicted error kind, then flip the default on. Touches `orchestrator/pipeline.py`, `memory/store.py`. **Strengthens fabri's genuinely-unique differentiator (the self-improving memory loop).**
+
+- **M2** • Hybrid & advanced retrieval pipeline • Track M • **shipped v0.9.0** • Configurable multi-strategy retrieval replacing the original cosine-only path. All features opt-in via `memory.*` config; all default to pre-v0.9.0 behavior.
+  - **Strategies** (`memory.retrieval_strategy`): `dense` (default), `sparse` (BM25), `hybrid` (RRF fusion), `hybrid+mmr` (hybrid + MMR diversification).
+  - **SQLite FTS5** — BM25 index via Python's built-in FTS5 (porter tokenizer). Zero extra install. Auto-migrates existing DBs. Synced on every upsert/delete. `_fts5_query()` sanitizer handles tool names, URLs, special chars.
+  - **Qdrant BM25** — client-side re-ranking via optional `fabri[bm25]` (`rank_bm25`).
+  - **RRF** (`k=60`) — ordinal rank fusion; entries in both dense + sparse get double credit.
+  - **MMR** — diversifies final pool: `score(d) = λ*sim(d,q) - (1-λ)*max(sim(d,selected))`. Controlled by `memory.mmr_lambda` (default 0.7).
+  - **Temporal decay** (`memory.temporal_decay`, `memory.temporal_half_life_days=30`) — `score *= exp(-ln(2)*age/half_life)`.
+  - **Importance boost** (`memory.importance_weight=0.2`) — `min(1, hit_count/10 + 0.3 if strategic)`.
+  - **Domain routing** (`memory.domain_routing`) — keyword heuristic (code/planning/search/api/generic); 1.15× boost on match, never hard-filters.
+  - **MemoryEntry enrichment** — new fields: `domain`, `outcome`, `agent_id`, `task_embedding_hash`. Auto-classified at ingest. Backward-compatible (old payloads safe via `.get()` defaults, ID hash unchanged).
+  - **Bug fix** — `agent_runner_tool.py` was hardcoded to Qdrant; now uses `build_memory_store(mem_cfg)`.
+  - **Open follow-ups** (tracked in `TODO.md`): query expansion (reserved as `memory.query_expansion`), cross-encoder reranking, agent-scoped memory namespacing, memory TTL/eviction.
 
 ### Track X — Observability & safety
 
@@ -73,7 +86,7 @@ _(none tracked here — see `CHANGELOG.md` for current release work.)_
 - **X2** • Guardrail processors (input/output) • Track X • — • A composable processor pipeline running before the LLM (prompt-injection / PII / moderation) and after (output filtering / token cap). Ships a couple of reference processors plus a stable processor interface so hosts add their own. Acceptance: a configured PII-redaction processor masks input before the model sees it; an injection processor can block or rewrite; processors compose in declared order. Touches `config.py`, new `guardrails/` package, `core/agent.py`. **Mastra ships a processor pipeline, OpenAI SDK ships guardrails; fabri has none. Fits "frugal + safe by default".**
 - **X3** • Correctness eval harness • Track X • — • Generalize the existing `benchmarks/` scaffolding into a reusable scorer framework: LLM-as-judge, rule-based/assertion, and exact-match scorers over a task→expected dataset, with per-case isolation and aggregate reporting (reuse the `longmemeval` runner's structure). Acceptance: a small dataset runs through all three scorer types and emits a pass-rate report under `.fabri/benchmarks/`. Touches `benchmarks/`. **Today fabri proves cost (`session_delta`) and memory (`longmemeval`) but not general task correctness.**
 
-**Suggested build order (not enforced):** O1 → O2, then M1 (consumer-requested),
+**Suggested build order (not enforced):** O1 → O2, then M1 (consumer-requested), M2 ✓ (shipped v0.9.0),
 then X1 (cheap, high enterprise leverage), then X2 + X3 (quality/safety story).
 
 ### Track B — Builder (idea → running self-improving agent)
@@ -132,6 +145,7 @@ flowchart LR
     X2[X2 guardrails]
     X3[X3 eval harness]
     M1[M1 failure-pattern memory] -.-> LXPM[ludexel postmortem retrieval]
+    M2[M2 hybrid retrieval ✓]
     B2[B2 tool-writer] --> B5[B5 prompt-kit]
     B5 --> B1[B1 ideator]
     B2 --> B4[B4 skills]

@@ -18,6 +18,7 @@ The two backends are interchangeable from the agent loop's perspective —
 from __future__ import annotations
 
 import json
+import re as _re
 import sqlite3
 import struct
 from pathlib import Path
@@ -40,6 +41,18 @@ _INSTALL_HINT = (
 
 def _pack(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _fts5_query(text: str) -> str:
+    """Convert raw text to FTS5 MATCH syntax.
+
+    Splits on non-word chars and wraps each token in double quotes so FTS5
+    operator chars (*, ", (, ), ^, :) in tool names or paths cannot cause a
+    syntax error. Caps at 50 tokens to avoid pathologically large MATCH
+    expressions from long task strings. Returns "" when no tokens survive
+    (caller should skip the BM25 query entirely)."""
+    words = _re.sub(r"[^\w\s]", " ", text).split()
+    return " ".join(f'"{w}"' for w in words[:50]) if words else ""
 
 
 class SqliteMemoryStore:
@@ -94,6 +107,31 @@ class SqliteMemoryStore:
                 embedding FLOAT[{EMBEDDING_DIM}]
             )"""
         )
+        # FTS5 is a Python built-in — no extra install needed. Porter tokenizer
+        # improves BM25 recall by stemming (run/running/runs → same stem).
+        # id is UNINDEXED so it rides alongside each row for JOINs without
+        # inflating the BM25 signal.
+        cur.execute(
+            """CREATE VIRTUAL TABLE IF NOT EXISTS fts_guidelines USING fts5(
+               id UNINDEXED,
+               text,
+               tokenize='porter ascii'
+            )"""
+        )
+        # One-time migration for DBs created before FTS5 support: if
+        # fts_guidelines is empty but guidelines has rows, bulk-populate it.
+        fts_count = self.conn.execute(
+            "SELECT COUNT(*) FROM fts_guidelines"
+        ).fetchone()[0]
+        if fts_count == 0:
+            guideline_count = self.conn.execute(
+                "SELECT COUNT(*) FROM guidelines"
+            ).fetchone()[0]
+            if guideline_count > 0:
+                cur.execute(
+                    "INSERT INTO fts_guidelines(id, text) "
+                    "SELECT id, text FROM guidelines"
+                )
         self.conn.commit()
         self._check_model_version()
 
@@ -128,6 +166,12 @@ class SqliteMemoryStore:
         cur.execute(
             "INSERT INTO vec_guidelines(id, embedding) VALUES (?, ?)",
             (entry.id, _pack(vector)),
+        )
+        # Keep FTS5 index in sync for BM25 retrieval.
+        cur.execute("DELETE FROM fts_guidelines WHERE id = ?", (entry.id,))
+        cur.execute(
+            "INSERT INTO fts_guidelines(id, text) VALUES (?, ?)",
+            (entry.id, entry.text),
         )
         self.conn.commit()
         return entry.id
@@ -182,6 +226,47 @@ class SqliteMemoryStore:
                 break
         return out
 
+    def query_bm25(
+        self,
+        text: str,
+        top_k: int = 5,
+        kind: str | None = None,
+        tools_any: list[str] | None = None,
+    ) -> list[tuple[MemoryEntry, float]]:
+        """BM25 full-text search via FTS5.
+
+        Returns (entry, score) pairs where score is -bm25(fts_guidelines) so
+        that higher is better (FTS5 bm25() returns negative values — more
+        negative means more relevant). Degrades gracefully to [] on empty
+        query or OperationalError."""
+        fts_query = _fts5_query(text)
+        if not fts_query:
+            return []
+        fetch_k = top_k * 4 if (kind is not None or tools_any) else top_k
+        try:
+            rows = self.conn.execute(
+                """SELECT f.id, bm25(fts_guidelines) AS bm25_score, g.payload
+                   FROM fts_guidelines f
+                   JOIN guidelines g ON g.id = f.id
+                   WHERE fts_guidelines MATCH ?
+                   ORDER BY bm25_score
+                   LIMIT ?""",
+                (fts_query, fetch_k),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        out: list[tuple[MemoryEntry, float]] = []
+        for _id, bm25_score, payload_json in rows:
+            entry = MemoryEntry.from_payload(json.loads(payload_json))
+            if kind is not None and entry.kind != kind:
+                continue
+            if tools_any is not None and not (set(entry.tools or []) & set(tools_any)):
+                continue
+            out.append((entry, -bm25_score))  # negate: higher = more relevant
+            if len(out) >= top_k:
+                break
+        return out
+
     def find_similar(
         self, text: str, threshold: float = 0.85, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
@@ -194,6 +279,7 @@ class SqliteMemoryStore:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM guidelines WHERE id = ?", (point_id,))
         cur.execute("DELETE FROM vec_guidelines WHERE id = ?", (point_id,))
+        cur.execute("DELETE FROM fts_guidelines WHERE id = ?", (point_id,))
         self.conn.commit()
 
     def count(self, kind: str | None = None) -> int:

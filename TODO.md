@@ -147,6 +147,25 @@ hardening" for detail + tests in `tests/test_unit_security_hardening.py`):
 - [x] **Recipe escapes** — `run_shell_safe` drops `find` + rejects
   exec/file-write args; `git_diff` validates `ref`.
 
+## v0.9.0 — Hybrid & Advanced Retrieval (shipped 2026-07-04)
+
+All items below shipped in v0.9.0. See `CHANGELOG.md` and `docs/ROADMAP.md` (M2) for detail.
+
+- [x] **Single retrieval mode** — only cosine vector similarity, no keyword signal. Added `memory.retrieval_strategy` (`dense`/`sparse`/`hybrid`/`hybrid+mmr`); SQLite FTS5 BM25 (built-in, zero extra install) + optional Qdrant client-side BM25 (`fabri[bm25]`), fused via Reciprocal Rank Fusion.
+- [x] **No result diversification** — near-duplicate guidelines could fill all top-k slots. Added MMR (`hybrid+mmr`) controlled by `memory.mmr_lambda`.
+- [x] **No temporal decay** — stale guidelines ranked identically to fresh ones. Added `memory.temporal_decay` + `memory.temporal_half_life_days`.
+- [x] **No importance boosting** — `hit_count` and strategic promotion not factored into ranking. Added `memory.importance_weight`.
+- [x] **No domain context** — all entries scored equally regardless of query type. Added `memory.domain_routing` (zero-latency keyword classifier → 1.15× boost).
+- [x] **Thin `MemoryEntry` metadata** — no domain, outcome, or agent provenance. Added `domain`, `outcome`, `agent_id`, `task_embedding_hash`; auto-classified at ingest; backward-compatible.
+- [x] **`agent_runner_tool.py` hardcoded Qdrant** — sub-agents always used Qdrant even when config said sqlite. Fixed to use `build_memory_store(mem_cfg)`.
+
+### Still open (retrieval)
+
+- [x] **No memory TTL/eviction** — `memory.max_entries` cap + time-weighted eviction added to `memory/pruning.py`. Score = hit_count × exp(-age/half_life); strategic entries protected last. Wired through `pipeline.process_trace` + CLI. Config keys: `memory.max_entries`, `memory.eviction_half_life_days`. Tests: `tests/test_unit_memory_eviction.py`.
+- [ ] **Query expansion** — `memory.query_expansion` is reserved but not implemented. Multi-query template expansion: generate N task variants, union results, MMR-deduplicate. Zero LLM cost if template-based. Touches `orchestrator/retrieval.py`.
+- [ ] **Cross-encoder reranking** — optional final stage after candidate retrieval. Gated behind `memory.reranker` config key. Deferred until user demand is clear (adds latency).
+- [ ] **Agent-scoped memory namespacing** — `agent_id` field now stored but not used for per-agent store routing. Add `memory.agent_namespace: true` to shard retrieval by agent. Touches `orchestrator/retrieval.py`, `memory/pruning.py`.
+
 ### Deferred (tracked, not fixed — config/tool-trust or larger scope)
 
 - [ ] **MCP remote tool descriptions** flow into the system prompt verbatim —
@@ -163,8 +182,7 @@ hardening" for detail + tests in `tests/test_unit_security_hardening.py`):
   add a select/poll read timeout mirroring the HTTP transport.
 - [ ] **`grep_dir` recipe** reads any path (no sandbox jail) — confine to a root
   if promoting it from recipe to a registered tool.
-- [ ] **No memory TTL/eviction** — unbounded growth (slow DoS + retrieval
-  dilution). Add an LRU/least-hit cap in `ingest_guideline`.
+- [x] **No memory TTL/eviction** — shipped (see above).
 - [ ] **128-bit deterministic point ID** — negligible accidental collision;
   revisit only if guideline text becomes attacker-grindable.
 - [ ] **TOON decode** raises `IndexError`/`RecursionError` on adversarial

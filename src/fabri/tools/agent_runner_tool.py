@@ -12,9 +12,8 @@ from fabri.config import load_config
 from fabri.core.agent import run_agent
 from fabri.core.outcome import Outcome
 from fabri.core.run_config import AgentRunConfig
-from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.traces import trace_path
-from fabri.runtime import build_run_llms, build_tool_defs, build_tools
+from fabri.runtime import build_memory_store, build_run_llms, build_tool_defs, build_tools
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -76,7 +75,7 @@ def main() -> int:
     llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
 
     mem_cfg = config["memory"]
-    store = QdrantMemoryStore(url=mem_cfg["qdrant_url"], collection=mem_cfg["collection"])
+    store = build_memory_store(mem_cfg)
 
     # agent.subagent.{max_steps,max_cost_usd} override the parent budget
     # for this child only; absent fields fall back to the parent values.

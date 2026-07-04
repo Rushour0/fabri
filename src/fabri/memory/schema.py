@@ -25,6 +25,10 @@ class MemoryEntry:
     hit_count: int = 1
     created_at: float = field(default_factory=time.time)
     model_version: str = EMBEDDING_MODEL_VERSION
+    domain: str = "generic"           # "code"|"planning"|"search"|"api"|"generic"
+    outcome: str = "unknown"          # "failure"|"partial"|"success"|"unknown"
+    agent_id: str | None = None       # which agent produced this entry
+    task_embedding_hash: str | None = None  # sha256(task)[:8] for clustering
 
     @property
     def id(self) -> str:
@@ -54,6 +58,10 @@ class MemoryEntry:
             "hit_count": self.hit_count,
             "created_at": self.created_at,
             "model_version": self.model_version,
+            "domain": self.domain,
+            "outcome": self.outcome,
+            "agent_id": self.agent_id,
+            "task_embedding_hash": self.task_embedding_hash,
         }
 
     @classmethod
@@ -67,4 +75,8 @@ class MemoryEntry:
             hit_count=payload.get("hit_count", 1),
             created_at=payload.get("created_at", time.time()),
             model_version=payload.get("model_version", EMBEDDING_MODEL_VERSION),
+            domain=payload.get("domain", "generic"),
+            outcome=payload.get("outcome", "unknown"),
+            agent_id=payload.get("agent_id"),
+            task_embedding_hash=payload.get("task_embedding_hash"),
         )

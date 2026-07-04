@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 
 from fabri.core.agent import DEFAULT_MAX_PARALLEL_SPAWNS
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS
-from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, DEFAULT_TOP_K
+from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, DEFAULT_TOP_K, RetrievalConfig
 
 
 def planner_mode_from_cfg(planner_cfg: dict) -> str:
@@ -56,6 +56,7 @@ class AgentRunConfig:
     error_strategy: str = "strict"
     response_fallback: object | None = None
     repair: dict | None = None
+    retrieval_config: RetrievalConfig = RetrievalConfig()
 
     @classmethod
     def from_config(cls, config: dict) -> "AgentRunConfig":
@@ -93,6 +94,7 @@ class AgentRunConfig:
             error_strategy=agent.get("error_strategy", cls.error_strategy),
             response_fallback=agent.get("response_fallback"),
             repair=agent.get("repair"),
+            retrieval_config=RetrievalConfig.from_mem_cfg(mem),
         )
 
     def for_subagent(self, max_steps: int, max_cost_usd: float | None) -> "AgentRunConfig":
@@ -126,4 +128,5 @@ class AgentRunConfig:
             "error_strategy": self.error_strategy,
             "response_fallback": self.response_fallback,
             "repair": self.repair,
+            "retrieval_config": self.retrieval_config,
         }
