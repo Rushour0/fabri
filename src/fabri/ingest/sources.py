@@ -76,8 +76,11 @@ class LogSource:
                     self._buffer.append(next(it))
                 except StopIteration:
                     break
-            # chain the just-consumed iterator's remainder back onto _raw
-            self._raw = _chain_after(it, self._raw)
+            # The un-peeked remainder now lives in `it`; the first `need` items
+            # are safely held in `self._buffer`. Reusing a fresh `iter(list)`
+            # here (rather than chaining the original iterable back on) is what
+            # keeps list/tuple sources from being yielded twice.
+            self._raw = it
         return self._buffer[:n]
 
     def lines(self) -> Iterator[str]:
@@ -142,11 +145,6 @@ def iter_sources(src) -> Iterator[LogSource]:
 def _read_lines(path: Path) -> Iterator[str]:
     with path.open() as f:
         yield from f
-
-
-def _chain_after(head_iter, tail_iterable):
-    yield from head_iter
-    yield from tail_iterable
 
 
 def _dotted(record: dict, path: str):

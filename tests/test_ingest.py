@@ -156,6 +156,63 @@ def test_configmap_requires_tool_field():
         ConfigMapAdapter("bad", {"session_key": "x"})
 
 
+def test_configmap_string_status_is_not_always_truthy():
+    # Regression: a string ok_field like "false"/"error" must read as FAILURE,
+    # not success (plain bool("false") is True). Real bools still pass through.
+    records = [
+        {"trace": "t1", "prompt": "ship", "tool": {"name": "deploy", "ok": "true"}},
+        {"trace": "t1", "prompt": "ship", "tool": {"name": "verify", "ok": "false"}},
+        {"trace": "t1", "prompt": "ship", "tool": {"name": "probe", "ok": "error"}},
+    ]
+    src = LogSource.from_any([json.dumps(r) for r in records])
+    adapter = ConfigMapAdapter("prod", {
+        "session_key": "trace", "task_field": "prompt",
+        "tool_field": "tool.name", "ok_field": "tool.ok",
+    })
+    calls = [e for e in list(adapter.sessions(src, {}))[0].events if e["type"] == "tool_call"]
+    assert calls[0]["result"]["ok"] is True    # "true"  -> success
+    assert calls[1]["result"]["ok"] is False   # "false" -> failure (was truthy before fix)
+    assert calls[2]["result"]["ok"] is False   # "error" -> failure
+
+
+# --------------------------------------------------------------------------- #
+# LogSource.peek() — must not double-yield re-iterable (list/tuple) sources    #
+# --------------------------------------------------------------------------- #
+def test_peek_does_not_duplicate_list_source():
+    # Regression: peek() on a list source used to re-append the whole list,
+    # yielding every item twice on the auto-sniff path.
+    src = LogSource.from_any(["a", "b", "c"])
+    assert src.peek(5) == ["a", "b", "c"]
+    assert list(src.lines()) == ["a", "b", "c"]
+
+
+def test_peek_partial_then_full_iterate_list_source():
+    src = LogSource.from_any(["a", "b", "c", "d", "e"])
+    assert src.peek(2) == ["a", "b"]
+    assert list(src.lines()) == ["a", "b", "c", "d", "e"]
+
+
+def test_peek_generator_source_still_consumes_once():
+    src = LogSource.from_any(iter(["x", "y", "z"]))
+    assert src.peek(2) == ["x", "y"]
+    assert list(src.lines()) == ["x", "y", "z"]
+
+
+def test_readlogs_auto_adapter_matches_explicit_jsonl():
+    # Regression (headline SDK path): readlogs(list) with the DEFAULT adapter
+    # ('auto' -> sniff -> peek) must not double-count in-memory list logs.
+    auto = readlogs(
+        _jsonl(_run_events()),
+        config={"memory": {}, "ingest": {}}, store=InMemoryVectorStore(),
+    )
+    explicit = readlogs(
+        _jsonl(_run_events()), adapter="jsonl",
+        config={"memory": {}, "ingest": {}}, store=InMemoryVectorStore(),
+    )
+    assert auto.sessions == explicit.sessions == 1
+    assert auto.failures_mined == explicit.failures_mined == 1
+
+
 # --------------------------------------------------------------------------- #
 # Event validation / normalization                                             #
 # --------------------------------------------------------------------------- #

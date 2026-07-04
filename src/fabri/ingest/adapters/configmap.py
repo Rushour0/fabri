@@ -21,7 +21,21 @@ from __future__ import annotations
 from typing import Iterator
 
 from fabri.ingest.adapters.base import Session, final_event, safe_session_id, start_event, tool_event
+from fabri.ingest.adapters.builtins import _ok_from_status
 from fabri.ingest.sources import LogSource, _dotted
+
+
+def _coerce_ok(value) -> bool:
+    """Interpret a mapped ``ok_field`` value as success/failure. A real bool is
+    taken verbatim; a *string* is routed through the shared fail-word check so
+    ``"false"``/``"error"``/``"0"`` correctly read as failure (plain ``bool()``
+    would treat every non-empty string as truthy); anything else falls back to
+    ``bool()``."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _ok_from_status(value)
+    return bool(value)
 
 
 class ConfigMapAdapter:
@@ -59,7 +73,7 @@ class ConfigMapAdapter:
                 continue
             error = _dotted(rec, error_field) if error_field else None
             if ok_field is not None:
-                ok = bool(_dotted(rec, ok_field))
+                ok = _coerce_ok(_dotted(rec, ok_field))
             else:
                 ok = error is None  # no explicit ok field → presence of an error means failure
             args = _dotted(rec, args_field) if args_field else None
