@@ -202,7 +202,9 @@ def _stub_runner_runtime(monkeypatch, capture: dict):
         def __init__(self, **_):
             pass
 
-    monkeypatch.setattr(art, "QdrantMemoryStore", _StubStore)
+    # agent_runner_tool builds its store via build_memory_store(mem_cfg) (the
+    # v0.9.0 runtime refactor); patch that seam, not the removed QdrantMemoryStore.
+    monkeypatch.setattr(art, "build_memory_store", lambda mem_cfg: _StubStore())
 
 
 def _runner_main_with_config(cfg_dict: dict, monkeypatch, tmp_path) -> dict:

@@ -180,6 +180,8 @@ fabri --config agent.yaml run "..."        # config-driven agent
 fabri --verbose run "..."                  # DEBUG logging to console
 fabri inspect-memory "a query"             # test retrieval
 fabri ingest-traces <session-id>           # re-mine a past trace
+fabri ingest app.log --adapter regex       # mine an EXTERNAL log (the Improver)
+fabri ingest --list-adapters               # available log adapters
 ```
 
 Each `run` returns an outcome: `success`, `success_with_recovery`
@@ -486,6 +488,65 @@ step. The short version, as a table:
 Smell test: if "what would the agent do with the result of this
 tool?" has a one-sentence answer, the tool is probably shaped right.
 If the answer is "it depends what mode you called it in", split it.
+
+## The Improver — learn from logs you already have
+
+The memory loop doesn't only learn from fabri's own runs. Point it at any log —
+app logs, CI output, OTel/OpenAI traces — and the failures and successes in it
+mine into the *same* memory the agent retrieves from. Feeding logs is
+plug-and-play, and the default path is deterministic and **$0** (no LLM call);
+add `synthesize=True` for LLM-compressed guidelines.
+
+```python
+import fabri
+
+# Deterministic ($0): mine an external log straight into the agent's memory.
+summary = fabri.readlogs("prod/app.jsonl", adapter="jsonl")
+print(summary.sessions, summary.by_kind, f"${summary.llm_cost_usd:.4f}")
+
+# The knowledge is now retrievable — the next run starts ahead of where the
+# logs left off. Omit store/config and it resolves them from agent.yaml, so the
+# guideline lands in the collection the agent already reads.
+```
+
+Teach fabri a new log format three ways — pick per format:
+
+```python
+# 1) a native Python adapter (decorator)
+from fabri.ingest import Session, tool_event, start_event, final_event
+
+@fabri.adapter("mytool")
+def parse(source, options):
+    for trace_id, records in source.group_by("trace_id"):
+        events = [start_event(records[0]["prompt"])]
+        for r in records:
+            events.append(tool_event(r["cmd"], ok=r["exit"] == 0, error=r.get("stderr")))
+        events.append(final_event("success" if records[-1]["exit"] == 0 else "failed"))
+        yield Session(f"mytool-{trace_id}", events)
+```
+
+```yaml
+# 2) a declarative field-map in agent.yaml — zero code
+ingest:
+  adapters:
+    - name: prodlogs
+      kind: configmap
+      mapping: {session_key: trace_id, task_field: prompt,
+                tool_field: tool.name, ok_field: tool.ok, error_field: tool.error}
+```
+
+```
+# 3) a polyglot executable (any language) via the tool contract, shippable as a
+#    skill — see the bundled `syslog-adapter` skill.
+fabri skills install syslog-adapter
+fabri ingest app.log --adapter syslog        # $0; --synthesize for LLM guidelines
+tail -f app.log | fabri ingest - --adapter syslog   # or stream it live
+```
+
+Built-in adapters: `jsonl` (native), `regex` (plaintext), `otel`/`openai`
+(structured traces), and `auto` to sniff. Third-party adapters install as pip
+packages via the `fabri.adapters` entry-point group. `fabri ingest
+--list-adapters` shows what's available.
 
 ## Using it as a library
 

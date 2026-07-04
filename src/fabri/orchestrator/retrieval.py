@@ -71,9 +71,9 @@ class RetrievalConfig:
 # ---------------------------------------------------------------------------
 
 # Keyword sets for each domain. Checked as substrings of combined task +
-# tool_names text so "file_" matches read_file / write_file / edit_file.
+# tool_names text so "file" matches read_file / write_file / edit_file.
 _DOMAIN_RULES: list[tuple[str, set[str]]] = [
-    ("code",     {"file_", "write", "edit", "bash", "python", "code", "script"}),
+    ("code",     {"file", "write", "edit", "bash", "python", "code", "script"}),
     ("search",   {"web_", "search", "browse", "fetch", "url", "http"}),
     ("planning", {"plan", "design", "architect", "outline", "decompose", "strategy"}),
     ("api",      {"api", "endpoint", "request", "response", "token", "header"}),

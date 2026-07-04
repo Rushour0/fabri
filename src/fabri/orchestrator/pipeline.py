@@ -92,6 +92,31 @@ def extract_agent_memory(events: list[dict]) -> dict | None:
     return memory
 
 
+def _deterministic_failure_text(task: str, event: dict, max_task_chars: int = 80) -> str:
+    """LLM-free counterpart to `synthesize_guideline`. Stable phrasing keyed on
+    (tool, error-signature) so the same failure mode dedups/merges via cosine
+    similarity + rising hit_count instead of spawning near-duplicates — exactly
+    like `build_postmortem_text`. Embeds a short task prefix so vector search
+    over a future task can still surface it; the stable tool/error part
+    dominates so repeats collapse. This is what powers the $0 ingest path: a
+    huge external log mines into memory without a single LLM call."""
+    sig = _error_signature(event.get("result", {}))
+    name = event.get("name", "?")
+    t = task[:max_task_chars] + ("…" if len(task) > max_task_chars else "")
+    return f"On tasks like {t!r}: {name} previously failed [{sig}] — anticipate and avoid it."
+
+
+def _deterministic_success_text(
+    task: str, tool_names: list[str], outcome: str, max_task_chars: int = 80
+) -> str:
+    """LLM-free counterpart to `synthesize_success_pattern`. Records the winning
+    tool sequence for a task so a similar future task can reuse the plan without
+    the miner paying for an LLM compression call."""
+    unique = list(dict.fromkeys(tool_names))
+    t = task[:max_task_chars] + ("…" if len(task) > max_task_chars else "")
+    return f"On tasks like {t!r}: this plan worked (tools in order: {unique}); outcome={outcome}."
+
+
 def is_discrepancy(event: dict) -> bool:
     return event.get("type") == EventType.DISCREPANCY.value
 
@@ -116,6 +141,8 @@ def process_trace(
     promotion_threshold_sessions: int = PROMOTION_THRESHOLD_SESSIONS,
     record_postmortem: bool = False,
     on_usage: Callable[[LLMUsage], None] | None = None,
+    events: list[dict] | None = None,
+    synthesize: bool = True,
     max_entries: int | None = None,
     eviction_half_life_days: float = 30.0,
     eviction_strategy: str = "delete",
@@ -129,8 +156,18 @@ def process_trace(
     ALSO ingest one deterministic whole-run postmortem regardless of outcome —
     the "you tried X N times last week" signal the planner retrieves by task
     similarity. Off by default so memory-store contents and entry counts are
-    unchanged for callers that don't opt in."""
-    events = read_trace(session_id)
+    unchanged for callers that don't opt in.
+
+    Ingest layer (the Improver / `fabri.readlogs`): pass `events` to mine an
+    in-memory event list built by a log adapter instead of reading a native
+    trace file off disk — `session_id` is then only used to tag provenance on
+    the resulting entries. `synthesize=False` swaps the two LLM miners (failure
+    guideline, success pattern) for deterministic, keyed text so ingesting an
+    arbitrarily large external log costs $0; `llm` is never invoked in that
+    mode. Both default to today's behaviour (read from disk, LLM synthesis) so
+    every existing caller is byte-identical."""
+    if events is None:
+        events = read_trace(session_id)
     task = next((e["task"] for e in events if e.get("type") == EventType.START.value), "")
     failures = [e for e in events if is_tool_failure(e)]
     logger.info("processing trace %s: %d failure(s) found", session_id, len(failures))
@@ -187,11 +224,16 @@ def process_trace(
             if agent_memory:
                 memory_lines = "\n".join(f"{k}: {v}" for k, v in agent_memory.items())
                 success_summary += f"\nAgent-reported memory:\n{memory_lines}"
-            success_text = synthesize_success_pattern(
-                success_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
-            )
+            if synthesize:
+                success_text = synthesize_success_pattern(
+                    success_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
+                )
+            else:
+                success_text = _deterministic_success_text(
+                    task, tool_names, final_event.get("outcome", "success"),
+                )
             logger.debug(
-                "synthesized success pattern (%d tokens): %r",
+                "success pattern (%d tokens): %r",
                 count_tokens(success_text), success_text,
             )
             entry = ingest_guideline(
@@ -233,15 +275,20 @@ def process_trace(
         new_entries.append(entry)
 
     for event in failures:
-        failure_summary = (
-            f"Task: {task}\nTool: {event['name']}\nArgs: {event['args']}\n"
-            f"Failure: {event['result'].get('error')}"
-        )
-        guideline_text = synthesize_guideline(
-            failure_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
-        )
+        if synthesize:
+            # `args` is optional on externally-ingested events (a raw log may
+            # not carry the tool's inputs); default so mining never crashes.
+            failure_summary = (
+                f"Task: {task}\nTool: {event['name']}\nArgs: {event.get('args', {})}\n"
+                f"Failure: {(event.get('result') or {}).get('error')}"
+            )
+            guideline_text = synthesize_guideline(
+                failure_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
+            )
+        else:
+            guideline_text = _deterministic_failure_text(task, event)
         logger.debug(
-            "synthesized guideline (%d tokens) for tool %s: %r",
+            "guideline (%d tokens) for tool %s: %r",
             count_tokens(guideline_text),
             event["name"],
             guideline_text,

@@ -11,6 +11,16 @@ from fabri.core.llm import (
 )
 from fabri.core.outcome import Outcome
 from fabri.core.structured import StructuredOutputError, parse_response, validate
+from fabri.ingest import (
+    Adapter,
+    Improver,
+    IngestSummary,
+    Session,
+    adapter,
+    list_adapters,
+    readlogs,
+    register_adapter,
+)
 from fabri.memory.embedded_store import SqliteMemoryStore
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.pipeline import process_trace
@@ -19,10 +29,18 @@ from fabri.tools.agent_tool import make_agent_tool_manifest
 from fabri.tools.registry import ToolRegistry
 
 __all__ = [
+    "Adapter",
     "AdminAuthError",
     "AgentProtocolError",
     "AnthropicLLMBackend",
     "DEFAULT_CONFIG",
+    "Improver",
+    "IngestSummary",
+    "Session",
+    "adapter",
+    "list_adapters",
+    "readlogs",
+    "register_adapter",
     "GeminiLLMBackend",
     "LLMBackend",
     "LLMError",

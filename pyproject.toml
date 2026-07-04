@@ -51,6 +51,17 @@ Issues = "https://github.com/Rushour0/fabri/issues"
 [project.scripts]
 fabri = "fabri.cli:main"
 
+# The Improver's plug-and-play adapter discovery. fabri's own built-ins register
+# through this group (dogfooding the mechanism); a third-party pip package adds
+# its own adapter by declaring the same `[project.entry-points."fabri.adapters"]`
+# group. fabri also registers these programmatically at import, so they work in
+# an editable checkout without a reinstall.
+[project.entry-points."fabri.adapters"]
+jsonl = "fabri.ingest.adapters.builtins:jsonl_adapter"
+regex = "fabri.ingest.adapters.builtins:regex_adapter"
+otel = "fabri.ingest.adapters.builtins:otel_adapter"
+openai = "fabri.ingest.adapters.builtins:otel_adapter"
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
