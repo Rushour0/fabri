@@ -190,6 +190,27 @@ DEFAULT_CONFIG = {
         "importance_weight": 0.2,
         # Reserved for future multi-query expansion — no-op when False.
         "query_expansion": False,
+        # Memory eviction: cap the total number of stored entries so the
+        # collection doesn't grow unboundedly. When set, after each ingest
+        # the N lowest-scoring entries are deleted to bring the count back
+        # to max_entries. Score = hit_count * temporal_decay(age) — old,
+        # rarely-retrieved entries are evicted first; frequently-used and
+        # recent entries survive longest. Strategic entries are protected
+        # until all non-strategic entries are gone.
+        # None = no limit (default, current behaviour).
+        "max_entries": None,
+        # Half-life for the eviction age-weight (same formula as
+        # temporal_decay in retrieval). An entry that is eviction_half_life_days
+        # old has its hit_count weighted at 0.5 for the eviction ranking.
+        # Reuses temporal_half_life_days when not set separately.
+        "eviction_half_life_days": None,
+        # What to do with entries selected for eviction:
+        #   "delete"    — plain delete (default, zero LLM cost)
+        #   "summarize" — compress groups of evicted entries into one shorter
+        #                 guideline before deleting (MemGPT-style recursive
+        #                 summarization). Uses the run's compress_llm so cost
+        #                 is billed to the same post-run usage bucket.
+        "eviction_strategy": "delete",
     },
 }
 

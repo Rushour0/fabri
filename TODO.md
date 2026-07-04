@@ -161,7 +161,7 @@ All items below shipped in v0.9.0. See `CHANGELOG.md` and `docs/ROADMAP.md` (M2)
 
 ### Still open (retrieval)
 
-- [ ] **No memory TTL/eviction** — unbounded growth (slow DoS + retrieval dilution). Add LRU/least-hit eviction in `ingest_guideline`. _(also in deferred section below)_
+- [x] **No memory TTL/eviction** — `memory.max_entries` cap + time-weighted eviction added to `memory/pruning.py`. Score = hit_count × exp(-age/half_life); strategic entries protected last. Wired through `pipeline.process_trace` + CLI. Config keys: `memory.max_entries`, `memory.eviction_half_life_days`. Tests: `tests/test_unit_memory_eviction.py`.
 - [ ] **Query expansion** — `memory.query_expansion` is reserved but not implemented. Multi-query template expansion: generate N task variants, union results, MMR-deduplicate. Zero LLM cost if template-based. Touches `orchestrator/retrieval.py`.
 - [ ] **Cross-encoder reranking** — optional final stage after candidate retrieval. Gated behind `memory.reranker` config key. Deferred until user demand is clear (adds latency).
 - [ ] **Agent-scoped memory namespacing** — `agent_id` field now stored but not used for per-agent store routing. Add `memory.agent_namespace: true` to shard retrieval by agent. Touches `orchestrator/retrieval.py`, `memory/pruning.py`.
@@ -182,8 +182,7 @@ All items below shipped in v0.9.0. See `CHANGELOG.md` and `docs/ROADMAP.md` (M2)
   add a select/poll read timeout mirroring the HTTP transport.
 - [ ] **`grep_dir` recipe** reads any path (no sandbox jail) — confine to a root
   if promoting it from recipe to a registered tool.
-- [ ] **No memory TTL/eviction** — unbounded growth (slow DoS + retrieval
-  dilution). Add an LRU/least-hit cap in `ingest_guideline`.
+- [x] **No memory TTL/eviction** — shipped (see above).
 - [ ] **128-bit deterministic point ID** — negligible accidental collision;
   revisit only if guideline text becomes attacker-grindable.
 - [ ] **TOON decode** raises `IndexError`/`RecursionError` on adversarial

@@ -204,6 +204,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         bucket.cache_creation_input_tokens += u.cache_creation_input_tokens
         bucket.cache_read_input_tokens += u.cache_read_input_tokens
 
+    _eviction_half_life = (
+        mem_cfg.get("eviction_half_life_days")
+        or mem_cfg.get("temporal_half_life_days", 30.0)
+    )
     entries = process_trace(
         session_id,
         store,
@@ -213,6 +217,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
         record_postmortem=mem_cfg.get("record_postmortems", False),
         on_usage=_accumulate_post_run,
+        max_entries=mem_cfg.get("max_entries"),
+        eviction_half_life_days=float(_eviction_half_life),
+        eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
     )
     if (post_run_usage.input_tokens or post_run_usage.output_tokens
             or post_run_usage.cache_creation_input_tokens
@@ -250,6 +257,10 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
     llm = build_llm(config, [])
+    _eviction_half_life_ingest = (
+        mem_cfg.get("eviction_half_life_days")
+        or mem_cfg.get("temporal_half_life_days", 30.0)
+    )
     entries = process_trace(
         args.session_id,
         store,
@@ -258,6 +269,9 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
         similarity_threshold=mem_cfg["similarity_threshold"],
         promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
         record_postmortem=mem_cfg.get("record_postmortems", False),
+        max_entries=mem_cfg.get("max_entries"),
+        eviction_half_life_days=float(_eviction_half_life_ingest),
+        eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
     )
     print(json.dumps([e.to_payload() for e in entries], indent=2))
 

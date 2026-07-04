@@ -116,6 +116,9 @@ def process_trace(
     promotion_threshold_sessions: int = PROMOTION_THRESHOLD_SESSIONS,
     record_postmortem: bool = False,
     on_usage: Callable[[LLMUsage], None] | None = None,
+    max_entries: int | None = None,
+    eviction_half_life_days: float = 30.0,
+    eviction_strategy: str = "delete",
 ) -> list[MemoryEntry]:
     """Mine a session's trace for failures, synthesize each into a compressed
     guideline, and ingest it into memory (dedup/promote per pruning rules).
@@ -148,6 +151,12 @@ def process_trace(
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
             kind="postmortem",
+            max_entries=max_entries,
+            eviction_half_life_days=eviction_half_life_days,
+            eviction_strategy=eviction_strategy,
+            eviction_llm=llm,
+            eviction_guideline_max_tokens=guideline_max_tokens,
+            on_eviction_usage=on_usage,
         )
         logger.debug("recorded postmortem: %r", postmortem_text)
         new_entries.append(entry)
@@ -193,6 +202,12 @@ def process_trace(
                 similarity_threshold=similarity_threshold,
                 promotion_threshold_sessions=promotion_threshold_sessions,
                 kind="success_pattern",
+                max_entries=max_entries,
+                eviction_half_life_days=eviction_half_life_days,
+                eviction_strategy=eviction_strategy,
+                eviction_llm=llm,
+                eviction_guideline_max_tokens=guideline_max_tokens,
+                on_eviction_usage=on_usage,
             )
             new_entries.append(entry)
 
@@ -208,6 +223,12 @@ def process_trace(
             tools=["write_file", "edit_file"],
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
+            max_entries=max_entries,
+            eviction_half_life_days=eviction_half_life_days,
+            eviction_strategy=eviction_strategy,
+            eviction_llm=llm,
+            eviction_guideline_max_tokens=guideline_max_tokens,
+            on_eviction_usage=on_usage,
         )
         new_entries.append(entry)
 
@@ -232,6 +253,12 @@ def process_trace(
             tools=[event["name"]],
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
+            max_entries=max_entries,
+            eviction_half_life_days=eviction_half_life_days,
+            eviction_strategy=eviction_strategy,
+            eviction_llm=llm,
+            eviction_guideline_max_tokens=guideline_max_tokens,
+            on_eviction_usage=on_usage,
         )
         new_entries.append(entry)
 
