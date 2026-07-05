@@ -4,7 +4,7 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
-## Unreleased
+## 0.9.2 — 2026-07-05
 
 ### The Improver — plug-and-play log ingestion (`fabri.readlogs`)
 
@@ -47,6 +47,25 @@ into the *same* memory the agent retrieves from.
 - **Example skill** `syslog-adapter` demonstrates the polyglot `ToolAdapter`
   path end to end (`fabri skills install` → `fabri ingest app.log --adapter
   syslog`). New package `src/fabri/ingest/`; 22 offline tests.
+
+### Fixes
+
+- **Ingest `peek()` no longer double-counts in-memory logs.** `LogSource.peek()`
+  re-appended the whole original iterable after a fresh iterator, so a list/tuple
+  source (the default `fabri.readlogs([...])` auto-sniff path) yielded every item
+  twice — doubling mined signals and skewing promotion thresholds. Generator/file/
+  stdin paths were unaffected. Set the raw source to the remainder iterator instead.
+- **`configmap` string status.** A mapped `ok_field` string like `"false"`/`"error"`
+  was truthy under `bool()` and mis-mined a failed call as success; routed through
+  the shared fail-word check.
+- **Restored a green suite (CI had been red since v0.9.0).** Repaired three
+  pre-existing test defects the release build inherited: the eviction unit stub
+  deleted by a synthetic id instead of `entry.id`; the domain classifier's `code`
+  keyword was `"file_"` (never matched `read_file`); and a stale
+  `agent_runner_tool.QdrantMemoryStore` monkeypatch (the store is built via
+  `build_memory_store` since the v0.9.0 runtime refactor). Full suite green (871
+  passed) with a live Qdrant.
+
 ## 0.9.1 — 2026-07-04
 
 ### Docs patch
