@@ -113,6 +113,18 @@ def test_concurrent_ingest_does_not_lose_updates():
     lost-update race the flock was added to fix)."""
     text = "Concurrent lesson that must survive a race without a lost update."
     n = 8
+
+    # Create and warm the shared collection before the threads race. This test
+    # exercises the flock's lost-update prevention, not collection creation:
+    # if the 8 workers below each raced to create the collection on first store
+    # construction and then queried it before Qdrant finished initializing its
+    # segments, that surfaced as a transient 500 "0 of 0 read operations failed"
+    # (and a create-conflict 409) under load -- flakiness unrelated to what the
+    # flock guarantees. A warm-up query forces the collection ready first, so
+    # the workers only exercise the serialized find->update->upsert path,
+    # exactly as production does against an already-established collection.
+    QdrantMemoryStore(collection=COLLECTION).find_similar(text)
+
     barrier = threading.Barrier(n)
     errors: list[Exception] = []
 
