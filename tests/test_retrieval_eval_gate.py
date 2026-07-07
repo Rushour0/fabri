@@ -24,16 +24,26 @@ pytest.importorskip("sqlite_vec")  # the eval store needs sqlite-vec; skip if ab
 
 from fabri.benchmarks.retrieval_eval import run_eval
 
+# Baselines measured 2026-07-07 (MiniLM-L6-v2, 40 guidelines / 24 queries, top_k=5):
+#   dense   recall@5 = 0.7917  recall@3 = 0.6875  mrr = 0.4424
+#   hybrid  recall@5 = 0.9375  recall@3 = 0.6042  mrr = 0.4507   (default since D3)
+# Floors are baseline − 0.05.
 DENSE_RECALL5_FLOOR = 0.74
 DENSE_RECALL3_FLOOR = 0.63
 DENSE_MRR_FLOOR = 0.39
+HYBRID_RECALL5_FLOOR = 0.89  # protects the shipped default strategy
 
 
 @pytest.fixture(scope="module")
-def dense_results(tmp_path_factory):
-    """Run the dense eval once for the whole module (embeds the corpus once)."""
+def eval_results(tmp_path_factory):
+    """Run dense + hybrid once for the whole module (embeds the corpus once)."""
     tmp = tmp_path_factory.mktemp("retrieval_eval")
-    return run_eval(strategies=["dense"], tmp_dir=tmp)["dense"]
+    return run_eval(strategies=["dense", "hybrid"], tmp_dir=tmp)
+
+
+@pytest.fixture(scope="module")
+def dense_results(eval_results):
+    return eval_results["dense"]
 
 
 def test_dense_recall_at_5_meets_baseline(dense_results):
@@ -52,6 +62,14 @@ def test_dense_recall_at_3_meets_baseline(dense_results):
 def test_dense_mrr_meets_baseline(dense_results):
     assert dense_results["mrr"] >= DENSE_MRR_FLOOR, (
         f"dense MRR regressed to {dense_results['mrr']} (floor {DENSE_MRR_FLOOR})"
+    )
+
+
+def test_hybrid_default_recall_at_5_meets_baseline(eval_results):
+    """hybrid is the shipped default (D3) — protect its recall@5 floor."""
+    got = eval_results["hybrid"]["recall@5"]
+    assert got >= HYBRID_RECALL5_FLOOR, (
+        f"default (hybrid) recall@5 regressed to {got} (floor {HYBRID_RECALL5_FLOOR})"
     )
 
 

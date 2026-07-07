@@ -37,7 +37,7 @@ def _entry(text: str, kind: str = "tactical", hit_count: int = 1, **kwargs) -> M
 class TestRetrievalConfig:
     def test_defaults(self):
         cfg = RetrievalConfig()
-        assert cfg.strategy == "dense"
+        assert cfg.strategy == "hybrid"  # D3: flipped from dense (eval-backed)
         assert cfg.temporal_decay is False
         assert cfg.temporal_half_life_days == 30.0
         assert cfg.mmr_lambda == 0.7

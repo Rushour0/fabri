@@ -130,10 +130,16 @@ Numbers below are **post the BM25 FTS5 fix** (2026-07-07 — see finding 1).
 
 | strategy | recall@1 | recall@3 | recall@5 | MRR |
 |---|---|---|---|---|
-| dense (shipped default) | 0.125 | 0.688 | 0.792 | 0.442 |
+| dense (pre-v0.9.x default, now fallback) | 0.125 | 0.688 | 0.792 | 0.442 |
 | sparse (BM25) | 0.167 | 0.750 | 0.875 | 0.533 |
-| hybrid (RRF) | 0.125 | 0.604 | **0.938** | 0.451 |
+| **hybrid (RRF) — shipped default since D3** | 0.125 | 0.604 | **0.938** | 0.451 |
 | hybrid+mmr | 0.479 | 0.542 | 0.646 | 0.697 |
+
+**Default flipped dense → hybrid (D3, 2026-07-07):** hybrid's recall@5 (0.938) is
+the clear win and it degrades gracefully to dense wherever BM25 is unavailable
+(Qdrant without `fabri[bm25]`), so it is never worse than the old default. MMR
+stays opt-in — it trades recall@5 for better rank-1/diversity, which this
+fixture doesn't reward. The gate now protects the hybrid recall@5 floor too.
 
 **Findings** (this is what the gate is _for_):
 1. **BM25 was a silent no-op on the SQLite backend — found and fixed.** Before

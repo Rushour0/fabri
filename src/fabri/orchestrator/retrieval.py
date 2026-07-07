@@ -35,17 +35,21 @@ except ImportError:
 class RetrievalConfig:
     """Retrieval knobs for a single retrieve_context call.
 
-    All fields default to the pre-hybrid behavior so passing None or
-    RetrievalConfig() is equivalent to the original retrieve_context behavior.
+    `strategy` defaults to "hybrid" (RRF fusion of dense + sparse) — the offline
+    retrieval eval showed hybrid recall@5 = 0.94 vs dense 0.79, and hybrid
+    degrades gracefully to dense wherever BM25 is unavailable (Qdrant without
+    `fabri[bm25]`), so it is never worse than the old dense default. The other
+    post-processing knobs (temporal decay, importance, domain routing) still
+    default off. See docs/design/memory-observability-plan.md (D3).
 
     Strategies:
-      "dense"      — vector similarity only (default, current behaviour)
+      "dense"      — vector similarity only (the pre-v0.9.x default)
       "sparse"     — BM25 only (SQLite FTS5 / Qdrant client-side BM25)
-      "hybrid"     — RRF fusion of dense + sparse
+      "hybrid"     — RRF fusion of dense + sparse (default)
       "hybrid+mmr" — hybrid + MMR diversification on final candidate pool
     """
 
-    strategy: str = "dense"
+    strategy: str = "hybrid"
     temporal_decay: bool = False
     temporal_half_life_days: float = 30.0
     mmr_lambda: float = 0.7
@@ -56,7 +60,7 @@ class RetrievalConfig:
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
         return cls(
-            strategy=mem_cfg.get("retrieval_strategy", "dense"),
+            strategy=mem_cfg.get("retrieval_strategy", "hybrid"),
             temporal_decay=bool(mem_cfg.get("temporal_decay", False)),
             temporal_half_life_days=float(mem_cfg.get("temporal_half_life_days", 30.0)),
             mmr_lambda=float(mem_cfg.get("mmr_lambda", 0.7)),

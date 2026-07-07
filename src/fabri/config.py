@@ -168,12 +168,16 @@ DEFAULT_CONFIG = {
         # this took N retries; tool X failed K times". Off keeps today's
         # failure/success-only mining (and unchanged entry counts).
         "record_postmortems": False,
-        # Advanced retrieval — all default to the pre-hybrid behaviour (opt-in).
-        # "dense"      — vector similarity only (default, current behaviour)
+        # Retrieval strategy. Default "hybrid" — the offline retrieval eval
+        # (python -m fabri.benchmarks.retrieval_eval) measured hybrid recall@5
+        # 0.94 vs dense 0.79, and hybrid falls back to dense wherever BM25 is
+        # unavailable, so it is never worse. Set "dense" for the pre-v0.9.x
+        # vector-only behaviour. See docs/design/memory-observability-plan.md.
+        # "dense"      — vector similarity only (pre-v0.9.x default)
         # "sparse"     — BM25 only (SQLite FTS5 / Qdrant client-side BM25)
-        # "hybrid"     — RRF fusion of dense + sparse
+        # "hybrid"     — RRF fusion of dense + sparse (default)
         # "hybrid+mmr" — hybrid + MMR diversification on final candidate pool
-        "retrieval_strategy": "dense",
+        "retrieval_strategy": "hybrid",
         # Exponential temporal decay: score *= exp(-ln(2)*age_days/half_life).
         # Recent entries get ~1.0; entries half_life_days old get ~0.5.
         "temporal_decay": False,
