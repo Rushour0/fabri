@@ -45,8 +45,10 @@ class TestFts5Query:
     def test_caps_at_50_tokens(self):
         long_text = " ".join(f"word{i}" for i in range(100))
         q = _fts5_query(long_text)
-        tokens = q.split()
-        assert len(tokens) <= 50
+        # Terms are OR-joined, so q.split() also counts the "OR" keywords; count
+        # the quoted search terms themselves, which is what the 50-cap bounds.
+        terms = [t for t in q.split() if t.startswith('"')]
+        assert len(terms) <= 50
 
 
 # ---------------------------------------------------------------------------

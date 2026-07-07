@@ -44,15 +44,25 @@ def _pack(vec: list[float]) -> bytes:
 
 
 def _fts5_query(text: str) -> str:
-    """Convert raw text to FTS5 MATCH syntax.
+    """Convert raw text to an FTS5 MATCH expression.
 
-    Splits on non-word chars and wraps each token in double quotes so FTS5
-    operator chars (*, ", (, ), ^, :) in tool names or paths cannot cause a
-    syntax error. Caps at 50 tokens to avoid pathologically large MATCH
-    expressions from long task strings. Returns "" when no tokens survive
-    (caller should skip the BM25 query entirely)."""
-    words = _re.sub(r"[^\w\s]", " ", text).split()
-    return " ".join(f'"{w}"' for w in words[:50]) if words else ""
+    Splits on any non-alphanumeric char — INCLUDING underscore, so a tool name
+    like `read_file` contributes its parts (`read`, `file`) and matches
+    guidelines that mention either — wraps each token in double quotes (so FTS5
+    operator chars like *, ", (, ), ^, : can't cause a syntax error), and joins
+    them with OR.
+
+    The OR is load-bearing. FTS5 treats whitespace between terms as an implicit
+    AND, so the old space-join required a guideline to contain EVERY query word
+    — which for a natural-language task is almost never true, silently making
+    BM25 (and therefore `sparse`/`hybrid` retrieval) a no-op that returned [].
+    OR matches a guideline sharing ANY term; BM25's IDF weighting then ranks
+    common words (the, for) near-zero so precision holds. Caps at 50 terms to
+    bound the expression size. Returns "" when no tokens survive (caller skips
+    the BM25 query entirely). Verified by the offline retrieval eval: fixing
+    this lifts hybrid recall@5 from 0.79 (== dense, dead) to 0.94."""
+    words = _re.sub(r"[\W_]+", " ", text).split()
+    return " OR ".join(f'"{w}"' for w in words[:50]) if words else ""
 
 
 class SqliteMemoryStore:

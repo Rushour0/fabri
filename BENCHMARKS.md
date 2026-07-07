@@ -119,6 +119,41 @@ _Cite the reference scores side-by-side so the comparison is honest:
 Mastra "Observational Memory" 94.87%, Letta, Mem0, Zep (63.8%), as
 published mid-2026._
 
+### Offline retrieval eval (recall@k / MRR)
+
+Fast, deterministic, credit-free eval of the retrieval layer itself (fabri's
+real `_retrieve_inner` over a labeled fixture — 40 guidelines, 24 queries,
+top_k=5). Runs in CI as a regression gate on the shipped `dense` default.
+Reproduce: `python -m fabri.benchmarks.retrieval_eval`.
+
+Numbers below are **post the BM25 FTS5 fix** (2026-07-07 — see finding 1).
+
+| strategy | recall@1 | recall@3 | recall@5 | MRR |
+|---|---|---|---|---|
+| dense (shipped default) | 0.125 | 0.688 | 0.792 | 0.442 |
+| sparse (BM25) | 0.167 | 0.750 | 0.875 | 0.533 |
+| hybrid (RRF) | 0.125 | 0.604 | **0.938** | 0.451 |
+| hybrid+mmr | 0.479 | 0.542 | 0.646 | 0.697 |
+
+**Findings** (this is what the gate is _for_):
+1. **BM25 was a silent no-op on the SQLite backend — found and fixed.** Before
+   the fix, `sparse` and `hybrid` were byte-identical to `dense` (all recall@5 =
+   0.792) because `SqliteMemoryStore.query_bm25` returned `[]` for any
+   multi-word query: `_fts5_query` space-joined tokens, and FTS5 reads a space
+   as implicit **AND**, so a guideline had to contain _every_ query word to
+   match. The fix (OR-join + split tool-name underscores) lifts **hybrid
+   recall@5 0.792 → 0.938** and sparse to 0.875. A regression guard
+   (`test_hybrid_bm25_is_alive`) now asserts hybrid beats dense so BM25 can't
+   silently die again. This is the evidence base for the Track-M `M5`/`D3`
+   default-strategy flip (still deferred — a separate reviewed decision).
+2. **MMR massively improves early rank.** `hybrid+mmr` lifts recall@1 0.125→0.479
+   and MRR 0.44→0.70 (trading recall@5) — it surfaces the single most relevant
+   guideline first far more often, which is what matters when only the top few
+   entries fit the prompt budget.
+
+_Gate floors (dense − 0.05) live in `tests/test_retrieval_eval_gate.py`; bump
+them only with a new row here._
+
 ## Honest gaps
 
 The single biggest open question fabri hasn't answered yet:
