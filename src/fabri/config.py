@@ -168,12 +168,16 @@ DEFAULT_CONFIG = {
         # this took N retries; tool X failed K times". Off keeps today's
         # failure/success-only mining (and unchanged entry counts).
         "record_postmortems": False,
-        # Advanced retrieval — all default to the pre-hybrid behaviour (opt-in).
-        # "dense"      — vector similarity only (default, current behaviour)
+        # Retrieval strategy. Default "hybrid" — the offline retrieval eval
+        # (python -m fabri.benchmarks.retrieval_eval) measured hybrid recall@5
+        # 0.94 vs dense 0.79, and hybrid falls back to dense wherever BM25 is
+        # unavailable, so it is never worse. Set "dense" for the pre-v0.9.x
+        # vector-only behaviour. See docs/design/memory-observability-plan.md.
+        # "dense"      — vector similarity only (pre-v0.9.x default)
         # "sparse"     — BM25 only (SQLite FTS5 / Qdrant client-side BM25)
-        # "hybrid"     — RRF fusion of dense + sparse
+        # "hybrid"     — RRF fusion of dense + sparse (default)
         # "hybrid+mmr" — hybrid + MMR diversification on final candidate pool
-        "retrieval_strategy": "dense",
+        "retrieval_strategy": "hybrid",
         # Exponential temporal decay: score *= exp(-ln(2)*age_days/half_life).
         # Recent entries get ~1.0; entries half_life_days old get ~0.5.
         "temporal_decay": False,
@@ -181,6 +185,12 @@ DEFAULT_CONFIG = {
         # MMR lambda: 0=pure diversity, 1=pure relevance. Only applies when
         # retrieval_strategy is "hybrid+mmr".
         "mmr_lambda": 0.7,
+        # RRF fusion constant for "hybrid". The web-scale default is 60, but
+        # fabri fuses two short pools where 60 flattens the rank term and lets
+        # mere agreement outrank the single best match — the offline eval
+        # measured recall@3 0.60 (k=60) -> 0.90 (k=20). Lower = sharper rank
+        # discrimination; raise toward 60 only for very large stores.
+        "rrf_k": 20,
         # Keyword heuristic domain classifier (code/planning/search/api/generic).
         # When true, entries whose domain matches the query get a 1.15× score boost.
         "domain_routing": False,

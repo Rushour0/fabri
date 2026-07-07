@@ -29,7 +29,10 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -e ".[dev]"
+        # sqlite extra pulls in sqlite-vec so the SqliteMemoryStore-backed
+        # retrieval-eval gate (tests/test_retrieval_eval_gate.py) runs instead
+        # of skipping. FTS5 BM25 is a Python built-in — no bm25 extra needed.
+        run: pip install -e ".[dev,sqlite]"
 
       - name: Test
         run: pytest tests/ -q

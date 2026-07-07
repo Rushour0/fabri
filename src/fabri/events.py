@@ -61,6 +61,15 @@ class EventType(str, Enum):
     # totals. Same shape as `usage` but flagged so a consumer knows to add
     # rather than replace.
     POST_RUN_USAGE = "post_run_usage"
+    # One event per retrieve_context_with_meta call describing WHAT retrieval
+    # decided: the active strategy, dense/sparse pool sizes, whether BM25 fired
+    # or fell back, guaranteed-slot counts, MMR, and a lean per-candidate list
+    # (id/kind/score/inclusion_reason) for the final injected set. Trace-only —
+    # never enters the prompt, so zero model-token cost. Emitted only when a
+    # session_id is threaded in (absent for library/eval callers). The debug
+    # surface for "why is retrieval weak" and the raw material a report rollup
+    # or OTel span reads. See docs/design/memory-observability-plan.md (A).
+    RETRIEVAL = "retrieval"
 
 
 def emit_discrepancy(session_id: str, path: str, reason: str) -> None:

@@ -788,7 +788,14 @@ def cmd_skills_add(args: argparse.Namespace) -> None:
 def cmd_report(args: argparse.Namespace) -> None:
     """G6/G7/G8/G20: aggregate JSONL traces into a usage report. Output in
     markdown (default), json, or self-contained HTML."""
-    from fabri.reports import aggregate, collect_sessions, render_html, render_json, render_markdown
+    from fabri.reports import (
+        aggregate,
+        collect_sessions,
+        compute_memory_health,
+        render_html,
+        render_json,
+        render_markdown,
+    )
 
     since_seconds = None
     if args.since:
@@ -808,6 +815,19 @@ def cmd_report(args: argparse.Namespace) -> None:
 
     sessions = collect_sessions(since_seconds=since_seconds, limit=args.limit)
     report = aggregate(sessions)
+
+    # M6: attach a memory-health snapshot when a store is reachable. Best-effort
+    # and OFFLINE-SAFE — build_memory_store directly (NOT _open_store, which
+    # sys.exit(1)s on an unreachable backend and would kill the trace-only
+    # report). Any failure leaves report.memory_health = None and the report
+    # renders exactly as before.
+    try:
+        config = load_config(args.config)
+        store = build_memory_store(config["memory"])
+        report.memory_health = compute_memory_health(store)
+    except Exception as e:  # noqa: BLE001 -- memory health is a best-effort add-on
+        import logging
+        logging.getLogger("fabri").debug("memory-health snapshot skipped: %s", e)
 
     if args.format == "json":
         output = render_json(report)

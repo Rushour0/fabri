@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable
 
+from fabri.events import EventType
 from fabri.memory.embeddings import embed
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
@@ -13,6 +15,23 @@ from fabri.memory.store import QdrantMemoryStore
 if TYPE_CHECKING:
     from fabri.tools.manifest_schema import ToolManifest
     from fabri.tools.registry import ToolRegistry
+
+logger = logging.getLogger("fabri")
+
+
+def _emit_retrieval_event(session_id: str, payload: dict) -> None:
+    """Best-effort emit of the RETRIEVAL trace event (see events.EventType).
+
+    Observability must never break retrieval: swallow any trace-write error (a
+    malformed session_id, a full disk) and log at debug rather than fail the run
+    over a trace-only event. `log_event` is imported lazily to keep retrieval's
+    import graph free of the traces module on the cold path."""
+    try:
+        from fabri.orchestrator.traces import log_event
+
+        log_event(session_id, {"type": EventType.RETRIEVAL.value, **payload})
+    except Exception:  # noqa: BLE001 -- observability is strictly best-effort
+        logger.debug("failed to emit retrieval event", exc_info=True)
 
 DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
@@ -35,34 +54,46 @@ except ImportError:
 class RetrievalConfig:
     """Retrieval knobs for a single retrieve_context call.
 
-    All fields default to the pre-hybrid behavior so passing None or
-    RetrievalConfig() is equivalent to the original retrieve_context behavior.
+    `strategy` defaults to "hybrid" (RRF fusion of dense + sparse) — the offline
+    retrieval eval showed hybrid recall@5 = 0.94 vs dense 0.79, and hybrid
+    degrades gracefully to dense wherever BM25 is unavailable (Qdrant without
+    `fabri[bm25]`), so it is never worse than the old dense default. The other
+    post-processing knobs (temporal decay, importance, domain routing) still
+    default off. See docs/design/memory-observability-plan.md (D3).
 
     Strategies:
-      "dense"      — vector similarity only (default, current behaviour)
+      "dense"      — vector similarity only (the pre-v0.9.x default)
       "sparse"     — BM25 only (SQLite FTS5 / Qdrant client-side BM25)
-      "hybrid"     — RRF fusion of dense + sparse
+      "hybrid"     — RRF fusion of dense + sparse (default)
       "hybrid+mmr" — hybrid + MMR diversification on final candidate pool
     """
 
-    strategy: str = "dense"
+    strategy: str = "hybrid"
     temporal_decay: bool = False
     temporal_half_life_days: float = 30.0
     mmr_lambda: float = 0.7
     domain_routing: bool = False
     importance_weight: float = 0.2
     query_expansion: bool = False  # reserved
+    # RRF fusion constant. The canonical web-scale default is 60, but fabri
+    # fuses two SHORT pools (~2*top_k candidates each), where k=60 flattens
+    # 1/(k+rank) so much that fusion rewards mere agreement over peak relevance
+    # — sinking recall@3. 20 keeps rank discrimination on a small pool; the
+    # offline eval measured recall@3 0.60 (k=60) -> 0.71 (k=20) with recall@5
+    # unchanged. See docs/design/memory-observability-plan.md.
+    rrf_k: int = 20
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
         return cls(
-            strategy=mem_cfg.get("retrieval_strategy", "dense"),
+            strategy=mem_cfg.get("retrieval_strategy", "hybrid"),
             temporal_decay=bool(mem_cfg.get("temporal_decay", False)),
             temporal_half_life_days=float(mem_cfg.get("temporal_half_life_days", 30.0)),
             mmr_lambda=float(mem_cfg.get("mmr_lambda", 0.7)),
             domain_routing=bool(mem_cfg.get("domain_routing", False)),
             importance_weight=float(mem_cfg.get("importance_weight", 0.2)),
             query_expansion=bool(mem_cfg.get("query_expansion", False)),
+            rrf_k=int(mem_cfg.get("rrf_k", 20)),
         )
 
 
@@ -122,13 +153,17 @@ def _dot(a: list[float], b: list[float]) -> float:
 def _rrf_fuse(
     dense: list[tuple[MemoryEntry, float]],
     sparse: list[tuple[MemoryEntry, float]],
-    k: int = 60,
+    k: int = 20,
 ) -> list[tuple[MemoryEntry, float]]:
     """Reciprocal Rank Fusion: score = Σ 1/(k + rank_i).
 
     Uses ordinal rank only — no score normalization needed. Entries that
     appear in both lists get double credit, naturally surfacing agreement
-    between the two retrieval signals."""
+    between the two retrieval signals.
+
+    `k` defaults to 20, not the web-scale 60: fabri fuses two short pools, and
+    a large k flattens the rank term so much that agreement dominates peak
+    relevance. See RetrievalConfig.rrf_k."""
     scores: dict[str, float] = {}
     entries: dict[str, MemoryEntry] = {}
     for rank, (entry, _) in enumerate(dense, start=1):
@@ -296,6 +331,7 @@ def retrieve_context_with_meta(
     tool_names: list[str] | None = None,
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
+    session_id: str | None = None,
 ) -> tuple[str, dict]:
     """Same as `retrieve_context` but also returns retrieval metadata so
     callers can emit the guideline-reuse-rate metric.
@@ -316,6 +352,7 @@ def retrieve_context_with_meta(
         store, task, top_k=top_k, tool_names=tool_names,
         tag_hit_score_floor=tag_hit_score_floor,
         retrieval_config=retrieval_config,
+        session_id=session_id,
     )
     meta = {
         "retrieved": len(merged),
@@ -335,6 +372,7 @@ def retrieve_context(
     tool_names: list[str] | None = None,
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Embed `task`, pull the top-k most relevant guidelines (tactical + strategic),
     and format them as a compact bullet list -- this is what gets injected into the
@@ -356,6 +394,7 @@ def retrieve_context(
         store, task, top_k=top_k, tool_names=tool_names,
         tag_hit_score_floor=tag_hit_score_floor,
         retrieval_config=retrieval_config,
+        session_id=session_id,
     )
     return text
 
@@ -371,22 +410,37 @@ def _retrieve_inner(
     tool_names: list[str] | None = None,
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
+    session_id: str | None = None,
 ):
     """Internal: returns (rendered_text, list_of_(entry, score)) so the
-    metadata-returning wrapper can compute reuse-rate without re-querying."""
-    # Cold store: skip the embed call so a fresh `fabri init` + first
-    # `fabri run` doesn't load the 44MB sentence-transformers model.
-    if store.count() == 0:
-        return "", []
+    metadata-returning wrapper can compute reuse-rate without re-querying.
 
+    When `session_id` is set, emits one `retrieval` trace event describing what
+    retrieval decided (strategy, pool sizes, BM25 fired/fell-back, slot counts,
+    MMR, and a lean per-candidate list). Trace-only, never enters the prompt.
+    See docs/design/memory-observability-plan.md (unit A)."""
     rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
     strategy = rcfg.strategy
+
+    # Bind once — on the Qdrant backend count() is a network round-trip.
+    store_count = store.count()
+    # Cold store: skip the embed call so a fresh `fabri init` + first
+    # `fabri run` doesn't load the 44MB sentence-transformers model.
+    if store_count == 0:
+        if session_id is not None:
+            _emit_retrieval_event(session_id, {
+                "strategy": strategy, "top_k": top_k, "store_count": 0,
+                "retrieved": 0, "cold_store": True,
+            })
+        return "", []
 
     # Word-boundary match so `read_file` doesn't trigger on "ready".
     mentioned_tools = [t for t in (tool_names or []) if _word_mentioned(t, task)]
 
     # Embed once and pass the vector down so per-tool queries don't re-embed.
+    _embed_t0 = time.monotonic()
     vector = embed(task)
+    embedding_ms = (time.monotonic() - _embed_t0) * 1000.0
 
     # Fetch a larger pool when post-processing (decay, MMR) will further filter.
     pool_multiplier = 4 if (rcfg.temporal_decay or "mmr" in strategy) else 2
@@ -399,25 +453,37 @@ def _retrieve_inner(
     )
 
     # --- Sparse (BM25) retrieval and RRF fusion ---
-    base_results: list[tuple[MemoryEntry, float]]
-    if "hybrid" in strategy or strategy == "sparse":
-        sparse_results: list[tuple[MemoryEntry, float]] = []
+    # Pre-init BEFORE the branch so the retrieval event can read these on EVERY
+    # path — the default dense path never enters the branch below, and an
+    # unconditional reference to a branch-local `sparse_results` would NameError.
+    sparse_results: list[tuple[MemoryEntry, float]] = []
+    sparse_backend: str | None = None
+    sparse_requested = "hybrid" in strategy or strategy == "sparse"
 
+    base_results: list[tuple[MemoryEntry, float]]
+    if sparse_requested:
         if hasattr(store, "query_bm25"):
             # SQLite path: FTS5 gives true independent BM25 over the full table.
+            sparse_backend = "fts5"
             sparse_results = store.query_bm25(task, top_k=fetch_k)  # type: ignore[union-attr]
         elif _HAS_RANK_BM25:
             # Qdrant path: client-side BM25 re-ranking over the dense pool.
+            sparse_backend = "rank_bm25"
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
 
         if "hybrid" in strategy and sparse_results:
-            base_results = _rrf_fuse(dense_results, sparse_results)
+            base_results = _rrf_fuse(dense_results, sparse_results, k=rcfg.rrf_k)
         elif strategy == "sparse" and sparse_results:
             base_results = sparse_results
         else:
             base_results = dense_results  # graceful fallback when BM25 unavailable
     else:
         base_results = dense_results
+
+    # sparse/hybrid was requested but BM25 produced nothing → we silently used
+    # dense. Surfacing this is the whole point of the observability card: it's
+    # how a "hybrid is secretly dense" degradation becomes visible in the trace.
+    sparse_fallback = sparse_requested and not sparse_results
 
     # --- Temporal decay + importance boost ---
     if rcfg.temporal_decay or rcfg.importance_weight > 0:
@@ -455,10 +521,19 @@ def _retrieve_inner(
         [p for p in base_results if p[0].kind == "success_pattern"],
         key=lambda p: p[1], reverse=True,
     )
-    success_cap = max(1, top_k // 2) if success_results else 0
+    # Guarantee up to this many success patterns in the injected top_k — but
+    # never take rank 1 (min(..., top_k-1) always leaves the head to relevance).
+    success_cap = min(max(1, top_k // 2), max(0, top_k - 1)) if success_results else 0
 
     seen_ids: set[str] = set()
     merged: list[tuple[MemoryEntry, float]] = []
+    # Why each id earned its slot — surfaced per-candidate in the retrieval event.
+    inclusion_reason: dict[str, str] = {}
+
+    def _reason(entry: MemoryEntry) -> str:
+        # A success pattern that earns its slot on relevance is still a success
+        # pattern in the trace; only the forced tail-slot ones are "guaranteed".
+        return "success_pattern" if entry.kind == "success_pattern" else "base"
 
     for entry, score in tag_results:
         if score < tag_hit_score_floor:
@@ -466,29 +541,86 @@ def _retrieve_inner(
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
+            inclusion_reason[entry.id] = "tag_hit"
 
-    success_added = 0
+    # Relevance owns the HEAD of top_k; hold back `success_cap` tail slots for the
+    # success-pattern guarantee. base_results already contains success patterns,
+    # so one that's genuinely relevant still earns a head slot. Front-loading the
+    # guarantee instead (the pre-fix behaviour) stole ranks 1-2 from the most
+    # relevant guideline and sank recall@1 0.60 -> 0.13 in the offline eval.
+    relevance_head = max(0, top_k - len(merged) - success_cap)
+    deferred: list[tuple[MemoryEntry, float]] = []
+    head_added = 0
+    for entry, score in base_results:
+        if entry.id in seen_ids:
+            continue
+        if head_added < relevance_head:
+            seen_ids.add(entry.id)
+            merged.append((entry, score))
+            inclusion_reason[entry.id] = _reason(entry)
+            head_added += 1
+        else:
+            deferred.append((entry, score))
+
+    # Fill the reserved tail slots with success patterns not already surfaced by
+    # relevance, up to the cap (counting any that already landed in the head).
+    successes = sum(1 for e in merged if e[0].kind == "success_pattern")
     for entry, score in success_results:
-        if success_added >= success_cap or len(merged) >= top_k:
+        if successes >= success_cap or len(merged) >= top_k:
             break
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
-            success_added += 1
+            inclusion_reason[entry.id] = "success_pattern"
+            successes += 1
 
-    # Collect up to pool_multiplier * top_k candidates for MMR, then trim.
-    for entry, score in base_results:
+    # Backfill the rest of top_k (when too few success patterns existed) and
+    # extend the candidate pool for MMR, from the deferred relevance tail.
+    for entry, score in deferred:
         if len(merged) >= top_k * pool_multiplier:
             break
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
+            inclusion_reason[entry.id] = _reason(entry)
 
     # --- MMR diversification (final step, applied to full candidate pool) ---
-    if "mmr" in strategy and len(merged) > top_k:
+    mmr_pool_before = len(merged)
+    mmr_applied = "mmr" in strategy and len(merged) > top_k
+    if mmr_applied:
         merged = _apply_mmr(merged, vector, rcfg.mmr_lambda, top_k)
     else:
         merged = merged[:top_k]
+
+    if session_id is not None:
+        final_reasons = [inclusion_reason.get(e.id, "base") for e, _ in merged]
+        _emit_retrieval_event(session_id, {
+            "strategy": strategy,
+            "top_k": top_k,
+            "store_count": store_count,
+            "embedding_ms": round(embedding_ms, 2),
+            "dense_pool_size": len(dense_results),
+            "sparse_pool_size": len(sparse_results),
+            "sparse_backend": sparse_backend,
+            "sparse_fallback": sparse_fallback,
+            "tag_hits": final_reasons.count("tag_hit"),
+            "success_hits": final_reasons.count("success_pattern"),
+            "mmr_applied": mmr_applied,
+            "mmr_pool_before": mmr_pool_before,
+            "retrieved": len(merged),
+            "score_min": round(min((s for _, s in merged), default=0.0), 4),
+            "score_max": round(max((s for _, s in merged), default=0.0), 4),
+            "candidates": [
+                {
+                    "id": entry.id,
+                    "kind": entry.kind,
+                    "score": round(score, 4),
+                    "inclusion_reason": inclusion_reason.get(entry.id, "base"),
+                    "mmr_survived": mmr_applied,
+                }
+                for entry, score in merged
+            ],
+        })
 
     if not merged:
         return "", []

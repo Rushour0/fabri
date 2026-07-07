@@ -115,6 +115,30 @@ def render_markdown(report: AggregateReport, *, trend: bool = True) -> str:
         )
         parts.append("")
 
+    # Memory health — M6 (store composition; None when no store was reachable)
+    if report.memory_health:
+        mh = report.memory_health
+        parts.append("## memory health")
+        parts.append("")
+        median = mh.get("median_age_days")
+        rows = [
+            ["guidelines in store", str(mh.get("total_guidelines", 0))],
+            ["strategic share", _fmt_pct(mh.get("strategic_share"))],
+            ["median entry age", f"{median:.1f}d" if median is not None else "—"],
+        ]
+        if report.avg_reuse_rate is not None:
+            rows.append(["avg reuse rate", _fmt_pct(report.avg_reuse_rate)])
+        parts.append(_table(["metric", "value"], rows))
+        by_kind = mh.get("by_kind") or {}
+        if by_kind:
+            parts.append("")
+            parts.append(
+                _table(["kind", "count"], [[k, str(v)] for k, v in by_kind.items()])
+            )
+        parts.append("")
+        parts.append("_Store composition at report time; reuse rate is from traces._")
+        parts.append("")
+
     # Trend — G8
     if trend and report.sessions:
         # Oldest -> newest for the sparkline.
@@ -178,7 +202,8 @@ def render_json(report: AggregateReport) -> str:
         "outcomes": report.outcomes,
         "tool_call_count": report.tool_call_count,
         "tool_failure_count": report.tool_failure_count,
-        "avg_reuse_rate": report.avg_reuse_rate,
+        "avg_reuse_rate": report.avg_reuse_rate,  # kept top-level for back-compat
+        "memory_health": report.memory_health,  # M6; null when no store reachable
         "sessions": [
             {
                 "session_id": s.session_id,
@@ -312,6 +337,21 @@ def render_html(report: AggregateReport) -> str:
                 [[o, str(c)] for o, c in sorted(report.outcomes.items())],
             )
         )
+
+    if report.memory_health:  # M6
+        mh = report.memory_health
+        median = mh.get("median_age_days")
+        mh_rows = [
+            ["guidelines in store", str(mh.get("total_guidelines", 0))],
+            ["strategic share", _fmt_pct(mh.get("strategic_share"))],
+            ["median entry age", f"{median:.1f}d" if median is not None else "—"],
+        ]
+        if report.avg_reuse_rate is not None:
+            mh_rows.append(["avg reuse rate", _fmt_pct(report.avg_reuse_rate)])
+        for kind, count in (mh.get("by_kind") or {}).items():
+            mh_rows.append([f"kind: {kind}", str(count)])
+        parts.append("<h2>memory health</h2>")
+        parts.append(_html_table(["metric", "value"], mh_rows))
 
     if report.sessions:
         parts.append("<h2>sessions</h2>")

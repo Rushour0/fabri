@@ -37,13 +37,14 @@ def _entry(text: str, kind: str = "tactical", hit_count: int = 1, **kwargs) -> M
 class TestRetrievalConfig:
     def test_defaults(self):
         cfg = RetrievalConfig()
-        assert cfg.strategy == "dense"
+        assert cfg.strategy == "hybrid"  # D3: flipped from dense (eval-backed)
         assert cfg.temporal_decay is False
         assert cfg.temporal_half_life_days == 30.0
         assert cfg.mmr_lambda == 0.7
         assert cfg.domain_routing is False
         assert cfg.importance_weight == 0.2
         assert cfg.query_expansion is False
+        assert cfg.rrf_k == 20  # retuned from the web-scale 60 (eval-backed)
 
     def test_from_mem_cfg_parses_all_keys(self):
         mem_cfg = {
@@ -54,6 +55,7 @@ class TestRetrievalConfig:
             "domain_routing": True,
             "importance_weight": 0.4,
             "query_expansion": True,
+            "rrf_k": 30,
         }
         cfg = RetrievalConfig.from_mem_cfg(mem_cfg)
         assert cfg.strategy == "hybrid+mmr"
@@ -63,6 +65,7 @@ class TestRetrievalConfig:
         assert cfg.domain_routing is True
         assert cfg.importance_weight == 0.4
         assert cfg.query_expansion is True
+        assert cfg.rrf_k == 30
 
     def test_from_mem_cfg_empty_dict_gives_defaults(self):
         cfg = RetrievalConfig.from_mem_cfg({})
