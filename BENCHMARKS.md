@@ -126,39 +126,49 @@ real `_retrieve_inner` over a labeled fixture — 40 guidelines, 24 queries,
 top_k=5). Runs in CI as a regression gate on the shipped `dense` default.
 Reproduce: `python -m fabri.benchmarks.retrieval_eval`.
 
-Numbers below are **post the BM25 FTS5 fix** (2026-07-07 — see finding 1).
+Numbers below are **post the BM25 FTS5 fix, the RRF-k retune, and the
+success-slot back-load** (2026-07-07 — see findings).
 
 | strategy | recall@1 | recall@3 | recall@5 | MRR |
 |---|---|---|---|---|
-| dense (pre-v0.9.x default, now fallback) | 0.125 | 0.688 | 0.792 | 0.442 |
-| sparse (BM25) | 0.167 | 0.750 | 0.875 | 0.533 |
-| **hybrid (RRF) — shipped default since D3** | 0.125 | 0.604 | **0.938** | 0.451 |
-| hybrid+mmr | 0.479 | 0.542 | 0.646 | 0.697 |
+| dense (pre-v0.9.x default, now fallback) | 0.583 | 0.688 | 0.792 | 0.790 |
+| sparse (BM25) | 0.500 | 0.792 | 0.875 | 0.772 |
+| **hybrid (RRF) — shipped default** | **0.583** | **0.896** | **0.938** | **0.844** |
+| hybrid+mmr | 0.583 | 0.625 | 0.729 | 0.804 |
 
-**Default flipped dense → hybrid (D3, 2026-07-07):** hybrid's recall@5 (0.938) is
-the clear win and it degrades gracefully to dense wherever BM25 is unavailable
-(Qdrant without `fabri[bm25]`), so it is never worse than the old default. MMR
-stays opt-in — it trades recall@5 for better rank-1/diversity, which this
-fixture doesn't reward. The gate now protects the hybrid recall@5 floor too.
+**hybrid is now the best strategy on every metric**, not just recall@5 — the
+default flip is unambiguous. It also degrades gracefully to dense wherever BM25
+is unavailable (Qdrant without `fabri[bm25]`), so it is never worse than the old
+default. MMR stays opt-in — on this fixture it trades recall for diversity with
+no rank-1 gain left to capture, so it is not the default.
 
 **Findings** (this is what the gate is _for_):
 1. **BM25 was a silent no-op on the SQLite backend — found and fixed.** Before
-   the fix, `sparse` and `hybrid` were byte-identical to `dense` (all recall@5 =
-   0.792) because `SqliteMemoryStore.query_bm25` returned `[]` for any
-   multi-word query: `_fts5_query` space-joined tokens, and FTS5 reads a space
-   as implicit **AND**, so a guideline had to contain _every_ query word to
-   match. The fix (OR-join + split tool-name underscores) lifts **hybrid
-   recall@5 0.792 → 0.938** and sparse to 0.875. A regression guard
-   (`test_hybrid_bm25_is_alive`) now asserts hybrid beats dense so BM25 can't
-   silently die again. This is the evidence base for the Track-M `M5`/`D3`
-   default-strategy flip (still deferred — a separate reviewed decision).
-2. **MMR massively improves early rank.** `hybrid+mmr` lifts recall@1 0.125→0.479
-   and MRR 0.44→0.70 (trading recall@5) — it surfaces the single most relevant
-   guideline first far more often, which is what matters when only the top few
-   entries fit the prompt budget.
+   the fix, `sparse` and `hybrid` were byte-identical to `dense` because
+   `SqliteMemoryStore.query_bm25` returned `[]` for any multi-word query:
+   `_fts5_query` space-joined tokens, and FTS5 reads a space as implicit **AND**,
+   so a guideline had to contain _every_ query word to match. Fix: OR-join +
+   split tool-name underscores. Guarded by `test_hybrid_bm25_is_alive`.
+2. **RRF `k` was mistuned for the pool size (60 → 20).** RRF scores
+   `Σ 1/(k+rank)`; the web-scale default `k=60` flattens the rank term over
+   fabri's short two-pool fusion, so "appears in both lists" outranks "is the
+   single best match in either." That lifts recall@5 but sinks recall@3. Retuning
+   to `k=20` (configurable via `memory.rrf_k`) lifted **hybrid recall@3
+   0.60 → 0.90** with recall@5 unchanged.
+3. **`success_pattern` guaranteed slots were front-loaded — the big one.** The
+   merge reserved the **top** `top_k//2` slots for success patterns, injected
+   ahead of the most relevant guideline. Only ~1/5 of queries actually want a
+   success pattern, so for the rest ranks 1–2 were spent on non-relevant entries,
+   capping recall@1. Back-loading the guarantee (relevance owns the head; success
+   patterns fill reserved *tail* slots, never rank 1) lifted **recall@1
+   0.13 → 0.58 and MRR 0.45 → 0.84** — and it helped dense too (recall@1 also
+   0.13 → 0.58), since the front-load hurt every strategy. Guarded by
+   `test_success_pattern_does_not_steal_rank_one` and the hybrid MRR/recall@3
+   gate floors.
 
-_Gate floors (dense − 0.05) live in `tests/test_retrieval_eval_gate.py`; bump
-them only with a new row here._
+_Gate floors (measured − 0.05) live in `tests/test_retrieval_eval_gate.py`; bump
+them only with a new row here. See `docs/retrieval-tuning.md` for how to tune
+these knobs on your own corpus._
 
 ## Honest gaps
 

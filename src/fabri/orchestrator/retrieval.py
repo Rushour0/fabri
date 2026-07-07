@@ -75,6 +75,13 @@ class RetrievalConfig:
     domain_routing: bool = False
     importance_weight: float = 0.2
     query_expansion: bool = False  # reserved
+    # RRF fusion constant. The canonical web-scale default is 60, but fabri
+    # fuses two SHORT pools (~2*top_k candidates each), where k=60 flattens
+    # 1/(k+rank) so much that fusion rewards mere agreement over peak relevance
+    # — sinking recall@3. 20 keeps rank discrimination on a small pool; the
+    # offline eval measured recall@3 0.60 (k=60) -> 0.71 (k=20) with recall@5
+    # unchanged. See docs/design/memory-observability-plan.md.
+    rrf_k: int = 20
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -86,6 +93,7 @@ class RetrievalConfig:
             domain_routing=bool(mem_cfg.get("domain_routing", False)),
             importance_weight=float(mem_cfg.get("importance_weight", 0.2)),
             query_expansion=bool(mem_cfg.get("query_expansion", False)),
+            rrf_k=int(mem_cfg.get("rrf_k", 20)),
         )
 
 
@@ -145,13 +153,17 @@ def _dot(a: list[float], b: list[float]) -> float:
 def _rrf_fuse(
     dense: list[tuple[MemoryEntry, float]],
     sparse: list[tuple[MemoryEntry, float]],
-    k: int = 60,
+    k: int = 20,
 ) -> list[tuple[MemoryEntry, float]]:
     """Reciprocal Rank Fusion: score = Σ 1/(k + rank_i).
 
     Uses ordinal rank only — no score normalization needed. Entries that
     appear in both lists get double credit, naturally surfacing agreement
-    between the two retrieval signals."""
+    between the two retrieval signals.
+
+    `k` defaults to 20, not the web-scale 60: fabri fuses two short pools, and
+    a large k flattens the rank term so much that agreement dominates peak
+    relevance. See RetrievalConfig.rrf_k."""
     scores: dict[str, float] = {}
     entries: dict[str, MemoryEntry] = {}
     for rank, (entry, _) in enumerate(dense, start=1):
@@ -460,7 +472,7 @@ def _retrieve_inner(
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
 
         if "hybrid" in strategy and sparse_results:
-            base_results = _rrf_fuse(dense_results, sparse_results)
+            base_results = _rrf_fuse(dense_results, sparse_results, k=rcfg.rrf_k)
         elif strategy == "sparse" and sparse_results:
             base_results = sparse_results
         else:
@@ -509,12 +521,19 @@ def _retrieve_inner(
         [p for p in base_results if p[0].kind == "success_pattern"],
         key=lambda p: p[1], reverse=True,
     )
-    success_cap = max(1, top_k // 2) if success_results else 0
+    # Guarantee up to this many success patterns in the injected top_k — but
+    # never take rank 1 (min(..., top_k-1) always leaves the head to relevance).
+    success_cap = min(max(1, top_k // 2), max(0, top_k - 1)) if success_results else 0
 
     seen_ids: set[str] = set()
     merged: list[tuple[MemoryEntry, float]] = []
     # Why each id earned its slot — surfaced per-candidate in the retrieval event.
     inclusion_reason: dict[str, str] = {}
+
+    def _reason(entry: MemoryEntry) -> str:
+        # A success pattern that earns its slot on relevance is still a success
+        # pattern in the trace; only the forced tail-slot ones are "guaranteed".
+        return "success_pattern" if entry.kind == "success_pattern" else "base"
 
     for entry, score in tag_results:
         if score < tag_hit_score_floor:
@@ -524,24 +543,46 @@ def _retrieve_inner(
             merged.append((entry, score))
             inclusion_reason[entry.id] = "tag_hit"
 
-    success_added = 0
+    # Relevance owns the HEAD of top_k; hold back `success_cap` tail slots for the
+    # success-pattern guarantee. base_results already contains success patterns,
+    # so one that's genuinely relevant still earns a head slot. Front-loading the
+    # guarantee instead (the pre-fix behaviour) stole ranks 1-2 from the most
+    # relevant guideline and sank recall@1 0.60 -> 0.13 in the offline eval.
+    relevance_head = max(0, top_k - len(merged) - success_cap)
+    deferred: list[tuple[MemoryEntry, float]] = []
+    head_added = 0
+    for entry, score in base_results:
+        if entry.id in seen_ids:
+            continue
+        if head_added < relevance_head:
+            seen_ids.add(entry.id)
+            merged.append((entry, score))
+            inclusion_reason[entry.id] = _reason(entry)
+            head_added += 1
+        else:
+            deferred.append((entry, score))
+
+    # Fill the reserved tail slots with success patterns not already surfaced by
+    # relevance, up to the cap (counting any that already landed in the head).
+    successes = sum(1 for e in merged if e[0].kind == "success_pattern")
     for entry, score in success_results:
-        if success_added >= success_cap or len(merged) >= top_k:
+        if successes >= success_cap or len(merged) >= top_k:
             break
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
             inclusion_reason[entry.id] = "success_pattern"
-            success_added += 1
+            successes += 1
 
-    # Collect up to pool_multiplier * top_k candidates for MMR, then trim.
-    for entry, score in base_results:
+    # Backfill the rest of top_k (when too few success patterns existed) and
+    # extend the candidate pool for MMR, from the deferred relevance tail.
+    for entry, score in deferred:
         if len(merged) >= top_k * pool_multiplier:
             break
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
-            inclusion_reason[entry.id] = "base"
+            inclusion_reason[entry.id] = _reason(entry)
 
     # --- MMR diversification (final step, applied to full candidate pool) ---
     mmr_pool_before = len(merged)

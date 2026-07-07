@@ -185,6 +185,12 @@ DEFAULT_CONFIG = {
         # MMR lambda: 0=pure diversity, 1=pure relevance. Only applies when
         # retrieval_strategy is "hybrid+mmr".
         "mmr_lambda": 0.7,
+        # RRF fusion constant for "hybrid". The web-scale default is 60, but
+        # fabri fuses two short pools where 60 flattens the rank term and lets
+        # mere agreement outrank the single best match — the offline eval
+        # measured recall@3 0.60 (k=60) -> 0.90 (k=20). Lower = sharper rank
+        # discrimination; raise toward 60 only for very large stores.
+        "rrf_k": 20,
         # Keyword heuristic domain classifier (code/planning/search/api/generic).
         # When true, entries whose domain matches the query get a 1.15× score boost.
         "domain_routing": False,

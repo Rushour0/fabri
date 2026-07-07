@@ -51,7 +51,7 @@ features for any future consumer.
 
 ## In Progress
 
-- **Memory + observability initiative** (scoped 2026-07-07) — decided plan in **`docs/design/memory-observability-plan.md`**. **Shipped:** `M4` (offline retrieval eval gate), the BM25 FTS5 no-op fix, `M5/D3` (default flipped dense→hybrid), `M3` (retrieval-decision observability event), `M6` (memory-health report section). **Remaining:** `X1` (OTel export — own PR), `M5` `D1`/`D2`/`D4` (reranker / query-expansion / embedding upgrade, each gated on the eval).
+- **Memory + observability initiative** (scoped 2026-07-07) — decided plan in **`docs/design/memory-observability-plan.md`**. **Shipped:** `M4` (offline retrieval eval gate), the BM25 FTS5 no-op fix, `M5/D3` (default flipped dense→hybrid), `M3` (retrieval-decision observability event), `M6` (memory-health report section), plus two eval-driven retrieval-quality fixes — **RRF `k` 60→20** (hybrid recall@3 0.60→0.90) and **success-slot back-load** (hybrid recall@1 0.13→0.58, MRR 0.45→0.84; also fixed a START-before-retrieval trace-ordering bug). First-user tuning guide: **`docs/retrieval-tuning.md`**. **Remaining:** `X1` (OTel export — own PR), `M5` `D1`/`D2`/`D4` (reranker / query-expansion / embedding upgrade, each gated on the eval).
 
 ## Backlog
 

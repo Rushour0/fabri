@@ -119,6 +119,38 @@ def test_cold_store_emits_minimal_event():
     assert ev["cold_store"] is True
 
 
+def test_success_pattern_does_not_steal_rank_one():
+    # Back-load regression guard: a success pattern that is NOT the most relevant
+    # must land in a reserved TAIL slot, never rank 1 — while still being
+    # guaranteed into the injected set. Front-loading it (the pre-fix behaviour)
+    # sank recall@1 0.60 -> 0.13 in the offline eval.
+    store = MagicMock()
+    store.count.return_value = 5
+    tac1 = _entry("most relevant tactical", "tactical")
+    tac2 = _entry("second tactical", "tactical")
+    tac3 = _entry("third tactical", "tactical")
+    tac4 = _entry("fourth tactical", "tactical")
+    succ = _entry("a low-relevance success pattern", "success_pattern")
+    # dense order puts the success pattern LAST (least relevant to the query).
+    store.query_by_vector.return_value = [
+        (tac1, 0.9), (tac2, 0.8), (tac3, 0.7), (tac4, 0.6), (succ, 0.2),
+    ]
+    store.query_bm25.return_value = []
+    _retrieve_inner(
+        store, "read a file", top_k=3,
+        retrieval_config=RetrievalConfig(strategy="dense"),
+        session_id="sess-backload",
+    )
+    ev = _retrieval_events("sess-backload")[0]
+    cands = ev["candidates"]
+    # rank 1 is the most-relevant tactical, NOT the forced success pattern
+    assert cands[0]["id"] == tac1.id
+    assert cands[0]["inclusion_reason"] == "base"
+    # ...but the success pattern is still guaranteed into the injected set (tail)
+    assert any(c["kind"] == "success_pattern" for c in cands)
+    assert cands[-1]["kind"] == "success_pattern"
+
+
 def test_event_reconstructs_injected_set():
     # The observability must not lie: the candidate ids in the event must be
     # exactly the entries that were injected (returned) — not a superset.

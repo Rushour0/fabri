@@ -179,6 +179,13 @@ def _run_single_attempt(
     session_id = session_id or str(uuid.uuid4())
     logger.info("agent run starting: task=%r session_id=%s", task, session_id)
 
+    # START is the run's root event and MUST be the first line in the trace —
+    # reports and the OTel exporter treat it as the parent of everything. Emit
+    # it BEFORE retrieval so M3's `retrieval` event lands as a child rather than
+    # ahead of the root. (The injected context is captured by the retrieval
+    # event's candidate list, so it no longer needs to ride on START.)
+    log_event(session_id, {"type": EventType.START.value, "task": task})
+
     context_block, retrieval_meta = retrieve_context_with_meta(
         store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
         retrieval_config=retrieval_config, session_id=session_id,
@@ -214,8 +221,6 @@ def _run_single_attempt(
         system_prompt_prefix=system_prompt_prefix,
         result_format=result_format,
     )
-
-    log_event(session_id, {"type": EventType.START.value, "task": task, "context_block": context_block})
 
     final_text = None
     # O1: the validated JSON value when response_schema is configured (None

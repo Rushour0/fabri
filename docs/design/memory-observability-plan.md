@@ -140,6 +140,20 @@ on unit A; hard prerequisite for all of unit D.**
 ### D · Retrieval quality upgrades (M5) — ALL DEFERRED, each gated on C
 Nothing ships enabled-by-default in v1. Each is an opt-in config flag whose
 default-flip is gated on a measured C delta. Order after C: **D3 → D1 → D4 → D2.**
+
+> **Post-flip fixes (2026-07-07, eval-driven).** Running the C eval head-to-head
+> after the D3 flip surfaced that hybrid only won at recall@5 while *losing* at
+> recall@1/@3. Two fixes, both measured on the C fixture, made hybrid dominate
+> every metric: **(1) RRF `k` 60 → 20** (`memory.rrf_k`) — the web-scale constant
+> flattened rank over fabri's short two-pool fusion; recall@3 0.60 → 0.90. **(2)
+> `success_pattern` slots back-loaded** — they were front-loaded into ranks 1-2
+> ahead of the most relevant guideline, capping recall@1; relevance now owns the
+> head and the guarantee fills reserved *tail* slots (recall@1 0.13 → 0.58, MRR
+> 0.45 → 0.84, and it lifted dense identically — the front-load hurt all
+> strategies). Threading `session_id` into retrieval (M3) also exposed a
+> **START-before-retrieval trace-ordering bug**: the run's root `start` event was
+> logged *after* retrieval, so the `retrieval` event landed first; `start` now
+> emits before retrieval. New first-user tuning guide: `docs/retrieval-tuning.md`.
 - **D3 (flip dense→hybrid+mmr):** machinery exists; stage
   `retrieval_strategy: hybrid+mmr` in `configs/benchmark.yaml` **only**; run C
   dense-vs-hybrid-vs-hybrid+mmr; flip the two default sites (`retrieval.py`
