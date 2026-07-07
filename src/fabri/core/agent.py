@@ -181,7 +181,7 @@ def _run_single_attempt(
 
     context_block, retrieval_meta = retrieve_context_with_meta(
         store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
-        retrieval_config=retrieval_config,
+        retrieval_config=retrieval_config, session_id=session_id,
     )
     # When retrieval is on, the filtered subset stays constant for the whole
     # run so the prompt cache still hits across steps. The model is given the

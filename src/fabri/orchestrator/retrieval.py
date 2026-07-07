@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable
 
+from fabri.events import EventType
 from fabri.memory.embeddings import embed
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
@@ -13,6 +15,23 @@ from fabri.memory.store import QdrantMemoryStore
 if TYPE_CHECKING:
     from fabri.tools.manifest_schema import ToolManifest
     from fabri.tools.registry import ToolRegistry
+
+logger = logging.getLogger("fabri")
+
+
+def _emit_retrieval_event(session_id: str, payload: dict) -> None:
+    """Best-effort emit of the RETRIEVAL trace event (see events.EventType).
+
+    Observability must never break retrieval: swallow any trace-write error (a
+    malformed session_id, a full disk) and log at debug rather than fail the run
+    over a trace-only event. `log_event` is imported lazily to keep retrieval's
+    import graph free of the traces module on the cold path."""
+    try:
+        from fabri.orchestrator.traces import log_event
+
+        log_event(session_id, {"type": EventType.RETRIEVAL.value, **payload})
+    except Exception:  # noqa: BLE001 -- observability is strictly best-effort
+        logger.debug("failed to emit retrieval event", exc_info=True)
 
 DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
@@ -300,6 +319,7 @@ def retrieve_context_with_meta(
     tool_names: list[str] | None = None,
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
+    session_id: str | None = None,
 ) -> tuple[str, dict]:
     """Same as `retrieve_context` but also returns retrieval metadata so
     callers can emit the guideline-reuse-rate metric.
@@ -320,6 +340,7 @@ def retrieve_context_with_meta(
         store, task, top_k=top_k, tool_names=tool_names,
         tag_hit_score_floor=tag_hit_score_floor,
         retrieval_config=retrieval_config,
+        session_id=session_id,
     )
     meta = {
         "retrieved": len(merged),
@@ -339,6 +360,7 @@ def retrieve_context(
     tool_names: list[str] | None = None,
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Embed `task`, pull the top-k most relevant guidelines (tactical + strategic),
     and format them as a compact bullet list -- this is what gets injected into the
@@ -360,6 +382,7 @@ def retrieve_context(
         store, task, top_k=top_k, tool_names=tool_names,
         tag_hit_score_floor=tag_hit_score_floor,
         retrieval_config=retrieval_config,
+        session_id=session_id,
     )
     return text
 
@@ -375,22 +398,37 @@ def _retrieve_inner(
     tool_names: list[str] | None = None,
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
+    session_id: str | None = None,
 ):
     """Internal: returns (rendered_text, list_of_(entry, score)) so the
-    metadata-returning wrapper can compute reuse-rate without re-querying."""
-    # Cold store: skip the embed call so a fresh `fabri init` + first
-    # `fabri run` doesn't load the 44MB sentence-transformers model.
-    if store.count() == 0:
-        return "", []
+    metadata-returning wrapper can compute reuse-rate without re-querying.
 
+    When `session_id` is set, emits one `retrieval` trace event describing what
+    retrieval decided (strategy, pool sizes, BM25 fired/fell-back, slot counts,
+    MMR, and a lean per-candidate list). Trace-only, never enters the prompt.
+    See docs/design/memory-observability-plan.md (unit A)."""
     rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
     strategy = rcfg.strategy
+
+    # Bind once — on the Qdrant backend count() is a network round-trip.
+    store_count = store.count()
+    # Cold store: skip the embed call so a fresh `fabri init` + first
+    # `fabri run` doesn't load the 44MB sentence-transformers model.
+    if store_count == 0:
+        if session_id is not None:
+            _emit_retrieval_event(session_id, {
+                "strategy": strategy, "top_k": top_k, "store_count": 0,
+                "retrieved": 0, "cold_store": True,
+            })
+        return "", []
 
     # Word-boundary match so `read_file` doesn't trigger on "ready".
     mentioned_tools = [t for t in (tool_names or []) if _word_mentioned(t, task)]
 
     # Embed once and pass the vector down so per-tool queries don't re-embed.
+    _embed_t0 = time.monotonic()
     vector = embed(task)
+    embedding_ms = (time.monotonic() - _embed_t0) * 1000.0
 
     # Fetch a larger pool when post-processing (decay, MMR) will further filter.
     pool_multiplier = 4 if (rcfg.temporal_decay or "mmr" in strategy) else 2
@@ -403,15 +441,22 @@ def _retrieve_inner(
     )
 
     # --- Sparse (BM25) retrieval and RRF fusion ---
-    base_results: list[tuple[MemoryEntry, float]]
-    if "hybrid" in strategy or strategy == "sparse":
-        sparse_results: list[tuple[MemoryEntry, float]] = []
+    # Pre-init BEFORE the branch so the retrieval event can read these on EVERY
+    # path — the default dense path never enters the branch below, and an
+    # unconditional reference to a branch-local `sparse_results` would NameError.
+    sparse_results: list[tuple[MemoryEntry, float]] = []
+    sparse_backend: str | None = None
+    sparse_requested = "hybrid" in strategy or strategy == "sparse"
 
+    base_results: list[tuple[MemoryEntry, float]]
+    if sparse_requested:
         if hasattr(store, "query_bm25"):
             # SQLite path: FTS5 gives true independent BM25 over the full table.
+            sparse_backend = "fts5"
             sparse_results = store.query_bm25(task, top_k=fetch_k)  # type: ignore[union-attr]
         elif _HAS_RANK_BM25:
             # Qdrant path: client-side BM25 re-ranking over the dense pool.
+            sparse_backend = "rank_bm25"
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
 
         if "hybrid" in strategy and sparse_results:
@@ -422,6 +467,11 @@ def _retrieve_inner(
             base_results = dense_results  # graceful fallback when BM25 unavailable
     else:
         base_results = dense_results
+
+    # sparse/hybrid was requested but BM25 produced nothing → we silently used
+    # dense. Surfacing this is the whole point of the observability card: it's
+    # how a "hybrid is secretly dense" degradation becomes visible in the trace.
+    sparse_fallback = sparse_requested and not sparse_results
 
     # --- Temporal decay + importance boost ---
     if rcfg.temporal_decay or rcfg.importance_weight > 0:
@@ -463,6 +513,8 @@ def _retrieve_inner(
 
     seen_ids: set[str] = set()
     merged: list[tuple[MemoryEntry, float]] = []
+    # Why each id earned its slot — surfaced per-candidate in the retrieval event.
+    inclusion_reason: dict[str, str] = {}
 
     for entry, score in tag_results:
         if score < tag_hit_score_floor:
@@ -470,6 +522,7 @@ def _retrieve_inner(
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
+            inclusion_reason[entry.id] = "tag_hit"
 
     success_added = 0
     for entry, score in success_results:
@@ -478,6 +531,7 @@ def _retrieve_inner(
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
+            inclusion_reason[entry.id] = "success_pattern"
             success_added += 1
 
     # Collect up to pool_multiplier * top_k candidates for MMR, then trim.
@@ -487,12 +541,45 @@ def _retrieve_inner(
         if entry.id not in seen_ids:
             seen_ids.add(entry.id)
             merged.append((entry, score))
+            inclusion_reason[entry.id] = "base"
 
     # --- MMR diversification (final step, applied to full candidate pool) ---
-    if "mmr" in strategy and len(merged) > top_k:
+    mmr_pool_before = len(merged)
+    mmr_applied = "mmr" in strategy and len(merged) > top_k
+    if mmr_applied:
         merged = _apply_mmr(merged, vector, rcfg.mmr_lambda, top_k)
     else:
         merged = merged[:top_k]
+
+    if session_id is not None:
+        final_reasons = [inclusion_reason.get(e.id, "base") for e, _ in merged]
+        _emit_retrieval_event(session_id, {
+            "strategy": strategy,
+            "top_k": top_k,
+            "store_count": store_count,
+            "embedding_ms": round(embedding_ms, 2),
+            "dense_pool_size": len(dense_results),
+            "sparse_pool_size": len(sparse_results),
+            "sparse_backend": sparse_backend,
+            "sparse_fallback": sparse_fallback,
+            "tag_hits": final_reasons.count("tag_hit"),
+            "success_hits": final_reasons.count("success_pattern"),
+            "mmr_applied": mmr_applied,
+            "mmr_pool_before": mmr_pool_before,
+            "retrieved": len(merged),
+            "score_min": round(min((s for _, s in merged), default=0.0), 4),
+            "score_max": round(max((s for _, s in merged), default=0.0), 4),
+            "candidates": [
+                {
+                    "id": entry.id,
+                    "kind": entry.kind,
+                    "score": round(score, 4),
+                    "inclusion_reason": inclusion_reason.get(entry.id, "base"),
+                    "mmr_survived": mmr_applied,
+                }
+                for entry, score in merged
+            ],
+        })
 
     if not merged:
         return "", []
