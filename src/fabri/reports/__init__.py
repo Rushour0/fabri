@@ -14,6 +14,7 @@ from fabri.reports.aggregate import (
     SessionSummary,
     aggregate,
     collect_sessions,
+    compute_memory_health,
 )
 from fabri.reports.chart import ascii_sparkline, svg_trendline
 from fabri.reports.render import render_html, render_json, render_markdown
@@ -23,6 +24,7 @@ __all__ = [
     "SessionSummary",
     "aggregate",
     "collect_sessions",
+    "compute_memory_health",
     "ascii_sparkline",
     "svg_trendline",
     "render_html",

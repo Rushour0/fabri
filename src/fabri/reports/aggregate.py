@@ -237,10 +237,45 @@ class AggregateReport:
     tool_call_count: int = 0
     priced_sessions: int = 0  # sessions that had a usage event
     avg_reuse_rate: float | None = None
+    # Snapshot of the memory store's health at report time (M6). None when no
+    # store was reachable — the report stays fully offline in that case.
+    memory_health: dict | None = None
 
     @property
     def session_count(self) -> int:
         return len(self.sessions)
+
+
+def compute_memory_health(store) -> dict:
+    """One-pass snapshot of the memory store's composition (M6).
+
+    `store` is any backend exposing the shared interface (`count`, `iterate`).
+    Returns headline memory-health metrics: total guideline count, the share
+    that have been promoted to `strategic`, the median entry age in days, and a
+    per-kind breakdown. Reuse-rate is NOT recomputed here — it flows from the
+    traces (AggregateReport.avg_reuse_rate); this is the store-side view of
+    "how has memory accumulated over time".
+
+    See docs/design/memory-observability-plan.md (unit E)."""
+    total = store.count()
+    if total == 0:
+        return {"total_guidelines": 0, "strategic_share": None,
+                "median_age_days": None, "by_kind": {}}
+
+    entries = store.iterate()
+    strategic = sum(1 for e in entries if e.kind == "strategic")
+    now = time.time()
+    ages = sorted((now - (e.created_at or now)) / 86_400.0 for e in entries)
+    # Lower-median: for an even count take the lower-middle element — cheap,
+    # deterministic, and good enough for an at-a-glance health number.
+    median_age = ages[(len(ages) - 1) // 2] if ages else None
+    by_kind = Counter(e.kind for e in entries)
+    return {
+        "total_guidelines": total,
+        "strategic_share": round(strategic / total, 4),
+        "median_age_days": round(median_age, 1) if median_age is not None else None,
+        "by_kind": dict(by_kind.most_common()),
+    }
 
 
 def aggregate(sessions: list[SessionSummary]) -> AggregateReport:
