@@ -51,7 +51,7 @@ features for any future consumer.
 
 ## In Progress
 
-_(none tracked here — see `CHANGELOG.md` for current release work.)_
+- **Memory + observability initiative** (scoped 2026-07-07) — cards `M3`, `M4`, `M5`, `M6` (Track M) + updated `X1` (Track X). Decided, dependency-ordered plan with a full decision table, resolved blockers, and 6 open human-decision questions lives in **`docs/design/memory-observability-plan.md`**. Thesis: retrieval quality is unmeasured, so observability (`M3`) + an offline eval gate (`M4`) must land before any quality upgrade (`M5`). Not yet started in `src/`.
 
 ## Backlog
 
@@ -78,16 +78,27 @@ _(none tracked here — see `CHANGELOG.md` for current release work.)_
   - **Domain routing** (`memory.domain_routing`) — keyword heuristic (code/planning/search/api/generic); 1.15× boost on match, never hard-filters.
   - **MemoryEntry enrichment** — new fields: `domain`, `outcome`, `agent_id`, `task_embedding_hash`. Auto-classified at ingest. Backward-compatible (old payloads safe via `.get()` defaults, ID hash unchanged).
   - **Bug fix** — `agent_runner_tool.py` was hardcoded to Qdrant; now uses `build_memory_store(mem_cfg)`.
-  - **Open follow-ups** (tracked in `TODO.md`): query expansion (reserved as `memory.query_expansion`), cross-encoder reranking, agent-scoped memory namespacing, memory TTL/eviction.
+  - **Open follow-ups** (now scoped as `M3`–`M6` below + `D`-items; see `docs/design/memory-observability-plan.md`): query expansion (reserved as `memory.query_expansion`), cross-encoder reranking, default-strategy flip, embedding upgrade, agent-scoped memory namespacing, memory TTL/eviction.
+
+- **M3** • Retrieval-decision observability • Track M • — • Emit **one** structured `retrieval` trace event per call, built inside `_retrieve_inner` and written via the existing `log_event`/JSONL spine — so "why is retrieval weak" becomes debuggable. Captures the active strategy, dense/sparse pool sizes, score ranges, drop-counts (MMR/tag-floor/success-cap), and a lean per-candidate list (id/kind/score/inclusion_reason/`mmr_survived`) for the final merged set. Zero model-token cost (trace-only), ~1–2KB/run, guarded to `if session_id is not None`. **Ships a dense-path `NameError` fix** (`sparse_results` is bound only in the hybrid/sparse branch today) and **net-new tests** (the assumed harness in `test_unit_hybrid_retrieval.py` doesn't exist). Freezes a flat, JSON-serializable event contract (`A6`) that M6's rollup and X1's span attrs both consume. Touches `orchestrator/events.py`, `orchestrator/retrieval.py`, `core/agent.py`. **The debug surface every retrieval-quality change depends on.** Full spec + resolved blockers: `docs/design/memory-observability-plan.md` (unit A).
+
+- **M4** • Retrieval eval harness (the ground-truth gate) • Track M • — • A FAST, deterministic, **offline retrieval-only** eval that runs in CI with zero API credits and gates retrieval changes as a regression tripwire — distinct from the slow/expensive `longmemeval` + `session_delta` end-to-end runners. Backed by in-process `SqliteMemoryStore` (local MiniLM embeds + native FTS5 BM25, no Qdrant service). A hand-labeled `tests/fixtures/retrieval_eval.json` (40–60 guidelines, 20–30 queries, binary relevance) → tmp store → `_retrieve_inner` → a pure `recall@k`/`MRR`/`precision@k` metrics module; a pytest gate at **measured-baseline−0.05** (never exact equality) plus a `python -m fabri.benchmarks.retrieval_eval` strategy-comparison CLI (the M5 before/after tool). CI install → `.[dev,sqlite]` (native FTS5 needs no `rank-bm25`); skips via `importorskip('sqlite_vec')` when absent. Asserts corpus text-uniqueness-per-kind + deterministic tiebreak to protect the green suite. Touches `benchmarks/`, `tests/`, `.github/workflows/ci.yml`. **Hard prerequisite for all of M5 — retrieval quality is unmeasured today.** Spec: `docs/design/memory-observability-plan.md` (unit C).
+
+- **M5** • Retrieval quality upgrades (each gated on M4) • Track M • — • Concrete retrieval improvements, **none enabled-by-default**, each an opt-in flag whose default-flip is gated on a measured M4 delta. Order: **(D3)** stage `hybrid+mmr` in `benchmark.yaml`, flip defaults only on a positive delta *and* backend-capability detection (stock Qdrant without `rank-bm25` silently degrades hybrid→dense); **(D1)** cross-encoder reranker over the *base-results/filler* portion only (guaranteed tag-hit/success_pattern slots stay pinned), no new dep (`sentence-transformers` ships `CrossEncoder`); **(D4)** embedding upgrade to `BAAI/bge-small-en-v1.5` (stays 384-dim; re-embed migration via the store upsert seam; reuses the existing `model_version` field); **(D2)** implement the reserved `query_expansion` — rule-based first (reuse `_rrf_fuse`), LLM-based last. Touches `orchestrator/retrieval.py`, `memory/embeddings.py`, `config.py`. **Do NOT ship any of these blind.** Spec: `docs/design/memory-observability-plan.md` (unit D).
+
+- **M6** • Memory-health surface in `fabri report` • Track M • — • One `## memory health` section added to the existing report (not a dedicated command). Headline set: **reuse-rate** (already flowing) + **guidelines-in-store** + **strategic-share%** + **median-entry-age**. `compute_memory_health(store)` via `build_memory_store` in a `try/except Exception` (NOT `_open_store`, which `sys.exit(1)`s and would kill today's fully-offline report); rendered across the md/json/html triple with `avg_reuse_rate` kept at json top-level for back-compat. Phase-2: reuse-rate trend sparkline + a strategy/latency rollup that parses M3's `retrieval` events. Touches `reports/{aggregate,render,chart}.py`, `cli.py`. Spec: `docs/design/memory-observability-plan.md` (unit E).
 
 ### Track X — Observability & safety
 
-- **X1** • OpenTelemetry / Langfuse trace exporter • Track X • — • A thin, optional exporter mapping the existing `events.py` events to OTel spans (agent run = root span; steps / tool calls / model interactions = child spans carrying token + cost attributes). Off by default; enabled via config + env. Acceptance: with an OTLP endpoint configured, a run produces a hierarchical trace in any OTel-compatible backend (Datadog/Honeycomb/Langfuse); with it unset, behavior is unchanged. Touches `events.py`, new `observability/otel.py`. **fabri's JSONL traces are rich but internal-only; a thin layer over them unlocks enterprise observability cheaply.**
+- **X1** • OpenTelemetry trace exporter (Langfuse via OTLP) • Track X • _scoped 2026-07-07_ • **Decided design:** keep the homegrown JSONL event spine as the single source of truth and add a thin, off-by-default OTel export shim — **not** a bespoke protocol, **not** a Langfuse-SDK dep (honors the CHANGELOG "no Langfuse/Agnost dep" decision). **Langfuse is reached for free as just another OTLP endpoint+headers target; LangGraph is cut** (a DAG runtime, irrelevant to the ReAct loop). v1 is a **post-hoc batch exporter** `observability/otel.py::export_trace(session_id, otel_cfg)` — `read_trace()` → walk events into an OTel span tree (START→root `fabri.agent_run`; STEP_*→`fabri.step`; TOOL_*→tool spans; THOUGHT/NARRATION→span events) → force-flush OTLP at run end, guarded by `if otel_cfg.endpoint`, plus a `fabri traces export <session_id>` CLI verb. Because it consumes whatever is in the trace, **M3's `retrieval` event exports automatically** as a span with per-candidate attrs. Sub-agent nesting is best-effort (no spawn-session-id field exists; parse child sid from a successful spawn `tool_call` result payload; crashed children → unlinkable leaf spans). Optional extra `fabri[otel]`, lazy-imported. Build order: **B1→B5→B4→B2→B3→B6**. Off by default; unset behavior byte-identical. Touches `orchestrator/events.py`, new `observability/otel.py`, `config.py`, `core/run_config.py`, `core/agent.py`, `cli.py`, `pyproject.toml`. **Open Q:** gRPC-only vs gRPC+HTTP in v1. Full spec: `docs/design/memory-observability-plan.md` (unit B).
 - **X2** • Guardrail processors (input/output) • Track X • — • A composable processor pipeline running before the LLM (prompt-injection / PII / moderation) and after (output filtering / token cap). Ships a couple of reference processors plus a stable processor interface so hosts add their own. Acceptance: a configured PII-redaction processor masks input before the model sees it; an injection processor can block or rewrite; processors compose in declared order. Touches `config.py`, new `guardrails/` package, `core/agent.py`. **Mastra ships a processor pipeline, OpenAI SDK ships guardrails; fabri has none. Fits "frugal + safe by default".**
-- **X3** • Correctness eval harness • Track X • — • Generalize the existing `benchmarks/` scaffolding into a reusable scorer framework: LLM-as-judge, rule-based/assertion, and exact-match scorers over a task→expected dataset, with per-case isolation and aggregate reporting (reuse the `longmemeval` runner's structure). Acceptance: a small dataset runs through all three scorer types and emits a pass-rate report under `.fabri/benchmarks/`. Touches `benchmarks/`. **Today fabri proves cost (`session_delta`) and memory (`longmemeval`) but not general task correctness.**
+- **X3** • Correctness eval harness • Track X • — • Generalize the existing `benchmarks/` scaffolding into a reusable scorer framework: LLM-as-judge, rule-based/assertion, and exact-match scorers over a task→expected dataset, with per-case isolation and aggregate reporting (reuse the `longmemeval` runner's structure). Acceptance: a small dataset runs through all three scorer types and emits a pass-rate report under `.fabri/benchmarks/`. Touches `benchmarks/`. **Today fabri proves cost (`session_delta`) and memory (`longmemeval`) but not general task correctness.** (Note: `M4` ships the retrieval-specific offline gate first; X3 is the general task-correctness superset.)
 
-**Suggested build order (not enforced):** O1 → O2, then M1 (consumer-requested), M2 ✓ (shipped v0.9.0),
-then X1 (cheap, high enterprise leverage), then X2 + X3 (quality/safety story).
+**Suggested build order (not enforced):** O1 → O2, then M1 (consumer-requested), M2 ✓ (shipped v0.9.0).
+**Memory + observability initiative (scoped 2026-07-07, `docs/design/memory-observability-plan.md`):**
+run **M3 (retrieval observability) + M4 (offline eval gate)** first — retrieval quality is unmeasured, so
+these are load-bearing prerequisites — then **X1 (OTel export) + M6 (memory-health report)** alongside,
+and **only then M5 (quality upgrades, each gated on an M4 delta)**. X2 stays on the safety track.
 
 ### Track B — Builder (idea → running self-improving agent)
 
@@ -141,11 +152,17 @@ flowchart LR
     S2 --> LXS[ludexel: service/sandbox.py + Dockerfile]
     A1[A1 ask_user] --> LXFE[ludexel frontend: ask_user inline UI]
     O1[O1 structured output ✓] --> O2[O2 streaming]
-    X1[X1 OTel exporter]
     X2[X2 guardrails]
     X3[X3 eval harness]
     M1[M1 failure-pattern memory] -.-> LXPM[ludexel postmortem retrieval]
     M2[M2 hybrid retrieval ✓]
+    %% Memory + observability initiative (docs/design/memory-observability-plan.md)
+    M3[M3 retrieval observability] --> M5[M5 retrieval quality upgrades]
+    M4[M4 offline eval gate] --> M5
+    M3 --> X1[X1 OTel exporter]
+    M3 --> M6[M6 memory-health report]
+    M2 --> M4
+    M2 --> M5
     B2[B2 tool-writer] --> B5[B5 prompt-kit]
     B5 --> B1[B1 ideator]
     B2 --> B4[B4 skills]
