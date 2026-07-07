@@ -4,6 +4,59 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.10.0 — 2026-07-07
+
+### Measured retrieval — observability, an offline eval gate, and a hybrid default that actually wins
+
+Memory retrieval was *unmeasured* — every quality tweak was a guess. This
+release makes it **measured, gated, observable, and better by default.** Full
+plan: `docs/design/memory-observability-plan.md`; first-user tuning guide:
+`docs/retrieval-tuning.md`.
+
+- **Offline retrieval eval + CI gate (M4).** `python -m
+  fabri.benchmarks.retrieval_eval` drives fabri's real `_retrieve_inner` over a
+  labeled fixture (40 guidelines / 24 queries) and reports recall@k / MRR /
+  precision@k per strategy — fast, deterministic, **zero API credits**. A pytest
+  gate (`tests/test_retrieval_eval_gate.py`) locks the shipped defaults at
+  `measured − 0.05` so retrieval can't silently regress. CI installs
+  `.[dev,sqlite]`.
+- **BM25 was a silent no-op on the SQLite backend — found by the eval, fixed.**
+  `_fts5_query` space-joined tokens and FTS5 reads a space as implicit AND, so
+  multi-word queries matched nothing and `sparse`/`hybrid` collapsed to `dense`.
+  Fix: OR-join terms + split tool-name underscores. Guarded by
+  `test_hybrid_bm25_is_alive`.
+- **Default retrieval strategy flipped `dense` → `hybrid` (M5/D3).** Eval-backed,
+  and hybrid degrades gracefully to dense wherever BM25 is unavailable, so it is
+  never worse than the old default.
+- **Two eval-driven retrieval-quality fixes** turned hybrid from "wins only at
+  recall@5" into the best strategy on **every** metric: **RRF `k` 60 → 20** (new
+  `memory.rrf_k`; recall@3 0.60 → 0.90 — the web-scale constant flattened rank
+  over fabri's short two-pool fusion) and **`success_pattern` guaranteed slots
+  back-loaded** (recall@1 0.13 → 0.58, MRR 0.45 → 0.84 — relevance now owns
+  rank 1 and the guarantee fills reserved *tail* slots).
+- **Retrieval-decision observability (M3).** One structured `retrieval` trace
+  event per call — strategy, dense/sparse pool sizes, whether BM25 fired or
+  silently fell back, guaranteed-slot counts, MMR, and a per-candidate list with
+  `inclusion_reason`. Trace-only (zero prompt-token cost), emitted only when a
+  `session_id` is threaded in. Makes "why is retrieval weak" debuggable.
+- **Memory-health section in `fabri report` (M6).** Guidelines-in-store,
+  strategic share, median entry age, and a per-kind breakdown across md/json/
+  html. Offline-safe: opens the store best-effort so an unreachable backend
+  can't kill the trace-only report.
+- **Tuning knob:** `memory.rrf_k` (default 20). All other retrieval knobs
+  unchanged.
+
+### Fixed
+
+- **Trace-ordering:** the run's root `start` event now emits *before* retrieval,
+  so M3's `retrieval` event nests as a child rather than landing ahead of the
+  root (fixes the `start`-is-first invariant relied on by reports and the
+  upcoming OTel exporter).
+- **Test isolation:** per-test Qdrant collection isolation kills the
+  order-dependent accumulating-count flake seen in the July CI reds; the
+  concurrent-ingest test warms the collection before racing so it exercises only
+  the lost-update path it asserts.
+
 ## 0.9.2 — 2026-07-05
 
 ### The Improver — plug-and-play log ingestion (`fabri.readlogs`)
