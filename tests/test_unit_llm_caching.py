@@ -12,15 +12,37 @@ import pytest
 from fabri.core.llm import AnthropicLLMBackend
 
 
+class _StreamCtx:
+    """Stands in for anthropic's messages.stream() context manager."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self._resp
+
+
 class _StubClient:
     def __init__(self, response):
         self._response = response
         self.calls: list[dict] = []
-        self.messages = self  # so `.messages.create(...)` works
+        self.messages = self  # so `.messages.stream(...)` / `.create(...)` work
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
         return self._response
+
+    def stream(self, **kwargs):
+        # step() streams; caching wraps system/messages/tools identically, so the
+        # recorded kwargs are what the cache-wrapping assertions inspect.
+        self.calls.append(kwargs)
+        return _StreamCtx(self._response)
 
 
 @pytest.fixture

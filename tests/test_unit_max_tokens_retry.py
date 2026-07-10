@@ -7,21 +7,50 @@ from types import SimpleNamespace
 
 import pytest
 
-from fabri.core.llm import AnthropicLLMBackend, LLMError, MAX_TOKENS_RETRY_CEILING
+from fabri.core.llm import (
+    ANTHROPIC_MAX_TOKENS_CEILING,
+    AnthropicLLMBackend,
+    LLMError,
+)
+
+
+class _StreamCtx:
+    """Stands in for anthropic's messages.stream() context manager."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self._resp
 
 
 class _SeqClient:
-    """Returns a pre-set sequence of responses, one per create() call."""
+    """Returns a pre-set sequence of responses, one per stream()/create() call."""
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
+        self.streamed = False
         self.messages = self
 
     def create(self, **kwargs):
         resp = self._responses[len(self.calls)]
         self.calls.append(kwargs)
         return resp
+
+    def stream(self, **kwargs):
+        # step() streams; record the kwargs (so max_tokens assertions still hold)
+        # and hand back the sequenced response via get_final_message().
+        self.streamed = True
+        resp = self._responses[len(self.calls)]
+        self.calls.append(kwargs)
+        return _StreamCtx(resp)
 
 
 def _resp(stop_reason, *, out=2, inp=10):
@@ -77,7 +106,17 @@ def test_no_truncation_is_a_single_call():
 
 
 def test_retry_cap_is_bounded_by_ceiling():
-    # A high configured cap can't retry past the non-streaming-safe ceiling.
-    b = _backend([_resp("max_tokens"), _resp("end_turn")], max_tokens=12000)
+    # Streaming lets the retry reach the model's real output ceiling, but no
+    # further: a very high configured cap still clamps to ANTHROPIC_MAX_TOKENS_CEILING.
+    b = _backend([_resp("max_tokens"), _resp("end_turn")], max_tokens=40000)
     b.step("sys", [{"role": "user", "content": "go"}])
-    assert b._client.calls[1]["max_tokens"] == MAX_TOKENS_RETRY_CEILING  # 16000, not 24000
+    # 40000*2 = 80000, clamped to the 64000 ceiling.
+    assert b._client.calls[1]["max_tokens"] == ANTHROPIC_MAX_TOKENS_CEILING
+
+
+def test_step_uses_streaming_transport():
+    # The Anthropic completion path must stream (so large max_tokens don't trip
+    # the SDK's non-streaming HTTP timeout), not call messages.create().
+    b = _backend([_resp("end_turn", out=5)])
+    b.step("sys", [{"role": "user", "content": "go"}])
+    assert b._client.streamed is True

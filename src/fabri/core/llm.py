@@ -37,12 +37,18 @@ class Provider(StrEnum):
         except ValueError:
             return None
 
-# Upper bound for the one-shot retry after a max_tokens truncation. fabri uses
-# non-streaming requests, which risk SDK HTTP timeouts on very long completions,
-# so the retry cap is held to a non-streaming-comfortable ceiling rather than
-# the model's full output limit. Beyond this, the run fails loud and the agent
-# is told to split the turn.
+# Upper bound for the one-shot retry after a max_tokens truncation. The openai
+# and gemini backends use non-streaming requests, which risk SDK HTTP timeouts
+# on very long completions, so their retry cap is held to a non-streaming-
+# comfortable ceiling rather than the model's full output limit. Beyond this,
+# the run fails loud and the agent is told to split the turn.
 MAX_TOKENS_RETRY_CEILING = 16000
+
+# The Anthropic backend streams (see AnthropicLLMBackend.step), so a long
+# completion arrives incrementally and can't trip the SDK's non-streaming HTTP
+# timeout. That lets its retry reach the model's real output ceiling instead of
+# the conservative non-streaming cap above.
+ANTHROPIC_MAX_TOKENS_CEILING = 64000
 
 
 class LLMError(RuntimeError):
@@ -275,14 +281,23 @@ class AnthropicLLMBackend:
         import anthropic
 
         def _create(max_tokens: int):
-            return _call_with_retry(
-                lambda: self._client.messages.create(
+            # Stream so a long completion arrives incrementally rather than as one
+            # blocking HTTP response the SDK can time out on for large max_tokens.
+            # get_final_message() returns the same accumulated Message shape
+            # (content / stop_reason / usage) the rest of this method consumes, so
+            # only the transport changes.
+            def _stream_once():
+                with self._client.messages.stream(
                     model=self._model,
                     system=self._build_system(system),
                     messages=self._build_messages(messages),
                     tools=self._build_tools(),
                     max_tokens=max_tokens,
-                ),
+                ) as stream:
+                    return stream.get_final_message()
+
+            return _call_with_retry(
+                _stream_once,
                 transient=(anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError),
             )
 
@@ -297,7 +312,7 @@ class AnthropicLLMBackend:
             # -- while still failing loud below if even the bigger cap truncates.
             # We never accept a truncated answer as success.
             if resp.stop_reason == "max_tokens":
-                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                retry_cap = min(self._max_tokens * 2, ANTHROPIC_MAX_TOKENS_CEILING)
                 if retry_cap > self._max_tokens:
                     logger.warning(
                         "anthropic response truncated at max_tokens=%d; retrying once at %d",
@@ -351,7 +366,7 @@ class AnthropicLLMBackend:
         if resp.stop_reason == "max_tokens":
             raise LLMError(
                 f"anthropic response truncated at max_tokens even after retry to "
-                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
+                f"{min(self._max_tokens * 2, ANTHROPIC_MAX_TOKENS_CEILING)}; raise llm.max_tokens "
                 f"or split this turn into smaller actions (fewer/lighter tool calls)"
             )
 

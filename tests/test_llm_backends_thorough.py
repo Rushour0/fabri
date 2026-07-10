@@ -29,18 +29,39 @@ openai = pytest.importorskip("openai")
 # --------------------------------------------------------------------------- #
 # Anthropic stubs / builders
 # --------------------------------------------------------------------------- #
+class _AnthropicStreamCtx:
+    """Stands in for anthropic's messages.stream() context manager."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self._resp
+
+
 class _AnthropicSeqClient:
-    """Returns a pre-set sequence of responses, one per create() call."""
+    """Returns a pre-set sequence of responses, one per stream()/create() call."""
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
-        self.messages = self  # so `.messages.create(...)` works
+        self.messages = self  # so `.messages.stream(...)` / `.create(...)` work
 
     def create(self, **kwargs):
         resp = self._responses[len(self.calls)]
         self.calls.append(kwargs)
         return resp
+
+    def stream(self, **kwargs):
+        resp = self._responses[len(self.calls)]
+        self.calls.append(kwargs)
+        return _AnthropicStreamCtx(resp)
 
 
 def _au(input_tokens=10, output_tokens=2, cache_creation=0, cache_read=0):
