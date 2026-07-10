@@ -4,6 +4,18 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.10.1 — 2026-07-11
+
+### Stream Anthropic responses so large turns don't truncate
+
+The Anthropic backend used non-streaming requests, so its max_tokens retry was
+held to a non-streaming-safe 16000 ceiling — a content-heavy turn (>16k output,
+e.g. writing several files) truncated even after the retry and failed the run.
+The backend now streams via `messages.stream()` + `get_final_message()` (same
+Message shape downstream), and the streaming path gets its own
+`ANTHROPIC_MAX_TOKENS_CEILING = 64000`. The openai/gemini backends keep the
+16000 non-streaming cap.
+
 ## 0.10.0 — 2026-07-07
 
 ### Measured retrieval — observability, an offline eval gate, and a hybrid default that actually wins
