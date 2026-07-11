@@ -246,6 +246,11 @@ def cmd_run(args: argparse.Namespace) -> None:
         for e in entries:
             print(f"  [{e.kind}] {e.text}")
 
+    # X1: best-effort OTLP export of the finished trace (no-op unless
+    # observability.otlp_endpoint is set). Fired here, after the POST_RUN_USAGE
+    # event, so the exported spans include memory-compression cost too.
+    _maybe_export_trace(session_id, config)
+
     if run_failed:
         sys.exit(1)
 
@@ -856,6 +861,51 @@ def cmd_admin_config(args: argparse.Namespace) -> None:
     print(json.dumps(describe_config(config, tools), indent=2))
 
 
+def _maybe_export_trace(session_id: str, config: dict) -> None:
+    """Best-effort end-of-run OTLP export. No-op unless
+    `observability.otlp_endpoint` is set. Swallows every error (including a
+    missing `fabri[otel]` extra or an unreachable collector) with a warning, so
+    a misconfigured exporter can never fail an otherwise-successful run — use
+    `fabri traces export` to see those errors loudly instead."""
+    import logging
+
+    from fabri.observability import OtelConfig, export_trace
+
+    otel_cfg = OtelConfig.from_config(config)
+    if not otel_cfg.enabled:
+        return
+    log = logging.getLogger("fabri")
+    try:
+        if export_trace(session_id, otel_cfg):
+            log.info("exported trace %s to %s", session_id, otel_cfg.endpoint)
+    except Exception as e:  # best-effort: never fail the run over telemetry
+        log.warning("OTLP trace export failed (continuing): %s", e)
+
+
+def cmd_traces_export(args: argparse.Namespace) -> None:
+    """Export a finished session's trace to the configured OTLP backend
+    (`observability.otlp_endpoint`; Langfuse / Honeycomb / Tempo / Jaeger / …).
+    Unlike the best-effort end-of-run auto-export, this surfaces errors loudly:
+    a missing `fabri[otel]` extra, an unreachable endpoint, or an empty/unknown
+    session all exit non-zero."""
+    from fabri.observability import OtelConfig, export_trace
+
+    config = load_config(args.config)
+    otel_cfg = OtelConfig.from_config(config)
+    if not otel_cfg.enabled:
+        print(
+            "observability.otlp_endpoint is not set; nothing to export. Set it in "
+            "your config or via FABRI_OTLP_ENDPOINT.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if export_trace(args.session_id, otel_cfg):
+        print(f"exported trace {args.session_id} to {otel_cfg.endpoint}")
+    else:
+        print(f"no trace to export for {args.session_id}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_traces_show(args: argparse.Namespace) -> None:
     """Pretty-print a session's JSONL trace. The framework already writes
     every step (start / tool_call / thought / final / failed) to
@@ -1200,6 +1250,11 @@ def main() -> None:
     p_traces_list = traces_sub.add_parser("list", help="List recent session traces")
     p_traces_list.add_argument("--limit", type=int, default=20)
     p_traces_list.set_defaults(func=cmd_traces_list)
+
+    p_traces_export = traces_sub.add_parser(
+        "export", help="Export a session's trace to the configured OTLP backend (Langfuse/Honeycomb/…)")
+    p_traces_export.add_argument("session_id")
+    p_traces_export.set_defaults(func=cmd_traces_export)
 
     # B7: embeddable service — a non-Python host submits a task over HTTP and
     # streams events without importing fabri.

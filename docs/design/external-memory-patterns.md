@@ -109,7 +109,7 @@ interface boundary is the real product surface.)
 | Inline consolidation (dedup, promote, evict, summarize) | ✅ Partial — done **inline at ingest**, not as a deliberate pass | `memory/pruning.py:235` (`ingest_guideline`), `:157` (`_evict_if_needed`), `:46` (`_summarize_and_evict`) | **→ R2** |
 | Swappable backend behind an interface | ⚠️ **Gap** — Qdrant + sqlite share a method surface but it's **duck-typed, no Protocol** | `memory/store.py`, `memory/embedded_store.py`, `runtime.py::build_memory_store` | **→ R1** |
 | Always-injected long-term tier | ⚠️ **Gap** — everything reaches the prompt via retrieval; no always-on strategic digest | `orchestrator/retrieval.py` `_retrieve_inner` | **→ R3** |
-| External trace export / observability | ⚠️ **Landed but unwired** — `observability/otel.py` exists; **zero callsites** outside that dir, no `traces export` verb | `observability/otel.py`, `cli.py` (only `traces show/tail/list`) | **→ R4** |
+| External trace export / observability | ✅ **Wired (v0.11.0)** — `fabri traces export <sid>` + best-effort end-of-run auto-export | `observability/otel.py`, `cli.py` (`cmd_traces_export`, `_maybe_export_trace`) | Done (was R4) |
 | Contradiction detection / provenance freshness | ⚠️ Gap (provenance fields exist; no contradiction pass) | `schema.py` (`session_ids`, `created_at`, `hit_count`) | **→ R2 sub-piece** |
 
 Fabri is genuinely **ahead** on retrieval and measurement — the survey does not push us
@@ -199,15 +199,17 @@ default-flip on a positive, backend-aware delta. Mirror the D3 discipline in
 
 **Roadmap.** Extends the M5 (D-track) "opt-in flag, gated on a measured C delta" pattern.
 
-### R4 · Finish the OTel observability wiring (X1 / unit B last mile)
+### R4 · Finish the OTel observability wiring (X1 / unit B last mile) — ✅ DONE (v0.11.0)
 
-**What.** `observability/otel.py::export_trace` + `OtelConfig` **exist but are wired to
-nothing** — confirmed: no references outside `observability/`, and `cli.py` exposes only
-`traces show / tail / list`, no `export`. Finish exactly what `memory-observability-plan.md`
-§B specs: the `fabri traces export <session_id>` CLI verb (B2), the end-of-run auto-fire
-guarded by `if otel_cfg.endpoint` (B2, `core/agent.py` end-of-run), event→span mapping
-incl. best-effort sub-agent nesting (B3), and the Langfuse-as-OTLP recipe (B6). The
-`observability:` config block and the optional `fabri[otel]` extra are already scoped.
+**What shipped.** `fabri traces export <session_id>` exports a finished trace on demand
+(`cli.py::cmd_traces_export`), and `fabri run` best-effort auto-exports at the end of a
+run when `observability.otlp_endpoint` is set (`_maybe_export_trace`, guarded so a broken
+exporter never fails the run). The event→span mapping (B3), the `observability:` config
+block, the `FABRI_OTLP_*` env overrides, the `fabri[otel]` extra, and the Langfuse/OTLP
+recipes (`docs/observability.md`, B6) all landed too. **Still pending:** a live inline span
+tap (B9), and threading the export through `run_agent` so library callers / spawned
+sub-agents auto-export without the CLI — today the CLI fires once at the top level and the
+exporter nests sub-agent traces underneath.
 
 **Why.** This isn't new design — it's the undone last mile of an already-decided unit.
 Both surveyed projects expose memory/agent observability (`openclaw memory status`,
@@ -222,9 +224,9 @@ endpoint). Follow the corrected build order in §B: `B1 → B5 → B4 → B2 →
 
 ### Suggested sequence
 
-`R1` (unblocks clean backend work, zero risk) → `R4` (finish an in-flight unit) → `R2`
-(consolidation, reuses existing machinery) → `R3` (highest retrieval-quality risk, do
-last and fully eval-gated).
+`R4` (in-flight unit) shipped first in v0.11.0. Remaining: `R1` (unblocks clean backend
+work, zero risk) → `R2` (consolidation, reuses existing machinery) → `R3` (highest
+retrieval-quality risk, do last and fully eval-gated).
 
 ---
 
@@ -257,9 +259,10 @@ These are load-bearing in an assistant but wrong for a procedural learning store
 
 ## Verification note
 
-All fabri anchors verified against the working tree on 2026-07-11 (store method
-surfaces, `pruning.py` constants, `schema.py` fields, retrieval strategy/fence, CLI
-subparsers, and the absence of any `export_trace` callsite or `traces export` verb).
+All fabri anchors verified against the working tree (store method surfaces,
+`pruning.py` constants, `schema.py` fields, retrieval strategy/fence, CLI
+subparsers). The `export_trace` wiring gap noted in R4 was closed in v0.11.0
+(`fabri traces export` + end-of-run auto-export).
 External behavior is attributed to each project's published docs, fetched via
 summarization rather than raw source — treat those descriptions as "per their docs,"
 not independently verified implementation fact.
