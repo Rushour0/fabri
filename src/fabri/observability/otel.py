@@ -19,6 +19,10 @@ result payload; a child we can't resolve is silently skipped (v1 accepts that).
 The OTel libraries live behind the optional `otel` extra:
 `pip install 'fabri[otel]'`. See docs/observability.md for the Langfuse and
 generic-OTLP recipes.
+
+Not to be confused with the `otel` *ingest* adapter
+(`fabri.ingest.adapters.builtins:otel_adapter`), which reads OTel-shaped
+EXTERNAL logs INTO memory. This module exports fabri's OWN traces OUT.
 """
 from __future__ import annotations
 
@@ -162,7 +166,12 @@ def _emit_trace_spans(events, tracer, session_id, parent_ctx=None, depth: int = 
 
     current_step = None
     current_step_ctx = root_ctx
-    open_tools: dict[str, object] = {}
+    # Keyed by the event's `call_index` (unique per tool call), NOT the tool
+    # name: a parallel_group fan-out runs several calls to the SAME tool name
+    # concurrently and completes them out of order, so name-keying would close
+    # the wrong span. `call_index` can be 0, so fall back to name only when it
+    # is genuinely absent (older traces / synthesized events).
+    open_tools: dict[object, object] = {}
 
     def _enclosing():
         return current_step if current_step is not None else root
@@ -186,13 +195,17 @@ def _emit_trace_spans(events, tracer, session_id, parent_ctx=None, depth: int = 
 
         elif etype == _TOOL_START:
             name = ev.get("tool") or ev.get("name") or "tool"
+            ci = ev.get("call_index")
+            key = ci if ci is not None else name
             span = tracer.start_span(f"tool.{name}", context=current_step_ctx, start_time=ts)
             span.set_attribute("fabri.tool.name", name)
-            open_tools[name] = span
+            open_tools[key] = span
 
         elif etype == _TOOL_END:
             name = ev.get("name") or ev.get("tool") or "tool"
-            span = open_tools.pop(name, None)
+            ci = ev.get("call_index")
+            key = ci if ci is not None else name
+            span = open_tools.pop(key, None)
             if span is None:
                 # No matching tool_started (e.g. a scripted path) — synthesize one.
                 span = tracer.start_span(f"tool.{name}", context=current_step_ctx, start_time=ts)

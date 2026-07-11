@@ -4,7 +4,7 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
-## 0.11.0 — 2026-07-12
+## 0.10.2 — 2026-07-12
 
 ### Runnable examples, a memory-pattern study, and an OTel export module
 
@@ -27,12 +27,15 @@ to real fabri mechanisms and the examples that show them.
 
 **OTel export module (X1, off by default).** Adds `observability/otel.py` — a
 post-hoc batch exporter that maps fabri's JSONL trace spine to an OpenTelemetry
-span tree — plus the `observability:` config block and `FABRI_OTLP_*` env
-overrides. The JSONL spine stays the source of truth; OTLP is just an export
-target (Langfuse, Honeycomb, Datadog, Tempo, Jaeger). Needs `pip install
-'fabri[otel]'`. **Not yet wired into the CLI/run loop** — the `fabri traces
-export` verb and end-of-run fire (B2/B3 in `docs/design/memory-observability-plan.md`)
-are still pending; this release lands the exporter and config only.
+span tree — plus the `observability:` config block, the `FABRI_OTLP_*` env
+overrides (`_apply_env_overrides`), the optional `fabri[otel]` install extra, and
+`docs/observability.md` (Langfuse + generic-OTLP recipes). The JSONL spine stays
+the source of truth; OTLP is just an export target (Langfuse, Honeycomb, Datadog,
+Tempo, Jaeger). Tool spans are keyed by `call_index`, so parallel_group fan-outs
+that run the same tool concurrently map to the correct spans. **Not yet wired
+into the CLI/run loop** — the `fabri traces export` verb and end-of-run fire
+(B2/B3 in `docs/design/memory-observability-plan.md`) are still pending; this
+release lands the exporter, config, and library entrypoint only.
 
 ## 0.10.1 — 2026-07-11
 
