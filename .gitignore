@@ -5,6 +5,12 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
+# local-only blog drafts + research dossiers (not part of the project)
+blogs/
+
+# wrangler (Cloudflare) local state — not part of the project
+.wrangler/
+
 # per-run state, written project-local under .fabri/ (see paths.py)
 .fabri/
 logs/
