@@ -7,12 +7,14 @@ span tree and ships it over OTLP to any backend (Langfuse, Honeycomb, Datadog,
 Grafana Tempo, Jaeger, …). When no endpoint is configured, behaviour is
 byte-identical to no export.
 
-> **Status (v0.10.2):** the exporter module (`fabri.observability.export_trace`)
-> and its config surface ship and work from the library. It is **not yet wired
-> into the CLI/run loop** — there is no `fabri traces export` verb or automatic
-> end-of-run fire yet (that's the B2/B3 follow-up in
-> `docs/design/memory-observability-plan.md`). Today you call `export_trace`
-> yourself; see below.
+> **Status (v0.11.0):** wired in. `fabri traces export <session_id>` exports a
+> finished trace on demand, and `fabri run` best-effort auto-exports at the end
+> of a run when `otlp_endpoint` is set (a broken exporter logs a warning and
+> never fails the run). You can also call `export_trace` directly from the
+> library. Still pending: a live inline span tap (B9) and threading the export
+> through `run_agent` so library callers / spawned sub-agents auto-export
+> without the CLI (today the CLI fires once at the top level and the exporter
+> nests sub-agent traces underneath).
 
 ## Install
 
@@ -51,6 +53,22 @@ they override the yaml at load time):
 | `FABRI_OTLP_HEADERS` | `observability.otlp_headers` (`k=v,k2=v2`) |
 
 ## Export a trace
+
+**On every run (automatic).** Once `otlp_endpoint` is set, `fabri run` exports
+the finished trace at the end of the run — best-effort, so a misconfigured or
+unreachable collector logs a warning and never fails the run.
+
+**On demand (CLI).** Export any past session's trace, surfacing errors loudly (a
+missing `fabri[otel]` extra, an unreachable endpoint, or an unknown session all
+exit non-zero):
+
+```bash
+fabri --config agent.yaml traces export <session_id>
+# or point at a collector via env, no config edit:
+FABRI_OTLP_ENDPOINT=http://localhost:4318/v1/traces fabri traces export <session_id>
+```
+
+**From the library.**
 
 ```python
 from fabri.config import load_config

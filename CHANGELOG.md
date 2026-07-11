@@ -4,6 +4,27 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.11.0 — 2026-07-12
+
+### Wire the OTel trace export into the CLI (X1)
+
+v0.10.2 landed the OTel exporter module but left it unwired. It's now wired:
+
+- **`fabri traces export <session_id>`** — export a finished trace to the
+  configured OTLP backend on demand, surfacing errors loudly (a missing
+  `fabri[otel]` extra, an unreachable endpoint, or an unknown session all exit
+  non-zero).
+- **End-of-run auto-export** — `fabri run` exports the finished trace when
+  `observability.otlp_endpoint` is set (`_maybe_export_trace`), best-effort: a
+  broken or missing exporter logs a warning and never fails the run. It fires
+  after the memory-compression usage event, so the spans include that cost too.
+
+One top-level export nests spawned sub-agent traces underneath, so a single fire
+captures the whole tree. Verified end-to-end against a local OTLP collector
+(759-byte protobuf POST). Full recipes in `docs/observability.md`. Still pending
+(future): a live inline span tap (B9) and threading the export through
+`run_agent` for library callers / sub-agents without the CLI.
+
 ## 0.10.2 — 2026-07-12
 
 ### Runnable examples, a memory-pattern study, and an OTel export module

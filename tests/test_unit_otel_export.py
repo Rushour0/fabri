@@ -81,3 +81,33 @@ def test_tool_spans_keyed_by_call_index_not_name(monkeypatch):
         f"tool spans have wrong start/end windows: {windows} — "
         "name-keying corrupts these under a parallel fan-out"
     )
+
+
+# ---- end-of-run auto-export wiring (cmd_run) -------------------------------
+
+def test_maybe_export_trace_noop_when_endpoint_unset(monkeypatch):
+    """No `observability.otlp_endpoint` -> export_trace is never even called."""
+    import fabri.observability as obs
+    from fabri import cli
+
+    calls = []
+    monkeypatch.setattr(obs, "export_trace", lambda *a, **k: calls.append(a) or True)
+
+    cli._maybe_export_trace("sid", {"observability": {"otlp_endpoint": None}})
+
+    assert calls == []
+
+
+def test_maybe_export_trace_swallows_errors(monkeypatch):
+    """A configured-but-broken exporter must never fail the run."""
+    import fabri.observability as obs
+    from fabri import cli
+
+    def boom(*a, **k):
+        raise RuntimeError("collector unreachable")
+
+    monkeypatch.setattr(obs, "export_trace", boom)
+
+    # Must not raise — best-effort. (The explicit `traces export` verb is the
+    # loud path; this end-of-run hook stays quiet.)
+    cli._maybe_export_trace("sid", {"observability": {"otlp_endpoint": "http://x/otel"}})
