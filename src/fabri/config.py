@@ -242,6 +242,20 @@ DEFAULT_CONFIG = {
         #   fabri/ingest/adapters/configmap.py for the mapping keys.
         "adapters": [],
     },
+    # X1: external trace export. Fabri's JSONL spine stays the source of truth;
+    # this exports it to any OpenTelemetry OTLP backend (Langfuse, Honeycomb,
+    # Datadog, Tempo, Jaeger, …). OFF unless `otlp_endpoint` is set — when unset,
+    # `fabri run` behaves byte-identically. Needs the optional extra:
+    # `pip install 'fabri[otel]'`. Env overrides: FABRI_OTLP_ENDPOINT,
+    # FABRI_OTLP_HEADERS ("k=v,k2=v2"), FABRI_OTLP_PROTOCOL, FABRI_OTLP_INSECURE.
+    # See docs/observability.md for the Langfuse recipe.
+    "observability": {
+        "otlp_endpoint": None,        # e.g. "https://cloud.langfuse.com/api/public/otel/v1/traces"
+        "otlp_protocol": "http",      # "http" (OTLP/HTTP protobuf, default) or "grpc"
+        "otlp_headers": {},           # e.g. {"Authorization": "Basic <base64 pk:sk>"}
+        "otlp_insecure": False,       # allow plaintext (gRPC only)
+        "service_name": "fabri",
+    },
 }
 
 
