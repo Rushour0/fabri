@@ -1,0 +1,52 @@
+# Example 02 — parallel sub-agent fan-out (dynamic spawn)
+#
+# The planner splits a big task into independent subtasks and spawns a fresh
+# `worker.yaml` sub-agent for each — in PARALLEL — by giving every
+# spawn_subagent call the same `parallel_group` string. fabri dispatches a
+# parallel_group through a thread pool, capped by tools.max_parallel_spawns.
+#
+# Run from the repo root:
+#   pip install 'fabri[sqlite]'
+#   export GEMINI_API_KEY=...
+#   fabri --config examples/02-parallel-fanout/planner.yaml \
+#     run "Summarize what each of these does, one worker per item, in parallel: \
+#          src/fabri/memory, src/fabri/orchestrator, src/fabri/tools. \
+#          Then combine the summaries into a short overview."
+#
+# Why fan out at all? Each sub-agent runs in its OWN context and its OWN trace
+# (fresh session_id). The parent never sees the worker's intermediate tool
+# spam — only its short final answer. That context isolation is the whole
+# optimization (see docs/optimization-methodologies.md → "delegation isolation").
+
+agent:
+  name: fanout-planner
+  max_steps: 14
+  # Budget the CHILDREN independently so a wide fan-out can't multiply cost
+  # past what you intend. Omit to let children inherit the parent's budget.
+  subagent:
+    max_steps: 6
+    max_cost_usd: 0.25
+
+llm:
+  provider: gemini                 # or anthropic / openai / openrouter
+  model: gemini-2.5-pro
+  max_tokens: 4096
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+  # spawn_subagent is a builtin. The planner also reads/lists to decide the
+  # split and writes the combined result.
+  enabled: [spawn_subagent, read_file, list_dir, write_file]
+  sandbox_root: .
+  result_format: toon
+  # Peak concurrent sub-agent subprocesses. Each spawn is a fresh process, so a
+  # very wide wave can spike memory — this caps it (default is 4).
+  max_parallel_spawns: 3
+
+memory:
+  backend: sqlite
+  collection: fanout_planner
+  sqlite_path: .fabri/fanout.db
+  top_k: 5

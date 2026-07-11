@@ -1,0 +1,29 @@
+# Example 03 — the verifier leaf (invoked as the `verify` tool by parent.yaml)
+#
+# Re-reads the source and checks the candidate against it. Its job is to be a
+# skeptic: return {ok:false, reasons:[...]} unless every claim is supported.
+# A separate model instance with a narrow job is a cheap, effective guard
+# against the drafter's confident-but-wrong output.
+
+agent:
+  name: verifier
+  max_steps: 6
+
+llm:
+  provider: gemini
+  model: gemini-2.5-flash
+  max_tokens: 1024
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file]
+  sandbox_root: .
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: pipeline_verifier
+  sqlite_path: .fabri/pipeline.db
+  top_k: 5

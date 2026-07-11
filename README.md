@@ -11,7 +11,7 @@ cheaper and more reliable every run.
 fabri is split into two layers: an **engine** (a frugal agent loop, per-role
 LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
 own traces) and a **builder** that turns intent into a running agent fast.
-Read [docs/vision.md](docs/vision.md) for the full why.
+Read [docs/vision.md](https://github.com/Rushour0/fabri/blob/main/docs/vision.md) for the full why.
 
 fabri is **source-available** under the [Business Source License
 1.1](https://github.com/Rushour0/fabri/blob/main/LICENSE). You can
@@ -72,8 +72,8 @@ without anyone editing the prompt by hand. That loop — trace → analyze
 → compress → dedup → promote → retrieve — is the heart of the **engine**.
 On top of it, a **builder** layer (ideator, tool-writer, prompt-kit, skills,
 service) scaffolds a new product onto the engine so building one is faster, not
-slower — see [docs/vision.md](docs/vision.md) and Track B in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+slower — see [docs/vision.md](https://github.com/Rushour0/fabri/blob/main/docs/vision.md) and Track B in
+[docs/ROADMAP.md](https://github.com/Rushour0/fabri/blob/main/docs/ROADMAP.md).
 
 Two operating principles fall out of that:
 
@@ -198,6 +198,13 @@ Every run writes two records keyed by `session_id`:
 
 Both land under `.fabri/` in the directory you run from (override with
 `$FABRI_HOME`). Add `.fabri/` to your project's `.gitignore`.
+
+> **Getting the most out of memory:** see
+> [docs/using-fabri-well.md](https://github.com/Rushour0/fabri/blob/main/docs/using-fabri-well.md)
+> for the cross-run learning loop, backend choice, reading the `retrieval`
+> trace, and memory hygiene. For how fabri's memory compares to other
+> agent-memory projects (Hermes Agent, OpenClaw) and where it's headed, see
+> [docs/design/external-memory-patterns.md](https://github.com/Rushour0/fabri/blob/main/docs/design/external-memory-patterns.md).
 
 ## Configuring an agent
 
@@ -381,6 +388,14 @@ when (a) each child has its own large context to chew through, and
 (b) the children genuinely don't need each other's outputs.
 
 ## Multi-agent examples
+
+> **Runnable versions of these shapes live in
+> [`examples/`](https://github.com/Rushour0/fabri/tree/main/examples)** —
+> custom tools (`01`), parallel sub-agent fan-out (`02`), a draft→verify
+> pipeline (`03`), and sandboxing (`04`), each annotated with the optimization
+> methodology it demonstrates
+> ([`docs/optimization-methodologies.md`](https://github.com/Rushour0/fabri/blob/main/docs/optimization-methodologies.md)).
+> The YAML in this section is illustrative; the `examples/` folders run as-is.
 
 Three shapes that actually pay for the ~15× sub-agent overhead.
 Anything outside these is almost always cheaper inline.

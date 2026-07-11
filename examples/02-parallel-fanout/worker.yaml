@@ -1,0 +1,32 @@
+# Example 02 — the worker leaf (spawned by planner.yaml)
+#
+# Each spawn_subagent call runs THIS config in a fresh subprocess via
+# agent_runner_tool.py, with its own session_id/trace and its own memory
+# namespace. Kept deliberately lean: read-only exploration tools, no further
+# spawning (a leaf shouldn't fan out again), a tight step budget.
+#
+# You never run this file directly — the planner points spawn_subagent's
+# `config_path` at it. It's here as the `config_path` target.
+
+agent:
+  name: fanout-worker
+  max_steps: 6
+
+llm:
+  provider: gemini
+  model: gemini-2.5-flash            # cheaper model for the leaf legwork
+  max_tokens: 2048
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, list_dir, grep]   # read-only; no spawn_subagent
+  sandbox_root: .
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: fanout_worker
+  sqlite_path: .fabri/fanout.db
+  top_k: 5

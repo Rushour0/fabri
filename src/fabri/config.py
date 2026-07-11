@@ -242,6 +242,20 @@ DEFAULT_CONFIG = {
         #   fabri/ingest/adapters/configmap.py for the mapping keys.
         "adapters": [],
     },
+    # X1: external trace export. Fabri's JSONL spine stays the source of truth;
+    # this exports it to any OpenTelemetry OTLP backend (Langfuse, Honeycomb,
+    # Datadog, Tempo, Jaeger, …). OFF unless `otlp_endpoint` is set — when unset,
+    # `fabri run` behaves byte-identically. Needs the optional extra:
+    # `pip install 'fabri[otel]'`. Env overrides: FABRI_OTLP_ENDPOINT,
+    # FABRI_OTLP_HEADERS ("k=v,k2=v2"), FABRI_OTLP_PROTOCOL, FABRI_OTLP_INSECURE.
+    # See docs/observability.md for the Langfuse recipe.
+    "observability": {
+        "otlp_endpoint": None,        # e.g. "https://cloud.langfuse.com/api/public/otel/v1/traces"
+        "otlp_protocol": "http",      # "http" (OTLP/HTTP protobuf, default) or "grpc"
+        "otlp_headers": {},           # e.g. {"Authorization": "Basic <base64 pk:sk>"}
+        "otlp_insecure": False,       # allow plaintext (gRPC only)
+        "service_name": "fabri",
+    },
 }
 
 
@@ -381,18 +395,51 @@ def _normalize_llm_roles(cfg: dict) -> dict:
 
 
 def _apply_env_overrides(cfg: dict) -> dict:
-    """`QDRANT_URL` env var, if set, overrides `memory.qdrant_url` so a
-    container host can propagate the in-cluster address (`qdrant:6333`)
-    across the subprocess boundary without rewriting each on-disk yaml.
-    Never mutates the shared DEFAULT_CONFIG."""
+    """Env-var overrides applied after load so a container host can inject
+    addresses/endpoints across the subprocess boundary without rewriting each
+    on-disk yaml. Never mutates the shared DEFAULT_CONFIG; each override acts
+    only when its env var is set.
+
+    - ``QDRANT_URL`` -> ``memory.qdrant_url``
+    - ``FABRI_OTLP_ENDPOINT`` -> ``observability.otlp_endpoint``
+    - ``FABRI_OTLP_PROTOCOL`` -> ``observability.otlp_protocol`` ("http"|"grpc")
+    - ``FABRI_OTLP_INSECURE`` -> ``observability.otlp_insecure`` (1/true/yes/on)
+    - ``FABRI_OTLP_HEADERS`` -> ``observability.otlp_headers`` ("k=v,k2=v2")
+    """
+    out = cfg
+
     url = os.environ.get("QDRANT_URL")
-    if not url:
-        return cfg
-    mem = dict(cfg.get("memory") or {})
-    if mem.get("qdrant_url") == url:
-        return cfg
-    mem["qdrant_url"] = url
-    return {**cfg, "memory": mem}
+    if url:
+        mem = dict(out.get("memory") or {})
+        if mem.get("qdrant_url") != url:
+            mem["qdrant_url"] = url
+            out = {**out, "memory": mem}
+
+    obs_over: dict = {}
+    endpoint = os.environ.get("FABRI_OTLP_ENDPOINT")
+    if endpoint:
+        obs_over["otlp_endpoint"] = endpoint
+    protocol = os.environ.get("FABRI_OTLP_PROTOCOL")
+    if protocol:
+        obs_over["otlp_protocol"] = protocol
+    insecure = os.environ.get("FABRI_OTLP_INSECURE")
+    if insecure is not None:
+        obs_over["otlp_insecure"] = insecure.strip().lower() in ("1", "true", "yes", "on")
+    headers = os.environ.get("FABRI_OTLP_HEADERS")
+    if headers:
+        parsed = {
+            k.strip(): v.strip()
+            for pair in headers.split(",")
+            if "=" in pair
+            for k, v in [pair.split("=", 1)]
+        }
+        if parsed:
+            obs_over["otlp_headers"] = parsed
+    if obs_over:
+        obs = {**(out.get("observability") or {}), **obs_over}
+        out = {**out, "observability": obs}
+
+    return out
 
 
 def load_config(path: str | None) -> dict:
