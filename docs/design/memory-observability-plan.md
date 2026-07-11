@@ -1,5 +1,10 @@
 # Memory-Retrieval Quality + Real Observability — Build Plan
 
+> **Companion:** `docs/design/external-memory-patterns.md` surveys how Hermes
+> Agent and OpenClaw handle memory and adds four recommendations (R1 MemoryStore
+> Protocol, R2 consolidation pass, R3 always-injected core-digest tier, R4 finish
+> the OTel wiring) that build on the M3–M6 / X1 units below.
+>
 > **Status:** decided plan, not yet built (scoped 2026-07-07).
 > **Tracks:** M (retrieval quality) + X (observability). Roadmap cards
 > `M3`–`M6` and an updated `X1` cross-reference this doc; this doc is the

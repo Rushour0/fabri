@@ -1,0 +1,36 @@
+# Example 01 — a custom tool wired into an agent
+#
+# Run from the repo root:
+#   pip install 'fabri[sqlite]'
+#   export GEMINI_API_KEY=...        # or switch llm.provider to anthropic/openai
+#   fabri --config examples/01-custom-tool/agent.yaml \
+#     run "which words appear most in examples/01-custom-tool/README.md?"
+#
+# The agent sees two tools: the builtin `read_file` and our custom
+# `word_frequency`. `manifest_dir` is a LIST — `builtin` pulls the bundled
+# tools, and the second entry points at this example's own tools/ dir.
+
+agent:
+  name: custom-tool-demo
+  max_steps: 8
+
+llm:
+  provider: gemini                 # or "anthropic" / "openai" / "openrouter"
+  model: gemini-2.5-pro
+  max_tokens: 2048
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin                      # bundled tools (read_file, list_dir, ...)
+    - examples/01-custom-tool/tools
+  # Keep the enabled set TIGHT — every entry sits in the cached system prefix.
+  enabled: [read_file, word_frequency]
+  sandbox_root: .                  # file tools are jailed here
+  result_format: toon              # flat {word,count} records encode small
+
+memory:
+  backend: sqlite                  # in-process, no docker/qdrant needed
+  collection: custom_tool_demo
+  sqlite_path: .fabri/custom_tool_demo.db
+  top_k: 5

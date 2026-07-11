@@ -1,0 +1,27 @@
+# Example 03 — the drafter leaf (invoked as the `draft` tool by parent.yaml)
+#
+# Reads the cited source and produces a short candidate answer. Read-only, no
+# spawning. Invoked via the static agents-as-tools mechanism, not run directly.
+
+agent:
+  name: drafter
+  max_steps: 6
+
+llm:
+  provider: gemini
+  model: gemini-2.5-flash
+  max_tokens: 1024
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file]
+  sandbox_root: .
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: pipeline_drafter
+  sqlite_path: .fabri/pipeline.db
+  top_k: 5

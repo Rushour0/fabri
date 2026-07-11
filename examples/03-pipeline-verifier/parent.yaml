@@ -1,0 +1,57 @@
+# Example 03 — pipeline with a verifier (static agents-as-tools)
+#
+# Two specialist sub-agents are baked in at config-load time under
+# `tools.agents[]`, each exposed to the orchestrator as an ordinary tool:
+#   draft  -> drafter.yaml   (produces a candidate answer, may be wrong)
+#   verify -> verifier.yaml  (checks a candidate, returns {ok, reasons[]})
+#
+# The orchestrator runs the loop: draft -> verify -> if not ok, draft again
+# with the verifier's reasons appended -> stop when ok or steps run out.
+#
+# Run from the repo root:
+#   pip install 'fabri[sqlite]'
+#   export GEMINI_API_KEY=...
+#   fabri --config examples/03-pipeline-verifier/parent.yaml run \
+#     "Write a one-paragraph explanation of what fabri's memory store is, \
+#      grounded ONLY in docs/using-fabri-well.md. Draft it, then verify it \
+#      against that file, and revise until verify returns ok."
+
+agent:
+  name: pipeline-orchestrator
+  max_steps: 12
+  subagent:
+    max_steps: 6
+
+llm:
+  provider: gemini
+  model: gemini-2.5-pro
+  max_tokens: 4096
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+  # The two agent names (draft, verify) are tools too — they must appear in
+  # `enabled` alongside the builtins the orchestrator itself uses.
+  enabled: [read_file, draft, verify]
+  sandbox_root: .
+  result_format: toon
+  agents:
+    - name: draft
+      description: >-
+        Produce a candidate answer to a writing task. May be wrong or
+        unsupported. Pass the full task and any source paths; expect a short
+        draft back.
+      config: examples/03-pipeline-verifier/drafter.yaml
+    - name: verify
+      description: >-
+        Check a candidate answer against its cited source file. Returns a
+        verdict {ok: bool, reasons: [...]} — `ok:false` with concrete reasons
+        the draft is wrong/unsupported so the orchestrator can revise.
+      config: examples/03-pipeline-verifier/verifier.yaml
+
+memory:
+  backend: sqlite
+  collection: pipeline_orchestrator
+  sqlite_path: .fabri/pipeline.db
+  top_k: 5

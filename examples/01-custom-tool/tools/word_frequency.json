@@ -1,0 +1,33 @@
+{
+  "name": "word_frequency",
+  "description": "Count the most frequent words in a text file (path must resolve inside the sandbox root). Returns the top `top_n` words as a flat {word,count} array plus total/unique counts -- not the whole document. Use `min_length` to ignore short filler words.",
+  "command": ["python3", "word_frequency.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "top_n": {"type": "integer", "minimum": 1},
+      "min_length": {"type": "integer", "minimum": 1}
+    },
+    "required": ["path"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "total_words": {"type": "integer"},
+      "unique_words": {"type": "integer"},
+      "words": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "word": {"type": "string"},
+            "count": {"type": "integer"}
+          }
+        }
+      }
+    }
+  },
+  "timeout_s": 10
+}

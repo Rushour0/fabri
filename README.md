@@ -199,6 +199,12 @@ Every run writes two records keyed by `session_id`:
 Both land under `.fabri/` in the directory you run from (override with
 `$FABRI_HOME`). Add `.fabri/` to your project's `.gitignore`.
 
+> **Getting the most out of memory:** see `docs/using-fabri-well.md` for the
+> cross-run learning loop, backend choice, reading the `retrieval` trace, and
+> memory hygiene. For how fabri's memory compares to other agent-memory
+> projects (Hermes Agent, OpenClaw) and where it's headed, see
+> `docs/design/external-memory-patterns.md`.
+
 ## Configuring an agent
 
 Every field has a default, so you only override what you need:
@@ -381,6 +387,12 @@ when (a) each child has its own large context to chew through, and
 (b) the children genuinely don't need each other's outputs.
 
 ## Multi-agent examples
+
+> **Runnable versions of these shapes live in [`examples/`](examples/)** —
+> custom tools (`01`), parallel sub-agent fan-out (`02`), a draft→verify
+> pipeline (`03`), and sandboxing (`04`), each annotated with the optimization
+> methodology it demonstrates ([`docs/optimization-methodologies.md`](docs/optimization-methodologies.md)).
+> The YAML in this section is illustrative; the `examples/` folders run as-is.
 
 Three shapes that actually pay for the ~15× sub-agent overhead.
 Anything outside these is almost always cheaper inline.

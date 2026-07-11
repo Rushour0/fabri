@@ -1,0 +1,29 @@
+# Example 04 — the config driven by run_sandboxed.py
+#
+# There is intentionally NO sandbox key here: the isolation backend is chosen
+# programmatically in run_sandboxed.py, not in YAML. This config just defines
+# the agent, tools, and memory the way any config does. `tools.sandbox_root`
+# still applies — it's the path jail the default LocalSandbox enforces.
+
+agent:
+  name: sandboxed-agent
+  max_steps: 8
+
+llm:
+  provider: gemini
+  model: gemini-2.5-pro
+  max_tokens: 2048
+  api_key_env: GEMINI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, list_dir, grep]   # read-only tools for the demo
+  sandbox_root: .                         # LocalSandbox path jail (host path)
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: sandboxed_agent
+  sqlite_path: .fabri/sandboxed.db
+  top_k: 5
