@@ -4,6 +4,36 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.11.0 — 2026-07-12
+
+### Runnable examples, a memory-pattern study, and an OTel export module
+
+Three things ship together, all additive — no behavior changes to `fabri run`.
+
+**A runnable `examples/` suite** (sqlite + gemini defaults, run from repo root),
+each folder annotated with the optimization methodology it demonstrates:
+`01-custom-tool` (tool contract + low-token design), `02-parallel-fanout`
+(dynamic `spawn_subagent` with `parallel_group` + per-child budgets),
+`03-pipeline-verifier` (static `tools.agents[]` draft→verify loop), and
+`04-docker-sandbox` (layered `LocalSandbox`→`DockerSandbox` isolation). The
+README's previously-illustrative multi-agent shapes now have working counterparts.
+
+**New docs.** `docs/design/external-memory-patterns.md` surveys how Hermes Agent
+and OpenClaw handle memory and proposes four adoptions (a `MemoryStore` Protocol,
+an offline consolidation pass, an always-injected core digest, and finishing the
+OTel wiring). `docs/using-fabri-well.md` documents the cross-run learning loop and
+memory hygiene. `docs/optimization-methodologies.md` maps the transferable ideas
+to real fabri mechanisms and the examples that show them.
+
+**OTel export module (X1, off by default).** Adds `observability/otel.py` — a
+post-hoc batch exporter that maps fabri's JSONL trace spine to an OpenTelemetry
+span tree — plus the `observability:` config block and `FABRI_OTLP_*` env
+overrides. The JSONL spine stays the source of truth; OTLP is just an export
+target (Langfuse, Honeycomb, Datadog, Tempo, Jaeger). Needs `pip install
+'fabri[otel]'`. **Not yet wired into the CLI/run loop** — the `fabri traces
+export` verb and end-of-run fire (B2/B3 in `docs/design/memory-observability-plan.md`)
+are still pending; this release lands the exporter and config only.
+
 ## 0.10.1 — 2026-07-11
 
 ### Stream Anthropic responses so large turns don't truncate
