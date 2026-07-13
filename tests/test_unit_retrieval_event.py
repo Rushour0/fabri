@@ -151,6 +151,52 @@ def test_success_pattern_does_not_steal_rank_one():
     assert cands[-1]["kind"] == "success_pattern"
 
 
+def test_global_collection_construction_failure_degrades_to_primary_only(monkeypatch):
+    """memory.global_collection configured but the second store fails to
+    construct (Qdrant unreachable, bad collection, etc): must degrade to zero
+    candidates from the global tier and never raise -- the primary store's own
+    retrieval is unaffected."""
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("simulated Qdrant connection failure")
+
+    monkeypatch.setattr("fabri.orchestrator.retrieval.QdrantMemoryStore", _raise)
+
+    store = _dense_store()
+    text, merged = _retrieve_inner(
+        store, "read a file", top_k=3,
+        retrieval_config=RetrievalConfig(strategy="dense", global_collection="global_lessons"),
+        session_id="sess-global-construct-fail",
+    )
+    assert len(merged) == 3
+    assert text  # primary-only result still rendered
+
+    ev = _retrieval_events("sess-global-construct-fail")[0]
+    assert ev["retrieved"] == 3
+
+
+def test_global_collection_absent_is_byte_identical_to_baseline():
+    """The specified regression guard: with `global_collection` absent/None,
+    behaviour must be identical to the pre-change baseline -- not just
+    'doesn't crash'. Compares the explicit-None config against the bare
+    default RetrievalConfig() (the exact object every pre-existing call site
+    already used before this feature existed)."""
+    store = _dense_store()
+    store.query_bm25.return_value = [(_entry("bm25 hit about files"), 2.1)]
+
+    text_default, merged_default = _retrieve_inner(
+        store, "read a file", top_k=3,
+        retrieval_config=RetrievalConfig(strategy="hybrid"),
+        session_id="sess-baseline-default",
+    )
+    text_explicit_none, merged_explicit_none = _retrieve_inner(
+        store, "read a file", top_k=3,
+        retrieval_config=RetrievalConfig(strategy="hybrid", global_collection=None),
+        session_id="sess-baseline-explicit-none",
+    )
+    assert text_default == text_explicit_none
+    assert [e.id for e, _ in merged_default] == [e.id for e, _ in merged_explicit_none]
+
+
 def test_event_reconstructs_injected_set():
     # The observability must not lie: the candidate ids in the event must be
     # exactly the entries that were injected (returned) — not a superset.

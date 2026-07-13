@@ -82,6 +82,16 @@ class RetrievalConfig:
     # offline eval measured recall@3 0.60 (k=60) -> 0.71 (k=20) with recall@5
     # unchanged. See docs/design/memory-observability-plan.md.
     rrf_k: int = 20
+    # Optional cross-collection "global lessons" tier (memory.global_collection
+    # in config). None (default) = today's single-collection behaviour. When
+    # set, _retrieve_inner opens a second QdrantMemoryStore bound to this
+    # collection on the SAME qdrant_url as the primary store (no separate URL
+    # config) and merges its candidates in before fusion/reservation/MMR.
+    global_collection: str | None = None
+    # The primary store's qdrant_url, threaded through so _retrieve_inner can
+    # construct the second store without a new config field — the global tier
+    # always lives on the same Qdrant instance as the primary collection.
+    global_qdrant_url: str = "http://localhost:6333"
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -94,6 +104,8 @@ class RetrievalConfig:
             importance_weight=float(mem_cfg.get("importance_weight", 0.2)),
             query_expansion=bool(mem_cfg.get("query_expansion", False)),
             rrf_k=int(mem_cfg.get("rrf_k", 20)),
+            global_collection=mem_cfg.get("global_collection"),
+            global_qdrant_url=mem_cfg.get("qdrant_url", "http://localhost:6333"),
         )
 
 
@@ -400,6 +412,64 @@ def retrieve_context(
 
 
 # ---------------------------------------------------------------------------
+# Optional cross-collection "global lessons" tier
+# ---------------------------------------------------------------------------
+
+def _open_global_store(rcfg: "RetrievalConfig") -> QdrantMemoryStore | None:
+    """Best-effort construction of the second (global) store for the
+    cross-collection lessons tier.
+
+    Scoped entirely to the retrieval path: this does NOT touch
+    `build_memory_store`'s single-store return contract used by cli/mcp/ingest
+    tooling elsewhere. Any failure (Qdrant unreachable, collection missing,
+    network blip) degrades to "no global tier this call" — logged at warning,
+    never raised — so a flaky/misconfigured global collection can never break
+    the primary store's retrieval."""
+    if not rcfg.global_collection:
+        return None
+    try:
+        store = QdrantMemoryStore(url=rcfg.global_qdrant_url, collection=rcfg.global_collection)
+        store.count()  # cheap reachability probe; raises if the connection/collection is bad
+        return store
+    except Exception:  # noqa: BLE001 -- degrade to "no global tier", never abort retrieval
+        logger.warning(
+            "global_collection %r unavailable; retrieval continues primary-only",
+            rcfg.global_collection, exc_info=True,
+        )
+        return None
+
+
+def _safe_global_count(global_store: QdrantMemoryStore | None) -> int:
+    if global_store is None:
+        return 0
+    try:
+        return global_store.count()
+    except Exception:  # noqa: BLE001
+        logger.warning("global_collection count() failed mid-call; treating as empty", exc_info=True)
+        return 0
+
+
+def _safe_global_dense(global_store: QdrantMemoryStore | None, vector: list[float], top_k: int) -> list[tuple[MemoryEntry, float]]:
+    if global_store is None:
+        return []
+    try:
+        return global_store.query_by_vector(vector, top_k=top_k)
+    except Exception:  # noqa: BLE001
+        logger.warning("global_collection dense query failed; contributing zero candidates", exc_info=True)
+        return []
+
+
+def _safe_global_tag(global_store: QdrantMemoryStore | None, vector: list[float], top_k: int, tool_name: str) -> list[tuple[MemoryEntry, float]]:
+    if global_store is None:
+        return []
+    try:
+        return global_store.query_by_vector(vector, top_k=top_k, tools_any=[tool_name])
+    except Exception:  # noqa: BLE001
+        logger.warning("global_collection tag-hit query failed; contributing zero candidates", exc_info=True)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Core retrieval pipeline
 # ---------------------------------------------------------------------------
 
@@ -424,9 +494,17 @@ def _retrieve_inner(
 
     # Bind once — on the Qdrant backend count() is a network round-trip.
     store_count = store.count()
+
+    # Optional cross-collection "global lessons" tier: opened here, scoped to
+    # this call, never changing build_memory_store's single-store contract.
+    # Any failure degrades to "no global tier" (see _open_global_store).
+    global_store = _open_global_store(rcfg)
+    global_count = _safe_global_count(global_store)
+
     # Cold store: skip the embed call so a fresh `fabri init` + first
-    # `fabri run` doesn't load the 44MB sentence-transformers model.
-    if store_count == 0:
+    # `fabri run` doesn't load the 44MB sentence-transformers model. Only
+    # short-circuits when BOTH the primary AND the global tier are empty.
+    if store_count == 0 and global_count == 0:
         if session_id is not None:
             _emit_retrieval_event(session_id, {
                 "strategy": strategy, "top_k": top_k, "store_count": 0,
@@ -447,8 +525,17 @@ def _retrieve_inner(
     fetch_k = top_k * pool_multiplier
 
     # --- Dense retrieval ---
+    # Global-tier candidates are merged into the SAME pre-fusion pool as the
+    # primary store's, BEFORE the RRF fuse / reservation / MMR pipeline below
+    # runs — that pipeline computes its guaranteed-slot math ONCE against a
+    # single top_k budget over one merged pool, so it must never see two
+    # separate per-store candidate sets to reserve slots against
+    # independently (that would inflate guaranteed-slot representation past
+    # top_k). Everything below this point is unchanged from the single-store
+    # pipeline: it just sees a possibly-larger candidate list.
+    _global_dense_results = _safe_global_dense(global_store, vector, fetch_k)
     dense_results: list[tuple[MemoryEntry, float]] = sorted(
-        store.query_by_vector(vector, top_k=fetch_k),
+        list(store.query_by_vector(vector, top_k=fetch_k)) + _global_dense_results,
         key=lambda p: p[1], reverse=True,
     )
 
@@ -465,9 +552,20 @@ def _retrieve_inner(
         if hasattr(store, "query_bm25"):
             # SQLite path: FTS5 gives true independent BM25 over the full table.
             sparse_backend = "fts5"
-            sparse_results = store.query_bm25(task, top_k=fetch_k)  # type: ignore[union-attr]
+            sparse_results = list(store.query_bm25(task, top_k=fetch_k))  # type: ignore[union-attr]
+            # The global tier is always a QdrantMemoryStore (no native FTS5), so
+            # its sparse contribution comes from the same client-side BM25
+            # re-rank the Qdrant primary path uses below, over its own dense
+            # pool — never raises; failure just means zero global sparse hits.
+            if _global_dense_results:
+                try:
+                    sparse_results += _qdrant_bm25(task, _global_dense_results, top_k=fetch_k)
+                except Exception:  # noqa: BLE001
+                    logger.warning("global_collection BM25 rerank failed; contributing zero sparse hits", exc_info=True)
         elif _HAS_RANK_BM25:
             # Qdrant path: client-side BM25 re-ranking over the dense pool.
+            # `dense_results` already includes the global tier's dense hits
+            # (merged above), so this re-rank naturally covers both stores.
             sparse_backend = "rank_bm25"
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
 
@@ -516,6 +614,10 @@ def _retrieve_inner(
         tag_results.extend(
             store.query_by_vector(vector, top_k=top_k, tools_any=[tool_name])
         )
+        # Global tier's tag hits merge into the SAME pre-reservation list —
+        # the TAG_HIT_SCORE_FLOOR guaranteed-slot logic below then runs once
+        # over the combined list, same top_k budget as always.
+        tag_results.extend(_safe_global_tag(global_store, vector, top_k, tool_name))
 
     success_results = sorted(
         [p for p in base_results if p[0].kind == "success_pattern"],

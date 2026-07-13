@@ -2,7 +2,12 @@ import uuid
 
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
-from fabri.orchestrator.retrieval import retrieve_context, retrieve_tools
+from fabri.orchestrator.retrieval import (
+    RetrievalConfig,
+    _retrieve_inner,
+    retrieve_context,
+    retrieve_tools,
+)
 from fabri.tools.manifest_schema import ToolManifest
 
 COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
@@ -10,6 +15,10 @@ COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
 
 def make_store() -> QdrantMemoryStore:
     return QdrantMemoryStore(collection=COLLECTION)
+
+
+def make_global_store() -> QdrantMemoryStore:
+    return QdrantMemoryStore(collection=f"test_global_{uuid.uuid4().hex[:8]}")
 
 
 def test_tools_any_filter_only_returns_tagged_entries():
@@ -159,3 +168,107 @@ def test_retrieved_context_is_fenced_and_strips_forged_tags():
         assert context.count("</retrieved_guidelines>") == 1
     finally:
         store.delete(entry.id)
+
+
+# ---------------------------------------------------------------------------
+# Optional cross-collection "global lessons" tier (memory.global_collection)
+# ---------------------------------------------------------------------------
+
+def test_global_collection_merges_candidates_without_exceeding_top_k():
+    """Both stores populated: candidates from BOTH must appear in the fused
+    result, and the tag-hit + success-pattern guaranteed-slot counts must not
+    exceed top_k in total. A naive per-store-then-concat implementation would
+    run the reservation math twice (once per store) and inflate guaranteed-slot
+    representation past top_k -- this is the specific regression the design
+    review flagged."""
+    primary = make_store()
+    global_store = make_global_store()
+
+    primary_tag = MemoryEntry(text="PRIMARY tag hit for the sum tool.", kind="tactical", tools=["sum"])
+    global_tag = MemoryEntry(text="GLOBAL tag hit for the sum tool.", kind="tactical", tools=["sum"])
+    primary_success = MemoryEntry(text="PRIMARY success pattern for summing numbers.", kind="success_pattern")
+    global_success = MemoryEntry(text="GLOBAL success pattern for summing numbers.", kind="success_pattern")
+    primary_fillers = [
+        MemoryEntry(text=f"PRIMARY filler guideline {i} about summing numbers.", kind="tactical")
+        for i in range(3)
+    ]
+    global_fillers = [
+        MemoryEntry(text=f"GLOBAL filler guideline {i} about summing numbers.", kind="tactical")
+        for i in range(3)
+    ]
+
+    for e in [primary_tag, primary_success, *primary_fillers]:
+        primary.upsert(e)
+    for e in [global_tag, global_success, *global_fillers]:
+        global_store.upsert(e)
+
+    try:
+        rcfg = RetrievalConfig(strategy="dense", global_collection=global_store.collection)
+        top_k = 4
+        _text, merged = _retrieve_inner(
+            primary, "please use the sum tool to add two numbers", top_k=top_k,
+            tool_names=["sum"], retrieval_config=rcfg,
+        )
+        assert len(merged) <= top_k
+
+        texts = [entry.text for entry, _ in merged]
+        assert any(t.startswith("PRIMARY") for t in texts), texts
+        assert any(t.startswith("GLOBAL") for t in texts), texts
+
+        tag_hit_count = sum(1 for entry, _ in merged if "tag hit" in entry.text)
+        success_count = sum(1 for entry, _ in merged if entry.kind == "success_pattern")
+        assert tag_hit_count + success_count <= top_k
+    finally:
+        for e in [primary_tag, primary_success, *primary_fillers]:
+            primary.delete(e.id)
+        for e in [global_tag, global_success, *global_fillers]:
+            global_store.delete(e.id)
+
+
+def test_global_collection_empty_degrades_to_primary_only():
+    """Global store configured but empty: retrieval must degrade cleanly to
+    primary-only results, with no exception and no behavioural difference from
+    the global tier simply not existing."""
+    primary = make_store()
+    global_store = make_global_store()  # never populated
+
+    entry = MemoryEntry(text="Prefer the sum tool for addition.", kind="tactical", tools=["sum"])
+    primary.upsert(entry)
+
+    try:
+        rcfg = RetrievalConfig(strategy="dense", global_collection=global_store.collection)
+        context_with_global, merged_with_global = _retrieve_inner(
+            primary, "how do I add two numbers", top_k=5, tool_names=["sum"], retrieval_config=rcfg,
+        )
+        context_without_global, merged_without_global = _retrieve_inner(
+            primary, "how do I add two numbers", top_k=5, tool_names=["sum"],
+            retrieval_config=RetrievalConfig(strategy="dense"),
+        )
+        assert context_with_global == context_without_global
+        assert [e.id for e, _ in merged_with_global] == [e.id for e, _ in merged_without_global]
+        assert "Prefer the sum tool for addition." in context_with_global
+    finally:
+        primary.delete(entry.id)
+
+
+def test_global_collection_connection_failure_degrades_to_primary_only():
+    """Global store configured but unreachable (bad host): retrieval must
+    degrade cleanly to primary-only results -- never raise."""
+    primary = make_store()
+
+    entry = MemoryEntry(text="Prefer the sum tool for addition.", kind="tactical", tools=["sum"])
+    primary.upsert(entry)
+
+    try:
+        rcfg = RetrievalConfig(
+            strategy="dense",
+            global_collection="unreachable_collection",
+            global_qdrant_url="http://127.0.0.1:1",  # nothing listens here
+        )
+        context, merged = _retrieve_inner(
+            primary, "how do I add two numbers", top_k=5, tool_names=["sum"], retrieval_config=rcfg,
+        )
+        assert "Prefer the sum tool for addition." in context
+        assert len(merged) == 1
+    finally:
+        primary.delete(entry.id)

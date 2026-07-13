@@ -200,6 +200,14 @@ DEFAULT_CONFIG = {
         "importance_weight": 0.2,
         # Reserved for future multi-query expansion — no-op when False.
         "query_expansion": False,
+        # Optional cross-collection "global lessons" tier: a second Qdrant
+        # collection (same `qdrant_url` — the shared Qdrant instance, no new
+        # URL field) whose candidates are merged into retrieval alongside the
+        # primary collection's. None (default) = today's single-collection
+        # behaviour, byte-identical. Only consulted by the retrieval pipeline
+        # (fabri.orchestrator.retrieval); build_memory_store's single-store
+        # return contract used by cli/mcp/ingest tooling is unaffected.
+        "global_collection": None,
         # Memory eviction: cap the total number of stored entries so the
         # collection doesn't grow unboundedly. When set, after each ingest
         # the N lowest-scoring entries are deleted to bring the count back
