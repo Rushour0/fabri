@@ -229,6 +229,15 @@ DEFAULT_CONFIG = {
         #                 summarization). Uses the run's compress_llm so cost
         #                 is billed to the same post-run usage bucket.
         "eviction_strategy": "delete",
+        # Staleness report thresholds (fabri.memory.staleness / `fabri memory
+        # stale`): a guideline is "stale" when hit_count <= stale_max_hit_count
+        # AND age_days >= stale_min_age_days. Pure read-side report -- these
+        # two knobs don't feed retrieval, scoring, or eviction at all; they
+        # only gate what `find_stale_guidelines` returns. Defaults mirror
+        # find_stale_guidelines' own defaults so an omitted config and an
+        # omitted call-site kwarg agree.
+        "stale_max_hit_count": 2,
+        "stale_min_age_days": 7.0,
     },
     # The Improver (fabri.readlogs / `fabri ingest`): feed EXTERNAL logs into the
     # same self-improving memory loop. All keys default so omission = today's

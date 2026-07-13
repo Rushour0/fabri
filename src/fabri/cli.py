@@ -455,6 +455,53 @@ def cmd_memory_diff(args: argparse.Namespace) -> None:
     _render(f"only in {a[:8]}", only_in_a)
 
 
+def cmd_memory_stale(args: argparse.Namespace) -> None:
+    """Read-side staleness report: guidelines with low hit_count relative to
+    their age (see fabri.memory.staleness). Pure report -- does not touch
+    scoring, retrieval, or eviction.
+
+    Runs against the primary store, and -- when memory.global_collection is
+    configured -- ALSO against that global store, tagging each result's
+    "tier" so the two are distinguishable in the merged JSON output."""
+    from fabri.memory.staleness import find_stale_guidelines
+    from fabri.orchestrator.retrieval import RetrievalConfig, _open_global_store
+
+    config = load_config(args.config)
+    mem_cfg = config["memory"]
+    kinds = tuple(args.kind) if args.kind else ("tactical", "strategic")
+    max_hit_count = (
+        args.max_hit_count if args.max_hit_count is not None
+        else mem_cfg.get("stale_max_hit_count", 2)
+    )
+    min_age_days = (
+        args.min_age_days if args.min_age_days is not None
+        else mem_cfg.get("stale_min_age_days", 7.0)
+    )
+
+    def _report(store) -> list[dict]:
+        return [
+            {**vars(g)}
+            for g in find_stale_guidelines(
+                store,
+                max_hit_count=max_hit_count,
+                min_age_days=min_age_days,
+                kinds=kinds,
+                limit=args.limit,
+            )
+        ]
+
+    store = _open_store(mem_cfg)
+    results = [{"tier": "project", **d} for d in _report(store)]
+
+    rcfg = RetrievalConfig.from_mem_cfg(mem_cfg)
+    if rcfg.global_collection:
+        global_store = _open_global_store(rcfg)
+        if global_store is not None:
+            results.extend({"tier": "global", **d} for d in _report(global_store))
+
+    print(json.dumps(results, indent=2))
+
+
 def cmd_replay(args: argparse.Namespace) -> None:
     """G5: re-run the task from a prior session against the *current* memory
     state. Prints a before/after table so the user can see whether the memory
@@ -1087,6 +1134,17 @@ def main() -> None:
     p_mem_diff.add_argument("session_b", help="The later session id")
     p_mem_diff.add_argument("--markdown", action="store_true", help="Render as markdown")
     p_mem_diff.set_defaults(func=cmd_memory_diff)
+
+    p_mem_stale = mem_sub.add_parser(
+        "stale", help="Report guidelines with low hit_count relative to age (JSON, pipeable)")
+    p_mem_stale.add_argument("--max-hit-count", dest="max_hit_count", type=int, default=None,
+                             help="Default: memory.stale_max_hit_count (2)")
+    p_mem_stale.add_argument("--min-age-days", dest="min_age_days", type=float, default=None,
+                             help="Default: memory.stale_min_age_days (7.0)")
+    p_mem_stale.add_argument("--kind", dest="kind", action="append", default=None,
+                             help="Restrict to this kind (repeatable; default: tactical + strategic)")
+    p_mem_stale.add_argument("--limit", type=int, default=None)
+    p_mem_stale.set_defaults(func=cmd_memory_stale)
 
     p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
     p_replay.add_argument("session_id")
