@@ -33,14 +33,22 @@ a small fabri agency (an orchestrator plus fixed specialists, each an ordinary
 me, it worked." Installable directly from this repo for both Claude Code
 (`.claude-plugin/marketplace.json`) and Codex CLI (`.agents/plugins/marketplace.json`) —
 `/plugin install agency-builder@fabri-skills` and
-`codex plugin add agency-builder@fabri-skills` respectively, both verified
-against real installs of each CLI, not just schema validation.
+`codex plugin add agency-builder@fabri-skills` respectively. Both installs
+were run for real (`claude plugin validate .`, a fresh
+`codex plugin marketplace add` + `codex plugin add` showing the skill content
+actually cached under the plugin root), not just schema-checked; an initial
+Codex manifest bug (`skills` pointing at a nonexistent directory, caught by
+review) is fixed.
 
-Ships with `docs/agency-kernel.md` (what's fixed vs. per-agency), a worked
-example (`examples/agencies/changelog-release-notes`, verifiers passing on a
-live run), and an "Observe a run" convention: every agency now points its
-user at `fabri traces show <session_id>` and `fabri report` instead of
-resting on the final chat message as proof of what happened.
+Ships with `docs/agency-kernel.md` (what's fixed vs. per-agency) and a worked
+example (`examples/agencies/changelog-release-notes`) whose committed
+deliverable passes both the specialist verifier and the host repair check —
+that's direct tool-level verification, not evidence of a completed live
+multi-agent run, which needs a real provider key this environment didn't have.
+The example's own README and the kernel doc both now carry an "Observe a run"
+/ "After a live run" section pointing at `fabri traces show <session_id>` and
+`fabri report`, with the caveat that static specialist cost doesn't currently
+roll into the parent's reported total.
 
 ## 0.11.0 — 2026-07-12
 

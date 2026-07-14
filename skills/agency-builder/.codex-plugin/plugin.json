@@ -10,7 +10,7 @@
   "repository": "https://github.com/Rushour0/fabri",
   "license": "Apache-2.0",
   "keywords": ["fabri", "agents", "orchestration", "scaffolding"],
-  "skills": "./skills/",
+  "skills": "./",
   "interface": {
     "displayName": "Fabri Agency Builder",
     "shortDescription": "Scaffold verified fabri agencies.",

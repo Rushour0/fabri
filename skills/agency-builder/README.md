@@ -14,7 +14,11 @@ For Claude Code, once this repository is published on GitHub:
 /reload-plugins
 ```
 
-Then ask: “Build an AI agency for changelog-to-release-notes production.” The
+Then describe the agency, including the target persona, the one deliverable,
+specialist roles, proof-bar metric, and approval gate — the skill returns its
+framing template and asks for anything missing rather than inventing it, so a
+bare prompt like "build an AI agency for changelog-to-release-notes
+production" gets a clarifying question back, not an immediate scaffold. The
 plugin exposes the namespaced skill `/agency-builder:agency-builder` and also
 auto-triggers from its description.
 
@@ -41,7 +45,14 @@ should read `agency-builder@fabri-skills  installed, enabled`.
 
 ## Try the worked agency
 
-From the repository root, first inspect the assembled tools and roles without
+Install `fabri` with the embedded SQLite memory backend first (use
+`python3 -m pip` if your environment has no bare `pip` on `PATH`):
+
+```bash
+python3 -m pip install -e '.[sqlite]'
+```
+
+From the repository root, then inspect the assembled tools and roles without
 credentials:
 
 ```bash
@@ -49,10 +60,11 @@ fabri --config examples/agencies/changelog-release-notes/agent.yaml run --dry-ru
   "Create verified release notes from examples/agencies/changelog-release-notes/source/release_input.json at examples/agencies/changelog-release-notes/deliverables/release_notes.md."
 ```
 
-Then set the provider key named in `agent.yaml` and run the same command without
-`--dry-run`. It creates `deliverables/release_notes.md` through the writer
-specialist and checks it through the verifier specialist and repair gate.
+Then set `ANTHROPIC_API_KEY` (the provider key named in `agent.yaml`) and run
+the same command without `--dry-run`. It creates `deliverables/release_notes.md`
+through the writer specialist and checks it through the verifier specialist
+and repair gate — read the verifier's own output, not just CLI exit success;
+see the example README's "same proof bar" note.
 
-The example needs `ANTHROPIC_API_KEY` for a live multi-agent run and
-`fabri[sqlite]` for the embedded memory backend. Its custom tools can be tested
-without credentials; see the example README.
+The example's custom tools can be tested without credentials; see the example
+README's "Test the real tool contract without a model" section.

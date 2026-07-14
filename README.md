@@ -560,15 +560,20 @@ Built-in adapters: `jsonl` (native), `regex` (plaintext), `otel`/`openai`
 packages via the `fabri.adapters` entry-point group. `fabri ingest
 --list-adapters` shows what's available.
 
-## Skills — scaffold an agency from one prompt
+## Skills — scaffold an agency from a bounded deliverable
 
-[`skills/agency-builder`](https://github.com/Rushour0/fabri/tree/main/skills/agency-builder)
+> The links and marketplace commands below resolve once this is merged to
+> `main`; on a branch or unmerged fork, use the local install/validate
+> commands in
+> [`skills/agency-builder/README.md`](skills/agency-builder/README.md) instead.
+
+[`skills/agency-builder`](skills/agency-builder)
 turns one bounded deliverable into a small, reviewable fabri agency — an
 orchestrator plus a fixed set of specialists, each an ordinary agents-as-tools
 config, with a deterministic verifier standing in for "trust me, it worked."
-See [`docs/agency-kernel.md`](https://github.com/Rushour0/fabri/blob/main/docs/agency-kernel.md)
+See [`docs/agency-kernel.md`](docs/agency-kernel.md)
 for what stays fixed versus what varies per agency, and
-[`examples/agencies/changelog-release-notes`](https://github.com/Rushour0/fabri/tree/main/examples/agencies/changelog-release-notes)
+[`examples/agencies/changelog-release-notes`](examples/agencies/changelog-release-notes)
 for a worked, runnable example.
 
 Install for Claude Code:
@@ -585,8 +590,11 @@ codex plugin marketplace add Rushour0/fabri
 codex plugin add agency-builder@fabri-skills
 ```
 
-Then ask: "Build an AI agency for changelog-to-release-notes production." See
-[`skills/agency-builder/README.md`](https://github.com/Rushour0/fabri/blob/main/skills/agency-builder/README.md)
+The skill asks for the target persona, the one deliverable, specialist roles,
+proof-bar metric, and approval gate before it builds anything — a bare prompt
+like "build an AI agency for X" gets you a clarifying question back, not an
+immediate scaffold. See
+[`skills/agency-builder/README.md`](skills/agency-builder/README.md)
 for local (pre-publish) install/validate commands and common usage cases.
 
 ## Using it as a library

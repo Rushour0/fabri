@@ -44,10 +44,18 @@ A run is only as observable as what you point the user at afterward. Once a
 live run finishes:
 
 1. Note the session ID fabri prints; put it in the agency's delivery message
-   or README, not just in your own scrollback.
-2. Run `fabri traces show <session_id>` and quote what each specialist
-   actually did — not what the plan intended.
+   or README, not just in your own scrollback. Static `tools.agents[]`
+   specialists each run in their own child session with their own ID
+   (visible in the parent's tool-call result) — note those too if you need
+   to show a specialist's own steps, not just what it returned to the parent.
+2. Run `fabri traces show <session_id>` on the parent and quote which
+   specialists it called and what they returned — not what the plan intended,
+   and not the specialists' own internal reasoning, which lives in their own
+   session traces.
 3. Run `fabri report --since 1h` and report actual cost, not an estimate.
+   Note that static specialist cost does not currently roll into the parent's
+   total — report per-session, not just the parent's number, if the agency
+   has specialists.
 
 See [references/agency-kernel.md](references/agency-kernel.md)'s "Observe a
 run" section for the full command set (`traces list`/`tail`, log file path).

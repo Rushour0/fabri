@@ -16,10 +16,9 @@ def section(title: str, items: list[str]) -> list[str]:
     return [f"## {title}", "", *[f"- {item}" for item in items], ""]
 
 
-def main() -> int:
-    args = json.loads(sys.stdin.read())
-    source = sandbox_path(args["source_path"])
-    output = sandbox_path(args["output_path"])
+def main(source_path: str, output_path: str) -> int:
+    source = sandbox_path(source_path)
+    output = sandbox_path(output_path)
     data = json.loads(source.read_text())
     required = ("product", "version", "release_date", "features", "fixes", "known_limitations")
     missing = [key for key in required if key not in data]
@@ -41,8 +40,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    args = json.loads(sys.stdin.read())
     try:
-        raise SystemExit(main())
+        raise SystemExit(main(args["source_path"], args["output_path"]))
+    except SystemExit:
+        raise
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}))
+        # Report the sandbox-relative output_path, not str(exc): a
+        # FileNotFoundError's message embeds the resolved absolute host path,
+        # which would otherwise leak the workspace/user directory layout into
+        # tool output an LLM sees.
+        print(json.dumps({"error": f"{type(exc).__name__} while building {args['output_path']}"}))
         raise SystemExit(1)

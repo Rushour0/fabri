@@ -16,6 +16,17 @@ agent:
       - python3
       - examples/agencies/changelog-release-notes/scripts/check_release_notes.py
       - examples/agencies/changelog-release-notes/deliverables/release_notes.md
+    # A repair re-run starts a FRESH task string, not a continuation of the
+    # original conversation -- the default repair prompt only carries
+    # {errors}, which would lose the source/output paths release_writer
+    # needs. Restate them explicitly since this agency's paths are fixed.
+    repair_prompt: |
+      A verification check rejected the release notes. Call release_writer
+      again with source_path=examples/agencies/changelog-release-notes/source/release_input.json
+      and output_path=examples/agencies/changelog-release-notes/deliverables/release_notes.md,
+      fixing ONLY the issues below, then call release_verifier again:
+
+      {errors}
 
 llm:
   provider: anthropic

@@ -36,16 +36,25 @@ def check(source_path: str, output_path: str) -> list[str]:
     return failures
 
 
-def main() -> int:
-    args = json.loads(sys.stdin.read())
-    failures = check(args["source_path"], args["output_path"])
+def main(output_path: str) -> int:
+    failures = check(args["source_path"], output_path)
     print(json.dumps({"ok": not failures, "failures": failures}))
     return 0 if not failures else 1
 
 
 if __name__ == "__main__":
+    args = json.loads(sys.stdin.read())
     try:
-        raise SystemExit(main())
+        raise SystemExit(main(args["output_path"]))
+    except SystemExit:
+        raise
     except Exception as exc:
-        print(json.dumps({"ok": False, "failures": [str(exc)]}))
+        # Report the sandbox-relative output_path, not str(exc): a
+        # FileNotFoundError's message embeds the resolved absolute host path,
+        # which would otherwise leak the workspace/user directory layout into
+        # tool output an LLM sees.
+        print(json.dumps({
+            "ok": False,
+            "failures": [f"{type(exc).__name__} while checking {args['output_path']}"],
+        }))
         raise SystemExit(1)

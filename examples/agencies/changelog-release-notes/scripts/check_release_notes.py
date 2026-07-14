@@ -13,6 +13,7 @@ def main() -> int:
     text = output.read_text()
     required = [
         f"# {data['product']} {data['version']}",
+        f"Released {data['release_date']}.",
         "## What’s new",
         "## Fixes",
         "## Known limitations",
