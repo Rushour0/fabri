@@ -142,7 +142,14 @@ def test_stale_guideline_projection_is_a_small_shape_not_the_raw_entry():
     assert result.domain == "code"
     assert result.tags == ["foo"]
     assert result.session_ids == ["s1"]
-    assert result.created_at == stale.created_at
+    # Flaky as exact equality: created_at round-trips through the real
+    # QdrantMemoryStore, whose payload serialization doesn't guarantee
+    # bit-exact float64 precision (observed drift ~1e-7s, e.g.
+    # 1781442398.913278 vs 1781442398.9132779). Staleness math only ever
+    # needs day-granularity precision, so a 1ms tolerance is still far
+    # tighter than anything that matters here while no longer flaking on
+    # sub-microsecond serialization noise.
+    assert result.created_at == pytest.approx(stale.created_at, abs=1e-3)
     assert result.age_days >= 30
 
     store.delete(stale.id)

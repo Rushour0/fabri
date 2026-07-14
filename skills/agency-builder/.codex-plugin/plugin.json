@@ -1,0 +1,24 @@
+{
+  "name": "agency-builder",
+  "version": "0.1.0",
+  "description": "Scaffold a verified fabri multi-agent agency from one bounded deliverable.",
+  "author": {
+    "name": "fabri contributors",
+    "url": "https://github.com/Rushour0/fabri"
+  },
+  "homepage": "https://github.com/Rushour0/fabri/tree/main/skills/agency-builder",
+  "repository": "https://github.com/Rushour0/fabri",
+  "license": "Apache-2.0",
+  "keywords": ["fabri", "agents", "orchestration", "scaffolding"],
+  "skills": "./",
+  "interface": {
+    "displayName": "Fabri Agency Builder",
+    "shortDescription": "Scaffold verified fabri agencies.",
+    "longDescription": "Turn one bounded deliverable into a fabri orchestrator, specialist team, tools, and verifier.",
+    "developerName": "fabri contributors",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://github.com/Rushour0/fabri",
+    "defaultPrompt": "Build a fabri AI agency for release-note production."
+  }
+}

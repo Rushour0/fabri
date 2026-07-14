@@ -1,0 +1,27 @@
+agent:
+  name: changelog-release-verifier
+  max_steps: 4
+  system_prompt: |
+    You are the verification specialist. Use verify_release_notes with the
+    source and output paths in the task. Return the tool's boolean verdict and its exact
+    missing requirements. Do not approve based on prose alone.
+
+llm:
+  provider: anthropic
+  model: claude-haiku-4-5
+  max_tokens: 700
+  api_key_env: ANTHROPIC_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+    - examples/agencies/changelog-release-notes/tools
+  enabled: [verify_release_notes]
+  sandbox_root: .
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: changelog_release_notes_verifier
+  sqlite_path: .fabri/changelog_release_notes.db
+  top_k: 2

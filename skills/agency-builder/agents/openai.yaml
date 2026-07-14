@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agency Builder"
+  short_description: "Scaffold fabri multi-agent agencies"
+  default_prompt: "Build a fabri AI agency for a clear deliverable."

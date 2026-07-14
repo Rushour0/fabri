@@ -1,0 +1,23 @@
+{
+  "name": "build_release_notes",
+  "description": "Create verified-format Markdown release notes from a release-input JSON file. Use once with a source path and output path.",
+  "command": ["python3", "build_release_notes.py"],
+  "input_schema": {
+    "type": "object",
+    "required": ["source_path", "output_path"],
+    "properties": {
+      "source_path": {"type": "string"},
+      "output_path": {"type": "string"}
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": ["output_path", "sections"],
+    "properties": {
+      "output_path": {"type": "string"},
+      "sections": {"type": "integer"}
+    }
+  },
+  "timeout_s": 10
+}

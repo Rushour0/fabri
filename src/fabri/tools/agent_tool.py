@@ -2,6 +2,7 @@
 as a tool -- composition instead of a dispatcher/orchestration layer. The
 sub-agent runs as an ordinary tool subprocess (agent_runner_tool.py), so it
 goes through the exact same {ok, error?, result?} contract as any other tool."""
+import sys
 from pathlib import Path
 
 from fabri.tools.manifest_schema import ToolManifest
@@ -24,7 +25,17 @@ def make_agent_tool_manifest(entry: dict) -> ToolManifest:
     - `qdrant_url` / `memory_collection` -> memory.qdrant_url / memory.collection
     """
     config_path = str(Path(entry["config"]).resolve())
-    command = ["python3", str(AGENT_RUNNER_SCRIPT), config_path]
+    # sys.executable, not a bare "python3": this script re-invokes fabri's OWN
+    # code (agent_runner_tool.py does `from fabri.config import ...`), so it
+    # must run under the exact interpreter fabri is already running under.
+    # A bare "python3" resolves from $PATH at subprocess-launch time and can
+    # silently be a totally different, fabri-less interpreter (pipx installs,
+    # Docker CMD without an activated venv, cron, systemd, or simply not
+    # having `source .venv/bin/activate`'d this exact shell) -- the child
+    # then dies on its first import with an empty stdout, which the tool
+    # runner reports as the unhelpful "malformed JSON output from tool"
+    # rather than the real ModuleNotFoundError.
+    command = [sys.executable, str(AGENT_RUNNER_SCRIPT), config_path]
     if "model" in entry:
         command += ["--model", str(entry["model"])]
     if "max_tokens" in entry:

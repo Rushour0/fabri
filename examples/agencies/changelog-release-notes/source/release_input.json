@@ -1,0 +1,15 @@
+{
+  "product": "Fabri Notes",
+  "version": "0.4.0",
+  "release_date": "2026-07-14",
+  "features": [
+    "Added CSV export for saved reports.",
+    "Added a compact activity view for long projects."
+  ],
+  "fixes": [
+    "Fixed duplicate reminders after a project rename."
+  ],
+  "known_limitations": [
+    "CSV export does not include archived reports."
+  ]
+}

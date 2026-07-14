@@ -1,7 +1,7 @@
 """Per-role LLM resolution: legacy compat, per-role provider overrides, and
 the multi-key api-key pre-flight. These exercise `config._normalize_llm_roles`
 + `runtime._resolve_role_cfg` end-to-end without hitting a real provider SDK."""
-from fabri.config import _normalize_llm_roles
+from fabri.config import DEFAULT_CONFIG, _deep_merge, _normalize_llm_roles
 from fabri.runtime import (
     _resolve_role_cfg,
     build_decompose_llm,
@@ -290,6 +290,62 @@ def test_bedrock_forces_api_key_env_none_even_when_inherited():
     })
     assert parent["llm"]["roles"]["main"]["api_key_env"] is None
     assert parent["llm"]["roles"]["narrator"]["api_key_env"] is None
+
+
+def test_switching_provider_alone_does_not_leak_gemini_api_key_env():
+    """Regression, sibling of the bedrock case above: a config that sets ONLY
+    `provider` + `model` (the two fields the config's own top comment tells
+    you to change to switch providers) must resolve `api_key_env` to that
+    provider's own conventional env var -- not silently keep demanding
+    GEMINI_API_KEY because DEFAULT_CONFIG's api_key_env default leaked in via
+    deep-merge. This is exactly the shape a user editing a fresh
+    `fabri init`-scaffolded config would produce."""
+    cases = [
+        ("anthropic", "claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
+        ("openai", "gpt-4o-mini", "OPENAI_API_KEY"),
+        ("openrouter", "anthropic/claude-sonnet-4.6", "OPENROUTER_API_KEY"),
+        ("gemini", "gemini-2.5-pro", "GEMINI_API_KEY"),  # the default; must still hold
+    ]
+    for provider, model, expected_key_env in cases:
+        cfg = _normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, {
+            "llm": {"provider": provider, "model": model},
+        }))
+        main = cfg["llm"]["roles"]["main"]
+        assert main["provider"] == provider
+        assert main["api_key_env"] == expected_key_env, (
+            f"{provider}: expected {expected_key_env}, got {main['api_key_env']!r}"
+        )
+
+
+def test_switching_provider_alone_also_fixes_narrator_not_just_main():
+    """Sibling of the above at the narrator role: switching only the parent's
+    `provider`/`model` must not leave narration pinned to a Gemini model
+    while carrying the new provider's api_key_env (a real, previously
+    reproduced crash: provider=openai + model=gemini-2.5-flash-lite +
+    key=OPENAI_API_KEY, which no provider serves)."""
+    cases = [
+        ("anthropic", "claude-haiku-4-5", "ANTHROPIC_API_KEY"),
+        ("openai", "gpt-4o-mini", "OPENAI_API_KEY"),
+        ("openrouter", "google/gemini-2.5-flash-lite", "OPENROUTER_API_KEY"),
+    ]
+    for provider, expected_model, expected_key_env in cases:
+        cfg = _normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, {
+            "llm": {"provider": provider, "model": "irrelevant-main-model"},
+        }))
+        narrator = cfg["llm"]["roles"]["narrator"]
+        assert narrator["provider"] == provider
+        assert narrator["model"] == expected_model
+        assert narrator["api_key_env"] == expected_key_env
+
+
+def test_explicit_api_key_env_override_still_wins_over_provider_default():
+    """A user naming a non-conventional env var explicitly (e.g. a shared
+    secret-manager alias) must not be overridden by the provider-default
+    resolution this fix introduces."""
+    cfg = _normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, {
+        "llm": {"provider": "openai", "model": "gpt-4o-mini", "api_key_env": "MY_CUSTOM_OPENAI_KEY"},
+    }))
+    assert cfg["llm"]["roles"]["main"]["api_key_env"] == "MY_CUSTOM_OPENAI_KEY"
 
 
 def test_find_missing_role_api_keys_ignores_bedrock(monkeypatch):
