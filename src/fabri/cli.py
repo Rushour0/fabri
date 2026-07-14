@@ -242,9 +242,12 @@ def cmd_run(args: argparse.Namespace) -> None:
             "cost_by_model": post_cost_by_model,
         })
     if entries:
-        print(f"\nSynthesized {len(entries)} guideline(s) from this run:")
+        # Human-informational only -> stderr. stdout must stay the machine-readable
+        # result envelope (printed above): the service parses stdout as JSON, and a
+        # trailing human line here would corrupt it (agent stdout was not JSON).
+        print(f"\nSynthesized {len(entries)} guideline(s) from this run:", file=sys.stderr)
         for e in entries:
-            print(f"  [{e.kind}] {e.text}")
+            print(f"  [{e.kind}] {e.text}", file=sys.stderr)
 
     # X1: best-effort OTLP export of the finished trace (no-op unless
     # observability.otlp_endpoint is set). Fired here, after the POST_RUN_USAGE

@@ -19,7 +19,12 @@ interface State {
   error: string | null;
   // question_ids the user has already answered (drives AskUserCard dismissal).
   answered: Set<string>;
+  // True once a terminal event (final/failed/incomplete) has set the outcome —
+  // so the trailing `result` frame doesn't override the run's own verdict.
+  terminal: boolean;
 }
+
+const SUCCESS_OUTCOMES = new Set(["success", "success_with_recovery"]);
 
 type Action =
   | { kind: "submit"; task: string }
@@ -38,6 +43,7 @@ const initialState: State = {
   result: null,
   error: null,
   answered: new Set(),
+  terminal: false,
 };
 
 function reducer(state: State, action: Action): State {
@@ -46,10 +52,24 @@ function reducer(state: State, action: Action): State {
       return { ...initialState, status: "submitting", task: action.task, answered: new Set() };
     case "started":
       return { ...state, status: "running", sessionId: action.sessionId };
-    case "event":
-      return { ...state, events: [...state.events, action.event] };
+    case "event": {
+      const ev = action.event;
+      const next = { ...state, events: [...state.events, ev] };
+      // The run's own terminal event is the authoritative verdict — more reliable
+      // than the result envelope (which is parsed from subprocess stdout).
+      if (ev.type === "final") {
+        next.status = ev.outcome && !SUCCESS_OUTCOMES.has(ev.outcome) ? "error" : "done";
+        next.terminal = true;
+      } else if (ev.type === "failed" || ev.type === "incomplete") {
+        next.status = "error";
+        next.terminal = true;
+      }
+      return next;
+    }
     case "result": {
-      // Prefer a terminal state that reflects the outcome, not just "stream ended".
+      // Supplementary (carries the cost surface). Only decides status if no
+      // terminal event set it — otherwise the run's own outcome wins.
+      if (state.terminal) return { ...state, result: action.result };
       const failed = action.result.success === false;
       return { ...state, status: failed ? "error" : "done", result: action.result };
     }
