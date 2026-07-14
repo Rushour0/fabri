@@ -325,7 +325,7 @@ def test_switching_provider_alone_also_fixes_narrator_not_just_main():
     key=OPENAI_API_KEY, which no provider serves)."""
     cases = [
         ("anthropic", "claude-haiku-4-5", "ANTHROPIC_API_KEY"),
-        ("openai", "gpt-4o-mini", "OPENAI_API_KEY"),
+        ("openai", "gpt-5-nano", "OPENAI_API_KEY"),
         ("openrouter", "google/gemini-2.5-flash-lite", "OPENROUTER_API_KEY"),
     ]
     for provider, expected_model, expected_key_env in cases:

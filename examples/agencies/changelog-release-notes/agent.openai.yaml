@@ -1,0 +1,58 @@
+agent:
+  name: changelog-release-notes
+  max_steps: 10
+  subagent:
+    max_steps: 4
+  system_prompt: |
+    You direct a fixed release-notes agency. The requested deliverable is a
+    Markdown file. Always call release_research first, then release_writer,
+    then release_verifier. Give every specialist the complete task, including
+    source and output paths. Finish only when release_verifier reports a pass;
+    otherwise ask release_writer to repair the named failure and verify again.
+  repair:
+    enabled: true
+    max_attempts: 1
+    verify_command:
+      - python3
+      - examples/agencies/changelog-release-notes/scripts/check_release_notes.py
+      - examples/agencies/changelog-release-notes/deliverables/release_notes.md
+    # A repair re-run starts a FRESH task string, not a continuation of the
+    # original conversation -- the default repair prompt only carries
+    # {errors}, which would lose the source/output paths release_writer
+    # needs. Restate them explicitly since this agency's paths are fixed.
+    repair_prompt: |
+      A verification check rejected the release notes. Call release_writer
+      again with source_path=examples/agencies/changelog-release-notes/source/release_input.json
+      and output_path=examples/agencies/changelog-release-notes/deliverables/release_notes.md,
+      fixing ONLY the issues below, then call release_verifier again:
+
+      {errors}
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  max_tokens: 1024
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [release_research, release_writer, release_verifier]
+  sandbox_root: .
+  result_format: toon
+  agents:
+    - name: release_research
+      description: Inspect the release input and return only supported facts and omissions.
+      config: examples/agencies/changelog-release-notes/researcher.openai.yaml
+    - name: release_writer
+      description: Create the requested release-notes Markdown deliverable from the supplied JSON input.
+      config: examples/agencies/changelog-release-notes/writer.openai.yaml
+    - name: release_verifier
+      description: Verify the requested release-notes file and return a concrete pass/fail verdict.
+      config: examples/agencies/changelog-release-notes/verifier.openai.yaml
+
+memory:
+  backend: sqlite
+  collection: changelog_release_notes_parent
+  sqlite_path: .fabri/changelog_release_notes.db
+  top_k: 3
+  record_postmortems: true

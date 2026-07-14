@@ -208,14 +208,15 @@ class _SpawnRegistry:
     """ToolRegistry stand-in: spawn_subagent returns a canned child result whose
     usage carries the fields we want to test the rollup against."""
 
-    def __init__(self, *, ok=True, usage=None):
+    def __init__(self, *, ok=True, usage=None, outcome="success"):
         self._ok = ok
         self._usage = usage
+        self._outcome = outcome
 
     def invoke(self, name: str, args: dict) -> dict:
         result = {
             "final_text": "child done",
-            "outcome": "success",
+            "outcome": self._outcome,
             "session_id": "child-sess",
             "trace_path": "/tmp/child.jsonl",
         }
@@ -286,6 +287,35 @@ def test_failed_spawn_contributes_nothing():
     had_failure = _dispatch(reg, [_spawn_call()], captured, "p-failed")
     assert had_failure is True
     assert captured == []  # nothing rolled up from a failed spawn
+
+
+# ============================================================================
+# Slice B: a nested subagent that exited 0 (ok=True) but whose OWN outcome is
+# worse than SUCCESS must surface as had_failure=True to the parent, so the
+# parent can never report a cleaner outcome than its worst nested specialist.
+# ============================================================================
+
+def test_nested_success_with_recovery_marks_parent_had_failure():
+    captured = []
+    reg = _SpawnRegistry(ok=True, outcome="success_with_recovery")
+    had_failure = _dispatch(reg, [_spawn_call()], captured, "p-nested-swr")
+    assert had_failure is True
+    # cost still rolls up normally -- this is a bookkeeping signal, not a crash.
+    assert captured == []  # no usage on this child
+
+
+def test_nested_all_tools_failed_marks_parent_had_failure():
+    captured = []
+    reg = _SpawnRegistry(ok=True, outcome="all_tools_failed")
+    had_failure = _dispatch(reg, [_spawn_call()], captured, "p-nested-atf")
+    assert had_failure is True
+
+
+def test_nested_plain_success_does_not_mark_had_failure():
+    captured = []
+    reg = _SpawnRegistry(ok=True, outcome="success")
+    had_failure = _dispatch(reg, [_spawn_call()], captured, "p-nested-plain")
+    assert had_failure is False
 
 
 def test_child_missing_usage_contributes_nothing():

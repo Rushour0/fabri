@@ -286,6 +286,31 @@ def test_openai_no_truncation_is_a_single_call():
     assert resp.usage.output_tokens == 20
 
 
+def test_openai_gpt5_model_uses_max_completion_tokens():
+    # GPT-5 / o-series reject legacy max_tokens on direct OpenAI (a hard 400).
+    b = _openai_backend([_openai_text_resp(finish_reason="stop")], model="gpt-5.6-terra")
+    b.step("sys", [{"role": "user", "content": "go"}])
+    assert "max_completion_tokens" in b._client.calls[0]
+    assert "max_tokens" not in b._client.calls[0]
+
+
+def test_openai_classic_model_keeps_max_tokens():
+    b = _openai_backend([_openai_text_resp(finish_reason="stop")], model="gpt-4o")
+    b.step("sys", [{"role": "user", "content": "go"}])
+    assert "max_tokens" in b._client.calls[0]
+    assert "max_completion_tokens" not in b._client.calls[0]
+
+
+def test_openrouter_gpt5_passthrough_keeps_max_tokens():
+    # OpenRouter (base_url set) normalizes max_tokens for every proxied model,
+    # so a namespaced GPT-5 id must NOT switch to max_completion_tokens.
+    b = _openai_backend([_openai_text_resp(finish_reason="stop")], model="openai/gpt-5")
+    b._base_url = "https://openrouter.ai/api/v1"
+    b.step("sys", [{"role": "user", "content": "go"}])
+    assert "max_tokens" in b._client.calls[0]
+    assert "max_completion_tokens" not in b._client.calls[0]
+
+
 def test_openai_retry_cap_bounded_by_ceiling():
     b = _openai_backend(
         [_openai_text_resp(finish_reason="length"), _openai_text_resp(finish_reason="stop")],

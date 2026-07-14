@@ -4,6 +4,55 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.12.1 — 2026-07-14
+
+### Fix: outcome no longer reports success when every tool call failed
+
+Two outcome-classification defects let the CLI's `outcome`/`success` field
+report success on runs that did nothing. `_classify_outcome` treated
+"the LLM emitted non-empty final text" plus "a tool failed" as an
+unconditional `success_with_recovery`, so a run where 100% of dispatched
+tool calls failed and no deliverable was produced could only ever report a
+`success*` outcome. A new `all_tools_failed` outcome now fires when the run
+succeeded-in-text but every dispatched call (≥2) failed; the ≥2 floor
+preserves the legitimate single-early-failure-then-recovery case.
+Separately, a nested `spawn_subagent` call that exited 0 while its own
+outcome was `success_with_recovery` collapsed into a clean parent signal;
+the parent now marks a tool failure whenever a nested child's outcome is
+not exactly `success`, so a parent can never report a cleaner outcome than
+its worst nested specialist. `agency-builder`'s SKILL.md and
+`docs/agency-kernel.md` now make "run the deterministic verifier yourself
+and quote its raw output; never trust `outcome` or the model's own
+narration" a mandatory delivery gate.
+
+### GPT-5 family support on the OpenAI backend
+
+fabri can now drive OpenAI's GPT-5 / o-series models. The backend picked
+the legacy `max_tokens` param, which those models reject with a 400; it now
+selects `max_completion_tokens` for direct-OpenAI GPT-5/o-series while
+keeping `max_tokens` for classic models and OpenRouter passthrough. GPT-5
+reasoning models also reject function tools on `/v1/chat/completions` unless
+`reasoning_effort` is `none`, so that is now sent for GPT-5 + tools.
+Verified with a live end-to-end run of the changelog-release-notes agency
+on `gpt-5.6-terra`, deliverable independently verifier-checked.
+
+### Pricing via litellm; cost-effective OpenAI role defaults
+
+Model rates now resolve dynamically from litellm's cost map (primary), with
+the hardcoded table as a fallback that includes the GPT-5 family. The
+litellm import's `load_dotenv()` side effect — which silently pulled the
+working directory's `.env` into the environment and could change key
+resolution — is now neutralized. The OpenAI narrator's cheap-model default
+moves from `gpt-4o-mini` to `gpt-5-nano`; the example agency ships an
+OpenAI variant set (manager on `gpt-5.6-terra`, specialists on
+`gpt-5.6-luna`).
+
+### `spawn_subagent`: per-spawn model override
+
+The `spawn_subagent` tool accepts an optional `model` arg that overrides the
+sub-agent's configured `llm.model` for a single spawn — e.g. pin a cheaper
+execution-tier model for a domain child while the orchestrator keeps its own.
+
 ## 0.12.0 — 2026-07-14
 
 ### License change: Business Source License 1.1 → Apache License, Version 2.0

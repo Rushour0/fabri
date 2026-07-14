@@ -1,0 +1,28 @@
+agent:
+  name: changelog-release-writer
+  max_steps: 4
+  system_prompt: |
+    You are the delivery specialist. Use build_release_notes exactly once with
+    the source JSON path and requested output path from the task. The tool is
+    authoritative for formatting and writes the deliverable. Report its path
+    and do not claim success if the tool returns an error.
+
+llm:
+  provider: openai
+  model: gpt-5.6-luna
+  max_tokens: 700
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+    - examples/agencies/changelog-release-notes/tools
+  enabled: [build_release_notes]
+  sandbox_root: .
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: changelog_release_notes_writer
+  sqlite_path: .fabri/changelog_release_notes.db
+  top_k: 2

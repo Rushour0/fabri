@@ -103,6 +103,8 @@ def build_runner_command(args: dict, runner_script: Path | None = None) -> list[
         cmd += ["--system-prompt", str(args["system_prompt_inline"])]
     if "system_prompt_path" in args:
         cmd += ["--system-prompt-file", str(Path(args["system_prompt_path"]).resolve())]
+    if args.get("model"):
+        cmd += ["--model", str(args["model"])]
     # NOTE: qdrant reachability across the spawn boundary is handled by the
     # `QDRANT_URL` env override in fabri.config.load_config (the child inherits
     # the env), not by forwarding a flag here -- the tool only sees the on-disk

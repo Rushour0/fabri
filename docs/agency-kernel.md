@@ -44,6 +44,19 @@ The labels are an operating procedure, not new API calls:
   know whether the deliverable is actually good — do not treat CLI success as
   proof. A human approval gate remains outside the engine and must be named in
   the agency contract.
+- **Outcome and narration are each independently unreliable.** Two live-run
+  findings show this concretely, not abstractly: one run reported
+  `outcome: "success_with_recovery"` while 13/13 tool calls failed and no
+  deliverable was created (`session-notes/live-test-run.log:106,132`);
+  another reported `outcome: "success"` with 0/14 tool-call failures while
+  the model's own final text narrated ongoing verification failure
+  (`session-notes/live-test-run-2.log:70,72,98`). fabri's `outcome` field and
+  the model's free-text summary each diverged from ground truth, in opposite
+  directions, on the same worked example. Neither is evidence alone. The
+  only trustworthy signal today is the deterministic verifier's own machine
+  output plus the trace's raw tool-call results -- read those, not either
+  summary layer. See "Deliver" below for what this means for the delivered
+  message.
 - **Deliver** is the verified file plus its path, verdict, and trace/session
   identifier. Do not equate a polished final message with verification.
 - **Learn** is fabri's existing post-run memory loop: relevant guidelines are

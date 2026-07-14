@@ -59,6 +59,28 @@ def test_outcome_success_with_recovery_when_a_tool_failed_but_final_text_produce
     assert r["outcome"] == "success_with_recovery"
 
 
+def test_outcome_all_tools_failed_when_every_call_fails_across_multiple_calls():
+    reg = _registry_with_always_ok()
+    script = [
+        LLMResponse(tool_call=ToolCall(name="fails", args={}, id="t1")),
+        LLMResponse(tool_call=ToolCall(name="fails", args={}, id="t2")),
+        LLMResponse(final_text="done"),
+    ]
+    r = run_agent("x", ScriptedLLMBackend(script), reg, _store())
+    assert r["outcome"] == "all_tools_failed"
+
+
+# Pin the >=2-call floor so a single failed call remains a recovery outcome.
+def test_outcome_success_with_recovery_when_single_tool_call_fails_stays_recovery():
+    reg = _registry_with_always_ok()
+    script = [
+        LLMResponse(tool_call=ToolCall(name="fails", args={}, id="t1")),
+        LLMResponse(final_text="recovered"),
+    ]
+    r = run_agent("x", ScriptedLLMBackend(script), reg, _store())
+    assert r["outcome"] == "success_with_recovery"
+
+
 def test_outcome_incomplete_when_max_steps_exhausted_without_final_text():
     reg = _registry_with_always_ok()
     script = [LLMResponse(tool_call=ToolCall(name="noop", args={}, id=f"t{i}")) for i in range(10)]
