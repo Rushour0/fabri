@@ -1,0 +1,50 @@
+# Fabri Studio demo agency — a self-demonstrating config for the Studio UI.
+#
+# It deliberately exercises every message class Studio renders:
+#   - the manager's FINAL answer      (the primary bubble)
+#   - narrator lines                  (the light "what's happening now" stream)
+#   - the ask_user tool               (the mid-run question card)
+#   - tool / file activity            (the activity chips)
+#   - usage/cost                      (the footer)
+#
+# Memory uses the sqlite backend so the quickstart needs no Qdrant/Docker.
+# Bring your own Anthropic key (or edit `llm` for another provider):
+#   export ANTHROPIC_API_KEY=...
+#   fabri serve --config examples/studio/demo/agent.yaml
+
+agent:
+  name: studio-demo
+  max_steps: 8
+  system_prompt: |
+    You are a helpful planning assistant talking to a user through a live UI.
+    Before you commit to an approach, use the `ask_user` tool ONCE to ask the
+    user a single clarifying question about what they want — offer 2-3 concrete
+    options when it helps. After they answer, do the work and give a clear,
+    self-contained final answer. Keep the final answer conversational: it is
+    shown to the user as your definitive message.
+
+llm:
+  provider: anthropic
+  model: claude-haiku-4-5
+  max_tokens: 1024
+  api_key_env: ANTHROPIC_API_KEY
+  # The narrator is a cheap model that emits one short "what's happening now"
+  # line per step — Studio renders these as the light secondary stream.
+  narrator:
+    provider: anthropic
+    model: claude-haiku-4-5
+    max_tokens: 60
+    api_key_env: ANTHROPIC_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [ask_user, read_file, write_file, list_dir]
+  sandbox_root: .
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: studio_demo
+  sqlite_path: .fabri/studio_demo.db
+  top_k: 3
+  similarity_threshold: 0.85
