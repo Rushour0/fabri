@@ -30,5 +30,8 @@ dist/
 decks/
 licenses-issued/
 
+# local session summaries / working notes — never push
+session-notes/
+
 # local env / secrets (AWS creds, API keys) — never commit
 .env*

@@ -324,7 +324,34 @@ def test_build_narrator_llm_legacy_model_key_still_works(monkeypatch):
 def test_narrator_default_is_flash_lite_in_default_config():
     """The packaged default config must default narrator to a cheap Gemini
     Flash-Lite so users get progress updates out of the box without extra
-    wiring -- matching the Gemini default provider."""
-    from fabri.config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["llm"]["narrator"]["model"] == "gemini-2.5-flash-lite"
-    assert DEFAULT_CONFIG["llm"]["narrator"]["max_tokens"] == 60
+    wiring -- matching the Gemini default provider. DEFAULT_CONFIG itself no
+    longer hardcodes a model (see `_CHEAP_NARRATOR_MODEL`): the resolved
+    `llm.roles.narrator` picks the cheap model for whichever provider is
+    actually configured, so this asserts the RESOLVED contract, not the raw
+    pre-resolution dict."""
+    from fabri.config import load_config
+    narrator = load_config(None)["llm"]["roles"]["narrator"]
+    assert narrator["provider"] == "gemini"
+    assert narrator["model"] == "gemini-2.5-flash-lite"
+    assert narrator["max_tokens"] == 60
+
+
+def test_narrator_default_follows_main_provider_when_not_gemini():
+    """Switching the main provider away from Gemini must not leave narration
+    pointed at a Gemini model with the new provider's API key -- narrator
+    should follow main's provider automatically, using that provider's own
+    cheap-model default (see _CHEAP_NARRATOR_MODEL), with no extra config."""
+    import os
+    from fabri.config import _normalize_llm_roles, DEFAULT_CONFIG, _deep_merge
+
+    for provider, expected_model, key_env in [
+        ("openai", "gpt-4o-mini", "OPENAI_API_KEY"),
+        ("anthropic", "claude-haiku-4-5", "ANTHROPIC_API_KEY"),
+    ]:
+        cfg = _normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, {
+            "llm": {"provider": provider, "model": "irrelevant-main-model"}
+        }))
+        narrator = cfg["llm"]["roles"]["narrator"]
+        assert narrator["provider"] == provider
+        assert narrator["model"] == expected_model
+        assert narrator["api_key_env"] == key_env

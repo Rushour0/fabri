@@ -91,7 +91,14 @@ DEFAULT_CONFIG = {
         "provider": Provider.GEMINI.value,
         "model": "gemini-2.5-pro",
         "max_tokens": 1024,
-        "api_key_env": "GEMINI_API_KEY",
+        # No literal env-var name here on purpose: `_normalize_llm_roles`
+        # resolves it from whichever `provider` is actually configured (see
+        # `_PROVIDER_DEFAULT_API_KEY_ENV`). A hardcoded "GEMINI_API_KEY" here
+        # would silently leak into any config that sets `provider`/`model`
+        # but not `api_key_env` -- switching provider would then still demand
+        # a Gemini key. Set `api_key_env` explicitly only to name something
+        # other than the provider's own convention.
+        "api_key_env": None,
         # Opt-in extended prompt caching. When true, marks the last
         # message's tail block with cache_control so the history prefix
         # reads from Anthropic's 5-min ephemeral cache on the next turn
@@ -110,9 +117,13 @@ DEFAULT_CONFIG = {
         "decompose": None,
         "planner": None,
         # Narrator emits short user-facing status updates between tool steps.
-        # Defaults to Gemini Flash-Lite because <100 tokens per update is
-        # effectively free; set this dict to None to silence narration entirely.
-        "narrator": {"model": "gemini-2.5-flash-lite", "max_tokens": 60},
+        # No "model" here on purpose: `_normalize_llm_roles` fills in a cheap
+        # model for whichever provider `llm.provider` resolves to (see
+        # `_CHEAP_NARRATOR_MODEL`), so switching the main provider doesn't
+        # leave narration pointed at a model that provider doesn't serve.
+        # Set this dict to None to silence narration entirely, or give it an
+        # explicit `model`/`provider` to pin narration to something else.
+        "narrator": {"max_tokens": 60},
         # Legacy flat keys -- still honored for backward compatibility.
         # `_normalize_llm_roles` lifts them into the corresponding role
         # dict above when the role dict is absent. Prefer the dict form in
@@ -318,6 +329,19 @@ _PROVIDER_DEFAULT_API_KEY_ENV = {
     Provider.GEMINI: "GEMINI_API_KEY",
 }
 
+# Cheap/fast model per provider, used as the narrator role's default `model`
+# when neither the user nor DEFAULT_CONFIG names one explicitly (see
+# `_normalize_llm_roles`). Keyed so narration always rides the SAME provider
+# the user already configured for `main` -- no second API key required just
+# to get status updates. Bedrock is absent: no cheap-tier convention to pick
+# automatically, so narration falls back to the main model on Bedrock.
+_CHEAP_NARRATOR_MODEL = {
+    Provider.GEMINI: "gemini-2.5-flash-lite",
+    Provider.ANTHROPIC: "claude-haiku-4-5",
+    Provider.OPENAI: "gpt-4o-mini",
+    Provider.OPENROUTER: "google/gemini-2.5-flash-lite",
+}
+
 
 def _normalize_llm_roles(cfg: dict) -> dict:
     """Resolve `llm.<role>` and legacy flat keys into a single normalized
@@ -395,9 +419,17 @@ def _normalize_llm_roles(cfg: dict) -> dict:
                     if provider == parent_defaults["provider"]
                     else _PROVIDER_DEFAULT_API_KEY_ENV.get(provider)
                 )
+        # Narrator's cheap-model default is provider-aware: pick the cheap
+        # model for whichever provider this role resolved to (normally the
+        # same as `main`), rather than falling through to `parent_defaults`'s
+        # (possibly expensive, possibly wrong-provider) main model.
+        if role == "narrator" and raw.get("model") is None:
+            model = _CHEAP_NARRATOR_MODEL.get(provider) or parent_defaults["model"]
+        else:
+            model = raw.get("model") or parent_defaults["model"]
         roles[role] = {
             "provider": provider,
-            "model": raw.get("model") or parent_defaults["model"],
+            "model": model,
             "api_key_env": api_key_env,
             "max_tokens": raw.get("max_tokens") or parent_defaults["max_tokens"],
             "cache_messages": bool(raw.get("cache_messages", parent_defaults["cache_messages"])),
