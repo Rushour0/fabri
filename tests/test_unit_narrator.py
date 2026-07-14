@@ -345,7 +345,7 @@ def test_narrator_default_follows_main_provider_when_not_gemini():
     from fabri.config import _normalize_llm_roles, DEFAULT_CONFIG, _deep_merge
 
     for provider, expected_model, key_env in [
-        ("openai", "gpt-4o-mini", "OPENAI_API_KEY"),
+        ("openai", "gpt-5-nano", "OPENAI_API_KEY"),
         ("anthropic", "claude-haiku-4-5", "ANTHROPIC_API_KEY"),
     ]:
         cfg = _normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, {

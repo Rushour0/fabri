@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -396,6 +397,15 @@ class AnthropicLLMBackend:
         )
 
 
+def _requires_max_completion_tokens(model: str) -> bool:
+    """True for direct-OpenAI models that reject the legacy `max_tokens` param
+    and require `max_completion_tokens`: the GPT-5 family and the o-series
+    reasoning models. Matched on the bare model id (OpenRouter's namespaced
+    `openai/gpt-5…` ids never reach here -- that path keeps `max_tokens`)."""
+    m = (model or "").lower()
+    return m.startswith("gpt-5") or bool(re.match(r"o[1-9]", m))
+
+
 class OpenAILLMBackend:
     """Second provider proving LLMBackend is provider-agnostic: same step()
     signature as AnthropicLLMBackend. The agent's message history is kept in
@@ -501,13 +511,33 @@ class OpenAILLMBackend:
         for m in messages:
             oa_messages.extend(self._to_openai(m))
 
+        # OpenAI's GPT-5 and o-series reasoning models reject the legacy
+        # `max_tokens` param and require `max_completion_tokens` (a hard 400).
+        # Classic chat models (gpt-4o, gpt-4.1) still take `max_tokens`, and
+        # OpenRouter (base_url set) normalizes `max_tokens` for every model it
+        # proxies -- so only switch for a direct-OpenAI GPT-5/o-series model.
+        token_kwarg = "max_tokens"
+        extra_kwargs: dict = {}
+        if getattr(self, "_base_url", None) is None and _requires_max_completion_tokens(self._model):
+            token_kwarg = "max_completion_tokens"
+            # GPT-5 reasoning models reject `function tools` on /v1/chat/completions
+            # unless reasoning_effort is 'none' (the alternative is the Responses
+            # API, which this backend does not speak). Agency orchestration is
+            # tool-routing, not deep chain-of-thought, so 'none' is the right
+            # default here; a host wanting reasoning can point the role at the
+            # Responses API in a future backend. o-series models can't disable
+            # reasoning, so scope this to the GPT-5 family that errored.
+            if self._tools and self._model.lower().startswith("gpt-5"):
+                extra_kwargs["reasoning_effort"] = "none"
+
         def _create(max_tokens: int):
             return _call_with_retry(
                 lambda: self._client.chat.completions.create(
                     model=self._model,
                     messages=oa_messages,
                     tools=self._tools or None,
-                    max_tokens=max_tokens,
+                    **{token_kwarg: max_tokens},
+                    **extra_kwargs,
                 ),
                 transient=(openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError),
             )

@@ -36,6 +36,7 @@ dependencies = [
     "boto3>=1.39",
     "tiktoken>=0.7",
     "pyyaml>=6.0",
+    "litellm>=1.0",
 ]
 
 [project.optional-dependencies]

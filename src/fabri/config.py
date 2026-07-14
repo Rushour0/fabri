@@ -338,7 +338,7 @@ _PROVIDER_DEFAULT_API_KEY_ENV = {
 _CHEAP_NARRATOR_MODEL = {
     Provider.GEMINI: "gemini-2.5-flash-lite",
     Provider.ANTHROPIC: "claude-haiku-4-5",
-    Provider.OPENAI: "gpt-4o-mini",
+    Provider.OPENAI: "gpt-5-nano",
     Provider.OPENROUTER: "google/gemini-2.5-flash-lite",
 }
 
