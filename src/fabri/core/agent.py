@@ -232,6 +232,8 @@ def _run_single_attempt(
     failed = False
     error_reason = None
     had_tool_failure = False
+    total_tool_calls = 0
+    failed_tool_calls = 0
     # Surfaced on terminal INCOMPLETE / FAILED events so a host can show the
     # model's last words on a max-steps run instead of scraping `thought`
     # events. FINAL keeps its existing `text` field and isn't affected.
@@ -494,9 +496,10 @@ def _run_single_attempt(
 
     def _run_step_loop(
         item_messages: list[dict], item_task: str, item_max_steps: int, step_offset: int
-    ) -> tuple[str | None, bool, bool, str | None, bool, int]:
+    ) -> tuple[str | None, bool, bool, str | None, bool, int, int, int]:
         """Run the inner step loop against `item_messages` (mutated in place).
-        Returns (final_text, success, failed, error_reason, had_failure, steps_used).
+        Returns (final_text, success, failed, error_reason, had_failure,
+        total_tool_calls, failed_tool_calls, steps_used).
         Raises AgentProtocolError on a no-tool-no-text response.
 
         This is the single step engine for BOTH paths: the planner executor
@@ -510,6 +513,8 @@ def _run_single_attempt(
         item_failed = False
         item_error = None
         item_had_failure = False
+        item_total_tool_calls = 0
+        item_failed_tool_calls = 0
         steps_used = 0
         for inner_step in range(item_max_steps):
             global_step = step_offset + inner_step
@@ -538,6 +543,7 @@ def _run_single_attempt(
                 if response.tool_calls:
                     _emit_thought(response.thinking_text, global_step)
                     _emit_narration(response.tool_calls, global_step, "tools")
+                    dispatch_stats: dict[str, int] = {}
                     step_had_failure = _dispatch_tool_calls(
                         response.tool_calls, tools, decompose_llm or llm, item_task, max_subquestions,
                         session_id, item_messages, global_step, result_format, output_format,
@@ -546,8 +552,11 @@ def _run_single_attempt(
                         on_budget_check=_budget_breached,
                         on_llm_usage=_accumulate,
                         max_parallel_spawns=max_parallel_spawns,
+                        dispatch_stats=dispatch_stats,
                     )
                     item_had_failure |= step_had_failure
+                    item_total_tool_calls += len(response.tool_calls)
+                    item_failed_tool_calls += dispatch_stats["failed_calls"]
                     log_event(session_id, {
                         "type": EventType.STEP_FINISHED.value,
                         "step": global_step,
@@ -569,7 +578,10 @@ def _run_single_attempt(
                     "elapsed_s": round(time.monotonic() - t0, 3),
                     "reason": StepReason.LLM_ERROR.value,
                 })
-                return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
+                return (
+                    item_final, item_success, item_failed, item_error, item_had_failure,
+                    item_total_tool_calls, item_failed_tool_calls, steps_used,
+                )
 
             if response.final_text:
                 _emit_thought(response.thinking_text, global_step)
@@ -583,7 +595,10 @@ def _run_single_attempt(
                     "reason": StepReason.FINAL.value,
                     "cost_usd": step_cost,
                 })
-                return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
+                return (
+                    item_final, item_success, item_failed, item_error, item_had_failure,
+                    item_total_tool_calls, item_failed_tool_calls, steps_used,
+                )
 
             reason = "llm response had no tool calls and no final text"
             logger.error(
@@ -603,7 +618,10 @@ def _run_single_attempt(
                 "reason": StepReason.PROTOCOL_ERROR.value,
             })
             raise AgentProtocolError(reason)
-        return item_final, item_success, item_failed, item_error, item_had_failure, steps_used
+        return (
+            item_final, item_success, item_failed, item_error, item_had_failure,
+            item_total_tool_calls, item_failed_tool_calls, steps_used,
+        )
 
     if plan_engaged:
         planner_backend = planner_llm or decompose_llm or llm
@@ -653,7 +671,10 @@ def _run_single_attempt(
                 # whenever an earlier one failed/incompleted without appending.)
                 item_budget = max(1, steps_remaining // max(1, len(order) - processed_count))
                 try:
-                    item_final, item_success, item_failed, item_error, item_had_failure, used = _run_step_loop(
+                    (
+                        item_final, item_success, item_failed, item_error, item_had_failure,
+                        item_total_tool_calls, item_failed_tool_calls, used,
+                    ) = _run_step_loop(
                         item_messages, item.goal, item_budget, step_offset=step_count,
                     )
                 except AgentProtocolError:
@@ -667,6 +688,8 @@ def _run_single_attempt(
                 step_count += used
                 steps_remaining -= used
                 had_tool_failure |= item_had_failure
+                total_tool_calls += item_total_tool_calls
+                failed_tool_calls += item_failed_tool_calls
                 if item_failed:
                     failed = True
                     error_reason = item_error
@@ -712,11 +735,16 @@ def _run_single_attempt(
         # one of the two paths (they used to be copy-pasted and had already
         # diverged on per-step cost telemetry).
         messages = [{"role": "user", "content": task}]
-        item_final, item_success, item_failed, item_error, item_had_failure, used = _run_step_loop(
+        (
+            item_final, item_success, item_failed, item_error, item_had_failure,
+            item_total_tool_calls, item_failed_tool_calls, used,
+        ) = _run_step_loop(
             messages, task, max_steps, step_offset=0
         )
         step_count = used
         had_tool_failure |= item_had_failure
+        total_tool_calls += item_total_tool_calls
+        failed_tool_calls += item_failed_tool_calls
         if item_failed:
             # LLMError or budget breach; _run_step_loop already logged the
             # ERROR / budget_exceeded + STEP_FINISHED events.
@@ -762,7 +790,9 @@ def _run_single_attempt(
         failed = True  # treat budget breach as a failure for exit-code purposes
         error_reason = error_reason or "cost budget exceeded"
     else:
-        outcome = _classify_outcome(success, had_tool_failure, failed)
+        outcome = _classify_outcome(
+            success, had_tool_failure, failed, total_tool_calls, failed_tool_calls,
+        )
     logger.info("agent run finished: outcome=%s session_id=%s", outcome.value, session_id)
 
     if success:
@@ -1074,12 +1104,14 @@ def _dispatch_tool_calls(
     on_budget_check: Callable[[], bool] | None = None,
     on_llm_usage: Callable[[LLMUsage], None] | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
+    dispatch_stats: dict[str, int] | None = None,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
     several in parallel), then append exactly one assistant turn echoing all the
     tool_use blocks and one user turn with all the matching tool_result blocks --
     the Anthropic API rejects a tool_use that isn't paired with a tool_result.
-    Returns whether any call failed.
+    Returns whether any call failed. When provided, `dispatch_stats` is populated
+    with `total_calls` and `failed_calls` for internal run accounting.
 
     `on_subagent_cost`, when given, receives each spawned sub-agent's
     end-to-end `total_cost_usd` so the parent can roll the sub-agent subtree
@@ -1214,6 +1246,16 @@ def _dispatch_tool_calls(
             ok = bool(result.get("ok"))
             child = result.get("result")
             child_usage = child.get("usage") if isinstance(child, dict) else None
+            # A spawn_subagent call can exit 0 (ok=True -- the subprocess
+            # tool contract is intact) while the nested run's own outcome is
+            # worse than SUCCESS -- e.g. SUCCESS_WITH_RECOVERY means the
+            # child recovered from an internal tool failure. Surface that to
+            # the PARENT's own had_failure bookkeeping so a parent can never
+            # report a cleaner outcome than the worst outcome any of its
+            # nested specialist calls actually experienced.
+            nested_outcome = child.get("outcome") if isinstance(child, dict) else None
+            if ok and nested_outcome is not None and nested_outcome != Outcome.SUCCESS.value:
+                had_failure = True
             if on_subagent_cost is not None and ok and isinstance(child_usage, dict):
                 child_cost = child_usage.get("total_cost_usd")
                 if child_cost is None:
@@ -1268,10 +1310,21 @@ def _dispatch_tool_calls(
         # ScriptedLLMBackend / id-less path: plain strings suffice.
         messages.append({"role": "assistant", "content": " ".join(simple_calls)})
         messages.append({"role": "user", "content": " ".join(simple_results)})
+    total_calls = len(calls)
+    failed_calls = sum(1 for result in results.values() if not result.get("ok"))
+    if dispatch_stats is not None:
+        dispatch_stats["total_calls"] = total_calls
+        dispatch_stats["failed_calls"] = failed_calls
     return had_failure
 
 
-def _classify_outcome(success: bool, had_tool_failure: bool, failed: bool) -> Outcome:
+def _classify_outcome(
+    success: bool,
+    had_tool_failure: bool,
+    failed: bool,
+    total_tool_calls: int = 0,
+    failed_tool_calls: int = 0,
+) -> Outcome:
     if failed:
         return Outcome.FAILED
     if not success:
@@ -1279,4 +1332,6 @@ def _classify_outcome(success: bool, had_tool_failure: bool, failed: bool) -> Ou
         # latter is usually the user's actual bug (bad sandbox path, missing
         # dep, wrong manifest). Collapsing both into INCOMPLETE hides that.
         return Outcome.INCOMPLETE_WITH_TOOL_FAILURE if had_tool_failure else Outcome.INCOMPLETE
+    if success and total_tool_calls >= 2 and failed_tool_calls == total_tool_calls:
+        return Outcome.ALL_TOOLS_FAILED
     return Outcome.SUCCESS_WITH_RECOVERY if had_tool_failure else Outcome.SUCCESS

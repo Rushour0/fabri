@@ -31,6 +31,13 @@ names. Keep the fixed kernel in [references/agency-kernel.md](references/agency-
    `fabri tool test` before giving it to an agent.
 4. Put the proof-bar in a deterministic verifier. Enable the optional fabri
    repair loop only when a host command can check the deliverable repeatedly.
+   `outcome`/`success`/`success_with_recovery` and the model's own final-message
+   narration must NEVER be treated as evidence a deliverable exists or is
+   correct — two live runs showed 13/13 tool-call failures reported as
+   `success_with_recovery` with no deliverable created, and separately 0/14
+   failures narrated by the model's own final text as persistent, ongoing
+   failure. Both signals are independently unreliable; only the deterministic
+   verifier's raw output is trustworthy.
 5. Use `memory.backend: sqlite` for a self-contained first run. Give each
    agency its own collection and keep related runs on that collection.
 
@@ -42,6 +49,15 @@ an agency ran if the live provider call was not made.
 
 A run is only as observable as what you point the user at afterward. Once a
 live run finishes:
+
+This is not only builder debugging discipline — bake it into the scaffolded
+agency's own delivery gate. Before reporting a run done to anyone outside this
+build, run the deliverable's own verifier command directly and quote its raw
+output in the delivery message. Do this even when `outcome` says success:
+`outcome` has been observed to say `success_with_recovery` on a run where
+13/13 tool calls failed and no deliverable existed. The delivery message must
+state the verifier's own `ok`/verdict output — not the CLI `outcome` field,
+not the model's own prose summary.
 
 1. Note the session ID fabri prints; put it in the agency's delivery message
    or README, not just in your own scrollback. Static `tools.agents[]`
@@ -65,8 +81,11 @@ Do not summarize a run from the final chat message alone.
 
 - **The idea is thin.** Return the frame from templates/agency-frame.md and
   wait — do not invent the target persona, deliverable, or approval gate.
-- **The verifier fails after a repair attempt.** Report the exact verifier
-  output and stop; do not raise `agent.repair.max_attempts` to force a pass.
+- **The verifier fails after a repair attempt, OR a run reports success
+  without the verifier having been re-run.** Report the exact verifier output
+  and stop; do not raise `agent.repair.max_attempts` to force a pass, and do
+  not report a run done on `outcome: success`/`success_with_recovery` alone
+  without independently re-running the verifier and quoting its output.
 - **No provider key is set.** Run and report the `--dry-run` inspection only;
   say plainly that no live call was made rather than describing a hypothetical
   run.
