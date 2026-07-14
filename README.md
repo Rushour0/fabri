@@ -1,7 +1,7 @@
 # fabri
 
 [![PyPI](https://img.shields.io/pypi/v/fabri.svg)](https://pypi.org/project/fabri/)
-[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/fabri.svg)](https://pypi.org/project/fabri/)
 
 **The self-improving agent engine you build products on.** Describe a
@@ -13,17 +13,14 @@ LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
 own traces) and a **builder** that turns intent into a running agent fast.
 Read [docs/vision.md](https://github.com/Rushour0/fabri/blob/main/docs/vision.md) for the full why.
 
-fabri is **source-available** under the [Business Source License
-1.1](https://github.com/Rushour0/fabri/blob/main/LICENSE). You can
-install it from PyPI, build agents with it, and rely on the CLI and
-config surface. Individuals and organizations under US $1M in annual
-revenue can use it in production for free; larger organizations and
-anyone embedding fabri in a hosted/distributed product need a commercial
-license — see
-[COMMERCIAL.md](https://github.com/Rushour0/fabri/blob/main/COMMERCIAL.md).
-Every version automatically converts to Apache 2.0 on 2030-06-23. The
-internals and the direction of the project are not open for
-contribution.
+fabri is **open source** under the [Apache License,
+2.0](https://github.com/Rushour0/fabri/blob/main/LICENSE). Install it
+from PyPI, build agents with it, embed it in a hosted product, fork it —
+no revenue threshold, no commercial license required. The core (agent
+loop, memory pipeline, orchestration, config surface) is open to
+contribution too — see
+[CONTRIBUTING.md](https://github.com/Rushour0/fabri/blob/main/CONTRIBUTING.md)
+for how core changes get reviewed.
 
 ## Philosophy
 
@@ -600,13 +597,7 @@ store = SqliteMemoryStore(
 
 ## License
 
-[Business Source License 1.1](https://github.com/Rushour0/fabri/blob/main/LICENSE)
-© Rushikesh Patade. Free for individuals and organizations under US $1M
-in annual revenue; commercial license required above that or for
-hosted/embedded redistribution — see
-[COMMERCIAL.md](https://github.com/Rushour0/fabri/blob/main/COMMERCIAL.md).
-Auto-converts to
-[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) on 2030-06-23.
-Not open for contribution.
-
-Versions ≤ 0.4.6 were released under Apache 2.0 and remain so.
+[Apache License, 2.0](https://github.com/Rushour0/fabri/blob/main/LICENSE)
+© Rushikesh Patade. Free for any use, including commercial and
+hosted/embedded redistribution. Contributions welcome — see
+[CONTRIBUTING.md](https://github.com/Rushour0/fabri/blob/main/CONTRIBUTING.md).

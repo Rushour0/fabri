@@ -4,6 +4,27 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.12.0 — 2026-07-14
+
+### License change: Business Source License 1.1 → Apache License, Version 2.0
+
+fabri returns to Apache-2.0, effective immediately and retroactively for
+all previously BSL-licensed versions (0.6.0–0.11.0). No revenue
+threshold, no commercial license, no embedding/hosting restriction.
+`COMMERCIAL.md` and the `licenses-issued/` template are removed — no
+commercial licenses were ever issued under the BSL terms, so this is a
+clean revert.
+
+### Governance change: the core is now open to contribution
+
+Previously, PRs touching the agent loop, memory pipeline, orchestration,
+or config surface were closed unmerged on principle. That's reversed:
+core PRs are now welcome, gated on a design-issue-first discussion
+rather than a blanket close. See CONTRIBUTING.md's new "Contributing to
+the core" section for the process. Tools remain the fast,
+no-discussion-needed path for new capability that doesn't need to touch
+core.
+
 ## 0.11.0 — 2026-07-12
 
 ### Wire the OTel trace export into the CLI (X1)

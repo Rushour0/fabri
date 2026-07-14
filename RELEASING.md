@@ -22,18 +22,7 @@ Optionally do the same on https://test.pypi.org first to rehearse.
 ## Cut a release
 
 1. Bump `version` in `pyproject.toml` (PyPI versions are immutable — never reuse one).
-2. **Bump the BSL Change Date in `LICENSE`** to *release date + 4 years*
-   (the maximum BSL 1.1 allows). The Change Date in `LICENSE` applies
-   per-version, so each new release should reset it to a fresh 4-year
-   window — otherwise later releases ship with a Change Date that's
-   already partially elapsed, shortening the source-available period.
-   - Edit the `Change Date:` line in `LICENSE` (e.g. cutting v0.7.7 on
-     2026-08-10 → `Change Date: 2030-08-10`).
-   - The `2030-06-23` date referenced in `README.md`, `COMMERCIAL.md`,
-     and `CHANGELOG.md` prose is informational; update those to match
-     if you want the docs to reflect the new ceiling, but the
-     `LICENSE` value is the legally controlling one.
-3. Commit, then tag and push:
+2. Commit, then tag and push:
    ```bash
    git commit -am "Release v0.1.0"
    git tag v0.1.0

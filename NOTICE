@@ -1,16 +1,10 @@
 fabri
 Copyright 2026 Rushikesh Patade
 
-Licensed under the Business Source License 1.1 (the "License"); you may
+Licensed under the Apache License, Version 2.0 (the "License"); you may
 not use this file except in compliance with the License. A copy of the
 License is provided in the LICENSE file in this distribution.
 
-The Licensed Work will convert to the Apache License, Version 2.0 on
-the Change Date specified in the LICENSE file.
-
-For commercial licensing, see COMMERCIAL.md or contact
-pataderushikesh@gmail.com.
-
-Versions of fabri up to and including 0.4.6 were released under the
-Apache License, Version 2.0, and those releases remain governed by that
-license.
+Versions 0.6.0 through 0.12.0 were released under the Business Source
+License 1.1; as of this release, all versions of fabri (including those
+retroactively) are governed by the Apache License, Version 2.0.

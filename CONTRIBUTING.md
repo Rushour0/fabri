@@ -1,25 +1,29 @@
 # Contributing to fabri
 
-Thanks for taking the time. fabri is **source-available** under the
-[Business Source License 1.1](LICENSE) — read first, build on freely,
-within the [license terms](COMMERCIAL.md).
+Thanks for taking the time. fabri is **open source** under the
+[Apache License, 2.0](LICENSE) — read it, build on it, embed it, no
+license terms to negotiate. The core is open to contribution, including
+the agent loop, memory pipeline, orchestration, and config surface —
+not just tools and docs.
 
 > [!IMPORTANT]
-> **The internals and the direction of the project are not open for
-> contribution.** Pull requests that rewrite the agent loop, memory
-> pipeline, orchestration, or config surface will be closed unmerged —
-> not because they're unwelcome in spirit, but because the design is
-> deliberately opinionated and centrally steered.
->
-> What *is* welcome, and genuinely useful:
+> **Core changes (agent loop, memory pipeline, orchestration, config
+> surface) need a design discussion before code.** Open an issue laying
+> out the problem and your proposed approach; a maintainer will weigh in
+> on direction before you invest in an implementation. This isn't
+> gatekeeping for its own sake — the memory loop and step loop have
+> non-obvious invariants (trace format, dedup semantics, sandbox
+> boundaries) that a design pass catches before a PR does. PRs that skip
+> straight to a core rewrite without prior discussion will be asked to
+> open that discussion first, not closed outright.
 
 | You want to…                                   | Do this                                  |
 |------------------------------------------------|------------------------------------------|
 | Report a bug or wrong behavior                 | [Open an issue](#reporting-bugs) with a repro |
 | Report a security issue                        | [Disclose privately](#security) — not a public issue |
 | Fix a typo, doc error, or broken example       | Small PR, no issue needed                |
-| Build a new capability                         | [Ship a **tool**](#the-real-extension-point-tools), not a core patch |
-| Propose a direction change                     | Open an issue to discuss *before* coding  |
+| Build a new capability without touching core   | [Ship a **tool**](#the-real-extension-point-tools) — fastest path, no design discussion needed |
+| Change the agent loop, memory, orchestration, or config | [Open a design issue first](#contributing-to-the-core), then PR |
 
 ---
 
@@ -50,6 +54,37 @@ Rust, Node).
 
 **If your tool touches the filesystem or runs code, respect the sandbox**
 (see below). That's the one rule a tool PR will be held to.
+
+---
+
+## Contributing to the core
+
+The agent loop, memory pipeline (trace → analyze → compress → dedup →
+promote → retrieve), orchestration, and config surface are open to
+contribution, with one rule: **design before code.**
+
+1. **Open an issue first.** State the problem, not just the fix — what
+   breaks or is missing today, with a repro or a concrete scenario.
+   Sketch your proposed approach and how it interacts with the existing
+   invariants (trace format, dedup/promotion semantics, per-role LLM
+   routing, sandbox boundaries). A maintainer will confirm direction or
+   redirect you before you write the PR.
+2. **Small, reviewable diffs.** A core PR that touches one seam
+   (e.g. the promotion threshold, one step-loop role, one memory
+   backend) reviews fast. A PR that rewrites several seams at once
+   doesn't — split it.
+3. **Tests pin behavior, not implementation.** New core behavior needs a
+   test that would fail if the behavior regressed, not one that
+   snapshots internals.
+4. **Docs move with the code.** A core change that shifts behavior
+   described in `docs/` (`HOW_FABRI_WORKS.md`, `vision.md`,
+   `using-fabri-well.md`) updates those files in the same PR.
+
+This is slower than shipping a tool, by design — the core is what every
+downstream product depends on, so a bad seam there costs everyone who's
+built on it. Tools remain the fast, no-discussion-needed path for new
+capability; use the core track only when the capability genuinely can't
+be a tool.
 
 ---
 
@@ -170,7 +205,7 @@ repro; you'll get an acknowledgement and a fix timeline.
 ## Licensing of contributions
 
 By submitting a contribution you agree it is licensed under the project's
-[BUSL-1.1 LICENSE](LICENSE) (which converts to Apache 2.0 on the
-per-version Change Date), and that you have the right to contribute it.
+[Apache License, 2.0](LICENSE), and that you have the right to
+contribute it.
 
 Releases are maintainer-only — see [RELEASING.md](RELEASING.md).
