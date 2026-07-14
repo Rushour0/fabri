@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "agency-builder",
+  "displayName": "Fabri Agency Builder",
+  "version": "0.1.0",
+  "description": "Scaffold a verified fabri multi-agent agency from one bounded deliverable.",
+  "author": {
+    "name": "fabri contributors"
+  },
+  "homepage": "https://github.com/Rushour0/fabri/tree/main/skills/agency-builder",
+  "repository": "https://github.com/Rushour0/fabri",
+  "license": "Apache-2.0",
+  "keywords": ["fabri", "agents", "orchestration", "scaffolding"],
+  "skills": "./"
+}

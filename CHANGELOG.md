@@ -25,6 +25,23 @@ the core" section for the process. Tools remain the fast,
 no-discussion-needed path for new capability that doesn't need to touch
 core.
 
+### `skills/agency-builder` — scaffold a multi-agent agency from one prompt
+
+A public, self-contained skill: give it one bounded deliverable and it builds
+a small fabri agency (an orchestrator plus fixed specialists, each an ordinary
+`tools.agents[]` entry) with a deterministic verifier standing in for "trust
+me, it worked." Installable directly from this repo for both Claude Code
+(`.claude-plugin/marketplace.json`) and Codex CLI (`.agents/plugins/marketplace.json`) —
+`/plugin install agency-builder@fabri-skills` and
+`codex plugin add agency-builder@fabri-skills` respectively, both verified
+against real installs of each CLI, not just schema validation.
+
+Ships with `docs/agency-kernel.md` (what's fixed vs. per-agency), a worked
+example (`examples/agencies/changelog-release-notes`, verifiers passing on a
+live run), and an "Observe a run" convention: every agency now points its
+user at `fabri traces show <session_id>` and `fabri report` instead of
+resting on the final chat message as proof of what happened.
+
 ## 0.11.0 — 2026-07-12
 
 ### Wire the OTel trace export into the CLI (X1)

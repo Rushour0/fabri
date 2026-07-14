@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "fabri-skills",
+  "owner": {
+    "name": "fabri contributors"
+  },
+  "description": "Public Claude Code plugins for building with fabri.",
+  "plugins": [
+    {
+      "name": "agency-builder",
+      "source": "./skills/agency-builder",
+      "description": "Scaffold a verified fabri multi-agent agency from one bounded deliverable.",
+      "version": "0.1.0",
+      "author": {
+        "name": "fabri contributors"
+      },
+      "license": "Apache-2.0",
+      "category": "development",
+      "tags": ["fabri", "agents", "orchestration"]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "verify_release_notes",
+  "description": "Check a release-notes Markdown file for required headings and every source item. Return ok false with concrete failures.",
+  "command": ["python3", "verify_release_notes.py"],
+  "input_schema": {
+    "type": "object",
+    "required": ["source_path", "output_path"],
+    "properties": {
+      "source_path": {"type": "string"},
+      "output_path": {"type": "string"}
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "required": ["ok", "failures"],
+    "properties": {
+      "ok": {"type": "boolean"},
+      "failures": {"type": "array", "items": {"type": "string"}}
+    }
+  },
+  "timeout_s": 10
+}
