@@ -239,13 +239,30 @@ def test_anthropic_cache_tokens_surface_onto_usage():
     assert resp.usage.input_tokens == 20
 
 
-def test_openai_cached_tokens_map_to_cache_read():
-    b = _openai_backend([_openai_text_resp(usage=_ou(prompt_tokens=50, completion_tokens=5, cached_tokens=30))])
+def test_openai_cached_tokens_excluded_from_input_not_double_billed():
+    # OpenAI's prompt_tokens INCLUDES the cached subset. The backend must move
+    # the cached portion OUT of input_tokens so pricing charges it once (at the
+    # 0.10x cache-read rate), not at 1.0x input + 0.10x read (~1.10x).
+    b = _openai_backend(
+        [_openai_text_resp(usage=_ou(prompt_tokens=50, completion_tokens=5, cached_tokens=30))],
+        model="gpt-4o",
+    )
     resp = b.step("sys", [{"role": "user", "content": "hi"}])
     assert resp.usage.cache_read_input_tokens == 30
-    assert resp.usage.input_tokens == 50
+    # 50 prompt tokens, 30 of them cached -> 20 non-cached input.
+    assert resp.usage.input_tokens == 20
     # OpenAI backend doesn't model a separate cache-write field.
     assert resp.usage.cache_creation_input_tokens == 0
+
+    # Money proof: gpt-4o input $2.5/MTok. Correct bill for the 30 cached tokens
+    # is 30 * 2.5 * 0.10 / 1e6; the old bug billed 30 * 2.5 * 1.10 / 1e6.
+    from fabri.pricing import cost_for
+
+    got = cost_for(resp.usage)
+    correct = (20 * 2.5 + 5 * 10 + 30 * 2.5 * 0.10) / 1_000_000
+    buggy = (50 * 2.5 + 5 * 10 + 30 * 2.5 * 0.10) / 1_000_000
+    assert got == round(correct, 6)
+    assert got != round(buggy, 6)
 
 
 # ========================================================================== #
@@ -267,6 +284,24 @@ def test_openai_truncation_retries_once_then_succeeds():
     # Discarded truncated attempt's tokens fold into reported usage.
     assert resp.usage.output_tokens == 4096 + 50
     assert resp.usage.input_tokens == 10 + 10
+
+
+def test_openai_truncated_attempt_cached_tokens_fold_into_cache_read():
+    # Both the discarded (length) attempt and the kept attempt report cached
+    # tokens. Each attempt's cached portion must move to cache_read and out of
+    # input_tokens, across both attempts -- so neither is double-billed.
+    b = _openai_backend(
+        [
+            _openai_text_resp(finish_reason="length", usage=_ou(prompt_tokens=100, completion_tokens=4096, cached_tokens=60)),
+            _openai_text_resp(finish_reason="stop", usage=_ou(prompt_tokens=100, completion_tokens=50, cached_tokens=60)),
+        ],
+        max_tokens=4096,
+    )
+    resp = b.step("sys", [{"role": "user", "content": "go"}])
+    # cached folds from BOTH attempts: 60 + 60.
+    assert resp.usage.cache_read_input_tokens == 120
+    # non-cached input from both attempts: (100-60) + (100-60) = 80.
+    assert resp.usage.input_tokens == 80
 
 
 def test_openai_truncation_twice_fails_loud():
