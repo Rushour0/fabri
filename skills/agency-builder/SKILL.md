@@ -40,6 +40,30 @@ names. Keep the fixed kernel in [references/agency-kernel.md](references/agency-
    verifier's raw output is trustworthy.
 5. Use `memory.backend: sqlite` for a self-contained first run. Give each
    agency its own collection and keep related runs on that collection.
+6. Set the frame's cost ceiling as `agent.max_cost_usd` in `agent.yaml` (fabri
+   ends a run at `Outcome.BUDGET_EXCEEDED` once crossed). An agency with no
+   ceiling is a decision to make explicitly, not by omission — do not leave it
+   unset silently. Cost, `cost_by_model`, and run metrics are already emitted on
+   the `usage` event and rolled up by `fabri report`; the frame decides the
+   ceiling and what to report, not new instrumentation.
+
+## Ship a front-end: Fabri Studio
+
+Do not hand-roll a bespoke UI per agency. Point the reusable **Fabri Studio**
+(`examples/studio/`) at the agency's `agent.yaml` over `fabri serve`:
+
+- Single-deliverable / conversational agencies: run `fabri --config
+  <agency>/agent.yaml serve`, then the Studio dev server. Studio streams the
+  run's plan timeline, tool calls, `ask_user` questions, and a live COGS panel
+  (per-model cost + budget) — the frame's reported metrics surface for free.
+- Fan-out agencies (one request → N per-item pipelines): use Studio's **Fleet**
+  view. `POST /fleets` fans the batch out to N runs; the roll-up shows
+  deployed/blocked/running counts and the **summed fleet COGS** (which works
+  around the static-specialist rollup caveat by summing per-session). Drill into
+  any item to watch its pipeline read-only.
+
+Only build a bespoke dashboard when the agency needs a view Studio genuinely
+cannot express; the default is to adapt Studio, not replace it.
 
 Run `fabri --config <agency>/agent.yaml run --dry-run "<task>"` before a live run.
 Run the real command only with the configured provider key present. Never claim
@@ -68,10 +92,13 @@ not the model's own prose summary.
    specialists it called and what they returned — not what the plan intended,
    and not the specialists' own internal reasoning, which lives in their own
    session traces.
-3. Run `fabri report --since 1h` and report actual cost, not an estimate.
-   Note that static specialist cost does not currently roll into the parent's
-   total — report per-session, not just the parent's number, if the agency
-   has specialists.
+3. Run `fabri report --since 1h` and report actual COGS, not an estimate. The
+   delivery message must quote: per-run total cost, `cost_by_model`, `outcome`,
+   the tool-failure rate, and the cost ceiling it ran under (spent vs
+   `max_cost_usd`). Static `tools.agents[]` specialist cost does not roll into
+   the parent's `total_cost_usd` — report per-session and sum, or read the sum
+   off Studio's fleet roll-up. Reporting COGS is part of the delivery gate, not
+   a nicety: an agency whose cost you cannot state is not shippable.
 
 See [references/agency-kernel.md](references/agency-kernel.md)'s "Observe a
 run" section for the full command set (`traces list`/`tail`, log file path).

@@ -34,6 +34,26 @@ root and use project-root-relative paths.
 - Use `agent.repair.verify_command` only for a trusted local command that exits
   non-zero or prints `{"ok": false}` on failure. The verifier is host code, not
   sandboxed; constrain it to the agency's deliverable path.
+- Set `agent.max_cost_usd` to the frame's cost ceiling. Fabri ends a run at
+  `Outcome.BUDGET_EXCEEDED` once crossed; leaving it unset is a conscious "no
+  ceiling" decision, not a default. Cost + `cost_by_model` + run metrics ride on
+  the `usage` event automatically — no extra config.
+
+## Front-end: point Fabri Studio at the agency
+
+Reuse `examples/studio/` rather than building a per-agency UI:
+
+```text
+# single-deliverable / conversational agency
+fabri --config <agency>/agent.yaml serve            # terminal 1
+cd examples/studio && npm install && npm run dev     # terminal 2  → http://localhost:5173
+```
+
+Studio streams the run's plan timeline, tool calls, `ask_user` prompts, and a
+live COGS panel (per-model cost, budget vs spent). For a **fan-out** agency, use
+Studio's Fleet view: it `POST /fleets` fans the batch to N runs and shows the
+summed fleet COGS + per-item drill-down. Only build a bespoke dashboard if
+Studio genuinely cannot express the needed view.
 
 ## Required gates
 
@@ -45,3 +65,7 @@ root and use project-root-relative paths.
 4. Run the agency with the matching key. Preserve the resulting trace and the
    deliverable path. If no credential is available, report that exact preflight
    failure rather than replacing it with a fake run.
+5. Report COGS as part of delivery: quote per-run total cost, `cost_by_model`,
+   `outcome`, tool-failure rate, and spent-vs-`max_cost_usd` from `fabri report
+   --since 1h` (or Studio's fleet roll-up for a fan-out). An agency whose cost
+   you cannot state is not shippable — see SKILL.md's delivery gate.
