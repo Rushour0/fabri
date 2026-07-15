@@ -42,10 +42,10 @@ export function AskUserCard({
   };
 
   return (
-    <div className="ask">
+    <div className={"ask" + (disabled ? " ask--waiting" : "")}>
       <div className="ask__role">
-        <span className="avatar avatar--manager">M</span>
-        <span className="msg__name">Manager needs an answer</span>
+        <span className="ask__dot" aria-hidden />
+        <span className="ask__name">Manager needs your input</span>
       </div>
       <div className="ask__question">{ev.question}</div>
 
