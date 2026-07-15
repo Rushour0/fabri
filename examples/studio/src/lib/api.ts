@@ -1,21 +1,31 @@
 // Thin wrappers over the `fabri serve` HTTP API (src/fabri/service/http_server.py).
 // All paths are same-origin — the Vite dev server proxies them to `fabri serve`.
-import type { RunResult } from "./events";
+import type { CostSurface, RunResult } from "./events";
 
 export interface SubmitResponse {
   session_id: string;
   status: string;
 }
 
-export async function submitRun(task: string): Promise<SubmitResponse> {
+export interface SubmitOptions {
+  threadId?: string;
+  fleetId?: string;
+  overrides?: Record<string, unknown>;
+}
+
+export async function submitRun(task: string, opts: SubmitOptions = {}): Promise<SubmitResponse> {
+  const body: Record<string, unknown> = { task };
+  if (opts.overrides) body.overrides = opts.overrides;
+  if (opts.threadId) body.thread_id = opts.threadId;
+  if (opts.fleetId) body.fleet_id = opts.fleetId;
   const res = await fetch("/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `submit failed (${res.status})`);
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error ?? `submit failed (${res.status})`);
   }
   return res.json();
 }
@@ -38,9 +48,107 @@ export async function answerAsk(
     }),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `answer failed (${res.status})`);
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error ?? `answer failed (${res.status})`);
   }
+}
+
+// Terminate a still-running run (POST /runs/<id>/cancel).
+export async function cancelRun(sessionId: string): Promise<void> {
+  const res = await fetch(`/runs/${encodeURIComponent(sessionId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error ?? `cancel failed (${res.status})`);
+  }
+}
+
+// A run summary from the persisted session index (GET /runs).
+export interface SessionSummary {
+  session_id: string;
+  task?: string;
+  label?: string | null;
+  status: "running" | "done" | "error" | "cancelled";
+  outcome?: string;
+  thread_id?: string | null;
+  fleet_id?: string | null;
+  started_ts?: number;
+  ended_ts?: number;
+  cost?: CostSurface | null;
+}
+
+export async function listRuns(): Promise<SessionSummary[]> {
+  const res = await fetch("/runs");
+  if (!res.ok) throw new Error(`list runs failed (${res.status})`);
+  const body = await res.json();
+  return body.sessions ?? [];
+}
+
+// Blocking result fetch (GET /runs/<id>/result) — used to replay a finished run
+// selected from history.
+export async function getResult(sessionId: string): Promise<RunResult> {
+  const res = await fetch(`/runs/${encodeURIComponent(sessionId)}/result`);
+  if (!res.ok) throw new Error(`result failed (${res.status})`);
+  return res.json();
+}
+
+// ---- fleets (POST/GET /fleets) ----
+
+export interface FleetItem {
+  task: string;
+  label?: string;
+  overrides?: Record<string, unknown>;
+}
+
+export interface FleetTotals {
+  total_cost_usd: number;
+  cost_by_model: Record<string, number>;
+}
+
+export interface FleetSummary {
+  fleet_id: string;
+  size: number;
+  counts: Record<string, number>;
+  totals: FleetTotals;
+  started_ts?: number;
+}
+
+export interface FleetStatus {
+  fleet_id: string;
+  sessions: SessionSummary[];
+  counts: Record<string, number>;
+  totals: FleetTotals;
+}
+
+export async function submitFleet(
+  items: FleetItem[],
+  overrides?: Record<string, unknown>,
+): Promise<{ fleet_id: string; sessions: { session_id: string; label?: string }[] }> {
+  const res = await fetch("/fleets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items, ...(overrides ? { overrides } : {}) }),
+  });
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error ?? `fleet launch failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function listFleets(): Promise<FleetSummary[]> {
+  const res = await fetch("/fleets");
+  if (!res.ok) throw new Error(`list fleets failed (${res.status})`);
+  return (await res.json()).fleets ?? [];
+}
+
+export async function getFleetStatus(fleetId: string): Promise<FleetStatus> {
+  const res = await fetch(`/fleets/${encodeURIComponent(fleetId)}`);
+  if (!res.ok) throw new Error(`fleet status failed (${res.status})`);
+  return res.json();
 }
 
 export type { RunResult };
