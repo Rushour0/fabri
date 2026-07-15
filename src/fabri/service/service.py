@@ -20,13 +20,15 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from threading import Lock
 
 from fabri.events import EventType
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
-from fabri.service.binding import bind_run_config
+from fabri.service.binding import bind_run_config, merge_overrides
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
 from fabri.service.tailer import extract_cost, run_trace_path, tail_events
@@ -76,9 +78,52 @@ class FabriService:
         self._runs: dict[str, RunHandle] = {}
         # Per-run human-in-the-loop bridge for the ask_user tool.
         self._asks: dict[str, AskUserListener] = {}
+        # Live per-session metadata (task + thread/fleet grouping + submit time)
+        # so ``list_sessions`` can describe an in-flight run before it has a
+        # terminal index line. Persisted copies live in ``index.jsonl``.
+        self._meta: dict[str, dict] = {}
+        # Sessions that already wrote a terminal index line, so a second
+        # ``result()`` (SSE tail + a recovery ``/result`` fetch both call it)
+        # doesn't double-record.
+        self._finalized: set[str] = set()
+        # Serialize appends to the on-disk session index (multiple run threads
+        # may terminate concurrently under ThreadingHTTPServer).
+        self._index_lock = Lock()
 
-    def submit(self, task: str, overrides: dict | None = None) -> str:
-        """Bind a per-run config, launch the agent, return its ``session_id``."""
+    @property
+    def _index_path(self) -> Path:
+        """Append-only session index; the persistence behind ``list_sessions``.
+
+        One JSON line per lifecycle transition (``submit`` then a terminal
+        ``result``/``cancel``). Lives beside the per-run homes so it survives a
+        ``serve`` restart -- history is re-derived from here, not held in RAM.
+        """
+        return self.home_root / "index.jsonl"
+
+    def _append_index(self, record: dict) -> None:
+        record = {"ts": round(time.time(), 3), **record}
+        line = json.dumps(record) + "\n"
+        with self._index_lock:
+            with self._index_path.open("a") as fh:
+                fh.write(line)
+
+    def submit(
+        self,
+        task: str,
+        overrides: dict | None = None,
+        *,
+        thread_id: str | None = None,
+        fleet_id: str | None = None,
+        label: str | None = None,
+    ) -> str:
+        """Bind a per-run config, launch the agent, return its ``session_id``.
+
+        ``thread_id`` groups multi-turn runs (a conversation); ``fleet_id`` groups
+        one fan-out batch; ``label`` is a human name for this run within a fleet
+        (e.g. an account name). All are opaque tags recorded in the index so
+        ``list_sessions`` / fleet roll-ups can reconstruct the grouping; the agent
+        loop itself is unaware of them.
+        """
         session_id = str(uuid.uuid4())
         run_home = (self.home_root / session_id).resolve()
         run_home.mkdir(parents=True, exist_ok=True)
@@ -107,7 +152,81 @@ class FabriService:
             env={"FABRI_ASK_USER_SOCKET": listener.socket_path},
         )
         self._runs[session_id] = handle
+        meta = {
+            "session_id": session_id,
+            "task": task,
+            "thread_id": thread_id,
+            "fleet_id": fleet_id,
+            "label": label,
+            "started_ts": round(time.time(), 3),
+        }
+        self._meta[session_id] = meta
+        self._append_index({"event": "submit", **meta})
         return session_id
+
+    def submit_fleet(self, items: list[dict], overrides: dict | None = None) -> dict:
+        """Fan one batch out to N runs sharing a ``fleet_id``.
+
+        ``items`` is a list of ``{"task", "label"?, "overrides"?}``. Fleet-level
+        ``overrides`` apply to every item, deep-merged under each item's own
+        overrides (item wins). A fleet is nothing but a tagged group of ordinary
+        runs -- the roll-up (:meth:`fleet_status`) sums their existing per-run
+        cost surfaces; there is no new engine.
+        """
+        fleet_id = str(uuid.uuid4())
+        base = overrides or {}
+        sessions: list[dict] = []
+        for it in items:
+            task = it.get("task")
+            if not task:
+                raise ValueError("each fleet item requires a 'task'")
+            item_overrides = merge_overrides(base, it.get("overrides"))
+            sid = self.submit(
+                task,
+                item_overrides or None,
+                fleet_id=fleet_id,
+                label=it.get("label"),
+            )
+            sessions.append({"session_id": sid, "label": it.get("label")})
+        self._append_index(
+            {"event": "fleet_submit", "fleet_id": fleet_id, "size": len(sessions)}
+        )
+        return {"fleet_id": fleet_id, "sessions": sessions}
+
+    def fleet_status(self, fleet_id: str) -> dict:
+        """Roll one fleet up: member statuses + summed COGS + status counts.
+
+        Cost is summed from each member's own recorded cost surface (the same
+        ``extract_cost`` output stored in the index at terminal), so a fleet's
+        total COGS is exact per-session even though static specialist cost does
+        not roll into a parent run's total.
+        """
+        members = [s for s in self.list_sessions() if s.get("fleet_id") == fleet_id]
+        if not members:
+            raise KeyError(f"unknown fleet_id {fleet_id!r}")
+        return {"fleet_id": fleet_id, **_rollup(members)}
+
+    def list_fleets(self) -> list[dict]:
+        """Summarize every fleet (newest first): size, status counts, total COGS."""
+        by_fleet: dict[str, list[dict]] = {}
+        for s in self.list_sessions():
+            fid = s.get("fleet_id")
+            if fid:
+                by_fleet.setdefault(fid, []).append(s)
+        out = []
+        for fid, members in by_fleet.items():
+            roll = _rollup(members)
+            started = [m.get("started_ts") for m in members if m.get("started_ts")]
+            out.append(
+                {
+                    "fleet_id": fid,
+                    "size": len(members),
+                    "counts": roll["counts"],
+                    "totals": roll["totals"],
+                    "started_ts": min(started) if started else None,
+                }
+            )
+        return sorted(out, key=lambda f: f.get("started_ts") or 0, reverse=True)
 
     def _start_ask_listener(self, session_id: str, trace_path: Path) -> AskUserListener:
         _ASK_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
@@ -172,7 +291,7 @@ class FabriService:
         events = _read_trace_at(handle.trace_path)
         cost = extract_cost(events)
         self.sync_hook.sync_out(session_id, handle.fabri_home, [])
-        return {
+        result = {
             "session_id": session_id,
             "success": envelope.get("success"),
             "outcome": envelope.get("outcome"),
@@ -182,6 +301,106 @@ class FabriService:
             "cost": cost,
             "error": envelope.get("error"),
         }
+        self._finalize(
+            session_id,
+            event="result",
+            outcome=envelope.get("outcome"),
+            success=envelope.get("success"),
+            cost=cost,
+        )
+        return result
+
+    def cancel(self, session_id: str) -> dict:
+        """Terminate a still-running agent + release its ask_user bridge.
+
+        Idempotent: cancelling an already-finished run is a no-op that still
+        returns its recorded status. Records a terminal ``cancel`` index line so
+        history reflects the interruption after a restart.
+        """
+        handle = self._handle(session_id)  # KeyError -> 404 at the HTTP layer
+        was_running = handle.is_running()
+        handle.terminate()
+        self._close_ask(session_id)
+        if was_running:
+            self._finalize(session_id, event="cancel", outcome="cancelled")
+        return {"session_id": session_id, "status": "cancelled" if was_running else "already_ended"}
+
+    def _finalize(
+        self,
+        session_id: str,
+        *,
+        event: str,
+        outcome: str | None = None,
+        success: bool | None = None,
+        cost: dict | None = None,
+    ) -> None:
+        """Write a session's one terminal index line (guarded against dupes)."""
+        if session_id in self._finalized:
+            return
+        self._finalized.add(session_id)
+        meta = self._meta.get(session_id, {})
+        self._append_index(
+            {
+                "event": event,
+                "session_id": session_id,
+                "task": meta.get("task"),
+                "thread_id": meta.get("thread_id"),
+                "fleet_id": meta.get("fleet_id"),
+                "outcome": outcome,
+                "success": success,
+                "cost": cost,
+            }
+        )
+
+    def list_sessions(self) -> list[dict]:
+        """Return a summary of every known run, newest first.
+
+        Rebuilt from the on-disk ``index.jsonl`` (so it survives a restart) with
+        live handles overlaid: a session whose subprocess is still alive reads
+        ``running`` even if no terminal line exists yet. Each entry:
+        ``{session_id, task, status, outcome, thread_id, fleet_id, started_ts,
+        cost}``.
+        """
+        summaries: dict[str, dict] = {}
+        for rec in _read_index(self._index_path):
+            sid = rec.get("session_id")
+            if not sid:
+                continue
+            entry = summaries.setdefault(
+                sid, {"session_id": sid, "status": "running"}
+            )
+            if rec.get("event") == "submit":
+                entry.update(
+                    {
+                        "task": rec.get("task"),
+                        "thread_id": rec.get("thread_id"),
+                        "fleet_id": rec.get("fleet_id"),
+                        "label": rec.get("label"),
+                        "started_ts": rec.get("started_ts") or rec.get("ts"),
+                    }
+                )
+            else:  # a terminal record (result / cancel)
+                outcome = rec.get("outcome")
+                entry.update(
+                    {
+                        "status": _status_for(rec.get("event"), outcome),
+                        "outcome": outcome,
+                        "cost": rec.get("cost"),
+                        "ended_ts": rec.get("ts"),
+                    }
+                )
+        # Overlay live state: a handle still running trumps a stale "running"
+        # index entry that never got a terminal line (e.g. after a crash the
+        # entry stays "running" -- but if the handle is gone we can't tell, so we
+        # only *upgrade* known-live handles, never mark unknown ones failed).
+        for sid, handle in self._runs.items():
+            if sid in summaries and handle.is_running():
+                summaries[sid]["status"] = "running"
+        return sorted(
+            summaries.values(),
+            key=lambda e: e.get("started_ts") or 0,
+            reverse=True,
+        )
 
     def close(self) -> None:
         """Terminate any still-running children + release ask_user bridges."""
@@ -190,6 +409,61 @@ class FabriService:
         for listener in list(self._asks.values()):
             listener.close()
         self._asks.clear()
+
+
+_SUCCESS_OUTCOMES = frozenset({"success", "success_with_recovery"})
+
+
+def _rollup(members: list[dict]) -> dict:
+    """Aggregate a set of session summaries into a fleet roll-up.
+
+    Returns ``{sessions, counts, totals}`` where ``totals`` sums each member's
+    own ``total_cost_usd`` and merges their ``cost_by_model`` maps. Members still
+    running contribute a status count but no cost (their surface is None until
+    they finish).
+    """
+    counts: dict[str, int] = {}
+    total = 0.0
+    by_model: dict[str, float] = {}
+    for m in members:
+        counts[m.get("status", "running")] = counts.get(m.get("status", "running"), 0) + 1
+        cost = m.get("cost") or {}
+        total += cost.get("total_cost_usd") or 0.0
+        for model, c in (cost.get("cost_by_model") or {}).items():
+            by_model[model] = by_model.get(model, 0.0) + (c or 0.0)
+    return {
+        "sessions": members,
+        "counts": counts,
+        "totals": {
+            "total_cost_usd": round(total, 6),
+            "cost_by_model": {k: round(v, 6) for k, v in by_model.items()},
+        },
+    }
+
+
+def _status_for(event: str | None, outcome: str | None) -> str:
+    """Map a terminal index record to a coarse UI status."""
+    if event == "cancel":
+        return "cancelled"
+    if outcome in _SUCCESS_OUTCOMES:
+        return "done"
+    return "error"
+
+
+def _read_index(path: Path) -> list[dict]:
+    """Read the append-only session index; skip malformed lines. Empty if absent."""
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 def _read_trace_at(path: Path) -> list[dict]:

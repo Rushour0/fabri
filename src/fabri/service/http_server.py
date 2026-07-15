@@ -5,12 +5,22 @@ fabri imports, no websockets dependency. Three endpoints:
 
 - ``POST /runs``            body ``{"task": ..., "overrides": {...}?}`` ->
                             ``{"session_id": ...}``. Launches the agent.
+- ``GET  /runs``            ``{"sessions": [...]}`` -- history of every known
+                            run (survives restart; see ``list_sessions``).
 - ``GET  /runs/<id>/events`` Server-Sent Events: one ``data:`` frame per trace
                             event (the live :mod:`fabri.events` vocabulary),
                             then a terminal ``event: result`` frame carrying the
                             result envelope + cost surface.
 - ``GET  /runs/<id>/result`` blocks for the run and returns the result JSON
                             (convenience for hosts that don't want SSE).
+- ``POST /runs/<id>/answer`` body ``{"question_id", "answer", ...}`` -- reply to
+                            a mid-run ``ask_user`` question.
+- ``POST /runs/<id>/cancel`` terminate a still-running agent -> ``{"status"}``.
+- ``POST /fleets``          body ``{"items": [{"task", "label"?, "overrides"?}],
+                            "overrides"?}`` -> ``{"fleet_id", "sessions"}``. Fans
+                            one batch out to N runs sharing a fleet_id.
+- ``GET  /fleets``          ``{"fleets": [...]}`` -- fleet roll-ups.
+- ``GET  /fleets/<id>``     one fleet's member statuses + summed COGS.
 - ``GET  /health``          ``{"status": "ok"}``.
 
 Built on :class:`http.server.ThreadingHTTPServer` so a streaming ``events``
@@ -30,6 +40,8 @@ logger = get_logger()
 _EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/events/?$")
 _RESULT_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/result/?$")
 _ANSWER_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/answer/?$")
+_CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/cancel/?$")
+_FLEET_RE = re.compile(r"^/fleets/([A-Za-z0-9_.-]+)/?$")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -54,6 +66,19 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path in ("/health", "/health/"):
             self._send_json(200, {"status": "ok"})
             return
+        if self.path in ("/runs", "/runs/"):
+            self._send_json(200, {"sessions": self.service.list_sessions()})
+            return
+        if self.path in ("/fleets", "/fleets/"):
+            self._send_json(200, {"fleets": self.service.list_fleets()})
+            return
+        m = _FLEET_RE.match(self.path)
+        if m:
+            try:
+                self._send_json(200, self.service.fleet_status(m.group(1)))
+            except KeyError:
+                self._send_json(404, {"error": f"unknown fleet_id {m.group(1)!r}"})
+            return
         m = _EVENTS_RE.match(self.path)
         if m:
             self._stream_events(m.group(1))
@@ -68,6 +93,13 @@ class _Handler(BaseHTTPRequestHandler):
         m = _ANSWER_RE.match(self.path)
         if m:
             self._answer(m.group(1))
+            return
+        m = _CANCEL_RE.match(self.path)
+        if m:
+            self._cancel(m.group(1))
+            return
+        if self.path in ("/fleets", "/fleets/"):
+            self._submit_fleet()
             return
         if self.path not in ("/runs", "/runs/"):
             self._send_json(404, {"error": f"no route for POST {self.path}"})
@@ -112,6 +144,33 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": str(e)})
             return
         self._send_json(200, {"status": "answered"})
+
+    def _cancel(self, session_id: str) -> None:
+        try:
+            result = self.service.cancel(session_id)
+        except KeyError:
+            self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
+            return
+        self._send_json(200, result)
+
+    def _submit_fleet(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw or b"{}")
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"error": f"invalid request JSON: {e}"})
+            return
+        items = req.get("items")
+        if not isinstance(items, list) or not items:
+            self._send_json(400, {"error": "fleet request requires a non-empty 'items' list"})
+            return
+        try:
+            result = self.service.submit_fleet(items, req.get("overrides"))
+        except Exception as e:  # bind/launch/validation -> 400, not 500 HTML
+            self._send_json(400, {"error": str(e)})
+            return
+        self._send_json(200, result)
 
     def _stream_events(self, session_id: str) -> None:
         try:

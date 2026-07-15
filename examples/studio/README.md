@@ -1,9 +1,11 @@
 # Fabri Studio
 
-A small **conversational UI you can drop onto any fabri agency**. Submit a task,
-watch the run stream in, and answer the manager's questions mid-run — all in the
-browser. It's an example/template, not a product: ~1 React app + `fabri serve`,
-meant to be copied and adapted.
+A **conversational + observability front-end you can drop onto any fabri
+agency**. Submit a task, watch the run's plan, tool calls, and cost stream in,
+answer the manager's questions mid-run, follow up in the same thread, browse past
+runs, and — for fan-out agencies — roll up a whole **fleet** of pipelines with
+their summed COGS. It's an example/template you copy and adapt: a React app +
+fabri's built-in `fabri serve`, no backend of its own.
 
 ![message classes: a manager bubble, light narrator lines, an activity chip, a cost footer, and a question card](./docs/studio.png)
 
@@ -17,14 +19,31 @@ reads like a conversation, not a log:
 | the root agent's `final` | **the manager's message** — the primary, load-bearing bubble |
 | `narration` | a light "what's happening now" line (the narrator) |
 | `thought` | a collapsible reasoning card |
-| `tool_started` / `spawn_subagent` | a light **sub-agent / tool activity** chip |
+| `plan_started` / `plan_item_*` / `plan_finished` | a live **step timeline** ("step 2 of 5") |
+| `tool_started` + `tool_call` | a **tool-call card** — name, status, duration, expandable args/result |
+| `parallel_group_started` / `spawn_subagent` | a parallel group header / nested sub-agent card |
 | `ask_user` | an **interactive question card** — the manager pauses and asks you |
-| `usage` | a cost / COGS footer |
+| `usage` | a **COGS panel** — total, per-model breakdown, tokens, steps, sub-agent split |
+| `cost_unaccounted` / `discrepancy` | a **warning** — under-reported spend or a claimed-but-unverified write |
+| `structured_output` (invalid) | a quiet schema-retry note |
 | `failed` / `incomplete` / `error` | a terminal status |
 
 The `ask_user` round-trip is the interesting part: the manager blocks mid-run,
 its question streams to the browser over SSE, and your answer flows back to
 unblock it — see [How it works](#how-it-works).
+
+## Three surfaces
+
+- **Conversation** — a live thread. Submit a task, watch it stream, then send a
+  follow-up: turns share a `thread_id` and a memory collection, and a transcript
+  preamble carries continuity. Stop a run mid-flight; start a new thread anytime.
+- **Fleet** — Studio as a whole-agency UI. Paste one item per line to fan a batch
+  out to N pipelines (`POST /fleets`); the roll-up shows done/running/blocked
+  counts and the **summed fleet COGS** (+ per-model), with drill-down into any
+  item's run. This is the front-end a fan-out agency (à la Microsite Factory)
+  ships with instead of a bespoke dashboard.
+- **History** — every past run, rebuilt from a persisted index that survives a
+  `fabri serve` restart. Open any run read-only to replay its timeline and cost.
 
 ## Quickstart
 
@@ -79,15 +98,21 @@ To get the most out of the UI, your config should:
  ────────────────────                    ──────────────────────
  POST /runs ─────────────────────────▶   launches `fabri run` subprocess
  EventSource /runs/<id>/events ◀──────    tails the run's trace JSONL (SSE)
-   … start, narration, thought,           each trace event → one SSE frame
-     tool_started, ask_user, final …
+   … start, plan_*, thought,              each trace event → one SSE frame
+     tool_started, ask_user, usage …
  POST /runs/<id>/answer ─────────────▶    delivers the answer to the run's
                                           ask_user Unix socket, unblocking it
+ POST /runs/<id>/cancel ─────────────▶    terminates a still-running agent
+ GET  /runs ─────────────────────────▶    persisted run history (survives restart)
+ POST /fleets ───────────────────────▶    fans a batch out to N runs (one fleet_id)
+ GET  /fleets, /fleets/<id> ─────────▶    fleet roll-ups: statuses + summed COGS
 ```
 
 - **Transport** is fabri's existing `fabri serve` — Studio adds no backend of
-  its own. The Vite dev server proxies `/runs` and `/health` to it so the
-  browser stays same-origin (`fabri serve` sets no CORS headers).
+  its own. Runs, history, cancel, and fleets are all thin seams over the same
+  per-run subprocess + trace model (a fleet is just N tagged runs; history is a
+  small on-disk index). The Vite dev server proxies `/runs`, `/fleets`, and
+  `/health` so the browser stays same-origin (`fabri serve` sets no CORS headers).
 - **Human-in-the-loop**: `fabri serve` runs a per-run listener on a Unix socket
   and points the agent's `ask_user` tool at it. When the agent asks a question,
   the listener writes an `ask_user` event into the run's trace (so it reaches the
@@ -101,15 +126,22 @@ examples/studio/
   demo/agent.yaml        a self-demonstrating sqlite-backed agency
   src/
     lib/events.ts        the fabri event → message-class mapping (the core contract)
-    lib/timeline.ts      builds the ordered, deduped conversation timeline
-    hooks/useRunEvents.ts one run over one EventSource; ends on the `result` frame
-    components/          Message, AskUserCard, Composer
-    App.tsx
+    lib/timeline.ts      builds the timeline: dedupe, tool pairing, plan aggregation
+    lib/api.ts           the fabri serve HTTP client (runs, cancel, history, fleets)
+    hooks/useRunEvents.ts a thread of runs, each streamed over one EventSource
+    components/
+      Message, PlanTimeline, ToolCall, CostSummary   the conversation
+      AskUserCard, Composer                          input + human-in-the-loop
+      HistoryList, RunReplay                         history + read-only replay
+      FleetView, AccountTile                         fleet roll-up + drill-down
+    App.tsx              the three-surface shell (Conversation / Fleet / History)
   vite.config.ts         dev proxy → fabri serve
 ```
 
 ## Scope
 
-This is a deliberately small single-run example. It does **not** do multi-turn
-chat, thread history, auth, or reload-mid-run recovery — see the ludexel app for
-a fuller, product-grade take on the same idea.
+Studio is a copy-and-adapt template, not a hosted product. It does multi-turn
+threads, run history, cancel/retry, live COGS, and fleet roll-ups — but it holds
+the active thread in memory (a hard reload drops the in-flight run; finished runs
+are recoverable from History), and it has no auth or multi-user isolation. Add
+those at the `fabri serve` layer for a production deployment.

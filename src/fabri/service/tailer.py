@@ -120,25 +120,54 @@ def tail_events(
 
 
 def extract_cost(events: list[dict]) -> dict:
-    """Pull the run's cost surface out of the trace's ``usage`` event.
+    """Pull the run's cost + metrics surface out of the trace's ``usage`` event.
 
-    Returns ``{cost_usd, subagent_cost_usd, total_cost_usd, post_run_cost_usd}``.
+    Returns a stable dict a host (and Studio) can render directly:
     ``cost_usd`` is the orchestrator's own COGS; ``total_cost_usd`` adds the
     sub-agent subtree (the number a host bills); ``post_run_cost_usd`` rolls in
     any ``post_run_usage`` (memory-compression) events the CLI appends after the
-    run's ``usage`` event. Missing fields default to ``0.0`` / ``None`` so a
-    host always gets a stable shape.
+    run's ``usage`` event.
+
+    Also surfaces the fields the ``usage`` event already carries but the service
+    used to drop: ``cost_by_model`` (per-model COGS breakdown), token counts,
+    ``step_count`` / ``wall_time_s``, and the sub-agent metrics. There is no
+    budget field in the ``usage`` event -- a budget breach surfaces as the run's
+    ``outcome`` (``budget_exceeded``), so a UI compares ``total_cost_usd`` to the
+    ``max_cost_usd`` it knows from config rather than reading it here. Missing
+    fields default to ``0.0`` / ``{}`` / ``None`` so the shape is always stable.
     """
     own = None
     subagent = None
     total = None
     post_run = 0.0
+    cost_by_model: dict = {}
+    metrics: dict = {}
     for ev in events:
         etype = ev.get("type")
         if etype == EventType.USAGE.value:
             own = ev.get("cost_usd")
             subagent = ev.get("subagent_cost_usd")
             total = ev.get("total_cost_usd")
+            cost_by_model = ev.get("cost_by_model") or {}
+            # Carry the run-quality metrics through verbatim (present since the
+            # agent loop's usage event; see fabri.core.agent). Absent keys stay
+            # out of the dict rather than defaulting, so a host can tell "not
+            # reported" from "zero".
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "step_count",
+                "wall_time_s",
+                "subagent_count",
+                "subagent_successful_count",
+                "subagent_failed_count",
+                "subagent_regret_count",
+                "guideline_reuse_rate",
+            ):
+                if key in ev:
+                    metrics[key] = ev.get(key)
         elif etype == EventType.POST_RUN_USAGE.value:
             post_run += ev.get("cost_usd") or 0.0
     return {
@@ -146,4 +175,6 @@ def extract_cost(events: list[dict]) -> dict:
         "subagent_cost_usd": subagent if subagent is not None else 0.0,
         "total_cost_usd": total if total is not None else 0.0,
         "post_run_cost_usd": round(post_run, 6),
+        "cost_by_model": cost_by_model,
+        "metrics": metrics,
     }
