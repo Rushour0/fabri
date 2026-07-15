@@ -4,6 +4,54 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.13.0 — 2026-07-15
+
+### Fix: cached tokens no longer double-billed on OpenAI & Gemini
+
+`pricing.cost_for` charges cache-read tokens at 0.10x the input rate *on top
+of* `input_tokens`, relying on `input_tokens` excluding cached tokens. That
+holds for Anthropic and Bedrock but not OpenAI (`prompt_tokens` includes
+`prompt_tokens_details.cached_tokens`) or Gemini (`prompt_token_count` includes
+`cached_content_token_count`): both backends set `input_tokens` to the
+cache-inclusive count *and* set `cache_read_input_tokens`, so cached tokens
+billed at ~1.10x instead of 0.10x — an ~11x over-charge on the cached portion
+(~3x on a warm 80%-cached turn), charged to real user credits. Both backends
+now subtract cached tokens out of `input_tokens`; the invariant is documented
+in `pricing.py`. Anthropic and Bedrock are unchanged. Two tests that had
+encoded the bug are corrected, with a hand-computed money proof added.
+
+### `fabri serve`: run cancel, persisted history, and fleet fan-out
+
+The embeddable service gained thin seams over its existing per-run subprocess +
+trace model (stdlib-only, no new engine): `POST /runs/<id>/cancel` terminates a
+running agent; `GET /runs` lists run history, rebuilt from a new append-only
+`index.jsonl` so it survives a `serve` restart; and `POST /fleets` fans one
+batch out to N runs sharing a `fleet_id`, with `GET /fleets` / `GET
+/fleets/<id>` rolling up member statuses and summed COGS. `submit()` gained
+`thread_id` / `fleet_id` / `label` grouping tags.
+
+### Cost surface: per-model COGS + run metrics on the result envelope
+
+`extract_cost` now surfaces the `cost_by_model` breakdown and the token / step /
+wall / sub-agent metrics the `usage` event already carried but the service
+dropped, so a host (and Fabri Studio) can render a full COGS panel without
+re-deriving anything.
+
+### Fabri Studio: fleet-grade conversational + observability UI (example)
+
+`examples/studio/` grew from a single-run demo into a three-surface front-end:
+a live conversation with a plan timeline, real tool-call cards (args / result /
+status / duration), a COGS panel, multi-turn threads, cancel/retry, run
+history, and a Fleet view that rolls up N pipelines with their summed COGS and
+per-item drill-down. Live-verified against a real OpenAI run.
+
+### agency-builder: COGS is a first-class deliverable
+
+The `agency-builder` skill now requires a Metrics & COGS section in the frame
+(a concrete `agent.max_cost_usd` ceiling), makes quoting real `fabri report`
+COGS part of the delivery gate, and wires Fabri Studio as the front-end a new
+agency ships with (fleet mode for fan-out) instead of a bespoke dashboard.
+
 ## 0.12.1 — 2026-07-14
 
 ### Fix: outcome no longer reports success when every tool call failed
