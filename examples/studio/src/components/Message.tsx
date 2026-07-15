@@ -1,13 +1,17 @@
 import { useState } from "react";
 import type { TimelineItem } from "../lib/timeline";
 import type { FabriEvent } from "../lib/events";
-import { activityLabel, isSubagent } from "../lib/events";
+import { EventType } from "../lib/events";
 import { Markdown } from "../lib/markdown";
+import { PlanTimeline } from "./PlanTimeline";
+import { ToolCall } from "./ToolCall";
+import { CostSummary } from "./CostSummary";
 
 // Renders one timeline entry according to its message class. Hierarchy is carried
 // by how much container a class gets — the manager message is the only full card;
-// narration/thought/activity recede to bare text, a rail, and a chip.
-export function Message({ item }: { item: TimelineItem }) {
+// narration/thought recede to bare text and a rail; tool/plan/cost are structured
+// but quiet; warnings break the texture because they flag risk to spend or truth.
+export function Message({ item, maxCostUsd }: { item: TimelineItem; maxCostUsd?: number }) {
   switch (item.cls) {
     case "manager":
       return <ManagerMessage ev={item.ev} />;
@@ -15,10 +19,16 @@ export function Message({ item }: { item: TimelineItem }) {
       return <NarrationLine ev={item.ev} />;
     case "thought":
       return <ThoughtCard ev={item.ev} />;
-    case "activity":
-      return <ActivityChip ev={item.ev} />;
+    case "plan":
+      return <PlanTimeline planEvents={item.planEvents ?? [item.ev]} />;
+    case "tool":
+      return <ToolCall ev={item.ev} result={item.toolResult} />;
     case "cost":
-      return <CostFooter ev={item.ev} />;
+      return <CostSummary event={item.ev} maxCostUsd={maxCostUsd} />;
+    case "warning":
+      return <WarningNote ev={item.ev} />;
+    case "note":
+      return <ValidationNote ev={item.ev} />;
     case "terminal":
       return <TerminalNote ev={item.ev} />;
     default:
@@ -83,29 +93,40 @@ function ThoughtCard({ ev }: { ev: FabriEvent }) {
   );
 }
 
-// Sub-agent / tool activity — the smallest footprint; consecutive rows merge
-// into one quiet texture. Kept (unlike ludexel, which hides tool events).
-function ActivityChip({ ev }: { ev: FabriEvent }) {
+// cost_unaccounted / discrepancy — a flagged risk that the run's COGS is
+// under-reported or that a claimed write never landed. Deliberately breaks the
+// quiet texture: these are exactly what a debugging UI must not hide.
+function WarningNote({ ev }: { ev: FabriEvent }) {
+  const isCost = ev.type === EventType.COST_UNACCOUNTED;
+  const label = isCost ? "unaccounted cost" : "discrepancy";
+  const detail = isCost
+    ? `${ev.tool ?? "sub-agent"}: ${ev.reason ?? "spend not attributed"}`
+    : `${ev.path ?? "artifact"}: ${ev.reason ?? "claimed but not verified"}`;
   return (
-    <div className={"activity" + (isSubagent(ev) ? " activity--subagent" : "")}>
-      <span className="activity__icon" aria-hidden>
-        {isSubagent(ev) ? "⤷" : "•"}
+    <div className="warning" role="note">
+      <span className="warning__icon" aria-hidden>
+        ⚠
       </span>
-      <span>{activityLabel(ev)}</span>
+      <span className="warning__label">{label}</span>
+      <span className="warning__detail">{detail}</span>
     </div>
   );
 }
 
-// Cost / COGS — a receipt stapled to the run: quietest tier, right-aligned.
-function CostFooter({ ev }: { ev: FabriEvent }) {
-  const cost = ev.total_cost_usd ?? ev.cost_usd;
-  const steps = ev.step_count;
-  const wall = ev.wall_time_s;
+// structured_output that failed validation — a quiet note the run retried a
+// typed answer, so a schema-retry isn't invisible.
+function ValidationNote({ ev }: { ev: FabriEvent }) {
+  const attempt = ev.attempt != null ? ev.attempt + 1 : undefined;
+  const first = Array.isArray(ev.errors) ? ev.errors[0] : undefined;
   return (
-    <div className="cost">
-      {cost != null && <span>${Number(cost).toFixed(4)}</span>}
-      {steps != null && <span>{steps} steps</span>}
-      {wall != null && <span>{Number(wall).toFixed(1)}s</span>}
+    <div className="note">
+      <span className="note__mark" aria-hidden>
+        ↻
+      </span>
+      <span>
+        output validation failed{attempt ? ` (attempt ${attempt})` : ""}
+        {first ? ` — ${first}` : ""}
+      </span>
     </div>
   );
 }
