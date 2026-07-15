@@ -573,18 +573,33 @@ class OpenAILLMBackend:
             )
 
         oai_usage = getattr(resp, "usage", None)
-        # OpenAI surfaces cached prompt tokens under prompt_tokens_details; pull
-        # them onto cache_read so a cached run isn't priced at full input rate.
-        oai_details = getattr(oai_usage, "prompt_tokens_details", None)
-        oai_cache_read = getattr(oai_details, "cached_tokens", 0) or 0
         # Fold the discarded truncated attempt's tokens in -- it was still billed.
         t_usage = getattr(truncated_attempt, "usage", None) if truncated_attempt is not None else None
+
+        # OpenAI's `prompt_tokens` INCLUDES cached prompt tokens
+        # (`prompt_tokens_details.cached_tokens` is a SUBSET of it), unlike
+        # Anthropic whose `input_tokens` already excludes them. pricing.cost_for
+        # charges cache_read at 0.10x ON TOP OF input_tokens, so leaving cached
+        # tokens inside input_tokens double-bills them (~1.10x instead of 0.10x).
+        # Subtract them out so input_tokens is the NON-cached prompt and the
+        # cache-read bucket carries the rest -- the invariant pricing.cost_for
+        # documents for every backend.
+        def _oai_prompt(u) -> int:
+            return (getattr(u, "prompt_tokens", 0) or 0) if u is not None else 0
+
+        def _oai_cached(u) -> int:
+            d = getattr(u, "prompt_tokens_details", None) if u is not None else None
+            return (getattr(d, "cached_tokens", 0) or 0) if d is not None else 0
+
+        cache_read = _oai_cached(oai_usage) + _oai_cached(t_usage)
+        non_cached_input = max(0, _oai_prompt(oai_usage) - _oai_cached(oai_usage)) + max(
+            0, _oai_prompt(t_usage) - _oai_cached(t_usage)
+        )
         call_usage = LLMUsage(
-            input_tokens=(getattr(oai_usage, "prompt_tokens", 0) or 0)
-            + (getattr(t_usage, "prompt_tokens", 0) or 0),
+            input_tokens=non_cached_input,
             output_tokens=(getattr(oai_usage, "completion_tokens", 0) or 0)
             + (getattr(t_usage, "completion_tokens", 0) or 0),
-            cache_read_input_tokens=oai_cache_read,
+            cache_read_input_tokens=cache_read,
             model=self._model,
         )
 
@@ -799,11 +814,23 @@ class GeminiLLMBackend:
             um = getattr(src, "usage_metadata", None) if src is not None else None
             return getattr(um, field, 0) or 0 if um is not None else 0
 
+        # Gemini's `prompt_token_count` INCLUDES `cached_content_token_count`
+        # (a subset), unlike Anthropic whose input_tokens excludes cached tokens.
+        # Subtract so input_tokens is the non-cached prompt -- otherwise
+        # pricing.cost_for bills cached tokens at ~1.10x (full input + 0.10x read)
+        # instead of 0.10x. See the OpenAI backend for the same normalization.
+        g_cache_read = _um(resp, "cached_content_token_count") + _um(
+            truncated_attempt, "cached_content_token_count"
+        )
+        g_input = max(0, _um(resp, "prompt_token_count") - _um(resp, "cached_content_token_count")) + max(
+            0,
+            _um(truncated_attempt, "prompt_token_count")
+            - _um(truncated_attempt, "cached_content_token_count"),
+        )
         call_usage = LLMUsage(
-            input_tokens=_um(resp, "prompt_token_count") + _um(truncated_attempt, "prompt_token_count"),
+            input_tokens=g_input,
             output_tokens=_um(resp, "candidates_token_count") + _um(truncated_attempt, "candidates_token_count"),
-            cache_read_input_tokens=_um(resp, "cached_content_token_count")
-            + _um(truncated_attempt, "cached_content_token_count"),
+            cache_read_input_tokens=g_cache_read,
             model=self._model,
         )
         logger.info(

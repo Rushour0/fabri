@@ -12,9 +12,17 @@ window, and tune the fallback constants below until they agree.
 Anthropic prompt-cache economics: a cache WRITE bills at 1.25x the input rate
 (5-minute ephemeral), a cache READ at 0.10x. Those multipliers live here rather
 than in the table so a new model only needs its (input, output) rate pair,
-from either source. The provider's `input_tokens` already EXCLUDES cached
-tokens -- they arrive in the `cache_creation_*` / `cache_read_*` buckets -- so
-the four buckets sum without double-counting.
+from either source.
+
+INVARIANT: `input_tokens` on an LLMUsage EXCLUDES cached tokens -- they live in
+the `cache_creation_*` / `cache_read_*` buckets and are charged at their own
+multipliers -- so the four buckets sum without double-counting. This holds for
+Anthropic and Bedrock natively (their SDKs report input_tokens net of cache),
+and fabri's OpenAI and Gemini backends NORMALIZE to it by subtracting cached
+tokens from the provider's cache-inclusive prompt count (OpenAI's `prompt_tokens`
+and Gemini's `prompt_token_count` both include cached tokens as a subset). If a
+new backend is added, it MUST uphold this invariant or cached tokens get billed
+at ~1.10x instead of 0.10x -- an ~11x over-charge on the cached portion.
 """
 
 from __future__ import annotations

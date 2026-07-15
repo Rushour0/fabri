@@ -241,7 +241,10 @@ def test_step_text_response_parsing_and_usage(monkeypatch):
     assert resp.final_text == "done"
     assert resp.tool_calls == []
     assert resp.usage.model == "gemini-2.5-flash"
-    assert resp.usage.input_tokens == 12
+    # Gemini's prompt_token_count (12) INCLUDES the cached subset (3); the
+    # backend excludes it from input_tokens so pricing doesn't double-bill the
+    # cached tokens (~1.10x). 12 - 3 = 9 non-cached input.
+    assert resp.usage.input_tokens == 9
     assert resp.usage.output_tokens == 4
     assert resp.usage.cache_read_input_tokens == 3
     assert len(b._client.calls) == 1
