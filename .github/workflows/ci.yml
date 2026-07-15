@@ -36,3 +36,20 @@ jobs:
 
       - name: Test
         run: pytest tests/ -q
+
+  studio-example:
+    # Typecheck + build the Fabri Studio example (examples/studio) so the
+    # in-repo React example can't silently rot on a fabri/service change.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: examples/studio/package-lock.json
+      - run: npm ci
+      - run: npm run build

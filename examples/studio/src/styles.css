@@ -1,20 +1,26 @@
 :root {
-  --bg: #0e0f13;
-  --surface: #16181f;
-  --surface-2: #1c1f28;
-  --border: #262a35;
-  --text: #e6e8ee;
-  --text-dim: #9aa0ae;
-  --text-faint: #6b7280;
-  --accent: #6ea8fe;
-  --accent-dim: #2b4a7a;
-  --manager: #7c9cff;
-  --ok: #4ade80;
-  --warn: #fbbf24;
-  --err: #f87171;
-  --radius: 12px;
+  /* Warm-neutral base — slate, not void, not pure grey. */
+  --bg: #0c0d10;
+  --surface: #131418; /* card / manager message / composer */
+  --surface-2: #1a1c22; /* input / raised chip / hover */
+  --border: #24262d; /* hairline */
+  --border-2: #33363f; /* emphasized hairline: card edge, focus */
+
+  --text: #e8e9ec; /* tier 1 — manager body, ask question */
+  --text-dim: #9497a3; /* tier 2 — narration, labels, timestamps */
+  --text-faint: #7c7f8b; /* tier 3 — thought, meta, chrome (AA-legible) */
+
+  /* One deliberate accent. Amber = "this needs you." Used ONLY on the ask
+     card + pending indicator, never decoratively. Manager messages own no hue. */
+  --accent: #d7a13b;
+  --accent-soft: rgba(215, 161, 59, 0.14);
+  --ok: #5fbf8f;
+  --err: #e2695f;
+
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 * {
@@ -33,60 +39,81 @@ body {
   color: var(--text);
   font-family: var(--font);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* Focus: one visible ring on every interactive element. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .app {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-width: 760px;
+  max-width: 720px;
   margin: 0 auto;
-  border-left: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+  border-inline: 1px solid var(--border);
 }
 
-/* ---- header ---- */
+/* ---------- header ---------- */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
+  padding: 13px 20px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 .header__brand {
   display: flex;
   align-items: center;
   gap: 9px;
   font-weight: 600;
+  font-size: 14.5px;
+  letter-spacing: -0.01em;
 }
 .header__logo {
-  color: var(--accent);
-  font-size: 18px;
-}
-.header__title {
-  letter-spacing: 0.01em;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--text) 0%, var(--text-dim) 100%);
+  transform: rotate(45deg);
+  flex: none;
 }
 
 .status {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 .status__dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--text-faint);
+  flex: none;
 }
+/* Running is signalled by MOTION, not color — so amber stays exclusively the
+   "needs you" accent. Done/error earn a color because they're a resolved state. */
 .status--running .status__dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 0 var(--accent);
-  animation: pulse 1.6s infinite;
+  background: var(--text-dim);
+  animation: pulse 1.8s var(--ease) infinite;
 }
 .status--done .status__dot {
   background: var(--ok);
@@ -96,252 +123,364 @@ body {
 }
 @keyframes pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(110, 168, 254, 0.5);
+    box-shadow: 0 0 0 0 rgba(148, 151, 163, 0.35);
   }
   70% {
-    box-shadow: 0 0 0 6px rgba(110, 168, 254, 0);
+    box-shadow: 0 0 0 5px transparent;
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(110, 168, 254, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
 }
 
-/* ---- thread ---- */
+/* ---------- thread ---------- */
 .thread {
   flex: 1;
   overflow-y: auto;
-  padding: 22px 20px;
+  overflow-x: hidden;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 4px; /* tight base — agent-activity rows read as one texture */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-2) transparent;
 }
 
 .empty {
   margin: auto 0;
   text-align: center;
   color: var(--text-dim);
-  padding: 40px 24px;
+  padding: 48px 24px;
 }
 .empty__title {
-  font-size: 17px;
+  font-size: 16px;
   color: var(--text);
-  margin: 0 0 6px;
+  margin: 0 0 7px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
 }
 .empty__sub {
-  margin: 0;
-  font-size: 14px;
-  max-width: 42ch;
-  margin-inline: auto;
+  margin: 0 auto;
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 40ch;
+  color: var(--text-dim);
 }
 
-/* ---- manager message (primary) ---- */
+/* ---------- manager message (primary — the only full card in the thread) ---------- */
 .msg--manager {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--manager);
-  border-radius: var(--radius);
-  padding: 14px 16px;
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 13px 16px 14px;
+  margin-top: 14px; /* breathing room above the primary utterance */
+  animation: rise 0.28s var(--ease) both;
 }
 .msg__role {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 7px;
 }
 .avatar {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
+  flex: none;
 }
 .avatar--manager {
-  background: var(--accent-dim);
-  color: var(--manager);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border-2);
 }
 .msg__name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
-}
-.msg__body {
-  white-space: pre-wrap;
-  word-break: break-word;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 .msg__meta {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--warn);
+  margin-top: 9px;
+  font-size: 11px;
+  color: var(--err);
   font-family: var(--mono);
 }
 
-/* ---- narration (secondary, light) ---- */
-.narration {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding-left: 4px;
+/* ---------- markdown (inside manager / ask) ---------- */
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md-p {
+  margin: 0 0 10px;
+}
+/* Section label, not a big heading — small uppercase so it reads as a boundary,
+   never confused with an inline-bolded term at body size. */
+.md-h {
+  margin: 17px 0 7px;
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--text-dim);
-  font-size: 13.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
-.narration__dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex: none;
-  opacity: 0.7;
+.md-list {
+  margin: 0 0 10px;
+  padding-left: 22px;
 }
-.narration__text {
-  font-style: italic;
+.md-list li {
+  margin: 3px 0;
+}
+.md-list li::marker {
+  color: var(--text-faint);
+}
+.md code,
+.md-code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.md-pre {
+  margin: 0 0 10px;
+  padding: 11px 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.md-pre code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: none;
+  border: none;
+  padding: 0;
+}
+.md a {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--text-faint);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2.5px;
+}
+.md a:hover {
+  text-decoration-color: var(--text);
+}
+.md-quote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border-2);
+  color: var(--text-dim);
 }
 
-/* ---- thought (collapsible) ---- */
-.thought {
+/* ---------- narration (tertiary — bare caption, no chrome) ---------- */
+.narration {
+  display: flex;
+  gap: 8px;
+  padding-left: 20px;
+  color: var(--text-dim);
   font-size: 13px;
+  line-height: 1.4;
+  animation: fade 0.25s var(--ease) both;
+}
+.narration__mark {
+  color: var(--text-faint);
+  flex: none;
+  user-select: none;
+}
+
+/* ---------- thought (secondary — rail only, no fill) ---------- */
+.thought {
+  padding-left: 20px;
+  animation: fade 0.25s var(--ease) both;
 }
 .thought__toggle {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
   width: 100%;
   background: none;
   border: none;
-  color: var(--text-faint);
-  cursor: pointer;
-  padding: 2px 4px;
+  border-left: 2px solid var(--border-2);
+  padding: 2px 0 2px 10px;
+  margin-left: -2px;
   text-align: left;
   font: inherit;
+  color: var(--text-faint);
+  cursor: pointer;
 }
 .thought__chevron {
-  width: 12px;
+  font-size: 9px;
+  width: 8px;
+  flex: none;
+  transition: transform 0.18s var(--ease);
+}
+.thought--open .thought__chevron {
+  transform: rotate(90deg);
 }
 .thought__label {
   font-family: var(--mono);
   text-transform: uppercase;
-  font-size: 11px;
-  letter-spacing: 0.05em;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  flex: none;
 }
 .thought__preview {
-  color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
 }
 .thought__full {
-  margin: 4px 0 0 24px;
-  padding: 8px 10px;
-  border-left: 2px solid var(--border);
+  margin: 4px 0 0;
+  padding-left: 30px;
   color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
   white-space: pre-wrap;
 }
 
-/* ---- activity chip ---- */
+/* ---------- activity chip (quaternary — bare inline, merges into texture) ---------- */
 .activity {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  align-self: flex-start;
-  padding: 4px 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 12.5px;
-  color: var(--text-dim);
+  gap: 7px;
+  padding-left: 20px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.3;
 }
 .activity--subagent {
-  margin-left: 16px;
-  border-color: var(--accent-dim);
+  padding-left: 30px;
 }
 .activity__icon {
-  color: var(--accent);
+  font-size: 11px;
+  opacity: 0.8;
+  flex: none;
 }
 
-/* ---- cost footer ---- */
+/* ---------- cost footer (receipt — attached, quietest) ---------- */
 .cost {
   display: flex;
-  gap: 14px;
-  align-self: flex-end;
+  gap: 12px;
+  justify-content: flex-end;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-faint);
+  padding: 4px 2px 0;
+  font-variant-numeric: tabular-nums;
 }
 
-/* ---- terminal note ---- */
+/* ---------- terminal (structural break — full-width rule, not a card) ---------- */
 .terminal {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-.terminal__badge {
-  font-family: var(--mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: rgba(248, 113, 113, 0.12);
+  gap: 12px;
+  margin-top: 14px;
   color: var(--err);
+}
+.terminal::before,
+.terminal::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: color-mix(in srgb, var(--err) 40%, transparent);
+}
+.terminal__label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
 }
 .terminal__reason {
   color: var(--text-dim);
+  font-size: 12.5px;
+  padding-left: 20px;
+  margin-top: 6px;
 }
 
-/* ---- ask user card (interactive, primary) ---- */
+/* ---------- ask card (primary + the one accent) ---------- */
 .ask {
   background: var(--surface);
-  border: 1px solid var(--accent-dim);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
   padding: 14px 16px;
-  box-shadow: 0 0 0 1px rgba(110, 168, 254, 0.08);
+  margin-top: 16px;
+  box-shadow: 0 0 0 1px var(--accent-soft), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  animation: rise 0.28s var(--ease) both;
 }
 .ask__role {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 9px;
+}
+.ask__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.ask__name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 .ask__question {
-  margin-bottom: 12px;
-  white-space: pre-wrap;
+  margin-bottom: 13px;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.5;
 }
 .ask__options {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 13px;
 }
 .ask__option {
   padding: 7px 13px;
   background: var(--surface-2);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-2);
   border-radius: 8px;
   color: var(--text);
   cursor: pointer;
   font: inherit;
   font-size: 14px;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
 .ask__option:hover {
-  border-color: var(--accent-dim);
+  border-color: var(--text-faint);
 }
 .ask__option--sel {
   border-color: var(--accent);
-  background: var(--accent-dim);
-  color: #fff;
+  background: var(--accent-soft);
+  color: var(--text);
 }
 .ask__input {
   width: 100%;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-2);
   border-radius: 8px;
   color: var(--text);
   padding: 9px 11px;
   font: inherit;
+  font-size: 14px;
   resize: vertical;
-  margin-bottom: 12px;
+  margin-bottom: 13px;
 }
 .ask__input:focus {
   outline: none;
@@ -353,57 +492,67 @@ body {
   gap: 12px;
 }
 .ask__hint {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-faint);
 }
 .ask__error {
   color: var(--err);
-  font-size: 13px;
+  font-size: 12.5px;
   margin-bottom: 10px;
 }
+.ask--waiting {
+  opacity: 0.55;
+  pointer-events: none;
+}
 
-/* ---- buttons ---- */
+/* ---------- buttons ---------- */
 .btn {
-  padding: 8px 15px;
+  padding: 8px 14px;
   border-radius: 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-2);
   background: var(--surface-2);
   color: var(--text);
   font: inherit;
-  font-size: 14px;
+  font-size: 13.5px;
+  font-weight: 500;
   cursor: pointer;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
 .btn:hover:not(:disabled) {
   border-color: var(--text-faint);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
+/* Primary CTA = neutral high-contrast (Vercel-style), so the amber accent stays
+   exclusively semantic ("needs you"), never just "the button color". */
 .btn--primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #0a0c10;
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
   font-weight: 600;
 }
 .btn--primary:hover:not(:disabled) {
-  background: #83b4ff;
+  background: #fff;
+  border-color: #fff;
 }
 
-/* ---- error banner ---- */
+/* ---------- error banner (transport-level) ---------- */
 .error-banner {
-  background: rgba(248, 113, 113, 0.1);
-  border: 1px solid rgba(248, 113, 113, 0.3);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--err) 30%, transparent);
   color: var(--err);
-  padding: 10px 14px;
+  padding: 10px 13px;
   border-radius: 8px;
-  font-size: 13.5px;
+  font-size: 13px;
+  margin-top: 12px;
 }
 
-/* ---- footer / composer ---- */
+/* ---------- footer / composer ---------- */
 .footer {
   border-top: 1px solid var(--border);
-  padding: 14px 16px;
+  padding: 13px 16px;
   background: var(--surface);
 }
 .footer__row {
@@ -413,7 +562,7 @@ body {
 }
 .footer__done {
   color: var(--text-dim);
-  font-size: 14px;
+  font-size: 13.5px;
 }
 .composer {
   display: flex;
@@ -423,17 +572,68 @@ body {
 .composer__input {
   flex: 1;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-2);
   border-radius: 10px;
   color: var(--text);
   padding: 10px 12px;
   font: inherit;
+  font-size: 14.5px;
   resize: none;
+  line-height: 1.45;
+  transition: border-color 0.15s var(--ease);
 }
 .composer__input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--text-faint);
+}
+.composer__input::placeholder {
+  color: var(--text-faint);
 }
 .composer__send {
   height: 42px;
+  padding-inline: 18px;
+}
+
+/* ---------- motion ---------- */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- responsive ---------- */
+@media (max-width: 640px) {
+  .app {
+    border-inline: none;
+  }
+  .thread {
+    padding: 16px 14px;
+  }
+  .header,
+  .footer {
+    padding-inline: 14px;
+  }
 }

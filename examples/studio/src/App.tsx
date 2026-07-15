@@ -31,7 +31,7 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="header__brand">
-          <span className="header__logo">◆</span>
+          <span className="header__logo" aria-hidden />
           <span className="header__title">Fabri Studio</span>
         </div>
         <div className={`status status--${run.status}`}>
