@@ -97,6 +97,30 @@ def _builder_for(script: Path):
     return _build
 
 
+# A fake that writes a `start` event then sleeps well past a test's patience, so
+# a cancel arrives while it is genuinely running (mirrors a long agent loop).
+_FAKE_AGENT_SLEEPY = """
+import json, os, time
+from pathlib import Path
+
+home = Path(os.environ["FABRI_HOME"])
+sid = os.environ["FABRI_SESSION_ID"]
+trace = home / ".fabri" / "traces" / (sid + ".jsonl")
+trace.parent.mkdir(parents=True, exist_ok=True)
+with trace.open("a") as f:
+    f.write(json.dumps({"type": "start", "task": "t"}) + "\\n")
+    f.flush()
+time.sleep(60)
+"""
+
+
+@pytest.fixture
+def fake_agent_sleepy(tmp_path: Path) -> Path:
+    p = tmp_path / "fake_agent_sleepy.py"
+    p.write_text(textwrap.dedent(_FAKE_AGENT_SLEEPY))
+    return p
+
+
 # --- 1. binding --------------------------------------------------------------
 
 def test_merge_overrides_deep_merges_nested():
@@ -222,7 +246,36 @@ def test_extract_cost_from_usage_event():
 def test_extract_cost_defaults_when_no_usage():
     cost = extract_cost([{"type": "start"}])
     assert cost == {"cost_usd": 0.0, "subagent_cost_usd": 0.0,
-                    "total_cost_usd": 0.0, "post_run_cost_usd": 0.0}
+                    "total_cost_usd": 0.0, "post_run_cost_usd": 0.0,
+                    "cost_by_model": {}, "metrics": {}}
+
+
+def test_extract_cost_surfaces_cost_by_model_and_metrics():
+    """The usage event already carries a per-model COGS breakdown + run metrics;
+    the cost surface must pass them through so a UI can render them."""
+    events = [
+        {
+            "type": "usage",
+            "cost_usd": 0.03,
+            "subagent_cost_usd": 0.01,
+            "total_cost_usd": 0.04,
+            "cost_by_model": {"claude-sonnet-5": 0.02, "claude-haiku-4-5": 0.01},
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "step_count": 4,
+            "wall_time_s": 8.1,
+            "subagent_count": 2,
+            "subagent_failed_count": 0,
+        },
+    ]
+    cost = extract_cost(events)
+    assert cost["cost_by_model"] == {"claude-sonnet-5": 0.02, "claude-haiku-4-5": 0.01}
+    assert cost["metrics"]["input_tokens"] == 1200
+    assert cost["metrics"]["step_count"] == 4
+    assert cost["metrics"]["wall_time_s"] == 8.1
+    assert cost["metrics"]["subagent_count"] == 2
+    # Keys absent from the usage event stay out of metrics (not zero-defaulted).
+    assert "guideline_reuse_rate" not in cost["metrics"]
 
 
 # --- 3. launcher -------------------------------------------------------------
@@ -315,6 +368,181 @@ def test_service_unknown_session_raises(tmp_path: Path):
         svc.result("nope")
 
 
+# --- Slice 0: cancel, session index / history, persistence -------------------
+
+def test_service_list_sessions_records_finished_run(tmp_path: Path, fake_agent: Path):
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        command_builder=_builder_for(fake_agent),
+    )
+    session_id = svc.submit("build it", thread_id="thread-1")
+    # Before terminal: the run shows up as running with its task + grouping.
+    live = {s["session_id"]: s for s in svc.list_sessions()}
+    assert live[session_id]["task"] == "build it"
+    assert live[session_id]["thread_id"] == "thread-1"
+    # After result(): status resolves to done and cost is recorded in history.
+    svc.result(session_id, timeout=30)
+    done = {s["session_id"]: s for s in svc.list_sessions()}[session_id]
+    assert done["status"] == "done"
+    assert done["outcome"] == "success"
+    assert done["cost"]["total_cost_usd"] == 0.0015
+    svc.close()
+
+
+def test_service_history_survives_restart(tmp_path: Path, fake_agent: Path):
+    """History is re-derived from the on-disk index, not RAM: a fresh service on
+    the same home_root still lists a run finished by a prior instance."""
+    home = tmp_path / "runs"
+    svc = FabriService(home_root=home, command_builder=_builder_for(fake_agent))
+    session_id = svc.submit("go")
+    svc.result(session_id, timeout=30)
+    svc.close()
+
+    reborn = FabriService(home_root=home, command_builder=_builder_for(fake_agent))
+    sessions = {s["session_id"]: s for s in reborn.list_sessions()}
+    assert session_id in sessions
+    assert sessions[session_id]["status"] == "done"
+    assert sessions[session_id]["cost"]["total_cost_usd"] == 0.0015
+
+
+def test_service_cancel_terminates_running_run(tmp_path: Path, fake_agent_sleepy: Path):
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        command_builder=_builder_for(fake_agent_sleepy),
+    )
+    session_id = svc.submit("long task")
+    # Wait for the `start` event so we know the child is actually up.
+    for ev in svc.stream(session_id, timeout=30):
+        if ev.get("type") == "start":
+            break
+    out = svc.cancel(session_id)
+    assert out["status"] == "cancelled"
+    # The child process is gone and history records the cancellation.
+    handle = svc._handle(session_id)
+    handle.wait(timeout=30)
+    assert not handle.is_running()
+    cancelled = {s["session_id"]: s for s in svc.list_sessions()}[session_id]
+    assert cancelled["status"] == "cancelled"
+    svc.close()
+
+
+def test_service_cancel_finished_run_is_noop(tmp_path: Path, fake_agent: Path):
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        command_builder=_builder_for(fake_agent),
+    )
+    session_id = svc.submit("go")
+    svc.result(session_id, timeout=30)
+    out = svc.cancel(session_id)
+    assert out["status"] == "already_ended"
+    # A cancel after a normal finish doesn't overwrite the recorded outcome.
+    assert {s["session_id"]: s for s in svc.list_sessions()}[session_id]["status"] == "done"
+    svc.close()
+
+
+def test_service_cancel_unknown_session_raises(tmp_path: Path):
+    svc = FabriService(home_root=tmp_path / "runs")
+    with pytest.raises(KeyError):
+        svc.cancel("nope")
+
+
+# --- Slice 3: fleet fan-out + roll-up ----------------------------------------
+
+def test_submit_fleet_fans_out_and_rolls_up_cost(tmp_path: Path, fake_agent: Path):
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        command_builder=_builder_for(fake_agent),
+    )
+    fleet = svc.submit_fleet(
+        [
+            {"task": "account A", "label": "acme"},
+            {"task": "account B", "label": "globex"},
+            {"task": "account C", "label": "initech"},
+        ]
+    )
+    fleet_id = fleet["fleet_id"]
+    assert len(fleet["sessions"]) == 3
+    # Drive each member to completion so its cost lands in the index.
+    for s in fleet["sessions"]:
+        svc.result(s["session_id"], timeout=30)
+
+    status = svc.fleet_status(fleet_id)
+    assert status["counts"]["done"] == 3
+    # Each fake run bills 0.0015; the fleet total is the exact per-session sum.
+    assert status["totals"]["total_cost_usd"] == pytest.approx(0.0045)
+    # Members carry their human label for the drill-down list.
+    labels = {m["label"] for m in status["sessions"]}
+    assert labels == {"acme", "globex", "initech"}
+    svc.close()
+
+
+def test_list_fleets_groups_and_survives_restart(tmp_path: Path, fake_agent: Path):
+    home = tmp_path / "runs"
+    svc = FabriService(home_root=home, command_builder=_builder_for(fake_agent))
+    fleet = svc.submit_fleet([{"task": "a"}, {"task": "b"}])
+    for s in fleet["sessions"]:
+        svc.result(s["session_id"], timeout=30)
+    svc.close()
+
+    reborn = FabriService(home_root=home, command_builder=_builder_for(fake_agent))
+    fleets = reborn.list_fleets()
+    assert len(fleets) == 1
+    assert fleets[0]["fleet_id"] == fleet["fleet_id"]
+    assert fleets[0]["size"] == 2
+    assert fleets[0]["totals"]["total_cost_usd"] == pytest.approx(0.003)
+
+
+def test_submit_fleet_rejects_item_without_task(tmp_path: Path, fake_agent: Path):
+    svc = FabriService(home_root=tmp_path / "runs", command_builder=_builder_for(fake_agent))
+    with pytest.raises(ValueError):
+        svc.submit_fleet([{"label": "no-task"}])
+    svc.close()
+
+
+def test_fleet_status_unknown_raises(tmp_path: Path):
+    svc = FabriService(home_root=tmp_path / "runs")
+    with pytest.raises(KeyError):
+        svc.fleet_status("nope")
+
+
+def test_http_fleet_submit_and_status(tmp_path: Path, fake_agent: Path):
+    from fabri.service.http_server import serve_http
+
+    svc = FabriService(home_root=tmp_path / "runs", command_builder=_builder_for(fake_agent))
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    host, port = server.server_address[0], server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _http_post(
+            host, port, "/fleets",
+            {"items": [{"task": "x", "label": "one"}, {"task": "y", "label": "two"}]},
+        )
+        assert status == 200
+        fleet = json.loads(body)
+        assert len(fleet["sessions"]) == 2
+        # drive members to completion
+        for s in fleet["sessions"]:
+            _http_get(host, port, f"/runs/{s['session_id']}/events")
+
+        status, body = _http_get(host, port, f"/fleets/{fleet['fleet_id']}")
+        assert status == 200
+        roll = json.loads(body)
+        assert roll["counts"]["done"] == 2
+        assert roll["totals"]["total_cost_usd"] == pytest.approx(0.003)
+
+        # list + missing-items + unknown-fleet
+        status, body = _http_get(host, port, "/fleets")
+        assert status == 200 and len(json.loads(body)["fleets"]) == 1
+        status, _ = _http_post(host, port, "/fleets", {"items": []})
+        assert status == 400
+        status, _ = _http_get(host, port, "/fleets/nope")
+        assert status == 404
+    finally:
+        server.shutdown()
+        svc.close()
+
+
 def test_serve_stdio_roundtrip(tmp_path: Path, fake_agent: Path):
     import io
 
@@ -399,6 +627,66 @@ def test_http_transport_submit_stream_cost(tmp_path: Path, fake_agent: Path):
         assert datas[0]["type"] == "start"
         assert result_frame is not None
         assert result_frame["cost"]["total_cost_usd"] == 0.0015
+    finally:
+        server.shutdown()
+        svc.close()
+
+
+def _http_post(conn_host, port, path, payload):
+    conn = http.client.HTTPConnection(conn_host, port, timeout=30)
+    conn.request(
+        "POST", path, body=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    body = resp.read().decode()
+    conn.close()
+    return resp.status, body
+
+
+def test_http_list_runs_and_cancel(tmp_path: Path, fake_agent: Path, fake_agent_sleepy: Path):
+    from fabri.service.http_server import serve_http
+
+    svc = FabriService(home_root=tmp_path / "runs")
+    # Route each task to the right fake: normal one finishes, sleepy one hangs
+    # so we can cancel it over HTTP.
+    def builder(task, config_path, session_id, fabri_home):
+        script = fake_agent_sleepy if task == "hang" else fake_agent
+        return [sys.executable, str(script)]
+    svc.command_builder = builder
+
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    host, port = server.server_address[0], server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # a finished run + a hanging run
+        status, body = _http_post(host, port, "/runs", {"task": "quick"})
+        assert status == 200
+        quick_id = json.loads(body)["session_id"]
+        _http_get(host, port, f"/runs/{quick_id}/events")  # drive to completion
+
+        status, body = _http_post(host, port, "/runs", {"task": "hang"})
+        hang_id = json.loads(body)["session_id"]
+        # wait for the sleepy child's start event so cancel hits a live process
+        for ev in svc.stream(hang_id, timeout=30):
+            if ev.get("type") == "start":
+                break
+
+        # GET /runs lists both
+        status, body = _http_get(host, port, "/runs")
+        assert status == 200
+        sessions = {s["session_id"]: s for s in json.loads(body)["sessions"]}
+        assert sessions[quick_id]["status"] == "done"
+        assert hang_id in sessions
+
+        # POST cancel the hanging one
+        status, body = _http_post(host, port, f"/runs/{hang_id}/cancel", {})
+        assert status == 200 and json.loads(body)["status"] == "cancelled"
+
+        # cancel an unknown session -> 404
+        status, _ = _http_post(host, port, "/runs/does-not-exist/cancel", {})
+        assert status == 404
     finally:
         server.shutdown()
         svc.close()
