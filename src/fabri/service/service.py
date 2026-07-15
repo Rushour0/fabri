@@ -24,10 +24,16 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
+from fabri.events import EventType
+from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.binding import bind_run_config
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
-from fabri.service.tailer import extract_cost, tail_events
+from fabri.service.tailer import extract_cost, run_trace_path, tail_events
+
+# Short base dir for per-run ask_user sockets. AF_UNIX paths are capped (~104
+# bytes on macOS), so we deliberately avoid nesting them under a deep run home.
+_ASK_SOCKET_DIR = Path(tempfile.gettempdir()) / "fabri-ask"
 
 # A host may swap how the agent is launched (tests point this at a fake script).
 # Signature: (task, config_path, session_id, fabri_home) -> argv.
@@ -68,6 +74,8 @@ class FabriService:
         self.sync_hook: FileSyncHook = sync_hook or NoOpSyncHook()
         self.command_builder = command_builder
         self._runs: dict[str, RunHandle] = {}
+        # Per-run human-in-the-loop bridge for the ask_user tool.
+        self._asks: dict[str, AskUserListener] = {}
 
     def submit(self, task: str, overrides: dict | None = None) -> str:
         """Bind a per-run config, launch the agent, return its ``session_id``."""
@@ -83,15 +91,58 @@ class FabriService:
         if self.command_builder is not None:
             command = self.command_builder(task, config_path, session_id, run_home)
 
+        # Start the ask_user bridge before launching the run, and point the
+        # child at its socket via the env. The listener appends an `ask_user`
+        # event to the run's own trace (same path the launcher will write/tail),
+        # so a mid-run question reaches the browser over the existing SSE stream.
+        trace_path = run_trace_path(run_home, session_id)
+        listener = self._start_ask_listener(session_id, trace_path)
+
         handle = launch_run(
             task,
             config_path=config_path,
             fabri_home=run_home,
             session_id=session_id,
             command=command,
+            env={"FABRI_ASK_USER_SOCKET": listener.socket_path},
         )
         self._runs[session_id] = handle
         return session_id
+
+    def _start_ask_listener(self, session_id: str, trace_path: Path) -> AskUserListener:
+        _ASK_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
+        sock_path = str(_ASK_SOCKET_DIR / f"{session_id[:12]}.sock")
+
+        def on_question(q: dict) -> None:
+            event = {"type": EventType.ASK_USER.value}
+            event.update({k: v for k, v in q.items() if v is not None})
+            append_trace_event(trace_path, event)
+
+        listener = AskUserListener(sock_path, on_question)
+        listener.start()
+        self._asks[session_id] = listener
+        return listener
+
+    def answer(
+        self,
+        session_id: str,
+        question_id: str,
+        answer: str,
+        selected_option: str | None = None,
+    ) -> None:
+        """Deliver a browser answer to a run's pending ask_user question."""
+        listener = self._asks.get(session_id)
+        if listener is None:
+            raise KeyError(f"no active ask_user bridge for session {session_id!r}")
+        if not listener.answer(question_id, answer, selected_option):
+            raise KeyError(
+                f"no pending question {question_id!r} for session {session_id!r}"
+            )
+
+    def _close_ask(self, session_id: str) -> None:
+        listener = self._asks.pop(session_id, None)
+        if listener is not None:
+            listener.close()
 
     def _handle(self, session_id: str) -> RunHandle:
         handle = self._runs.get(session_id)
@@ -115,6 +166,8 @@ class FabriService:
         """
         handle = self._handle(session_id)
         envelope = handle.result(timeout=timeout)
+        # The run has ended: no more questions can arrive, so release the bridge.
+        self._close_ask(session_id)
         # Read the completed trace under the run's own home for the cost surface.
         events = _read_trace_at(handle.trace_path)
         cost = extract_cost(events)
@@ -131,9 +184,12 @@ class FabriService:
         }
 
     def close(self) -> None:
-        """Terminate any still-running children (best effort)."""
+        """Terminate any still-running children + release ask_user bridges."""
         for handle in self._runs.values():
             handle.terminate()
+        for listener in list(self._asks.values()):
+            listener.close()
+        self._asks.clear()
 
 
 def _read_trace_at(path: Path) -> list[dict]:

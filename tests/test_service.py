@@ -74,6 +74,23 @@ def fake_agent(tmp_path: Path) -> Path:
     return p
 
 
+# Prints the result envelope FIRST, then a human-readable trailer on stdout --
+# reproducing the real `fabri run`, which emitted a "Synthesized N guideline(s)"
+# note after the JSON (that trailer now goes to stderr, but the parser must be
+# robust to any stdout trailer regardless).
+_FAKE_AGENT_WITH_TRAILER = _FAKE_AGENT + """
+print("\\nSynthesized 1 guideline(s) from this run:")
+print("  [success_pattern] Do the thing.")
+"""
+
+
+@pytest.fixture
+def fake_agent_with_trailer(tmp_path: Path) -> Path:
+    p = tmp_path / "fake_agent_trailer.py"
+    p.write_text(textwrap.dedent(_FAKE_AGENT_WITH_TRAILER))
+    return p
+
+
 def _builder_for(script: Path):
     def _build(task, config_path, session_id, fabri_home):
         return [sys.executable, str(script)]
@@ -212,8 +229,24 @@ def test_extract_cost_defaults_when_no_usage():
 
 def test_build_run_command_argv():
     cmd = build_run_command("do the thing", "/tmp/run.yaml", "sess-1")
-    assert cmd[1:] == ["-m", "fabri.cli", "run", "do the thing",
-                       "--config", "/tmp/run.yaml", "--session-id", "sess-1"]
+    # --config is a global option: it must precede the `run` subcommand, else
+    # argparse rejects it (exit 2). Regression guard for that ordering.
+    assert cmd[1:] == ["-m", "fabri.cli", "--config", "/tmp/run.yaml",
+                       "run", "do the thing", "--session-id", "sess-1"]
+
+
+def test_build_run_command_is_accepted_by_the_real_cli(tmp_path: Path):
+    """The argv from build_run_command must actually parse — every other service
+    test stubs the command, so this is the only guard that the real `fabri run`
+    accepts it. `--dry-run` exits 0 with no API key and no LLM call."""
+    import subprocess
+
+    cfg = tmp_path / "agent.yaml"
+    cfg.write_text("memory:\n  backend: sqlite\n  collection: t\n"
+                   "llm:\n  provider: anthropic\n  model: claude-haiku-4-5\n")
+    cmd = build_run_command("hello", cfg, "sess-dry") + ["--dry-run"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 0, f"real CLI rejected argv: {proc.stderr[-500:]}"
 
 
 def test_launch_run_sets_home_and_session_env(tmp_path: Path, fake_agent: Path):
@@ -256,6 +289,23 @@ def test_service_submit_stream_and_cost(tmp_path: Path, fake_agent: Path):
     assert result["cost"]["total_cost_usd"] == 0.0015
     assert result["cost"]["cost_usd"] == 0.0012
     assert result["cost"]["post_run_cost_usd"] == 0.0001
+    svc.close()
+
+
+def test_service_result_survives_stdout_trailer(tmp_path: Path, fake_agent_with_trailer: Path):
+    """A successful run whose stdout has a human-readable trailer after the JSON
+    envelope must still parse to success -- else `fabri serve` reports every
+    guideline-synthesizing run as a failure (agent stdout was not JSON)."""
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        command_builder=_builder_for(fake_agent_with_trailer),
+    )
+    session_id = svc.submit("go")
+    result = svc.result(session_id, timeout=30)
+    assert result["success"] is True
+    assert result["outcome"] == "success"
+    assert result["final_text"] == "all done"
+    assert result.get("error") is None
     svc.close()
 
 

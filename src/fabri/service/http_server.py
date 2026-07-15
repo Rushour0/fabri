@@ -29,6 +29,7 @@ logger = get_logger()
 
 _EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/events/?$")
 _RESULT_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/result/?$")
+_ANSWER_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/answer/?$")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -64,6 +65,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"no route for GET {self.path}"})
 
     def do_POST(self) -> None:  # noqa: N802
+        m = _ANSWER_RE.match(self.path)
+        if m:
+            self._answer(m.group(1))
+            return
         if self.path not in ("/runs", "/runs/"):
             self._send_json(404, {"error": f"no route for POST {self.path}"})
             return
@@ -84,6 +89,29 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
             return
         self._send_json(200, {"session_id": session_id, "status": "submitted"})
+
+    def _answer(self, session_id: str) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw or b"{}")
+        except json.JSONDecodeError as e:
+            self._send_json(400, {"error": f"invalid request JSON: {e}"})
+            return
+        question_id = req.get("question_id")
+        if not question_id or "answer" not in req:
+            self._send_json(
+                400, {"error": "answer requires 'question_id' and 'answer'"}
+            )
+            return
+        try:
+            self.service.answer(
+                session_id, question_id, req["answer"], req.get("selected_option")
+            )
+        except KeyError as e:
+            self._send_json(404, {"error": str(e)})
+            return
+        self._send_json(200, {"status": "answered"})
 
     def _stream_events(self, session_id: str) -> None:
         try:

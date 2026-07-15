@@ -39,15 +39,19 @@ def build_run_command(
 
     ``--session-id`` is passed so the launcher (not the agent) owns the id and
     can resolve the trace path before the child starts writing.
+
+    ``--config`` is a *global* option on the ``fabri`` parser, so it must appear
+    BEFORE the ``run`` subcommand (``fabri --config X run <task>``); placing it
+    after ``run`` makes argparse reject it with exit code 2.
     """
     return [
         python_exe or sys.executable,
         "-m",
         "fabri.cli",
-        "run",
-        task,
         "--config",
         str(config_path),
+        "run",
+        task,
         "--session-id",
         session_id,
     ]
@@ -101,8 +105,17 @@ class RunHandle:
         try:
             return json.loads(out)
         except json.JSONDecodeError:
-            # Some launchers (and the CLI) may print a non-JSON trailer; take the
-            # last JSON object line if present, else surface the raw tail.
+            # `fabri run` prints the result envelope FIRST, then may emit a
+            # human-readable trailer (e.g. a memory-synthesis note). Decode the
+            # first complete JSON object off the top rather than requiring the
+            # whole stream to be JSON.
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(out.lstrip())
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+            # Fallback: the last JSON object line, else surface the raw tail.
             for line in reversed(out.splitlines()):
                 line = line.strip()
                 if line.startswith("{"):

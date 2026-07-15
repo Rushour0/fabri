@@ -83,8 +83,9 @@ def test_cmd_run_exits_nonzero_on_unknown_outcome_string(monkeypatch):
 
 def test_cmd_run_prints_synthesized_guideline_summary(monkeypatch, capsys):
     """The cmd_run UX includes a `Synthesized N guideline(s)` block when the
-    pipeline returns entries. This is the user's only visible signal that the
-    memory loop ran on their behalf — pin the rendering."""
+    pipeline returns entries — the user's visible signal that the memory loop
+    ran. It goes to STDERR so stdout stays a clean machine-readable envelope
+    (the service parses stdout as JSON; a trailer there corrupts it)."""
     from fabri.memory.schema import MemoryEntry
 
     entry = MemoryEntry(
@@ -101,8 +102,12 @@ def test_cmd_run_prints_synthesized_guideline_summary(monkeypatch, capsys):
         {"success": True, "outcome": Outcome.SUCCESS.value, "final_text": "ok"},
         entries=[entry],
     )
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert code == 0
-    assert "Synthesized 1 guideline(s)" in out
-    assert "[tactical]" in out
-    assert "Re-read after write_file" in out
+    # Human summary on stderr...
+    assert "Synthesized 1 guideline(s)" in captured.err
+    assert "[tactical]" in captured.err
+    assert "Re-read after write_file" in captured.err
+    # ...and stdout stays a single clean JSON envelope.
+    import json as _json
+    assert _json.loads(captured.out)["success"] is True
