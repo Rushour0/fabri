@@ -8,6 +8,7 @@ import { CostSummary } from "./components/CostSummary";
 import { HistoryList } from "./components/HistoryList";
 import { RunReplay } from "./components/RunReplay";
 import { FleetView } from "./components/FleetView";
+import { AgencyGraph } from "./components/AgencyGraph";
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -18,7 +19,7 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-type Surface = "conversation" | "history" | "fleet" | "replay";
+type Surface = "conversation" | "company" | "history" | "fleet" | "replay";
 
 // One turn of the thread: the user's task, then the agent's streamed timeline,
 // then that turn's pending questions and cost fallback. Only the active (last)
@@ -100,6 +101,12 @@ export default function App() {
               Conversation
             </button>
             <button
+              className={"tab" + (surface === "company" ? " tab--on" : "")}
+              onClick={() => setSurface("company")}
+            >
+              Company
+            </button>
+            <button
               className={"tab" + (surface === "fleet" ? " tab--on" : "")}
               onClick={() => setSurface("fleet")}
             >
@@ -124,6 +131,11 @@ export default function App() {
         {surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
         {surface === "replay" && replayId && (
           <RunReplay sessionId={replayId} onBack={() => setSurface(replayFrom)} />
+        )}
+        {surface === "company" && (
+          hasThread ? <AgencyGraph events={run.turns[activeIdx]?.events ?? []} /> : (
+            <div className="agency-empty">Start a task in Conversation to watch your agency's agents work together.</div>
+          )
         )}
 
         {surface === "conversation" && (

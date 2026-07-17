@@ -1,8 +1,9 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import type { FabriEvent, RunResult } from "../lib/events";
 import { buildTimeline } from "../lib/timeline";
 import { Message } from "./Message";
 import { CostSummary } from "./CostSummary";
+import { AgencyGraph } from "./AgencyGraph";
 
 // A read-only view of a past run, opened from history. The run is already
 // finished, so its trace drains immediately over the same SSE endpoint the live
@@ -35,6 +36,7 @@ function reducer(state: State, action: Action): State {
 }
 
 export function RunReplay({ sessionId, onBack }: { sessionId: string; onBack: () => void }) {
+  const [view, setView] = useState<"timeline" | "graph">("timeline");
   const [state, dispatch] = useReducer(reducer, {
     events: [],
     result: null,
@@ -76,12 +78,18 @@ export function RunReplay({ sessionId, onBack }: { sessionId: string; onBack: ()
           ← History
         </button>
         <span className="replay__label">Read-only run</span>
+        <div className="agency-replay__views" role="group" aria-label="Replay view">
+          <button className={`tab${view === "timeline" ? " tab--on" : ""}`} onClick={() => setView("timeline")}>Timeline</button>
+          <button className={`tab${view === "graph" ? " tab--on" : ""}`} onClick={() => setView("graph")}>Company</button>
+        </div>
       </div>
       {state.loading && timeline.length === 0 && <div className="history__empty">Loading run…</div>}
-      {timeline.map((item) => (
-        <Message key={item.key} item={item} />
-      ))}
-      {!hasCostItem && state.result?.cost && <CostSummary surface={state.result.cost} />}
+      {view === "graph" ? <AgencyGraph events={state.events} /> : <>
+        {timeline.map((item) => (
+          <Message key={item.key} item={item} />
+        ))}
+        {!hasCostItem && state.result?.cost && <CostSummary surface={state.result.cost} />}
+      </>}
       {state.error && <div className="error-banner">{state.error}</div>}
     </div>
   );
