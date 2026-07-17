@@ -1247,3 +1247,66 @@ body {
     padding-inline: 14px;
   }
 }
+
+/* ── Company / agency graph view ─────── */
+.agency-graph { margin: 2px 0; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface) 58%, transparent); font-variant-numeric: tabular-nums; }
+.agency-graph__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.agency-graph__views, .agency-replay__views { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+.agency-graph__view, .agency-replay__views .tab { border: 0; padding: 3px 7px; font-size: 10.5px; }
+.agency-payroll { display: flex; align-items: center; gap: 4px; color: var(--text-dim); font-family: var(--mono); font-size: 11px; }
+.agency-payroll strong { color: var(--text); font-size: 12px; }
+.agency-payroll__coin { display: inline-block; }
+.agency-empty { margin: 38px auto; max-width: 37ch; text-align: center; color: var(--text-dim); font-size: 13px; }
+
+.office { padding-top: 20px; text-align: center; }
+.office-manager { display: flex; justify-content: center; }
+.office-team { display: flex; justify-content: center; align-items: flex-start; flex-wrap: wrap; gap: 18px 12px; margin-top: 27px; }
+.office-team__desk { position: relative; min-width: 104px; padding-top: 16px; }
+.office-team__connector { position: absolute; top: -27px; left: 50%; height: 37px; border-left: 1px solid var(--border-2); }
+.office-team__connector::before { content: ""; position: absolute; top: 0; left: -56px; width: 112px; border-top: 1px solid var(--border); }
+.office-team__document { position: absolute; z-index: 1; left: calc(50% - 10px); top: -24px; font-size: 15px; }
+.office-agent { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; color: var(--text-dim); }
+.office-agent__avatar { position: relative; display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--border-2); border-radius: 50%; background: var(--surface-2); font-size: 25px; }
+.office-agent--idle { opacity: .58; }
+.office-agent--done .office-agent__avatar { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
+.office-agent--error .office-agent__avatar { border-color: color-mix(in srgb, var(--err) 55%, var(--border)); }
+.office-agent__result { position: absolute; right: -5px; bottom: -5px; padding: 1px; border-radius: 50%; background: var(--surface); font-size: 13px; }
+.office-agent__thinking { position: absolute; bottom: -16px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
+.office-agent__label { max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11.5px; font-weight: 600; }
+.office-agent__meta { color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; }
+.office-agent__count { margin-left: 3px; color: var(--text-dim); }
+
+.org-chart { padding-top: 18px; text-align: center; }
+.org-chart > .org-node { width: min(100%, 250px); margin: 0 auto; }
+.org-chart__specialists { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 16px 10px; margin-top: 24px; }
+.org-chart__branch { position: relative; width: min(100%, 185px); padding-top: 15px; text-align: left; }
+.org-chart__connector { position: absolute; left: 50%; top: -24px; height: 40px; border-left: 1px solid var(--border-2); }
+.org-chart__connector::before { content: ""; position: absolute; left: -42px; top: 0; width: 84px; border-top: 1px solid var(--border); }
+.org-node { padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 3px 12px -10px #000; }
+.org-node--done { border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+.org-node--error { border-color: color-mix(in srgb, var(--err) 42%, var(--border)); }
+.org-node__head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.org-node__emoji { font-size: 17px; }
+.org-node__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11.5px; font-weight: 600; }
+.org-status { margin-left: auto; padding: 1px 5px; border: 1px solid var(--border-2); border-radius: 99px; color: var(--text-faint); font-family: var(--mono); font-size: 9px; text-transform: uppercase; }
+.org-status--done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.org-status--error { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.org-status--running { color: var(--text-dim); }
+.org-node__metrics { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 6px; color: var(--text-faint); font-family: var(--mono); font-size: 9.5px; }
+.org-node__detail { display: none; margin-top: 7px; color: var(--text-dim); font-size: 10px; line-height: 1.35; }
+.org-node:hover .org-node__detail { display: block; }
+.org-chart__memos { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }
+.org-edge { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 6px; border-left: 2px solid var(--border-2); color: var(--text-faint); font-size: 9.5px; }
+.org-edge--done { border-left-color: var(--ok); }
+.org-edge--error { border-left-color: var(--err); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .office-agent--running .office-agent__avatar { animation: office-pulse 1.5s var(--ease) infinite; }
+  .office-team__document { animation: office-document 1.4s var(--ease) infinite; }
+  .agency-payroll__coin--drop { animation: agency-coin-drop .54s var(--ease); }
+  .org-node--running { animation: org-running 1.8s var(--ease) infinite; }
+  @keyframes office-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(148,151,163,.35); } 65% { box-shadow: 0 0 0 7px transparent; } }
+  @keyframes office-document { 0% { transform: translateY(-10px); opacity: 0; } 20%, 75% { opacity: 1; } 100% { transform: translateY(38px); opacity: 0; } }
+  @keyframes agency-coin-drop { 0% { transform: translateY(-14px); opacity: 0; } 60% { transform: translateY(2px); } 100% { transform: translateY(0); opacity: 1; } }
+  @keyframes org-running { 50% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-dim) 20%, transparent); } }
+}

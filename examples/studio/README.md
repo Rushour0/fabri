@@ -32,11 +32,14 @@ The `ask_user` round-trip is the interesting part: the manager blocks mid-run,
 its question streams to the browser over SSE, and your answer flows back to
 unblock it — see [How it works](#how-it-works).
 
-## Three surfaces
+## Four surfaces
 
 - **Conversation** — a live thread. Submit a task, watch it stream, then send a
   follow-up: turns share a `thread_id` and a memory collection, and a transcript
   preamble carries continuity. Stop a run mid-flight; start a new thread anytime.
+- **Company** — a second skin over the live trace: a playful Office view shows
+  agent avatars, handoffs, and payroll, while Org chart makes the same agency
+  structure and task memos precise and inspectable.
 - **Fleet** — Studio as a whole-agency UI. Paste one item per line to fan a batch
   out to N pipelines (`POST /fleets`); the roll-up shows done/running/blocked
   counts and the **summed fleet COGS** (+ per-model), with drill-down into any
@@ -134,7 +137,7 @@ examples/studio/
       AskUserCard, Composer                          input + human-in-the-loop
       HistoryList, RunReplay                         history + read-only replay
       FleetView, AccountTile                         fleet roll-up + drill-down
-    App.tsx              the three-surface shell (Conversation / Fleet / History)
+    App.tsx              the four-surface shell (Conversation / Company / Fleet / History)
   vite.config.ts         dev proxy → fabri serve
 ```
 
