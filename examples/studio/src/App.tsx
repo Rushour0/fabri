@@ -130,7 +130,7 @@ export default function App() {
         {surface === "history" && <HistoryList onOpen={(id) => openReplay(id, "history")} />}
         {surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
         {surface === "replay" && replayId && (
-          <RunReplay sessionId={replayId} onBack={() => setSurface(replayFrom)} />
+          <RunReplay key={replayId} sessionId={replayId} onBack={() => setSurface(replayFrom)} />
         )}
         {surface === "company" && (
           hasThread ? <AgencyGraph events={run.turns[activeIdx]?.events ?? []} /> : (

@@ -56,6 +56,12 @@ function numberValue(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+// First finite number among the candidates (honoring an explicit 0), else undefined.
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const v of values) if (typeof v === "number" && Number.isFinite(v)) return v;
+  return undefined;
+}
+
 function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -98,21 +104,34 @@ function truncateTask(task: string | undefined): string | undefined {
   return task.length > 60 ? `${task.slice(0, 57)}…` : task;
 }
 
-function childResult(ev: FabriEvent | undefined): Record<string, unknown> | undefined {
+// A tool_call's `result` is the canonical envelope `{ok, result, error}`
+// (src/fabri/tools/result.py). A sub-agent's own return — session_id, outcome,
+// usage, … — is nested one level under `result`. Read `ok` off the envelope but
+// everything else off the nested child.
+function envelope(ev: FabriEvent | undefined): Record<string, unknown> | undefined {
   return recordValue(ev?.result);
+}
+
+function childResult(ev: FabriEvent | undefined): Record<string, unknown> | undefined {
+  const env = envelope(ev);
+  const nested = recordValue(env?.result);
+  // Prefer the nested child payload; fall back to the envelope for any tool that
+  // returns its payload flat (keeps detection robust to shape drift).
+  return nested ?? env;
 }
 
 function isAgentHandoff(ev: FabriEvent): boolean {
   if (ev.name === "ask_user") return false;
-  const result = childResult(ev);
-  return isSubagent(ev) || result?.session_id != null || result?.trace_path != null;
+  const child = childResult(ev);
+  return isSubagent(ev) || child?.session_id != null || child?.trace_path != null;
 }
 
-function handoffStatus(result: FabriEvent | undefined): Handoff["status"] {
-  if (!result) return "running";
-  const data = childResult(result);
-  if (data?.ok === false) return "error";
-  const outcome = textValue(data?.outcome);
+function handoffStatus(ev: FabriEvent | undefined): Handoff["status"] {
+  if (!ev) return "running";
+  // Envelope ok=false is a dispatch failure; otherwise a child that exited 0 can
+  // still carry a worse-than-success outcome, which reads as error.
+  if (envelope(ev)?.ok === false) return "error";
+  const outcome = textValue(childResult(ev)?.outcome);
   return outcome && !SUCCESS_OUTCOMES.has(outcome) ? "error" : "done";
 }
 
@@ -121,9 +140,11 @@ function usageFor(ev: FabriEvent | undefined): Usage | undefined {
 }
 
 function childCost(ev: FabriEvent | undefined): number {
-  const result = childResult(ev);
   const usage = usageFor(ev);
-  return numberValue(usage?.cost_usd) || numberValue(usage?.total_cost_usd) || numberValue(result?.cost_usd);
+  const child = childResult(ev);
+  // Per-node COGS = the child's end-to-end cost. total_cost_usd includes its own
+  // grandchildren (matches fabri's parent rollup); nullish so an explicit 0 wins.
+  return firstNumber(usage?.total_cost_usd, usage?.cost_usd, child?.cost_usd) ?? 0;
 }
 
 function nodeStatus(current: AgentNode["status"], incoming: Handoff["status"]): AgentNode["status"] {
@@ -153,7 +174,10 @@ export function buildAgencyGraph(events: FabriEvent[], managerLabel?: string): A
     const source = finish ?? begin;
     if (!isAgentHandoff(source)) return;
     const label = labelFor(source.type === EventType.TOOL_CALL ? source : begin);
-    const id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "sub-agent";
+    // Namespace specialist ids so one literally labeled "Manager" can't collide
+    // with the reserved root node id.
+    const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "sub-agent";
+    const id = `agent-${slug}`;
     const status = handoffStatus(finish);
     const costUsd = childCost(finish);
     const usage = usageFor(finish);
