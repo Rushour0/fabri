@@ -53,3 +53,4 @@ jobs:
           cache-dependency-path: examples/studio/package-lock.json
       - run: npm ci
       - run: npm run build
+      - run: npm test
