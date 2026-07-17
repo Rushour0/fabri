@@ -4,6 +4,36 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.13.1 — 2026-07-18
+
+### Fabri Studio: "Company" agency-graph view (example)
+
+Studio's timeline showed a run linearly but never *which agent delegated to
+which*. The new **Company** tab renders a run as a little company — the manager
+and its specialist sub-agents as emoji-avatar characters, the tasks they hand
+off, and a live payroll (COGS) counter — in two toggleable skins over one data
+layer: a playful **Office** view (a document animates along each handoff while
+it runs; agents light up idle → running → done/error) and a precise **Org
+chart** view (node cards with status pill, cost, and tokens; edges labeled by
+the handed-over task). A `Timeline | Company` toggle is also wired into the
+read-only run replay.
+
+It is derived **entirely client-side from the trace events Studio already
+streams** — no service or Python changes, no new runtime dependencies. An agent
+invoked more than once (a verify → repair → verify loop) dedupes to one node
+with an ×N badge summing its cost and tokens, while per-call edges keep each
+attempt's individual pass/fail.
+
+### Fix: read the nested tool-result envelope in the agency graph
+
+The graph read a `tool_call`'s `result` one level too shallow. A tool's result
+is the canonical envelope `{ok, result, error}` (`fabri.tools.result`), with the
+sub-agent's own return — `session_id`, `outcome`, `usage` — nested under
+`result`. Reading it flat made static `tools.agents[]` specialists disappear
+from the graph on real traces and dynamic sub-agents show `$0`/wrong status.
+Now split into envelope-vs-child, with 15 unit tests (`vitest`) pinning the
+contract and wired into the `studio-example` CI job.
+
 ## 0.13.0 — 2026-07-15
 
 ### Fix: cached tokens no longer double-billed on OpenAI & Gemini
