@@ -4,6 +4,29 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.14.0 — 2026-07-18
+
+### Agency distribution: `fabri new agency`, `fabri studio`, examples in the wheel
+
+Turn `pip install fabri` into a from-zero path to running and *watching* a multi-agent
+agency — driven entirely by the CLI, so any AI coding tool (Claude Code, Codex, Grok
+Build, Hermes) can use it via thin wrappers rather than bespoke integrations.
+
+- **`fabri new agency <name> --template bug-crew|changelog|blank`** scaffolds a working
+  agency (parent + specialist configs + a sandboxed workspace fixture + README) with
+  paths correct for how fabri resolves them. No Claude Code required.
+- **`fabri studio`** serves the bundled Studio UI and the run API from one same-origin
+  server (no Vite proxy) — `pip install "fabri[sqlite]" && fabri studio` opens the
+  Company view. Static serving is opt-in, so `fabri serve` is unchanged; a missing-assets
+  build gives an actionable message.
+- **Example agencies ship in the wheel** (`fabri examples` / `fabri examples --copy <dir>`),
+  including dotfiles like `workspace/.gitignore`, with no stray bytecode.
+- **Portable skill layer**: `skills/agency-builder/` is the one canonical, path-relative
+  source, with thin per-platform briefs (`briefs/{codex,grok,hermes}.md`) that all drive
+  the CLI.
+- CI/release build the Studio assets, sync the bundled payloads, and assert the wheel's
+  contents (Studio index+assets, example dotfile, no `.pyc`) before publishing.
+
 ## 0.13.2 — 2026-07-18
 
 ### Fabri Studio Company view: line icons + richer info-flow, and a second example agency
