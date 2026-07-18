@@ -9,9 +9,11 @@ import sys
 import uuid
 
 from fabri.admin import AdminAuthError, describe_config, render_dashboard, require_admin
-from fabri.agency_scaffold import agency_next_steps, scaffold_agency
+from fabri.agency_registry import resolve_source
+from fabri.agency_scaffold import _slug, agency_next_steps, scaffold_agency, write_template
 from fabri.agency_templates import TEMPLATES as AGENCY_TEMPLATES
 from fabri.config import ConfigError, load_config
+from fabri.company import company_next_steps, compile_company
 from fabri.core.agent import run_agent
 from fabri.core.llm import LLMUsage
 from fabri.core.logging_setup import configure_logging
@@ -665,17 +667,50 @@ def cmd_tool_init(args: argparse.Namespace) -> None:
 
 
 def cmd_new_agency(args: argparse.Namespace) -> None:
-    """Scaffold a fixed multi-agent agency from a bundled template."""
+    """Scaffold a multi-agent agency from a bundled template or registry source."""
     try:
-        created = scaffold_agency(args.name, args.template, args.dest)
+        if args.from_source:
+            files, readme, entry = resolve_source(args.from_source)
+            if not args.name or Path(args.name).name != args.name or args.name in {".", ".."}:
+                raise ValueError("agency name must be a single directory name")
+            agency_dir = Path(args.dest) / args.name
+            if agency_dir.exists():
+                raise FileExistsError(f"destination already exists: {agency_dir}")
+            created = write_template(
+                agency_dir,
+                files,
+                readme,
+                run_from=str(Path.cwd()),
+                slug=_slug(args.name),
+            )
+        else:
+            created = scaffold_agency(args.name, args.template, args.dest)
+            entry = "agent.openai.yaml"
     except (OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
-    print(f"Scaffolded {args.template!r} agency {args.name!r}:")
+    source = args.from_source or args.template
+    print(f"Scaffolded {source!r} agency {args.name!r}:")
     for path in created:
         print(f"  + {path}")
-    print("\n" + agency_next_steps(args.name, args.dest))
+    print("\n" + agency_next_steps(args.name, args.dest, entry))
+
+
+def cmd_company_compile(args: argparse.Namespace) -> None:
+    """Compile a company.toml into nested manager and agency configs."""
+    try:
+        root_config = compile_company(args.company_toml, args.dest)
+    except (OSError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    company_dir = root_config.parent
+    print(f"Compiled company into {company_dir}:")
+    for path in sorted(company_dir.rglob("*")):
+        if path.is_file():
+            print(f"  + {path}")
+    print("\n" + company_next_steps(root_config))
 
 
 def _build_enrichment_llm():
@@ -1338,8 +1373,22 @@ def main() -> None:
         help="Agency template (default: bug-crew)",
     )
     p_new_agency.add_argument(
+        "--from",
+        dest="from_source",
+        default=None,
+        help="Registry source: a local path or gh:owner/repo/subpath[@ref]",
+    )
+    p_new_agency.add_argument(
         "--dest", default=".", help="Parent directory (default: current directory)")
     p_new_agency.set_defaults(func=cmd_new_agency)
+
+    p_company = sub.add_parser("company", help="Compile a declarative multi-level company")
+    company_sub = p_company.add_subparsers(dest="company_command", required=True)
+    p_company_compile = company_sub.add_parser(
+        "compile", help="Compile company.toml into nested agent configs")
+    p_company_compile.add_argument("company_toml", help="Path to company.toml")
+    p_company_compile.add_argument("--dest", default=".", help="Output parent directory (default: current directory)")
+    p_company_compile.set_defaults(func=cmd_company_compile)
 
     # B5: prompt-kit — scaffold a new agent prompt from the proven skeleton.
     p_prompt = sub.add_parser("prompt", help="Prompt-related helpers (scaffold a new agent prompt)")

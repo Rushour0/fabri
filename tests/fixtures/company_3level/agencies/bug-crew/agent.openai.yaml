@@ -1,0 +1,13 @@
+agent:
+  name: bug-manager
+tools:
+  sandbox_root: __AGENCY_ROOT__/workspace
+  enabled: [bug-specialist]
+  agents:
+    - name: bug-specialist
+      description: Triage bugs.
+      config: __AGENCY_ROOT__/specialist.yaml
+memory:
+  backend: sqlite
+  collection: __AGENCY_SLUG___manager
+  sqlite_path: __AGENCY_ROOT__/.fabri/__AGENCY_SLUG__.db

@@ -1,0 +1,30 @@
+[company]
+name = "acme-eng"
+title = "Acme Engineering"
+positioning = "A compact engineering company for reliable delivery."
+max_cost_usd = 5.00
+memory_namespace = "acme_eng"
+
+[[node]]
+id = "ceo"
+report_to = ""
+title = "Chief of Staff"
+prompt = "You direct the company. Delegate to your reports and synthesize."
+
+[[node]]
+id = "vp_eng"
+report_to = "ceo"
+title = "VP Engineering"
+prompt = "You run engineering. Delegate to your crews."
+
+[[node]]
+id = "bugs"
+report_to = "vp_eng"
+agency = "agencies/bug-crew"
+title = "Bug Triage Crew"
+
+[[node]]
+id = "writer"
+report_to = "vp_eng"
+agency = "agencies/writer-crew"
+title = "Writer Crew"

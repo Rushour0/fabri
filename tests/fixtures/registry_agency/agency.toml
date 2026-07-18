@@ -1,0 +1,5 @@
+[agency]
+name = "sample"
+title = "Sample Registry Agency"
+tagline = "A minimal registry fixture."
+entry = "agent.openai.yaml"

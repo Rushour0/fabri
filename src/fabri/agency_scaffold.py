@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Mapping
 
 from fabri.agency_templates import TEMPLATES
 
@@ -35,11 +36,27 @@ def scaffold_agency(
         raise FileExistsError(f"destination already exists: {agency_dir}")
 
     template_data = TEMPLATES[template]
-    contents = dict(template_data["FILES"])
-    contents["README.md"] = template_data["README"]
+    return write_template(
+        agency_dir,
+        template_data["FILES"],
+        template_data["README"],
+        run_from=str(Path.cwd()),
+        slug=_slug(name),
+    )
+
+
+def write_template(
+    agency_dir: Path,
+    files: Mapping[str, str],
+    readme: str,
+    *,
+    run_from: str,
+    slug: str,
+) -> list[Path]:
+    """Write template files after substituting agency-specific placeholders."""
+    contents = dict(files)
+    contents["README.md"] = readme
     prefix = str(agency_dir)
-    run_from = str(Path.cwd())
-    slug = _slug(name)
     created: list[Path] = []
 
     for relative_name, raw_content in contents.items():
@@ -59,7 +76,11 @@ def scaffold_agency(
     return created
 
 
-def agency_next_steps(name: str, dest: str | Path) -> str:
+def agency_next_steps(
+    name: str,
+    dest: str | Path,
+    entry: str = "agent.openai.yaml",
+) -> str:
     """Return the commands that start a newly scaffolded agency and Studio."""
-    config = Path(dest) / name / "agent.openai.yaml"
+    config = Path(dest) / name / entry
     return f"Now run:\n  fabri serve --config {config}\n  fabri studio"
