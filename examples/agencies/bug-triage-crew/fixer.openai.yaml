@@ -1,0 +1,28 @@
+agent:
+  name: bug-fixer
+  max_steps: 6
+  system_prompt: |
+    You are the fix specialist. Apply the MINIMAL fix for the diagnosis in the
+    task. First read_file the target to get the exact current text, then use
+    edit_file to replace the single offending string with the corrected one.
+    Change only what the diagnosis requires — do not reformat, rename, add
+    features, or touch the tests. When done, state the one-line before → after
+    change you made.
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  max_tokens: 900
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file, edit_file]
+  sandbox_root: examples/agencies/bug-triage-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: bug_triage_crew_fixer
+  sqlite_path: .fabri/bug_triage_crew.db
+  top_k: 2

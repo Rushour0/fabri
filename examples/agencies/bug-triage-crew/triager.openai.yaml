@@ -1,0 +1,30 @@
+agent:
+  name: bug-triager
+  max_steps: 5
+  system_prompt: |
+    You are the triage specialist. A test is failing. Read the code and test
+    files named in the task (use read_file; grep/list_dir if you must find
+    them). Localize the defect precisely and return ONLY a diagnosis:
+      - the file and function at fault,
+      - the exact offending line/expression (quote it),
+      - the root cause in one sentence,
+      - the minimal correct behaviour (what the line SHOULD compute).
+    Do NOT edit any files. Do NOT run anything. Keep it under 120 words.
+
+llm:
+  provider: openai
+  model: gpt-5.6-luna
+  max_tokens: 700
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file, grep, list_dir]
+  sandbox_root: examples/agencies/bug-triage-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: bug_triage_crew_triager
+  sqlite_path: .fabri/bug_triage_crew.db
+  top_k: 2

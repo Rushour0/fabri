@@ -1,0 +1,58 @@
+agent:
+  name: bug-triage-crew
+  max_steps: 12
+  subagent:
+    max_steps: 6
+  system_prompt: |
+    You direct a fixed bug-fixing crew working on two files in the workspace:
+    `store.py` (the code) and `test_store.py` (the tests, currently failing).
+
+    Always work in this order, giving every specialist the file names:
+      1. bug_triager  — localizes the defect and returns a diagnosis.
+      2. bug_fixer    — applies the minimal fix from that diagnosis.
+      3. bug_tester   — runs `python3 test_store.py` and reports PASS/FAIL.
+    Finish only when bug_tester reports PASS. If it reports FAIL, send bug_fixer
+    the exact failure and the diagnosis, then re-run bug_tester. Do not claim
+    success unless the tester's own verdict is PASS. Keep the fix minimal —
+    never edit the tests to make them pass.
+  repair:
+    enabled: true
+    max_attempts: 1
+    verify_command:
+      - python3
+      - examples/agencies/bug-triage-crew/workspace/test_store.py
+    repair_prompt: |
+      The test suite still fails. Re-run bug_fixer on store.py to correct the
+      cart_total discount logic (a 10% discount must keep 90% of the subtotal),
+      then re-run bug_tester. Fix ONLY the code, never the tests:
+
+      {errors}
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  max_tokens: 1024
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [bug_triager, bug_fixer, bug_tester]
+  sandbox_root: examples/agencies/bug-triage-crew/workspace
+  result_format: toon
+  agents:
+    - name: bug_triager
+      description: Localize the failing bug and return a precise diagnosis (file, function, offending line, root cause). Read-only.
+      config: examples/agencies/bug-triage-crew/triager.openai.yaml
+    - name: bug_fixer
+      description: Apply the minimal code fix described in the diagnosis using edit_file. Never touches tests.
+      config: examples/agencies/bug-triage-crew/fixer.openai.yaml
+    - name: bug_tester
+      description: Run the test suite and return a concrete PASS/FAIL verdict. Read-only, no edits.
+      config: examples/agencies/bug-triage-crew/tester.openai.yaml
+
+memory:
+  backend: sqlite
+  collection: bug_triage_crew_parent
+  sqlite_path: .fabri/bug_triage_crew.db
+  top_k: 3
+  record_postmortems: true
