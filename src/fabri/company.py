@@ -104,6 +104,36 @@ def load_company(path: str | Path) -> dict:
     return data
 
 
+def company_org(path: str | Path) -> dict:
+    """Return a UI-ready organization chart for a validated company TOML."""
+    data = load_company(path)
+    company = data["company"]
+    nodes: list[dict] = data["node"]
+    children: dict[str, list[str]] = {node["id"]: [] for node in nodes}
+    for node in nodes:
+        if node["report_to"]:
+            children[node["report_to"]].append(node["id"])
+
+    return {
+        "name": company["name"],
+        "title": company.get("title") or company["name"],
+        "positioning": company.get("positioning", ""),
+        "max_cost_usd": company.get("max_cost_usd"),
+        "root_id": next(node["id"] for node in nodes if node["report_to"] == ""),
+        "nodes": [
+            {
+                "id": node["id"],
+                "title": node.get("title") or node["id"],
+                "kind": "crew" if "agency" in node else "manager",
+                "report_to": node["report_to"],
+                "agency": Path(node["agency"]).name if "agency" in node else None,
+                "children": children[node["id"]],
+            }
+            for node in nodes
+        ],
+    }
+
+
 def _entry_path(agency_dir: Path, entry: str) -> Path:
     relative = Path(entry)
     if relative.is_absolute() or ".." in relative.parts:

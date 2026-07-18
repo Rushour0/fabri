@@ -23,6 +23,7 @@ fabri imports, no websockets dependency. Three endpoints:
 - ``GET  /fleets``          ``{"fleets": [...]}`` -- fleet roll-ups.
 - ``GET  /fleets/<id>``     one fleet's member statuses + summed COGS.
 - ``GET  /health``          ``{"status": "ok"}``.
+- ``GET  /company``         ``{"company": {...} | null}`` -- served company org chart.
 
 Built on :class:`http.server.ThreadingHTTPServer` so a streaming ``events``
 request doesn't block a concurrent ``POST /runs``.
@@ -87,6 +88,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path in ("/questions", "/questions/"):
             self._send_json(200, {"questions": self.service.list_pending_questions()})
+            return
+        if self.path in ("/company", "/company/"):
+            self._send_json(200, {"company": self.server.company})
             return
         if self.path in ("/fleets", "/fleets/"):
             self._send_json(200, {"fleets": self.service.list_fleets()})
@@ -232,7 +236,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/health", "/questions"))
+                   for prefix in ("/runs", "/fleets", "/health", "/questions", "/company"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
@@ -268,10 +272,12 @@ class FabriHTTPServer(ThreadingHTTPServer):
         service: FabriService,
         *,
         serve_studio: bool = False,
+        company: dict | None = None,
     ) -> None:
         super().__init__(address, _Handler)
         self.service = service
         self.serve_studio = serve_studio
+        self.company = company
 
 
 def serve_http(
@@ -280,10 +286,13 @@ def serve_http(
     host: str = "127.0.0.1",
     port: int = 8080,
     serve_studio: bool = False,
+    company: dict | None = None,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
     Returns the server so a caller can ``serve_forever()`` (the CLI does) or run
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
     """
-    return FabriHTTPServer((host, port), service, serve_studio=serve_studio)
+    return FabriHTTPServer(
+        (host, port), service, serve_studio=serve_studio, company=company
+    )

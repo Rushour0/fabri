@@ -10,7 +10,8 @@ import { RunReplay } from "./components/RunReplay";
 import { FleetView } from "./components/FleetView";
 import { AgencyGraph } from "./components/AgencyGraph";
 import { QuestionsInbox } from "./components/QuestionsInbox";
-import { listQuestions } from "./lib/api";
+import { CompanyOrgChart } from "./components/CompanyOrgChart";
+import { listQuestions, getCompany, type Company } from "./lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -96,6 +97,15 @@ export default function App() {
     };
   }, []);
 
+  // The served company's org structure (null when Studio is pointed at a single
+  // agency). Fetched once — a served config doesn't change over a session.
+  const [company, setCompany] = useState<Company | null>(null);
+  useEffect(() => {
+    getCompany()
+      .then(setCompany)
+      .catch(() => setCompany(null));
+  }, []);
+
   const openReplay = (sessionId: string, from: Surface) => {
     setReplayId(sessionId);
     setReplayFrom(from);
@@ -164,7 +174,13 @@ export default function App() {
           <RunReplay key={replayId} sessionId={replayId} onBack={() => setSurface(replayFrom)} />
         )}
         {surface === "company" && (
-          hasThread ? <AgencyGraph events={run.turns[activeIdx]?.events ?? []} /> : (
+          company ? (
+            // A whole company is served (`fabri studio --company`): draw its org
+            // chart from GET /company; overlay live status + cost when a run streams.
+            <CompanyOrgChart company={company} events={run.turns[activeIdx]?.events} />
+          ) : hasThread ? (
+            <AgencyGraph events={run.turns[activeIdx]?.events ?? []} />
+          ) : (
             <div className="agency-empty">Start a task in Conversation to watch your agency's agents work together.</div>
           )
         )}
