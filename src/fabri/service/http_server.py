@@ -29,13 +29,19 @@ request doesn't block a concurrent ``POST /runs``.
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import cast
+from urllib.parse import unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.service.service import FabriService
 
 logger = get_logger()
+
+STUDIO_ASSETS_DIR = Path(__file__).parent / "studio_assets"
 
 _EVENTS_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/events/?$")
 _RESULT_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/result/?$")
@@ -44,12 +50,21 @@ _CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/cancel/?$")
 _FLEET_RE = re.compile(r"^/fleets/([A-Za-z0-9_.-]+)/?$")
 
 
+def studio_assets_available() -> bool:
+    """Return whether this installation contains a built Studio bundle."""
+    return (STUDIO_ASSETS_DIR / "index.html").is_file()
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "fabri-serve/1"
 
     @property
     def service(self) -> FabriService:
-        return self.server.service  # type: ignore[attr-defined]
+        return cast("FabriHTTPServer", self.server).service
+
+    @property
+    def serve_studio(self) -> bool:
+        return cast("FabriHTTPServer", self.server).serve_studio
 
     def log_message(self, fmt: str, *args) -> None:  # quiet the default stderr spam
         logger.debug("fabri serve: " + fmt, *args)
@@ -86,6 +101,9 @@ class _Handler(BaseHTTPRequestHandler):
         m = _RESULT_RE.match(self.path)
         if m:
             self._send_result(m.group(1))
+            return
+        if self.serve_studio and not self._is_api_path(self.path):
+            self._send_studio_asset()
             return
         self._send_json(404, {"error": f"no route for GET {self.path}"})
 
@@ -206,6 +224,33 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, result)
 
+    @staticmethod
+    def _is_api_path(raw_path: str) -> bool:
+        path = urlsplit(raw_path).path.rstrip("/")
+        return any(path == prefix or path.startswith(f"{prefix}/")
+                   for prefix in ("/runs", "/fleets", "/health"))
+
+    def _send_studio_asset(self) -> None:
+        request_path = unquote(urlsplit(self.path).path).lstrip("/")
+        asset_path = (STUDIO_ASSETS_DIR / request_path).resolve()
+        assets_root = STUDIO_ASSETS_DIR.resolve()
+        if (asset_path == assets_root or assets_root not in asset_path.parents
+                or not asset_path.is_file()):
+            asset_path = STUDIO_ASSETS_DIR / "index.html"
+
+        try:
+            body = asset_path.read_bytes()
+        except OSError:
+            self._send_json(404, {"error": "Studio assets are not available"})
+            return
+
+        content_type, _ = mimetypes.guess_type(asset_path.name)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 
 class FabriHTTPServer(ThreadingHTTPServer):
     """Threading HTTP server carrying a :class:`FabriService`."""
@@ -213,17 +258,28 @@ class FabriHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], service: FabriService) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        service: FabriService,
+        *,
+        serve_studio: bool = False,
+    ) -> None:
         super().__init__(address, _Handler)
         self.service = service
+        self.serve_studio = serve_studio
 
 
 def serve_http(
-    service: FabriService, *, host: str = "127.0.0.1", port: int = 8080
+    service: FabriService,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    serve_studio: bool = False,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
     Returns the server so a caller can ``serve_forever()`` (the CLI does) or run
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
     """
-    return FabriHTTPServer((host, port), service)
+    return FabriHTTPServer((host, port), service, serve_studio=serve_studio)

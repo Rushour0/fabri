@@ -1119,6 +1119,38 @@ def cmd_serve(args: argparse.Namespace) -> None:
         service.close()
 
 
+def cmd_studio(args: argparse.Namespace) -> None:
+    """Start the HTTP service with the bundled Studio UI enabled."""
+    from fabri.service.http_server import serve_http, studio_assets_available
+    from fabri.service.service import FabriService
+
+    if not studio_assets_available():
+        print(
+            "Studio assets aren't bundled in this build — run "
+            "`npm --prefix examples/studio run build && python "
+            "scripts/sync_studio_assets.py`, or install a released wheel",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    service = FabriService(template_config=args.config, home_root=args.home_root)
+    server = serve_http(
+        service,
+        host=args.host,
+        port=args.port,
+        serve_studio=True,
+    )
+    bound_host, bound_port = server.server_address[0], server.server_address[1]
+    print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        service.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fabri")
     parser.add_argument(
@@ -1417,6 +1449,31 @@ def main() -> None:
     p_serve.add_argument("--home-root", dest="home_root", default=None,
                          help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)")
     p_serve.set_defaults(func=cmd_serve)
+
+    p_studio = sub.add_parser(
+        "studio",
+        help="Start Fabri Studio and its run API (default port 8080; collides with `fabri serve`)",
+    )
+    p_studio.add_argument(
+        "--config",
+        default=None,
+        help="Template agent.yaml; per-run overrides deep-merge onto it.",
+    )
+    p_studio.add_argument("--host", default="127.0.0.1",
+                          help="Bind host (default: 127.0.0.1)")
+    p_studio.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Bind port (default: 8080; collides with `fabri serve`; 0 = OS-assigned)",
+    )
+    p_studio.add_argument(
+        "--home-root",
+        dest="home_root",
+        default=None,
+        help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)",
+    )
+    p_studio.set_defaults(func=cmd_studio)
 
     args = parser.parse_args()
     try:
