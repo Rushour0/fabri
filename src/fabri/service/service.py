@@ -277,6 +277,23 @@ class FabriService:
                 f"no pending question {question_id!r} for session {session_id!r}"
             )
 
+    def list_pending_questions(self) -> list[dict]:
+        """Return every pending ask_user question across live runs, oldest first."""
+        questions: list[dict] = []
+        for session_id, listener in self._asks.items():
+            meta = self._meta.get(session_id, {})
+            for question in listener.pending_questions():
+                entry = {
+                    **question,
+                    "session_id": session_id,
+                    "task": meta.get("task"),
+                }
+                for key in ("label", "thread_id", "fleet_id"):
+                    if meta.get(key) is not None:
+                        entry[key] = meta[key]
+                questions.append(entry)
+        return sorted(questions, key=lambda question: question["asked_ts"])
+
     def _close_ask(self, session_id: str) -> None:
         listener = self._asks.pop(session_id, None)
         if listener is not None:

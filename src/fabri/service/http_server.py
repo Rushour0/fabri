@@ -7,6 +7,7 @@ fabri imports, no websockets dependency. Three endpoints:
                             ``{"session_id": ...}``. Launches the agent.
 - ``GET  /runs``            ``{"sessions": [...]}`` -- history of every known
                             run (survives restart; see ``list_sessions``).
+- ``GET  /questions``       ``{"questions": [...]}`` -- pending ask_user inbox.
 - ``GET  /runs/<id>/events`` Server-Sent Events: one ``data:`` frame per trace
                             event (the live :mod:`fabri.events` vocabulary),
                             then a terminal ``event: result`` frame carrying the
@@ -83,6 +84,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path in ("/runs", "/runs/"):
             self._send_json(200, {"sessions": self.service.list_sessions()})
+            return
+        if self.path in ("/questions", "/questions/"):
+            self._send_json(200, {"questions": self.service.list_pending_questions()})
             return
         if self.path in ("/fleets", "/fleets/"):
             self._send_json(200, {"fleets": self.service.list_fleets()})
@@ -228,7 +232,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/health"))
+                   for prefix in ("/runs", "/fleets", "/health", "/questions"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")

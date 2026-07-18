@@ -182,7 +182,16 @@ def test_service_ask_user_round_trip(tmp_path: Path, asking_agent: Path):
         assert ask_ev["options"] == ["yes", "no"]
         assert ask_ev["default"] == "no"
 
+        pending = svc.list_pending_questions()
+        assert len(pending) == 1
+        assert pending[0]["session_id"] == session_id
+        assert pending[0]["question"] == "Ship it?"
+        assert pending[0]["options"] == ["yes", "no"]
+        assert pending[0]["default"] == "no"
+        assert isinstance(pending[0]["asked_ts"], float)
+
         svc.answer(session_id, holder["qid"], "yes", selected_option="yes")
+        assert svc.list_pending_questions() == []
 
         result = svc.result(session_id, timeout=30)
         assert result["success"] is True
@@ -250,6 +259,20 @@ def test_http_answer_round_trip(tmp_path: Path, asking_agent: Path):
 
         # once the question surfaces, answer it over HTTP
         assert holder["asked"].wait(timeout=15), "no ask_user frame over SSE"
+
+        questions = http.client.HTTPConnection(host, port, timeout=30)
+        questions.request("GET", "/questions")
+        questions_resp = questions.getresponse()
+        assert questions_resp.status == 200
+        pending = json.loads(questions_resp.read().decode())["questions"]
+        questions.close()
+        assert len(pending) == 1
+        assert pending[0]["session_id"] == session_id
+        assert pending[0]["question"] == "Ship it?"
+        assert pending[0]["options"] == ["yes", "no"]
+        assert pending[0]["default"] == "no"
+        assert isinstance(pending[0]["asked_ts"], float)
+
         ans = http.client.HTTPConnection(host, port, timeout=30)
         ans.request("POST", f"/runs/{session_id}/answer",
                     body=json.dumps({"question_id": holder["qid"], "answer": "yes",
