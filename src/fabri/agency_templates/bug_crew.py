@@ -57,8 +57,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: bug_triage_crew_parent
-  sqlite_path: .fabri/bug_triage_crew.db
+  collection: __AGENCY_SLUG___parent
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 3
   record_postmortems: true
 ''',
@@ -89,8 +89,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: bug_triage_crew_triager
-  sqlite_path: .fabri/bug_triage_crew.db
+  collection: __AGENCY_SLUG___triager
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "fixer.openai.yaml": '''agent:
@@ -118,8 +118,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: bug_triage_crew_fixer
-  sqlite_path: .fabri/bug_triage_crew.db
+  collection: __AGENCY_SLUG___fixer
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "tester.openai.yaml": '''agent:
@@ -146,8 +146,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: bug_triage_crew_tester
-  sqlite_path: .fabri/bug_triage_crew.db
+  collection: __AGENCY_SLUG___tester
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "workspace/store.py": '''"""A tiny store module. Ships with one deliberate pricing bug for the crew.

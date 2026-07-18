@@ -4,6 +4,16 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.14.1 — 2026-07-18
+
+### Fix: scaffolded agencies get a unique memory collection
+
+`fabri new agency` templates hardcoded their memory `collection` / `sqlite_path`
+(e.g. `bug_triage_crew_parent`), so two agencies scaffolded from the same template
+shared one memory store and cross-contaminated. Templates now use an
+`__AGENCY_SLUG__` placeholder that the scaffolder fills from the agency name — e.g.
+`fabri new agency alpha` → `alpha_parent` / `.fabri/alpha.db`.
+
 ## 0.14.0 — 2026-07-18
 
 ### Agency distribution: `fabri new agency`, `fabri studio`, examples in the wheel

@@ -53,8 +53,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: changelog_release_notes_parent
-  sqlite_path: .fabri/changelog_release_notes.db
+  collection: __AGENCY_SLUG___parent
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 3
   record_postmortems: true
 ''',
@@ -80,8 +80,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: changelog_release_notes_researcher
-  sqlite_path: .fabri/changelog_release_notes.db
+  collection: __AGENCY_SLUG___researcher
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "writer.openai.yaml": '''agent:
@@ -109,8 +109,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: changelog_release_notes_writer
-  sqlite_path: .fabri/changelog_release_notes.db
+  collection: __AGENCY_SLUG___writer
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "verifier.openai.yaml": '''agent:
@@ -137,8 +137,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: changelog_release_notes_verifier
-  sqlite_path: .fabri/changelog_release_notes.db
+  collection: __AGENCY_SLUG___verifier
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "prompts/researcher.md": '''# Research specialist
