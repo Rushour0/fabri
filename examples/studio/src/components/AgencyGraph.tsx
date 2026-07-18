@@ -15,13 +15,13 @@ function statusSymbol(status: AgentNode["status"]): string | null {
   return status === "done" ? "✅" : status === "error" ? "❌" : null;
 }
 
-function OfficeAvatar({ node }: { node: AgentNode }) {
+function OfficeAvatar({ node, arriving }: { node: AgentNode; arriving?: boolean }) {
   const symbol = statusSymbol(node.status);
   return (
-    <div className={`office-agent office-agent--${node.status}`}>
+    <div className={`office-agent office-agent--${node.status}${arriving ? " office-agent--arriving" : ""}`}>
       <div className="office-agent__avatar" aria-label={`${node.label}: ${node.status}`}>
         <span>{node.emoji}</span>
-        {symbol && <span className="office-agent__result">{symbol}</span>}
+        {symbol && <span className="office-agent__result" key={node.status}>{symbol}</span>}
         {node.status === "running" && <span className="office-agent__thinking">···</span>}
       </div>
       <div className="office-agent__label">{node.label}</div>
@@ -32,7 +32,7 @@ function OfficeAvatar({ node }: { node: AgentNode }) {
   );
 }
 
-function AgencyOffice({ graph }: { graph: AgencyGraph }) {
+function AgencyOffice({ graph, arriving }: { graph: AgencyGraph; arriving: Set<string> }) {
   const manager = graph.nodes[0];
   const specialists = graph.nodes.slice(1);
   const runningTargets = new Set(graph.edges.filter((edge) => edge.status === "running").map((edge) => edge.toId));
@@ -40,13 +40,30 @@ function AgencyOffice({ graph }: { graph: AgencyGraph }) {
     <section className="office" aria-label="Office view">
       <div className="office-manager"><OfficeAvatar node={manager} /></div>
       <div className="office-team">
-        {specialists.map((node) => (
-          <div className={`office-team__desk${node.parallelGroup ? " office-team__desk--concurrent" : ""}`} key={node.id}>
-            <span className="office-team__connector" aria-hidden />
-            {runningTargets.has(node.id) && <span className="office-team__document" aria-hidden>📄</span>}
-            <OfficeAvatar node={node} />
-          </div>
-        ))}
+        {specialists.map((node) => {
+          const isArriving = arriving.has(node.id);
+          const isRunning = runningTargets.has(node.id);
+          // A document rides the wire while a handoff runs (dynamic sub-agents)
+          // OR once, on arrival, so static specialists still show the flow.
+          const flowing = isRunning || isArriving;
+          return (
+            <div
+              className={`office-team__desk${node.parallelGroup ? " office-team__desk--concurrent" : ""}${flowing ? " office-team__desk--flowing" : ""}`}
+              key={node.id}
+            >
+              <span className="office-team__connector" aria-hidden />
+              {flowing && (
+                <span
+                  className={`office-team__document${isArriving && !isRunning ? " office-team__document--deliver" : ""}`}
+                  aria-hidden
+                >
+                  📄
+                </span>
+              )}
+              <OfficeAvatar node={node} arriving={isArriving} />
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -106,6 +123,26 @@ export function AgencyGraph({ events, managerLabel }: { events: FabriEvent[]; ma
   const [view, setView] = useState<"office" | "org">("office");
   const previousPayroll = useRef(graph.payrollUsd);
   const [coinDropping, setCoinDropping] = useState(false);
+  // Nodes that have appeared before — a newly-seen agent plays a one-shot
+  // "document delivered" beat so information flow is visible even for static
+  // specialists (which only enter the graph once they've finished).
+  const seen = useRef<Set<string>>(new Set());
+  const [arriving, setArriving] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const fresh = graph.nodes.filter((n) => n.kind !== "manager" && !seen.current.has(n.id)).map((n) => n.id);
+    if (fresh.length === 0) return;
+    fresh.forEach((id) => seen.current.add(id));
+    setArriving((prev) => new Set([...prev, ...fresh]));
+    const timeout = window.setTimeout(() => {
+      setArriving((prev) => {
+        const next = new Set(prev);
+        fresh.forEach((id) => next.delete(id));
+        return next;
+      });
+    }, 950);
+    return () => window.clearTimeout(timeout);
+  }, [graph.nodes]);
 
   useEffect(() => {
     if (graph.payrollUsd > previousPayroll.current) {
@@ -128,7 +165,7 @@ export function AgencyGraph({ events, managerLabel }: { events: FabriEvent[]; ma
       </header>
       {!graph.hasAnyHandoff ? (
         <p className="agency-empty">The manager hasn't brought anyone in yet — waiting for the team to get to work.</p>
-      ) : view === "office" ? <AgencyOffice graph={graph} /> : <AgencyOrgChart graph={graph} />}
+      ) : view === "office" ? <AgencyOffice graph={graph} arriving={arriving} /> : <AgencyOrgChart graph={graph} />}
     </section>
   );
 }

@@ -1300,13 +1300,27 @@ body {
 .org-edge--done { border-left-color: var(--ok); }
 .org-edge--error { border-left-color: var(--err); }
 
+/* An active handoff brightens its connector — visible even without motion. */
+.office-team__desk--flowing .office-team__connector,
+.office-team__desk--flowing .office-team__connector::before {
+  border-color: color-mix(in srgb, var(--text-dim) 55%, var(--border));
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .office-agent--running .office-agent__avatar { animation: office-pulse 1.5s var(--ease) infinite; }
+  .office-agent--arriving .office-agent__avatar { animation: office-pop .5s var(--ease); }
+  .office-agent__result { animation: office-stamp .42s var(--ease); }
+  /* Document loops along the wire while a handoff runs; plays once on arrival. */
   .office-team__document { animation: office-document 1.4s var(--ease) infinite; }
+  .office-team__document--deliver { animation: office-document .9s var(--ease) 1; }
+  .office-team__desk--flowing .office-team__connector::before { animation: office-flow 1.1s var(--ease) infinite; }
   .agency-payroll__coin--drop { animation: agency-coin-drop .54s var(--ease); }
   .org-node--running { animation: org-running 1.8s var(--ease) infinite; }
   @keyframes office-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(148,151,163,.35); } 65% { box-shadow: 0 0 0 7px transparent; } }
-  @keyframes office-document { 0% { transform: translateY(-10px); opacity: 0; } 20%, 75% { opacity: 1; } 100% { transform: translateY(38px); opacity: 0; } }
+  @keyframes office-pop { 0% { transform: scale(.6); opacity: 0; } 60% { transform: scale(1.08); } 100% { transform: scale(1); opacity: 1; } }
+  @keyframes office-stamp { 0% { transform: scale(0) rotate(-18deg); opacity: 0; } 70% { transform: scale(1.25) rotate(4deg); } 100% { transform: scale(1) rotate(0); opacity: 1; } }
+  @keyframes office-document { 0% { transform: translateY(-12px); opacity: 0; } 20%, 72% { opacity: 1; } 100% { transform: translateY(40px); opacity: 0; } }
+  @keyframes office-flow { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
   @keyframes agency-coin-drop { 0% { transform: translateY(-14px); opacity: 0; } 60% { transform: translateY(2px); } 100% { transform: translateY(0); opacity: 1; } }
   @keyframes org-running { 50% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-dim) 20%, transparent); } }
 }

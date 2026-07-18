@@ -203,6 +203,24 @@ describe("buildAgencyGraph — ids, parallelism, edge cases", () => {
   });
 });
 
+describe("role emoji mapping", () => {
+  const emojiOf = (role: string) => {
+    const g = buildAgencyGraph([
+      toolStarted(1, 0, "spawn_subagent", { role }),
+      agentCall(1, 0, "spawn_subagent", { total: 0.001 }, { args: { role } }),
+    ]);
+    return g.nodes.find((n) => n.kind === "specialist")!.emoji;
+  };
+  it("maps common crew roles to distinct icons", () => {
+    expect(emojiOf("bug_triager")).toBe("🔍");
+    expect(emojiOf("bug_fixer")).toBe("🔧");
+    expect(emojiOf("bug_tester")).toBe("🧪");
+    expect(emojiOf("market_researcher")).toBe("🧑‍🔬");
+    expect(emojiOf("release_writer")).toBe("✍️");
+    expect(emojiOf("something_unmapped")).toBe("🤖");
+  });
+});
+
 describe("humanizeAgentLabel", () => {
   it("titlecases snake, kebab, and camel forms", () => {
     expect(humanizeAgentLabel("release_writer")).toBe("Release Writer");
