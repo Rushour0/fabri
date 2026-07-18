@@ -4,6 +4,28 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.15.0 — 2026-07-18
+
+### Human-in-the-loop routing + an installable agency/company layer
+
+- **`fabri new agency --from <source>`** — scaffold an agency from a registry
+  directory: a local path or `gh:owner/repo/subpath[@ref]`. Reuses the bundled
+  templates' `__AGENCY_ROOT__/__AGENCY_SLUG__/__RUN_FROM__` placeholder contract,
+  so each install gets its own memory collection. Feeds the separate
+  [`fabri-rosters`](https://github.com/Rushour0/fabri-rosters) catalog.
+- **`fabri company compile <company.toml>`** — a first-class *company*: a flat
+  `company.toml` with `report_to` edges compiles to a nested tree of agent
+  configs (no runtime change — fabri already recurses through `tools.agents[]`).
+  Validated as a single-rooted tree; leaf agencies install from the registry.
+- **`fabri studio --company <company.toml>`** + **`GET /company`** — serve a whole
+  multi-level org in Studio; the Company tab draws its org chart (ceo → VPs →
+  crews) and overlays each node's live status + real per-node COGS during a run.
+- **Human-in-the-loop, dashboard-first.** A new Studio **Questions** inbox
+  collects every pending `ask_user` question across all live runs (`GET
+  /questions`), answerable inline — the run resumes on answer. Optional
+  `routing.slack` (off by default) also posts a question to a Slack channel/user.
+- Internal: consolidated the LLM/retrieval/runtime token + retry helpers.
+
 ## 0.14.1 — 2026-07-18
 
 ### Fix: scaffolded agencies get a unique memory collection
