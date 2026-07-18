@@ -13,7 +13,7 @@ from fabri.agency_registry import resolve_source
 from fabri.agency_scaffold import _slug, agency_next_steps, scaffold_agency, write_template
 from fabri.agency_templates import TEMPLATES as AGENCY_TEMPLATES
 from fabri.config import ConfigError, load_config
-from fabri.company import company_next_steps, compile_company
+from fabri.company import company_next_steps, company_org, compile_company
 from fabri.core.agent import run_agent
 from fabri.core.llm import LLMUsage
 from fabri.core.logging_setup import configure_logging
@@ -1168,12 +1168,30 @@ def cmd_studio(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    service = FabriService(template_config=args.config, home_root=args.home_root)
+    company = None
+    template_config = args.config
+    if args.company:
+        if args.config:
+            print("--company supplied; ignoring --config", file=sys.stderr)
+        import tempfile
+
+        try:
+            root = compile_company(
+                args.company, tempfile.mkdtemp(prefix="fabri-company-")
+            )
+            company = company_org(args.company)
+        except (OSError, ValueError) as exc:
+            print(f"company error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        template_config = str(root)
+
+    service = FabriService(template_config=template_config, home_root=args.home_root)
     server = serve_http(
         service,
         host=args.host,
         port=args.port,
         serve_studio=True,
+        company=company,
     )
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)
@@ -1507,6 +1525,11 @@ def main() -> None:
         "--config",
         default=None,
         help="Template agent.yaml; per-run overrides deep-merge onto it.",
+    )
+    p_studio.add_argument(
+        "--company",
+        default=None,
+        help="Company TOML to compile and serve as the Studio run template.",
     )
     p_studio.add_argument("--host", default="127.0.0.1",
                           help="Bind host (default: 127.0.0.1)")
