@@ -5,7 +5,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, TypeVar
 
 from fabri.events import EventType
 from fabri.memory.embeddings import embed
@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from fabri.tools.registry import ToolRegistry
 
 logger = logging.getLogger("fabri")
+
+_T = TypeVar("_T")
 
 
 def _emit_retrieval_event(session_id: str, payload: dict) -> None:
@@ -439,34 +441,26 @@ def _open_global_store(rcfg: "RetrievalConfig") -> QdrantMemoryStore | None:
         return None
 
 
-def _safe_global_count(global_store: QdrantMemoryStore | None) -> int:
+def _safe_global(
+    global_store: QdrantMemoryStore | None,
+    query: Callable[[QdrantMemoryStore], _T],
+    default: _T,
+    warning: str,
+) -> _T:
+    """Run `query` against the optional global tier, degrading to `default`.
+
+    The global tier is strictly additive (see `_open_global_store`): no global
+    store, or one that fails mid-call, subtracts its contribution and nothing
+    else — it must never abort the primary store's retrieval. `warning` is this
+    call site's own log line: the messages stay distinct because they are how a
+    degraded global tier is diagnosed from the logs."""
     if global_store is None:
-        return 0
+        return default
     try:
-        return global_store.count()
-    except Exception:  # noqa: BLE001
-        logger.warning("global_collection count() failed mid-call; treating as empty", exc_info=True)
-        return 0
-
-
-def _safe_global_dense(global_store: QdrantMemoryStore | None, vector: list[float], top_k: int) -> list[tuple[MemoryEntry, float]]:
-    if global_store is None:
-        return []
-    try:
-        return global_store.query_by_vector(vector, top_k=top_k)
-    except Exception:  # noqa: BLE001
-        logger.warning("global_collection dense query failed; contributing zero candidates", exc_info=True)
-        return []
-
-
-def _safe_global_tag(global_store: QdrantMemoryStore | None, vector: list[float], top_k: int, tool_name: str) -> list[tuple[MemoryEntry, float]]:
-    if global_store is None:
-        return []
-    try:
-        return global_store.query_by_vector(vector, top_k=top_k, tools_any=[tool_name])
-    except Exception:  # noqa: BLE001
-        logger.warning("global_collection tag-hit query failed; contributing zero candidates", exc_info=True)
-        return []
+        return query(global_store)
+    except Exception:  # noqa: BLE001 -- degrade to `default`, never abort retrieval
+        logger.warning(warning, exc_info=True)
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +493,10 @@ def _retrieve_inner(
     # this call, never changing build_memory_store's single-store contract.
     # Any failure degrades to "no global tier" (see _open_global_store).
     global_store = _open_global_store(rcfg)
-    global_count = _safe_global_count(global_store)
+    global_count = _safe_global(
+        global_store, lambda s: s.count(), 0,
+        "global_collection count() failed mid-call; treating as empty",
+    )
 
     # Cold store: skip the embed call so a fresh `fabri init` + first
     # `fabri run` doesn't load the 44MB sentence-transformers model. Only
@@ -533,7 +530,10 @@ def _retrieve_inner(
     # independently (that would inflate guaranteed-slot representation past
     # top_k). Everything below this point is unchanged from the single-store
     # pipeline: it just sees a possibly-larger candidate list.
-    _global_dense_results = _safe_global_dense(global_store, vector, fetch_k)
+    _global_dense_results: list[tuple[MemoryEntry, float]] = _safe_global(
+        global_store, lambda s: s.query_by_vector(vector, top_k=fetch_k), [],
+        "global_collection dense query failed; contributing zero candidates",
+    )
     dense_results: list[tuple[MemoryEntry, float]] = sorted(
         list(store.query_by_vector(vector, top_k=fetch_k)) + _global_dense_results,
         key=lambda p: p[1], reverse=True,
@@ -617,7 +617,12 @@ def _retrieve_inner(
         # Global tier's tag hits merge into the SAME pre-reservation list —
         # the TAG_HIT_SCORE_FLOOR guaranteed-slot logic below then runs once
         # over the combined list, same top_k budget as always.
-        tag_results.extend(_safe_global_tag(global_store, vector, top_k, tool_name))
+        tag_results.extend(_safe_global(
+            global_store,
+            lambda s: s.query_by_vector(vector, top_k=top_k, tools_any=[tool_name]),
+            [],
+            "global_collection tag-hit query failed; contributing zero candidates",
+        ))
 
     success_results = sorted(
         [p for p in base_results if p[0].kind == "success_pattern"],
