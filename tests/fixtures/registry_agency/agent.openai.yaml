@@ -1,0 +1,7 @@
+agent:
+  name: sample-parent
+tools:
+  sandbox_root: __AGENCY_ROOT__/workspace
+memory:
+  collection: __AGENCY_SLUG___parent
+  sqlite_path: __AGENCY_ROOT__/.fabri/__AGENCY_SLUG__.db
