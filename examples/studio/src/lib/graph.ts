@@ -72,15 +72,28 @@ function textValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+// Role → emoji, matched by substring (first hit wins). Ordered most-specific
+// first so e.g. "test" beats the generic engineer bucket.
+const ROLE_EMOJI: [string[], string][] = [
+  [["triage", "localiz", "diagnos", "investigat"], "🔍"],
+  [["fix", "patch", "repair", "debug", "hotfix"], "🔧"],
+  [["research", "analy", "inspect"], "🧑‍🔬"],
+  [["writ", "author", "draft", "summ", "doc", "content"], "✍️"],
+  [["test", "qa"], "🧪"],
+  [["verif", "review", "check", "audit", "lint"], "🕵️"],
+  [["plan", "architect", "orchestrat", "coordinat"], "🗺️"],
+  [["design", "ux", "ui"], "🎨"],
+  [["deploy", "release", "ship", "publish"], "🚀"],
+  [["secur", "threat", "vuln"], "🛡️"],
+  [["data", "sql", "etl"], "📊"],
+  [["code", "build", "engineer", "dev", "implement"], "🧑‍💻"],
+];
+
 function emojiFor(label: string): string {
   const value = label.toLowerCase();
-  if (value.includes("research") || value.includes("analy")) return "🧑‍🔬";
-  if (value.includes("writ") || value.includes("author") || value.includes("draft")) return "✍️";
-  if (["verif", "review", "qa", "check", "test"].some((part) => value.includes(part))) return "🕵️";
-  if (value.includes("plan") || value.includes("architect")) return "🗺️";
-  if (value.includes("design")) return "🎨";
-  if (["code", "build", "engineer", "dev"].some((part) => value.includes(part))) return "🧑‍💻";
-  if (value.includes("data")) return "📊";
+  for (const [parts, emoji] of ROLE_EMOJI) {
+    if (parts.some((part) => value.includes(part))) return emoji;
+  }
   return "🤖";
 }
 
