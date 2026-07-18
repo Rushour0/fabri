@@ -117,6 +117,38 @@ export async function listQuestions(): Promise<PendingQuestion[]> {
   return body.questions ?? [];
 }
 
+// ---- company org (GET /company) ----
+
+// One node in a served company's org chart. `kind: "manager"` is a generated
+// orchestrator; `"crew"` is a leaf agency. `id` equals the compiled agent name,
+// so a live run's handoffs can be matched to nodes by id.
+export interface CompanyNode {
+  id: string;
+  title: string;
+  kind: "manager" | "crew";
+  report_to: string;
+  agency: string | null; // the source agency name, for crew (leaf) nodes
+  children: string[];
+}
+
+export interface Company {
+  name: string;
+  title: string;
+  positioning: string;
+  max_cost_usd: number | null;
+  root_id: string;
+  nodes: CompanyNode[];
+}
+
+// The served company's org structure, or null when Studio is pointed at a single
+// agency (`--config`) rather than a company (`--company`).
+export async function getCompany(): Promise<Company | null> {
+  const res = await fetch("/company");
+  if (!res.ok) throw new Error(`get company failed (${res.status})`);
+  const body = await res.json();
+  return body.company ?? null;
+}
+
 // ---- fleets (POST/GET /fleets) ----
 
 export interface FleetItem {
