@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildAgencyGraph, type AgencyGraph, type AgentNode, type Handoff } from "../lib/graph";
+import { AgentIcon, CoinIcon, DocumentIcon, StatusIcon } from "../lib/agentIcons";
 import type { FabriEvent } from "../lib/events";
 
 function money(value: number): string {
@@ -11,17 +12,16 @@ function tokens(node: AgentNode): string | null {
   return `${node.inputTokens ?? 0} in / ${node.outputTokens ?? 0} out`;
 }
 
-function statusSymbol(status: AgentNode["status"]): string | null {
-  return status === "done" ? "✅" : status === "error" ? "❌" : null;
-}
-
 function OfficeAvatar({ node, arriving }: { node: AgentNode; arriving?: boolean }) {
-  const symbol = statusSymbol(node.status);
   return (
     <div className={`office-agent office-agent--${node.status}${arriving ? " office-agent--arriving" : ""}`}>
       <div className="office-agent__avatar" aria-label={`${node.label}: ${node.status}`}>
-        <span>{node.emoji}</span>
-        {symbol && <span className="office-agent__result" key={node.status}>{symbol}</span>}
+        <AgentIcon name={node.icon} size={node.kind === "manager" ? 28 : 24} className="office-agent__icon" />
+        {node.status !== "running" && node.status !== "idle" && (
+          <span className={`office-agent__result office-agent__result--${node.status}`} key={node.status}>
+            <StatusIcon status={node.status} />
+          </span>
+        )}
         {node.status === "running" && <span className="office-agent__thinking">···</span>}
       </div>
       <div className="office-agent__label">{node.label}</div>
@@ -57,7 +57,7 @@ function AgencyOffice({ graph, arriving }: { graph: AgencyGraph; arriving: Set<s
                   className={`office-team__document${isArriving && !isRunning ? " office-team__document--deliver" : ""}`}
                   aria-hidden
                 >
-                  📄
+                  <DocumentIcon />
                 </span>
               )}
               <OfficeAvatar node={node} arriving={isArriving} />
@@ -76,7 +76,7 @@ function NodeCard({ node, edge }: { node: AgentNode; edge?: Handoff }) {
   return (
     <article className={`org-node org-node--${node.status}`} title={tooltip}>
       <div className="org-node__head">
-        <span className="org-node__emoji" aria-hidden>{node.emoji}</span>
+        <span className="org-node__emoji" aria-hidden><AgentIcon name={node.icon} size={17} /></span>
         <span className="org-node__label">{node.label}</span>
         <span className={`org-status org-status--${node.status}`}>{node.status}</span>
       </div>
@@ -161,7 +161,7 @@ export function AgencyGraph({ events, managerLabel }: { events: FabriEvent[]; ma
           <button className={`agency-graph__view tab${view === "office" ? " tab--on" : ""}`} onClick={() => setView("office")}>Office</button>
           <button className={`agency-graph__view tab${view === "org" ? " tab--on" : ""}`} onClick={() => setView("org")}>Org chart</button>
         </div>
-        <div className="agency-payroll"><span className={coinDropping ? "agency-payroll__coin agency-payroll__coin--drop" : "agency-payroll__coin"}>🪙</span> payroll: <strong>{money(graph.payrollUsd)}</strong></div>
+        <div className="agency-payroll"><span className={coinDropping ? "agency-payroll__coin agency-payroll__coin--drop" : "agency-payroll__coin"}><CoinIcon /></span> payroll: <strong>{money(graph.payrollUsd)}</strong></div>
       </header>
       {!graph.hasAnyHandoff ? (
         <p className="agency-empty">The manager hasn't brought anyone in yet — waiting for the team to get to work.</p>

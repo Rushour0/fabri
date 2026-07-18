@@ -4,7 +4,8 @@ export interface AgentNode {
   id: string;
   label: string;
   kind: "manager" | "specialist";
-  emoji: string;
+  /** Role key for the Company-view icon set (see agentIcons.tsx). */
+  icon: string;
   status: "idle" | "running" | "done" | "error";
   costUsd: number;
   inputTokens?: number;
@@ -72,29 +73,29 @@ function textValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-// Role → emoji, matched by substring (first hit wins). Ordered most-specific
-// first so e.g. "test" beats the generic engineer bucket.
-const ROLE_EMOJI: [string[], string][] = [
-  [["triage", "localiz", "diagnos", "investigat"], "🔍"],
-  [["fix", "patch", "repair", "debug", "hotfix"], "🔧"],
-  [["research", "analy", "inspect"], "🧑‍🔬"],
-  [["writ", "author", "draft", "summ", "doc", "content"], "✍️"],
-  [["test", "qa"], "🧪"],
-  [["verif", "review", "check", "audit", "lint"], "🕵️"],
-  [["plan", "architect", "orchestrat", "coordinat"], "🗺️"],
-  [["design", "ux", "ui"], "🎨"],
-  [["deploy", "release", "ship", "publish"], "🚀"],
-  [["secur", "threat", "vuln"], "🛡️"],
-  [["data", "sql", "etl"], "📊"],
-  [["code", "build", "engineer", "dev", "implement"], "🧑‍💻"],
+// Role → icon key (rendered by agentIcons.tsx), matched by substring (first hit
+// wins). Ordered most-specific first so e.g. "test" beats the generic code bucket.
+const ROLE_ICONS: [string[], string][] = [
+  [["triage", "localiz", "diagnos", "investigat"], "triage"],
+  [["fix", "patch", "repair", "debug", "hotfix"], "fix"],
+  [["research", "analy", "inspect"], "research"],
+  [["writ", "author", "draft", "summ", "doc", "content"], "write"],
+  [["test", "qa"], "test"],
+  [["verif", "review", "check", "audit", "lint"], "verify"],
+  [["plan", "architect", "orchestrat", "coordinat"], "plan"],
+  [["design", "ux", "ui"], "design"],
+  [["deploy", "release", "ship", "publish"], "deploy"],
+  [["secur", "threat", "vuln"], "security"],
+  [["data", "sql", "etl"], "data"],
+  [["code", "build", "engineer", "dev", "implement"], "code"],
 ];
 
-function emojiFor(label: string): string {
+function iconFor(label: string): string {
   const value = label.toLowerCase();
-  for (const [parts, emoji] of ROLE_EMOJI) {
-    if (parts.some((part) => value.includes(part))) return emoji;
+  for (const [parts, key] of ROLE_ICONS) {
+    if (parts.some((part) => value.includes(part))) return key;
   }
-  return "🤖";
+  return "agent";
 }
 
 function labelFor(ev: FabriEvent): string {
@@ -178,7 +179,7 @@ export function buildAgencyGraph(events: FabriEvent[], managerLabel?: string): A
   let invocationOrder = 1;
 
   const manager: AgentNode = {
-    id: "manager", label: managerLabel ?? "Manager", kind: "manager", emoji: "🧑‍💼",
+    id: "manager", label: managerLabel ?? "Manager", kind: "manager", icon: "manager",
     status: "running", costUsd: 0, callCount: 1, order: 0,
   };
   nodes.set(manager.id, manager);
@@ -213,7 +214,7 @@ export function buildAgencyGraph(events: FabriEvent[], managerLabel?: string): A
       existing.parallelGroup ??= edge.parallelGroup;
     } else {
       nodes.set(id, {
-        id, label, kind: "specialist", emoji: emojiFor(label), status, costUsd,
+        id, label, kind: "specialist", icon: iconFor(label), status, costUsd,
         inputTokens: numberValue(usage?.input_tokens) || undefined,
         outputTokens: numberValue(usage?.output_tokens) || undefined,
         callCount: 1, parallelGroup: edge.parallelGroup, order: invocationOrder++,

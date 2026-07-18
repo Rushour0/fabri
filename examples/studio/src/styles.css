@@ -1255,7 +1255,7 @@ body {
 .agency-graph__view, .agency-replay__views .tab { border: 0; padding: 3px 7px; font-size: 10.5px; }
 .agency-payroll { display: flex; align-items: center; gap: 4px; color: var(--text-dim); font-family: var(--mono); font-size: 11px; }
 .agency-payroll strong { color: var(--text); font-size: 12px; }
-.agency-payroll__coin { display: inline-block; }
+.agency-payroll__coin { display: inline-flex; align-items: center; color: var(--text-dim); }
 .agency-empty { margin: 38px auto; max-width: 37ch; text-align: center; color: var(--text-dim); font-size: 13px; }
 
 .office { padding-top: 20px; text-align: center; }
@@ -1264,13 +1264,17 @@ body {
 .office-team__desk { position: relative; min-width: 104px; padding-top: 16px; }
 .office-team__connector { position: absolute; top: -27px; left: 50%; height: 37px; border-left: 1px solid var(--border-2); }
 .office-team__connector::before { content: ""; position: absolute; top: 0; left: -56px; width: 112px; border-top: 1px solid var(--border); }
-.office-team__document { position: absolute; z-index: 1; left: calc(50% - 10px); top: -24px; font-size: 15px; }
+.office-team__document { position: absolute; z-index: 1; left: calc(50% - 8px); top: -24px; display: grid; place-items: center; color: var(--text-dim); }
 .office-agent { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; color: var(--text-dim); }
-.office-agent__avatar { position: relative; display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--border-2); border-radius: 50%; background: var(--surface-2); font-size: 25px; }
+.office-agent__avatar { position: relative; display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--border-2); border-radius: 50%; background: var(--surface-2); }
+.office-agent__icon { color: var(--text); display: block; }
 .office-agent--idle { opacity: .58; }
 .office-agent--done .office-agent__avatar { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
 .office-agent--error .office-agent__avatar { border-color: color-mix(in srgb, var(--err) 55%, var(--border)); }
-.office-agent__result { position: absolute; right: -5px; bottom: -5px; padding: 1px; border-radius: 50%; background: var(--surface); font-size: 13px; }
+.office-agent__result { position: absolute; right: -5px; bottom: -5px; display: grid; place-items: center; border-radius: 50%; background: var(--surface); line-height: 0; }
+.office-agent__result svg { display: block; }
+.office-agent__result--done { color: var(--ok); }
+.office-agent__result--error { color: var(--err); }
 .office-agent__thinking { position: absolute; bottom: -16px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
 .office-agent__label { max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11.5px; font-weight: 600; }
 .office-agent__meta { color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; }
@@ -1286,7 +1290,7 @@ body {
 .org-node--done { border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
 .org-node--error { border-color: color-mix(in srgb, var(--err) 42%, var(--border)); }
 .org-node__head { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.org-node__emoji { font-size: 17px; }
+.org-node__emoji { display: inline-flex; color: var(--text); }
 .org-node__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11.5px; font-weight: 600; }
 .org-status { margin-left: auto; padding: 1px 5px; border: 1px solid var(--border-2); border-radius: 99px; color: var(--text-faint); font-family: var(--mono); font-size: 9px; text-transform: uppercase; }
 .org-status--done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
