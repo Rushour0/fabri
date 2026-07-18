@@ -90,7 +90,7 @@ describe("buildAgencyGraph — nested envelope contract", () => {
     const node = g.nodes.find((n) => n.label === "Market Researcher");
     expect(node).toBeDefined();
     expect(node!.costUsd).toBeCloseTo(0.0031, 6);
-    expect(node!.emoji).toBe("🧑‍🔬");
+    expect(node!.icon).toBe("research");
   });
 });
 
@@ -203,21 +203,21 @@ describe("buildAgencyGraph — ids, parallelism, edge cases", () => {
   });
 });
 
-describe("role emoji mapping", () => {
-  const emojiOf = (role: string) => {
+describe("role icon mapping", () => {
+  const iconOf = (role: string) => {
     const g = buildAgencyGraph([
       toolStarted(1, 0, "spawn_subagent", { role }),
       agentCall(1, 0, "spawn_subagent", { total: 0.001 }, { args: { role } }),
     ]);
-    return g.nodes.find((n) => n.kind === "specialist")!.emoji;
+    return g.nodes.find((n) => n.kind === "specialist")!.icon;
   };
-  it("maps common crew roles to distinct icons", () => {
-    expect(emojiOf("bug_triager")).toBe("🔍");
-    expect(emojiOf("bug_fixer")).toBe("🔧");
-    expect(emojiOf("bug_tester")).toBe("🧪");
-    expect(emojiOf("market_researcher")).toBe("🧑‍🔬");
-    expect(emojiOf("release_writer")).toBe("✍️");
-    expect(emojiOf("something_unmapped")).toBe("🤖");
+  it("maps common crew roles to distinct icon keys", () => {
+    expect(iconOf("bug_triager")).toBe("triage");
+    expect(iconOf("bug_fixer")).toBe("fix");
+    expect(iconOf("bug_tester")).toBe("test");
+    expect(iconOf("market_researcher")).toBe("research");
+    expect(iconOf("release_writer")).toBe("write");
+    expect(iconOf("something_unmapped")).toBe("agent");
   });
 });
 
