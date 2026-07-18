@@ -60,6 +60,26 @@ class LLMError(RuntimeError):
     provider traceback."""
 
 
+def _retry_cap(current: int, ceiling: int) -> int:
+    """The cap for the one-shot retry after a max_tokens truncation: double the
+    current cap, bounded by the provider's ceiling (which differs per backend --
+    see the two constants above -- so it stays a parameter). Single-sourced so
+    the doubling policy and the error message that reports it can't drift."""
+    return min(current * 2, ceiling)
+
+
+def _truncation_error(provider: str, cap: int, suffix: str = "") -> LLMError:
+    """The shared 'still truncated after the one retry' failure. Reaching this
+    means even `cap` wasn't enough: a tool_use block may carry partial/invalid
+    args and a cut-off text answer isn't a real final answer, so we fail loud
+    rather than dispatch garbage or report a half-answer as success."""
+    return LLMError(
+        f"{provider} response truncated at max_tokens even after retry to "
+        f"{cap}; raise llm.max_tokens "
+        f"or split this turn into smaller actions{suffix}"
+    )
+
+
 @dataclass
 class ToolCall:
     name: str
@@ -135,6 +155,37 @@ def _call_with_retry(fn: Callable, transient: tuple[type[Exception], ...], attem
                 logger.warning("llm call transient error (attempt %d/%d), retrying in %.1fs: %s", i + 1, attempts, delay, e)
                 time.sleep(delay)
     raise LLMError(f"llm call failed after {attempts} attempts: {last}") from last
+
+
+def _attr_int(src, name: str) -> int:
+    """Read a token count off an SDK usage object, coercing absent/None to 0.
+    `src` itself may be None (no usage on the response, or no discarded
+    truncated attempt to fold in), which reads as 0 too."""
+    if src is None:
+        return 0
+    return getattr(src, name, 0) or 0
+
+
+def _key_int(src, *keys: str) -> int:
+    """`_attr_int` for a nested dict payload (Bedrock's Converse response):
+    walk `keys`, coercing a missing/None link or leaf to 0."""
+    node = src
+    for k in keys:
+        if not node:
+            return 0
+        node = node.get(k)
+    return node or 0
+
+
+def _non_cached(prompt: int, cached: int) -> int:
+    """The prompt tokens billed at the full input rate. OpenAI's `prompt_tokens`
+    and Gemini's `prompt_token_count` INCLUDE the cached tokens as a subset,
+    unlike Anthropic's `input_tokens` which already excludes them. pricing.cost_for
+    charges cache_read at 0.10x ON TOP OF input_tokens, so leaving cached tokens
+    inside input_tokens double-bills them (~1.10x instead of 0.10x). Every
+    backend must hand pricing the NON-cached prompt here and put the rest in the
+    cache-read bucket -- the invariant pricing.cost_for documents."""
+    return max(0, prompt - cached)
 
 
 class ScriptedLLMBackend:
@@ -313,7 +364,7 @@ class AnthropicLLMBackend:
             # -- while still failing loud below if even the bigger cap truncates.
             # We never accept a truncated answer as success.
             if resp.stop_reason == "max_tokens":
-                retry_cap = min(self._max_tokens * 2, ANTHROPIC_MAX_TOKENS_CEILING)
+                retry_cap = _retry_cap(self._max_tokens, ANTHROPIC_MAX_TOKENS_CEILING)
                 if retry_cap > self._max_tokens:
                     logger.warning(
                         "anthropic response truncated at max_tokens=%d; retrying once at %d",
@@ -331,19 +382,16 @@ class AnthropicLLMBackend:
         # them so a run's trace shows whether the cache is hitting. A discarded
         # truncated attempt was still billed, so fold its tokens in -- COGS must
         # reflect what Anthropic charged, not just the kept response.
-        def _u(field: str, src) -> int:
-            return getattr(src, field, 0) or 0 if src is not None else 0
-
-        cache_create = (getattr(usage, "cache_creation_input_tokens", 0) or 0) + _u(
-            "cache_creation_input_tokens", truncated_attempt and truncated_attempt.usage
-        )
-        cache_read = (getattr(usage, "cache_read_input_tokens", 0) or 0) + _u(
-            "cache_read_input_tokens", truncated_attempt and truncated_attempt.usage
-        )
         t_usage = truncated_attempt.usage if truncated_attempt is not None else None
+        cache_create = _attr_int(usage, "cache_creation_input_tokens") + _attr_int(
+            t_usage, "cache_creation_input_tokens"
+        )
+        cache_read = _attr_int(usage, "cache_read_input_tokens") + _attr_int(
+            t_usage, "cache_read_input_tokens"
+        )
         call_usage = LLMUsage(
-            input_tokens=(usage.input_tokens or 0) + (_u("input_tokens", t_usage)),
-            output_tokens=(usage.output_tokens or 0) + (_u("output_tokens", t_usage)),
+            input_tokens=_attr_int(usage, "input_tokens") + _attr_int(t_usage, "input_tokens"),
+            output_tokens=_attr_int(usage, "output_tokens") + _attr_int(t_usage, "output_tokens"),
             cache_creation_input_tokens=cache_create,
             cache_read_input_tokens=cache_read,
             model=self._model,
@@ -359,16 +407,11 @@ class AnthropicLLMBackend:
             resp.stop_reason,
         )
 
-        # A response truncated at the token cap can't be trusted: a tool_use
-        # block may carry partial/invalid args, and a cut-off text answer is not
-        # a real final answer. We already retried once at a higher cap above, so
-        # reaching here means even that truncated -- fail rather than dispatch
-        # garbage or report a half-answer as success.
         if resp.stop_reason == "max_tokens":
-            raise LLMError(
-                f"anthropic response truncated at max_tokens even after retry to "
-                f"{min(self._max_tokens * 2, ANTHROPIC_MAX_TOKENS_CEILING)}; raise llm.max_tokens "
-                f"or split this turn into smaller actions (fewer/lighter tool calls)"
+            raise _truncation_error(
+                "anthropic",
+                _retry_cap(self._max_tokens, ANTHROPIC_MAX_TOKENS_CEILING),
+                " (fewer/lighter tool calls)",
             )
 
         # Claude can return several content blocks in one turn (reasoning text
@@ -549,7 +592,7 @@ class OpenAILLMBackend:
             # length truncation before failing the whole run; never accept a
             # truncated answer as success.
             if resp.choices[0].finish_reason == "length":
-                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                retry_cap = _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING)
                 if retry_cap > self._max_tokens:
                     logger.warning(
                         "openai response truncated at max_tokens=%d; retrying once at %d",
@@ -566,39 +609,25 @@ class OpenAILLMBackend:
         logger.info("openai call: model=%s latency=%.2fs finish=%s", self._model, elapsed, choice.finish_reason)
 
         if choice.finish_reason == "length":
-            raise LLMError(
-                f"openai response truncated at max_tokens even after retry to "
-                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
-                f"or split this turn into smaller actions"
-            )
+            raise _truncation_error("openai", _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING))
 
         oai_usage = getattr(resp, "usage", None)
         # Fold the discarded truncated attempt's tokens in -- it was still billed.
         t_usage = getattr(truncated_attempt, "usage", None) if truncated_attempt is not None else None
+        # OpenAI reports its cached tokens one level down, under
+        # prompt_tokens_details -- and as a SUBSET of prompt_tokens, so the
+        # prompt count goes through _non_cached before it reaches pricing.
+        oai_details = getattr(oai_usage, "prompt_tokens_details", None)
+        t_details = getattr(t_usage, "prompt_tokens_details", None)
 
-        # OpenAI's `prompt_tokens` INCLUDES cached prompt tokens
-        # (`prompt_tokens_details.cached_tokens` is a SUBSET of it), unlike
-        # Anthropic whose `input_tokens` already excludes them. pricing.cost_for
-        # charges cache_read at 0.10x ON TOP OF input_tokens, so leaving cached
-        # tokens inside input_tokens double-bills them (~1.10x instead of 0.10x).
-        # Subtract them out so input_tokens is the NON-cached prompt and the
-        # cache-read bucket carries the rest -- the invariant pricing.cost_for
-        # documents for every backend.
-        def _oai_prompt(u) -> int:
-            return (getattr(u, "prompt_tokens", 0) or 0) if u is not None else 0
-
-        def _oai_cached(u) -> int:
-            d = getattr(u, "prompt_tokens_details", None) if u is not None else None
-            return (getattr(d, "cached_tokens", 0) or 0) if d is not None else 0
-
-        cache_read = _oai_cached(oai_usage) + _oai_cached(t_usage)
-        non_cached_input = max(0, _oai_prompt(oai_usage) - _oai_cached(oai_usage)) + max(
-            0, _oai_prompt(t_usage) - _oai_cached(t_usage)
-        )
+        cache_read = _attr_int(oai_details, "cached_tokens") + _attr_int(t_details, "cached_tokens")
         call_usage = LLMUsage(
-            input_tokens=non_cached_input,
-            output_tokens=(getattr(oai_usage, "completion_tokens", 0) or 0)
-            + (getattr(t_usage, "completion_tokens", 0) or 0),
+            input_tokens=_non_cached(
+                _attr_int(oai_usage, "prompt_tokens"), _attr_int(oai_details, "cached_tokens")
+            )
+            + _non_cached(_attr_int(t_usage, "prompt_tokens"), _attr_int(t_details, "cached_tokens")),
+            output_tokens=_attr_int(oai_usage, "completion_tokens")
+            + _attr_int(t_usage, "completion_tokens"),
             cache_read_input_tokens=cache_read,
             model=self._model,
         )
@@ -793,7 +822,7 @@ class GeminiLLMBackend:
             # nuke a whole run. Retry ONCE at a higher cap on a MAX_TOKENS finish
             # before failing; never accept a truncated answer as success.
             if self._finish_reason(resp) == "MAX_TOKENS":
-                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                retry_cap = _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING)
                 if retry_cap > self._max_tokens:
                     logger.warning(
                         "gemini response truncated at max_tokens=%d; retrying once at %d",
@@ -810,26 +839,24 @@ class GeminiLLMBackend:
 
         # The discarded truncated attempt was still billed -- fold its tokens in
         # so COGS reflects what Google charged, not just the kept response.
-        def _um(src, field: str) -> int:
-            um = getattr(src, "usage_metadata", None) if src is not None else None
-            return getattr(um, field, 0) or 0 if um is not None else 0
+        # Gemini hangs its counts off `usage_metadata`, and its
+        # `prompt_token_count` INCLUDES `cached_content_token_count` (a subset),
+        # so the prompt count goes through _non_cached before it reaches pricing.
+        um = getattr(resp, "usage_metadata", None)
+        t_um = getattr(truncated_attempt, "usage_metadata", None)
 
-        # Gemini's `prompt_token_count` INCLUDES `cached_content_token_count`
-        # (a subset), unlike Anthropic whose input_tokens excludes cached tokens.
-        # Subtract so input_tokens is the non-cached prompt -- otherwise
-        # pricing.cost_for bills cached tokens at ~1.10x (full input + 0.10x read)
-        # instead of 0.10x. See the OpenAI backend for the same normalization.
-        g_cache_read = _um(resp, "cached_content_token_count") + _um(
-            truncated_attempt, "cached_content_token_count"
-        )
-        g_input = max(0, _um(resp, "prompt_token_count") - _um(resp, "cached_content_token_count")) + max(
-            0,
-            _um(truncated_attempt, "prompt_token_count")
-            - _um(truncated_attempt, "cached_content_token_count"),
+        g_cache_read = _attr_int(um, "cached_content_token_count") + _attr_int(
+            t_um, "cached_content_token_count"
         )
         call_usage = LLMUsage(
-            input_tokens=g_input,
-            output_tokens=_um(resp, "candidates_token_count") + _um(truncated_attempt, "candidates_token_count"),
+            input_tokens=_non_cached(
+                _attr_int(um, "prompt_token_count"), _attr_int(um, "cached_content_token_count")
+            )
+            + _non_cached(
+                _attr_int(t_um, "prompt_token_count"), _attr_int(t_um, "cached_content_token_count")
+            ),
+            output_tokens=_attr_int(um, "candidates_token_count")
+            + _attr_int(t_um, "candidates_token_count"),
             cache_read_input_tokens=g_cache_read,
             model=self._model,
         )
@@ -844,11 +871,7 @@ class GeminiLLMBackend:
         )
 
         if finish == "MAX_TOKENS":
-            raise LLMError(
-                f"gemini response truncated at max_tokens even after retry to "
-                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
-                f"or split this turn into smaller actions"
-            )
+            raise _truncation_error("gemini", _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING))
 
         # Walk the candidate's parts: collect text (reasoning prose when it
         # accompanies calls, the final answer otherwise) and function_calls.
@@ -1077,7 +1100,7 @@ class BedrockLLMBackend:
             # max_tokens truncation before failing; never accept a truncated
             # answer as success.
             if resp.get("stopReason") == "max_tokens":
-                retry_cap = min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)
+                retry_cap = _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING)
                 if retry_cap > self._max_tokens:
                     logger.warning(
                         "bedrock response truncated at max_tokens=%d; retrying once at %d",
@@ -1097,17 +1120,18 @@ class BedrockLLMBackend:
         stop_reason = resp.get("stopReason")
 
         # The discarded truncated attempt was still billed -- fold its tokens in.
-        # Cache keys may be absent on a usage dict, so .get-default them to 0.
-        def _u(src, key: str) -> int:
-            return ((src or {}).get("usage") or {}).get(key, 0) or 0
-
+        # Converse hands back a plain dict whose cache keys may be absent, hence
+        # _key_int. `inputTokens` already excludes cached tokens, so unlike the
+        # openai/gemini backends there is no _non_cached normalization here.
         call_usage = LLMUsage(
-            input_tokens=_u(resp, "inputTokens") + _u(truncated_attempt, "inputTokens"),
-            output_tokens=_u(resp, "outputTokens") + _u(truncated_attempt, "outputTokens"),
-            cache_read_input_tokens=_u(resp, "cacheReadInputTokens")
-            + _u(truncated_attempt, "cacheReadInputTokens"),
-            cache_creation_input_tokens=_u(resp, "cacheWriteInputTokens")
-            + _u(truncated_attempt, "cacheWriteInputTokens"),
+            input_tokens=_key_int(resp, "usage", "inputTokens")
+            + _key_int(truncated_attempt, "usage", "inputTokens"),
+            output_tokens=_key_int(resp, "usage", "outputTokens")
+            + _key_int(truncated_attempt, "usage", "outputTokens"),
+            cache_read_input_tokens=_key_int(resp, "usage", "cacheReadInputTokens")
+            + _key_int(truncated_attempt, "usage", "cacheReadInputTokens"),
+            cache_creation_input_tokens=_key_int(resp, "usage", "cacheWriteInputTokens")
+            + _key_int(truncated_attempt, "usage", "cacheWriteInputTokens"),
             model=self._model,
         )
         logger.info(
@@ -1123,11 +1147,7 @@ class BedrockLLMBackend:
         )
 
         if stop_reason == "max_tokens":
-            raise LLMError(
-                f"bedrock response truncated at max_tokens even after retry to "
-                f"{min(self._max_tokens * 2, MAX_TOKENS_RETRY_CEILING)}; raise llm.max_tokens "
-                f"or split this turn into smaller actions"
-            )
+            raise _truncation_error("bedrock", _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING))
         if stop_reason in _BEDROCK_FAILURE_STOP_REASONS:
             raise LLMError(
                 f"bedrock returned stopReason={stop_reason!r} (model={self._model}); "

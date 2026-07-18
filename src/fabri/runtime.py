@@ -2,6 +2,7 @@
 run_agent() needs. Used by both cli.py and tools/agent_runner_tool.py (the
 agent-as-tool adapter) so the two entry points build agents identically."""
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from fabri.config import DEFAULT_TOOLS_DIR
@@ -92,6 +93,19 @@ def _resolve_role_cfg(config: dict, role: str) -> dict | None:
     return roles.get(role)
 
 
+def _active_roles(config: dict) -> Iterator[tuple[str, dict]]:
+    """Yield (role, rcfg) for every role that will actually instantiate a
+    backend -- i.e. resolves to a config carrying a model. Roles that are
+    disabled, absent, or model-less are skipped, mirroring build_role_llm's
+    None return so pre-flight checks and the builders agree on which roles
+    are live."""
+    for role in ROLES:
+        rcfg = _resolve_role_cfg(config, role)
+        if rcfg is None or not rcfg.get("model"):
+            continue
+        yield role, rcfg
+
+
 def _instantiate(rcfg: dict, tool_defs: list[dict]):
     """Single point of provider dispatch -- adding a provider means a new
     Provider enum member (fabri.core.llm) plus one new branch here."""
@@ -177,10 +191,7 @@ def find_missing_role_api_keys(config: dict) -> dict[str, list[str]]:
     for the ones that aren't set in the current process environment. Empty
     dict means every required key is present."""
     needed: dict[str, list[str]] = {}
-    for role in ROLES:
-        rcfg = _resolve_role_cfg(config, role)
-        if rcfg is None or not rcfg.get("model"):
-            continue
+    for role, rcfg in _active_roles(config):
         env = rcfg.get("api_key_env")
         if not env:
             continue
@@ -198,10 +209,7 @@ def find_bedrock_roles_missing_region(config: dict) -> list[str]:
     if os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"):
         return []
     missing: list[str] = []
-    for role in ROLES:
-        rcfg = _resolve_role_cfg(config, role)
-        if rcfg is None or not rcfg.get("model"):
-            continue
+    for role, rcfg in _active_roles(config):
         if (rcfg.get("provider") or "").lower() == Provider.BEDROCK and not rcfg.get("aws_region"):
             missing.append(role)
     return missing
