@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { FabriEvent } from "../lib/events";
 
 // The manager pausing mid-run to ask the user something — the interactive core
@@ -13,10 +13,15 @@ export function AskUserCard({
   ev,
   onAnswer,
   disabled,
+  header,
 }: {
   ev: FabriEvent;
   onAnswer: (questionId: string, answer: string, selectedOption?: string) => Promise<void>;
   disabled?: boolean;
+  // Optional slot rendered at the top of the card. The cross-run Questions
+  // inbox uses it to name the source run + waiting age; the conversation
+  // surface passes nothing, so its card is unchanged.
+  header?: ReactNode;
 }) {
   const options = Array.isArray(ev.options) ? ev.options : undefined;
   const [text, setText] = useState(ev.default ?? "");
@@ -43,6 +48,7 @@ export function AskUserCard({
 
   return (
     <div className={"ask" + (disabled ? " ask--waiting" : "")}>
+      {header}
       <div className="ask__role">
         <span className="ask__dot" aria-hidden />
         <span className="ask__name">Manager needs your input</span>

@@ -95,6 +95,28 @@ export async function getResult(sessionId: string): Promise<RunResult> {
   return res.json();
 }
 
+// ---- questions inbox (GET /questions) ----
+
+// One ask_user question still awaiting a human answer, across every live run.
+export interface PendingQuestion {
+  question_id: string;
+  question: string;
+  options?: string[];
+  default?: string;
+  asked_ts: number; // epoch seconds when the agent asked
+  session_id: string; // the run to answer against
+  task?: string; // the source run's task line (its agency label)
+  label?: string; // fleet-item label, when the run belongs to a fleet
+}
+
+// Every pending ask_user question across all in-flight runs, oldest first.
+export async function listQuestions(): Promise<PendingQuestion[]> {
+  const res = await fetch("/questions");
+  if (!res.ok) throw new Error(`list questions failed (${res.status})`);
+  const body = await res.json();
+  return body.questions ?? [];
+}
+
 // ---- fleets (POST/GET /fleets) ----
 
 export interface FleetItem {
