@@ -10,6 +10,22 @@ agency as a configuration pattern, not a new fabri runtime: an orchestrator
 uses static agents-as-tools for fixed specialists; each specialist uses the
 normal step loop and JSON-manifest tools.
 
+## Use the CLI-first workflow
+
+From the fabri repository or project root, keep this skill as the canonical
+workflow and drive the public CLI instead of recreating its behavior:
+
+1. Run `fabri examples` to inspect the bundled agency starting points. Use
+   `fabri examples --copy <dir>` when a worked example is the right base.
+2. Run `fabri new agency <name> --template <template> --dest <dir>` to create
+   the agency. Edit the generated configs, prompts, tools, and verifier to
+   satisfy the completed frame below.
+3. Run `fabri serve --config <agency>/agent.yaml` for the agency service and
+   `fabri studio` for its reusable interface.
+
+Use the detailed rules below to review and adapt CLI output; do not replace the
+CLI with tool-specific scaffolding or runtime implementations.
+
 ## Frame before building
 
 Read [templates/agency-frame.md](templates/agency-frame.md). Ask for every
@@ -49,11 +65,12 @@ names. Keep the fixed kernel in [references/agency-kernel.md](references/agency-
 
 ## Ship a front-end: Fabri Studio
 
-Do not hand-roll a bespoke UI per agency. Point the reusable **Fabri Studio**
-(`examples/studio/`) at the agency's `agent.yaml` over `fabri serve`:
+Do not hand-roll a bespoke UI per agency. Point **Fabri Studio** at the
+agency's `agent.yaml` over the CLI:
 
-- Single-deliverable / conversational agencies: run `fabri --config
-  <agency>/agent.yaml serve`, then the Studio dev server. Studio streams the
+- Single-deliverable / conversational agencies: from the fabri repository or
+  project root, run `fabri serve --config <agency>/agent.yaml`, then `fabri
+  studio`. Studio streams the
   run's plan timeline, tool calls, `ask_user` questions, and a live COGS panel
   (per-model cost + budget) — the frame's reported metrics surface for free.
 - Fan-out agencies (one request → N per-item pipelines): use Studio's **Fleet**

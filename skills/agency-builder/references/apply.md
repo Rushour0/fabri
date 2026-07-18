@@ -41,12 +41,12 @@ root and use project-root-relative paths.
 
 ## Front-end: point Fabri Studio at the agency
 
-Reuse `examples/studio/` rather than building a per-agency UI:
+Use the fabri CLI rather than building a per-agency UI:
 
 ```text
 # single-deliverable / conversational agency
-fabri --config <agency>/agent.yaml serve            # terminal 1
-cd examples/studio && npm install && npm run dev     # terminal 2  → http://localhost:5173
+fabri serve --config <agency>/agent.yaml            # terminal 1
+fabri studio                                         # terminal 2
 ```
 
 Studio streams the run's plan timeline, tool calls, `ask_user` prompts, and a

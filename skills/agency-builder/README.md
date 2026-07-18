@@ -52,8 +52,24 @@ Install `fabri` with the embedded SQLite memory backend first (use
 python3 -m pip install -e '.[sqlite]'
 ```
 
-From the repository root, then inspect the assembled tools and roles without
-credentials:
+From the repository root, list or copy the bundled examples first:
+
+```bash
+fabri examples
+fabri examples --copy ./agency-examples
+```
+
+To start a new agency, use the canonical scaffold command, then serve it and
+open Studio through the CLI:
+
+```bash
+fabri new agency my-agency --template changelog --dest .
+fabri serve --config my-agency/agent.yaml
+fabri studio
+```
+
+To inspect the assembled tools and roles in the worked repository example
+without credentials:
 
 ```bash
 fabri --config examples/agencies/changelog-release-notes/agent.yaml run --dry-run \

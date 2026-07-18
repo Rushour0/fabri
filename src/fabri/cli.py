@@ -1,11 +1,16 @@
 import argparse
 import importlib.metadata
+import importlib.resources
 import json
 import os
+from pathlib import Path
+import shutil
 import sys
 import uuid
 
 from fabri.admin import AdminAuthError, describe_config, render_dashboard, require_admin
+from fabri.agency_scaffold import agency_next_steps, scaffold_agency
+from fabri.agency_templates import TEMPLATES as AGENCY_TEMPLATES
 from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
 from fabri.core.llm import LLMUsage
@@ -44,6 +49,53 @@ def cmd_init(args: argparse.Namespace) -> None:
         for rel in result["skipped"]:
             print(f"  . {rel}")
     print("\n" + next_steps(args.dir, template=template))
+
+
+def _copy_resource_tree(source: importlib.resources.abc.Traversable, dest: Path) -> None:
+    """Copy an importlib resource tree without assuming it is a real path."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        target = dest / child.name
+        if child.is_dir():
+            _copy_resource_tree(child, target)
+        else:
+            with child.open("rb") as source_file, target.open("wb") as dest_file:
+                shutil.copyfileobj(source_file, dest_file)
+
+
+def cmd_examples(args: argparse.Namespace) -> None:
+    """List bundled agencies or copy every example into a target directory."""
+    bundled = importlib.resources.files("fabri.examples.agencies")
+    agencies = sorted(
+        (
+            entry
+            for entry in bundled.iterdir()
+            if entry.is_dir() and not entry.name.startswith((".", "__"))
+        ),
+        key=lambda entry: entry.name,
+    )
+
+    if args.copy is None:
+        if not agencies:
+            print("No bundled example agencies found.")
+            return
+        for agency in agencies:
+            print(agency.name)
+        return
+
+    destination = Path(args.copy)
+    conflicts = [destination / agency.name for agency in agencies
+                 if (destination / agency.name).exists()]
+    if conflicts:
+        for conflict in conflicts:
+            print(f"Refusing to overwrite existing example: {conflict}", file=sys.stderr)
+        sys.exit(1)
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for agency in agencies:
+        target = destination / agency.name
+        _copy_resource_tree(agency, target)
+        print(f"Copied {agency.name} to {target}")
 
 
 def _require_api_key(api_key_env: str) -> None:
@@ -612,6 +664,20 @@ def cmd_tool_init(args: argparse.Namespace) -> None:
           f"`tools.manifest_dir` of your agent.yaml.")
 
 
+def cmd_new_agency(args: argparse.Namespace) -> None:
+    """Scaffold a fixed multi-agent agency from a bundled template."""
+    try:
+        created = scaffold_agency(args.name, args.template, args.dest)
+    except (OSError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Scaffolded {args.template!r} agency {args.name!r}:")
+    for path in created:
+        print(f"  + {path}")
+    print("\n" + agency_next_steps(args.name, args.dest))
+
+
 def _build_enrichment_llm():
     """B2: build an LLM backend for `tool new --from` schema enrichment, but
     ONLY when the default config's main-role API key is set. Returns None
@@ -1053,6 +1119,38 @@ def cmd_serve(args: argparse.Namespace) -> None:
         service.close()
 
 
+def cmd_studio(args: argparse.Namespace) -> None:
+    """Start the HTTP service with the bundled Studio UI enabled."""
+    from fabri.service.http_server import serve_http, studio_assets_available
+    from fabri.service.service import FabriService
+
+    if not studio_assets_available():
+        print(
+            "Studio assets aren't bundled in this build — run "
+            "`npm --prefix examples/studio run build && python "
+            "scripts/sync_studio_assets.py`, or install a released wheel",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    service = FabriService(template_config=args.config, home_root=args.home_root)
+    server = serve_http(
+        service,
+        host=args.host,
+        port=args.port,
+        serve_studio=True,
+    )
+    bound_host, bound_port = server.server_address[0], server.server_address[1]
+    print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        service.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fabri")
     parser.add_argument(
@@ -1075,6 +1173,13 @@ def main() -> None:
              "Non-default templates use the sqlite-vec backend (no docker required).",
     )
     p_init.set_defaults(func=cmd_init)
+
+    p_examples = sub.add_parser(
+        "examples", help="List bundled example agencies or copy them into a directory")
+    p_examples.add_argument(
+        "--copy", metavar="DIR", default=None,
+        help="Copy every bundled example agency into DIR")
+    p_examples.set_defaults(func=cmd_examples)
 
     p_run = sub.add_parser("run", help="Run the agent on a task")
     p_run.add_argument("task")
@@ -1220,6 +1325,22 @@ def main() -> None:
                             help="Directory holding the tool manifest (default: tools/agent_tools)")
     p_tool_run.set_defaults(func=cmd_tool_run)
 
+    p_new = sub.add_parser("new", help="Scaffold a new resource")
+    new_sub = p_new.add_subparsers(dest="new_command", required=True)
+
+    p_new_agency = new_sub.add_parser(
+        "agency", help="Scaffold a working multi-agent agency")
+    p_new_agency.add_argument("name", help="Directory name for the agency")
+    p_new_agency.add_argument(
+        "--template",
+        choices=sorted(AGENCY_TEMPLATES),
+        default="bug-crew",
+        help="Agency template (default: bug-crew)",
+    )
+    p_new_agency.add_argument(
+        "--dest", default=".", help="Parent directory (default: current directory)")
+    p_new_agency.set_defaults(func=cmd_new_agency)
+
     # B5: prompt-kit — scaffold a new agent prompt from the proven skeleton.
     p_prompt = sub.add_parser("prompt", help="Prompt-related helpers (scaffold a new agent prompt)")
     prompt_sub = p_prompt.add_subparsers(dest="prompt_command", required=True)
@@ -1328,6 +1449,31 @@ def main() -> None:
     p_serve.add_argument("--home-root", dest="home_root", default=None,
                          help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)")
     p_serve.set_defaults(func=cmd_serve)
+
+    p_studio = sub.add_parser(
+        "studio",
+        help="Start Fabri Studio and its run API (default port 8080; collides with `fabri serve`)",
+    )
+    p_studio.add_argument(
+        "--config",
+        default=None,
+        help="Template agent.yaml; per-run overrides deep-merge onto it.",
+    )
+    p_studio.add_argument("--host", default="127.0.0.1",
+                          help="Bind host (default: 127.0.0.1)")
+    p_studio.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Bind port (default: 8080; collides with `fabri serve`; 0 = OS-assigned)",
+    )
+    p_studio.add_argument(
+        "--home-root",
+        dest="home_root",
+        default=None,
+        help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)",
+    )
+    p_studio.set_defaults(func=cmd_studio)
 
     args = parser.parse_args()
     try:
