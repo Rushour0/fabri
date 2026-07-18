@@ -284,6 +284,15 @@ DEFAULT_CONFIG = {
         "otlp_insecure": False,       # allow plaintext (gRPC only)
         "service_name": "fabri",
     },
+    "routing": {
+        "slack": {
+            "enabled": False,
+            "bot_token_env": "SLACK_BOT_TOKEN",
+            "default_channel": None,
+            "default_user": None,
+            "studio_base_url": None,
+        },
+    },
 }
 
 
@@ -454,6 +463,10 @@ def _apply_env_overrides(cfg: dict) -> dict:
     - ``FABRI_OTLP_PROTOCOL`` -> ``observability.otlp_protocol`` ("http"|"grpc")
     - ``FABRI_OTLP_INSECURE`` -> ``observability.otlp_insecure`` (1/true/yes/on)
     - ``FABRI_OTLP_HEADERS`` -> ``observability.otlp_headers`` ("k=v,k2=v2")
+    - ``FABRI_SLACK_ENABLED`` -> ``routing.slack.enabled`` (1/true/yes/on)
+    - ``FABRI_SLACK_CHANNEL`` -> ``routing.slack.default_channel``
+    - ``FABRI_SLACK_USER`` -> ``routing.slack.default_user``
+    - ``FABRI_SLACK_STUDIO_URL`` -> ``routing.slack.studio_base_url``
     """
     out = cfg
 
@@ -487,6 +500,24 @@ def _apply_env_overrides(cfg: dict) -> dict:
     if obs_over:
         obs = {**(out.get("observability") or {}), **obs_over}
         out = {**out, "observability": obs}
+
+    slack_over: dict = {}
+    enabled = os.environ.get("FABRI_SLACK_ENABLED")
+    if enabled is not None:
+        slack_over["enabled"] = enabled.strip().lower() in ("1", "true", "yes", "on")
+    channel = os.environ.get("FABRI_SLACK_CHANNEL")
+    if channel:
+        slack_over["default_channel"] = channel
+    user = os.environ.get("FABRI_SLACK_USER")
+    if user:
+        slack_over["default_user"] = user
+    studio_url = os.environ.get("FABRI_SLACK_STUDIO_URL")
+    if studio_url:
+        slack_over["studio_base_url"] = studio_url
+    if slack_over:
+        routing = dict(out.get("routing") or {})
+        routing["slack"] = {**(routing.get("slack") or {}), **slack_over}
+        out = {**out, "routing": routing}
 
     return out
 

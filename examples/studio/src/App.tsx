@@ -9,6 +9,8 @@ import { HistoryList } from "./components/HistoryList";
 import { RunReplay } from "./components/RunReplay";
 import { FleetView } from "./components/FleetView";
 import { AgencyGraph } from "./components/AgencyGraph";
+import { QuestionsInbox } from "./components/QuestionsInbox";
+import { listQuestions } from "./lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -19,7 +21,7 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-type Surface = "conversation" | "company" | "history" | "fleet" | "replay";
+type Surface = "conversation" | "company" | "questions" | "history" | "fleet" | "replay";
 
 // One turn of the thread: the user's task, then the agent's streamed timeline,
 // then that turn's pending questions and cost fallback. Only the active (last)
@@ -77,6 +79,23 @@ export default function App() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [run.turns, run.status, surface]);
 
+  // Pending-question count for the Questions tab badge, so a waiting question is
+  // visible from any surface. Lightweight poll, independent of the inbox's own.
+  const [pendingCount, setPendingCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const poll = () =>
+      listQuestions()
+        .then((qs) => alive && setPendingCount(qs.length))
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
   const openReplay = (sessionId: string, from: Surface) => {
     setReplayId(sessionId);
     setReplayFrom(from);
@@ -107,6 +126,17 @@ export default function App() {
               Company
             </button>
             <button
+              className={"tab" + (surface === "questions" ? " tab--on" : "")}
+              onClick={() => setSurface("questions")}
+            >
+              Questions
+              {pendingCount > 0 && (
+                <span className="tab__badge" aria-label={`${pendingCount} waiting`}>
+                  {pendingCount}
+                </span>
+              )}
+            </button>
+            <button
               className={"tab" + (surface === "fleet" ? " tab--on" : "")}
               onClick={() => setSurface("fleet")}
             >
@@ -128,6 +158,7 @@ export default function App() {
 
       <main className="thread">
         {surface === "history" && <HistoryList onOpen={(id) => openReplay(id, "history")} />}
+        {surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
         {surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
         {surface === "replay" && replayId && (
           <RunReplay key={replayId} sessionId={replayId} onBack={() => setSurface(replayFrom)} />

@@ -44,8 +44,18 @@ _ACCEPT_POLL_S = 0.5
 class _Pending:
     """One question awaiting an answer: the live connection + a latch."""
 
-    def __init__(self, conn: socket.socket) -> None:
+    def __init__(
+        self,
+        conn: socket.socket,
+        question: str | None,
+        options: list[str] | None,
+        default: str | None,
+    ) -> None:
         self.conn = conn
+        self.question = question
+        self.options = options
+        self.default = default
+        self.asked_ts = time.time()
         self.event = threading.Event()
         self.reply: dict | None = None
 
@@ -126,9 +136,20 @@ class AskUserListener:
         pending.event.set()
         return True
 
-    def pending_questions(self) -> list[str]:
+    def pending_questions(self) -> list[dict]:
+        """Return snapshots of questions that are still awaiting an answer."""
         with self._lock:
-            return list(self._pending.keys())
+            return [
+                {
+                    "question_id": question_id,
+                    "question": pending.question,
+                    "options": pending.options,
+                    "default": pending.default,
+                    "asked_ts": pending.asked_ts,
+                }
+                for question_id, pending in self._pending.items()
+                if not pending.event.is_set()
+            ]
 
     # -- internals ------------------------------------------------------------
 
@@ -155,7 +176,12 @@ class AskUserListener:
             question_id = req.get("question_id")
             if not question_id:
                 return
-            pending = _Pending(conn)
+            pending = _Pending(
+                conn,
+                req.get("question"),
+                req.get("options"),
+                req.get("default"),
+            )
             with self._lock:
                 self._pending[question_id] = pending
 

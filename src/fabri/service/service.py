@@ -18,6 +18,7 @@ CLI + trace seams, so behaviour is identical to running ``fabri run`` by hand.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import tempfile
 import time
@@ -26,16 +27,19 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from threading import Lock
 
+from fabri.config import ConfigError, load_config
 from fabri.events import EventType
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.binding import bind_run_config, merge_overrides
 from fabri.service.launcher import RunHandle, launch_run
+from fabri.service.slack_notify import post_ask_user_question
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
 from fabri.service.tailer import extract_cost, run_trace_path, tail_events
 
 # Short base dir for per-run ask_user sockets. AF_UNIX paths are capped (~104
 # bytes on macOS), so we deliberately avoid nesting them under a deep run home.
 _ASK_SOCKET_DIR = Path(tempfile.gettempdir()) / "fabri-ask"
+_LOG = logging.getLogger("fabri")
 
 # A host may swap how the agent is launched (tests point this at a fake script).
 # Signature: (task, config_path, session_id, fabri_home) -> argv.
@@ -67,6 +71,13 @@ class FabriService:
         command_builder: CommandBuilder | None = None,
     ) -> None:
         self.template_config = template_config
+        try:
+            self._slack_cfg = load_config(
+                str(self.template_config) if self.template_config else None
+            ).get("routing", {}).get("slack", {})
+        except ConfigError:
+            _LOG.warning("could not load Slack routing configuration", exc_info=True)
+            self._slack_cfg = {}
         self.home_root = (
             Path(home_root)
             if home_root is not None
@@ -236,6 +247,14 @@ class FabriService:
             event = {"type": EventType.ASK_USER.value}
             event.update({k: v for k, v in q.items() if v is not None})
             append_trace_event(trace_path, event)
+            post_ask_user_question(
+                self._slack_cfg,
+                session_id=session_id,
+                question=q.get("question", ""),
+                question_id=q.get("question_id", ""),
+                options=q.get("options"),
+                default=q.get("default"),
+            )
 
         listener = AskUserListener(sock_path, on_question)
         listener.start()
@@ -257,6 +276,23 @@ class FabriService:
             raise KeyError(
                 f"no pending question {question_id!r} for session {session_id!r}"
             )
+
+    def list_pending_questions(self) -> list[dict]:
+        """Return every pending ask_user question across live runs, oldest first."""
+        questions: list[dict] = []
+        for session_id, listener in self._asks.items():
+            meta = self._meta.get(session_id, {})
+            for question in listener.pending_questions():
+                entry = {
+                    **question,
+                    "session_id": session_id,
+                    "task": meta.get("task"),
+                }
+                for key in ("label", "thread_id", "fleet_id"):
+                    if meta.get(key) is not None:
+                        entry[key] = meta[key]
+                questions.append(entry)
+        return sorted(questions, key=lambda question: question["asked_ts"])
 
     def _close_ask(self, session_id: str) -> None:
         listener = self._asks.pop(session_id, None)
