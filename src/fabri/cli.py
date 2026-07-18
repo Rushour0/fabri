@@ -6,6 +6,8 @@ import sys
 import uuid
 
 from fabri.admin import AdminAuthError, describe_config, render_dashboard, require_admin
+from fabri.agency_scaffold import agency_next_steps, scaffold_agency
+from fabri.agency_templates import TEMPLATES as AGENCY_TEMPLATES
 from fabri.config import ConfigError, load_config
 from fabri.core.agent import run_agent
 from fabri.core.llm import LLMUsage
@@ -610,6 +612,20 @@ def cmd_tool_init(args: argparse.Namespace) -> None:
             print(f"  . {f}")
     print(f"\nNext: edit {args.name}.* to your liking, then list this dir in "
           f"`tools.manifest_dir` of your agent.yaml.")
+
+
+def cmd_new_agency(args: argparse.Namespace) -> None:
+    """Scaffold a fixed multi-agent agency from a bundled template."""
+    try:
+        created = scaffold_agency(args.name, args.template, args.dest)
+    except (OSError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Scaffolded {args.template!r} agency {args.name!r}:")
+    for path in created:
+        print(f"  + {path}")
+    print("\n" + agency_next_steps(args.name, args.dest))
 
 
 def _build_enrichment_llm():
@@ -1219,6 +1235,22 @@ def main() -> None:
     p_tool_run.add_argument("--dir", default="tools/agent_tools",
                             help="Directory holding the tool manifest (default: tools/agent_tools)")
     p_tool_run.set_defaults(func=cmd_tool_run)
+
+    p_new = sub.add_parser("new", help="Scaffold a new resource")
+    new_sub = p_new.add_subparsers(dest="new_command", required=True)
+
+    p_new_agency = new_sub.add_parser(
+        "agency", help="Scaffold a working multi-agent agency")
+    p_new_agency.add_argument("name", help="Directory name for the agency")
+    p_new_agency.add_argument(
+        "--template",
+        choices=sorted(AGENCY_TEMPLATES),
+        default="bug-crew",
+        help="Agency template (default: bug-crew)",
+    )
+    p_new_agency.add_argument(
+        "--dest", default=".", help="Parent directory (default: current directory)")
+    p_new_agency.set_defaults(func=cmd_new_agency)
 
     # B5: prompt-kit — scaffold a new agent prompt from the proven skeleton.
     p_prompt = sub.add_parser("prompt", help="Prompt-related helpers (scaffold a new agent prompt)")
