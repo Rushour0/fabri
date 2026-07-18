@@ -4,6 +4,27 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.13.2 — 2026-07-18
+
+### Fabri Studio Company view: line icons + richer info-flow, and a second example agency
+
+- **Cohesive line-icon set** replaces the emoji glyphs in the Company view — a
+  monochrome, theme-aware set (lucide, inline SVG, `currentColor`) that stays on
+  Studio's grayscale-survivable design system: Manager (briefcase), triage
+  (search), fix (wrench), test (flask), research, write, verify, plan, deploy,
+  security, data, code, plus document + coins + status badges.
+- **Information-flow animations** now read for *every* agency, not just dynamic
+  fan-outs: each agent plays a one-shot document-delivery + pop when it first
+  enters the graph (static `tools.agents[]` specialists otherwise appeared with
+  no flow), plus a status stamp-in and an active-connector highlight — all behind
+  `prefers-reduced-motion`.
+- **New example: `examples/agencies/bug-triage-crew`** — a triage → fix → test
+  crew that localizes a real bug, edits code with `edit_file`, and runs the test
+  suite, sandboxed to its `workspace/`. A second walking skeleton alongside
+  changelog-release-notes and a good Company-view demo.
+- Studio graph gains unit tests (`vitest`, wired into CI) pinning the trace→graph
+  contract, including the nested tool-result envelope.
+
 ## 0.13.1 — 2026-07-18
 
 ### Fabri Studio: "Company" agency-graph view (example)
