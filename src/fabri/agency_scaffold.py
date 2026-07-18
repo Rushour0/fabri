@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fabri.agency_templates import TEMPLATES
 
 _AGENCY_ROOT = "__AGENCY_ROOT__"
 _RUN_FROM = "__RUN_FROM__"
+_AGENCY_SLUG = "__AGENCY_SLUG__"
+
+
+def _slug(name: str) -> str:
+    """A memory-collection-safe slug from the agency name, so two scaffolded
+    agencies never share a collection / sqlite db."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "agency"
 
 
 def scaffold_agency(
@@ -31,6 +39,7 @@ def scaffold_agency(
     contents["README.md"] = template_data["README"]
     prefix = str(agency_dir)
     run_from = str(Path.cwd())
+    slug = _slug(name)
     created: list[Path] = []
 
     for relative_name, raw_content in contents.items():
@@ -39,7 +48,11 @@ def scaffold_agency(
             raise ValueError(f"template contains an unsafe path: {relative_name}")
         output_path = agency_dir / relative_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        content = raw_content.replace(_AGENCY_ROOT, prefix).replace(_RUN_FROM, run_from)
+        content = (
+            raw_content.replace(_AGENCY_ROOT, prefix)
+            .replace(_RUN_FROM, run_from)
+            .replace(_AGENCY_SLUG, slug)
+        )
         output_path.write_text(content)
         created.append(output_path)
 

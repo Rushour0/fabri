@@ -28,8 +28,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: blank_agency_parent
-  sqlite_path: .fabri/blank_agency.db
+  collection: __AGENCY_SLUG___parent
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 3
 ''',
     "specialist.openai.yaml": '''agent:
@@ -53,8 +53,8 @@ tools:
 
 memory:
   backend: sqlite
-  collection: blank_agency_specialist
-  sqlite_path: .fabri/blank_agency.db
+  collection: __AGENCY_SLUG___specialist
+  sqlite_path: .fabri/__AGENCY_SLUG__.db
   top_k: 2
 ''',
     "workspace/.gitignore": "__pycache__/\n*.pyc\n",

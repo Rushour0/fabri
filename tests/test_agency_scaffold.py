@@ -46,3 +46,25 @@ def test_scaffolded_agency_config_paths_exist(
     if template == "changelog":
         check_script = agency_dir / "scripts" / "check_release_notes.py"
         assert f"agencies/{name}/source/release_input.json" in check_script.read_text()
+
+
+def test_scaffolded_agencies_get_distinct_memory_collections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two agencies from the same template must not share a memory collection /
+    sqlite db, or their memories cross-contaminate."""
+    monkeypatch.chdir(tmp_path)
+    scaffold_agency("alpha-crew", "bug-crew", Path("."))
+    scaffold_agency("beta-crew", "bug-crew", Path("."))
+
+    a = yaml.safe_load((tmp_path / "alpha-crew" / "agent.openai.yaml").read_text())
+    b = yaml.safe_load((tmp_path / "beta-crew" / "agent.openai.yaml").read_text())
+
+    assert a["memory"]["collection"] == "alpha_crew_parent"
+    assert b["memory"]["collection"] == "beta_crew_parent"
+    assert a["memory"]["collection"] != b["memory"]["collection"]
+    assert a["memory"]["sqlite_path"] != b["memory"]["sqlite_path"]
+    # No lingering template placeholder or hardcoded base leaked through.
+    assert "__AGENCY_SLUG__" not in (tmp_path / "alpha-crew" / "agent.openai.yaml").read_text()
+    assert "bug_triage_crew" not in a["memory"]["collection"]
