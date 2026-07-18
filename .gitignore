@@ -26,6 +26,12 @@ build/
 # build artifacts
 dist/
 
+# generated wheel payloads (keep the importable package stubs tracked)
+src/fabri/examples/agencies/*
+!src/fabri/examples/agencies/__init__.py
+src/fabri/service/studio_assets/*
+!src/fabri/service/studio_assets/__init__.py
+
 # private strategy / decks / signed licenses — never push
 decks/
 licenses-issued/

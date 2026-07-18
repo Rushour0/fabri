@@ -1,7 +1,10 @@
 import argparse
 import importlib.metadata
+import importlib.resources
 import json
 import os
+from pathlib import Path
+import shutil
 import sys
 import uuid
 
@@ -46,6 +49,53 @@ def cmd_init(args: argparse.Namespace) -> None:
         for rel in result["skipped"]:
             print(f"  . {rel}")
     print("\n" + next_steps(args.dir, template=template))
+
+
+def _copy_resource_tree(source: importlib.resources.abc.Traversable, dest: Path) -> None:
+    """Copy an importlib resource tree without assuming it is a real path."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        target = dest / child.name
+        if child.is_dir():
+            _copy_resource_tree(child, target)
+        else:
+            with child.open("rb") as source_file, target.open("wb") as dest_file:
+                shutil.copyfileobj(source_file, dest_file)
+
+
+def cmd_examples(args: argparse.Namespace) -> None:
+    """List bundled agencies or copy every example into a target directory."""
+    bundled = importlib.resources.files("fabri.examples.agencies")
+    agencies = sorted(
+        (
+            entry
+            for entry in bundled.iterdir()
+            if entry.is_dir() and not entry.name.startswith((".", "__"))
+        ),
+        key=lambda entry: entry.name,
+    )
+
+    if args.copy is None:
+        if not agencies:
+            print("No bundled example agencies found.")
+            return
+        for agency in agencies:
+            print(agency.name)
+        return
+
+    destination = Path(args.copy)
+    conflicts = [destination / agency.name for agency in agencies
+                 if (destination / agency.name).exists()]
+    if conflicts:
+        for conflict in conflicts:
+            print(f"Refusing to overwrite existing example: {conflict}", file=sys.stderr)
+        sys.exit(1)
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for agency in agencies:
+        target = destination / agency.name
+        _copy_resource_tree(agency, target)
+        print(f"Copied {agency.name} to {target}")
 
 
 def _require_api_key(api_key_env: str) -> None:
@@ -1091,6 +1141,13 @@ def main() -> None:
              "Non-default templates use the sqlite-vec backend (no docker required).",
     )
     p_init.set_defaults(func=cmd_init)
+
+    p_examples = sub.add_parser(
+        "examples", help="List bundled example agencies or copy them into a directory")
+    p_examples.add_argument(
+        "--copy", metavar="DIR", default=None,
+        help="Copy every bundled example agency into DIR")
+    p_examples.set_defaults(func=cmd_examples)
 
     p_run = sub.add_parser("run", help="Run the agent on a task")
     p_run.add_argument("task")

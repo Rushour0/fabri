@@ -83,6 +83,8 @@ include = ["fabri*"]
 # install ships only the .py files and drops every .json manifest, so the
 # `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
 [tool.setuptools.package-data]
+"fabri.examples.agencies" = ["**/*", "**/.*"]
+"fabri.service.studio_assets" = ["**/*", "**/.*"]
 "fabri.tools.examples" = [
     "*.json",
     "example_go_tool/*",
@@ -105,4 +107,18 @@ include = ["fabri*"]
     "skills_examples/*/config.yaml",
     "skills_examples/*/prompts/*",
     "skills_examples/*/tools/*",
+]
+
+[tool.setuptools.exclude-package-data]
+"fabri.examples.agencies" = [
+    "__pycache__/*",
+    "**/__pycache__/*",
+    "*.pyc",
+    "**/*.pyc",
+]
+"fabri.service.studio_assets" = [
+    "__pycache__/*",
+    "**/__pycache__/*",
+    "*.pyc",
+    "**/*.pyc",
 ]
