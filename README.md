@@ -113,6 +113,37 @@ Every run emits a `usage` trace event carrying token totals **and**
 — the end-to-end cost of the run and its whole sub-agent subtree — so a host
 service can track COGS without parsing logs. See `fabri.pricing`.
 
+## Run it in your repo — self-improving, in one file
+
+Easy setup is a design goal, not an afterthought. fabri agents learn from their
+own runs (a lesson that recurs across ≥3 sessions is **promoted to a permanent
+guideline**), and `fabri repo` surfaces that learning **as a reviewable GitHub
+issue or PR, right in your repo** — with only the built-in `GITHUB_TOKEN`, no
+model API key, no server to run.
+
+Drop one workflow file in and the agent proposes its own prompt improvements on a
+schedule:
+
+```yaml
+# .github/workflows/self-improve.yml
+permissions: { issues: write }
+jobs:
+  suggest-prompt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install "fabri[sqlite]"
+      - run: fabri repo suggest-prompt --config agent.yaml
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+```
+
+**Live reference:** [Rushour0/fabri-repo-demo](https://github.com/Rushour0/fabri-repo-demo)
+runs this weekly — see its [issues](https://github.com/Rushour0/fabri-repo-demo/issues)
+for what the agent learned from its own runs. Full guide:
+[`docs/repo-agent.md`](docs/repo-agent.md).
+
 ## Install
 
 ```bash
