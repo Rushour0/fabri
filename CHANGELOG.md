@@ -4,6 +4,18 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.16.3 — 2026-07-19
+
+### Studio
+
+- **Stable full-width frame — no more conversation "shrinking".** The app frame
+  animated its width between tabs (720px ↔ 1440px), so switching to Conversation
+  visibly shrank the whole frame. The frame is now full-width and stable on every
+  tab; the conversation centers its own readable 768px column inside it, while
+  list surfaces fill the frame.
+- **Blue accent.** The single accent is now blue (`--accent #0d92f4`, `--accent-2
+  #80c4e9`) instead of amber, matching the roster landing page.
+
 ## 0.16.2 — 2026-07-19
 
 ### Studio
