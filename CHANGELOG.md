@@ -4,6 +4,11 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.15.1 — 2026-07-19
+
+- Base installs are now lean: `sentence-transformers` is optional. Use
+  `pip install "fabri[embeddings]"` to enable memory retrieval and learning.
+
 ## 0.15.0 — 2026-07-18
 
 ### Human-in-the-loop routing + an installable agency/company layer
