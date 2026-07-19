@@ -118,7 +118,7 @@ service can track COGS without parsing logs. See `fabri.pricing`.
 ```bash
 pip install fabri                       # lean base install; agencies run without memory learning
 pip install "fabri[self-improving]"     # ONE command: memory + hybrid retrieval so agencies learn
-                                        # and get cheaper/better every run — local sqlite-vec store, no docker
+                                        # from their own runs and avoid repeat mistakes — local sqlite-vec store, no docker
 export ANTHROPIC_API_KEY=...
 ```
 
