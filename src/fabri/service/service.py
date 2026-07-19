@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import tempfile
 import time
@@ -32,6 +33,7 @@ from fabri.events import EventType
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.binding import bind_run_config, merge_overrides
 from fabri.service.launcher import RunHandle, launch_run
+from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
 from fabri.service.tailer import extract_cost, run_trace_path, tail_events
@@ -54,8 +56,10 @@ class FabriService:
             to inherit framework defaults). Per-run ``overrides`` deep-merge onto
             it.
         home_root: parent dir under which each run gets its own
-            ``<home_root>/<session_id>`` ``FABRI_HOME``. Defaults to a fresh
-            temp dir so runs never collide.
+            ``<home_root>/<session_id>`` ``FABRI_HOME``. Defaults to
+            ``${FABRI_HOME:-~/.fabri}/serve`` so history survives restarts.
+            Set ``FABRI_EPHEMERAL=1`` to use a fresh temp dir instead (useful
+            for isolated tests and CI).
         sync_hook: optional :class:`FileSyncHook` invoked around each run to
             ferry workspace state. Defaults to a no-op.
         command_builder: optional override for the launch argv (tests / custom
@@ -76,16 +80,21 @@ class FabriService:
         self.template_config = template_config
         self.catalog = catalog
         try:
-            self._slack_cfg = load_config(
+            loaded_config = load_config(
                 str(self.template_config) if self.template_config else None
-            ).get("routing", {}).get("slack", {})
+            )
+            self._slack_cfg = loaded_config.get("routing", {}).get("slack", {})
+            self._default_agency = loaded_config.get("agent", {}).get("name", "default")
         except ConfigError:
             _LOG.warning("could not load Slack routing configuration", exc_info=True)
             self._slack_cfg = {}
+            self._default_agency = "default"
         self.home_root = (
             Path(home_root)
             if home_root is not None
             else Path(tempfile.mkdtemp(prefix="fabri-serve-"))
+            if os.environ.get("FABRI_EPHEMERAL") == "1"
+            else Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve"
         )
         self.home_root.mkdir(parents=True, exist_ok=True)
         self.sync_hook: FileSyncHook = sync_hook or NoOpSyncHook()
@@ -104,6 +113,11 @@ class FabriService:
         # Serialize appends to the on-disk session index (multiple run threads
         # may terminate concurrently under ThreadingHTTPServer).
         self._index_lock = Lock()
+        self.run_store = RunStore(
+            self.home_root / "runs.db",
+            index_path=self._index_path,
+            default_agency=self._default_agency,
+        )
 
     @property
     def _index_path(self) -> Path:
@@ -147,10 +161,12 @@ class FabriService:
         self.sync_hook.sync_in(session_id, run_home)
 
         template_config = self.template_config
+        agency = self._default_agency
         if catalog_ref is not None:
             if self.catalog is None or catalog_ref not in self.catalog:
                 raise KeyError(f"unknown catalog_ref {catalog_ref!r}")
             template_config = self.catalog[catalog_ref]["config"]
+            agency = catalog_ref
         config_path = bind_run_config(template_config, overrides, run_home / "run.yaml")
         command = None
         if self.command_builder is not None:
@@ -179,9 +195,19 @@ class FabriService:
             "fleet_id": fleet_id,
             "label": label,
             "started_ts": round(time.time(), 3),
+            "agency": agency,
         }
         self._meta[session_id] = meta
         self._append_index({"event": "submit", **meta})
+        self.run_store.record_submit(
+            session_id=session_id,
+            agency=agency,
+            task=task,
+            submitted_at=meta["started_ts"],
+            thread_id=thread_id,
+            fleet_id=fleet_id,
+            label=label,
+        )
         return session_id
 
     def submit_fleet(self, items: list[dict], overrides: dict | None = None) -> dict:
@@ -409,44 +435,29 @@ class FabriService:
                 "cost": cost,
             }
         )
+        self.run_store.record_terminal(
+            session_id=session_id,
+            finished_at=time.time(),
+            event=event,
+            outcome=outcome,
+            cost=cost,
+        )
 
-    def list_sessions(self) -> list[dict]:
+    def list_sessions(
+        self, *, agency: str | None = None, limit: int | None = None, offset: int = 0
+    ) -> list[dict]:
         """Return a summary of every known run, newest first.
 
-        Rebuilt from the on-disk ``index.jsonl`` (so it survives a restart) with
-        live handles overlaid: a session whose subprocess is still alive reads
+        Read from the durable SQLite index with live handles overlaid: a session
+        whose subprocess is still alive reads
         ``running`` even if no terminal line exists yet. Each entry:
         ``{session_id, task, status, outcome, thread_id, fleet_id, started_ts,
         cost}``.
         """
-        summaries: dict[str, dict] = {}
-        for rec in _read_index(self._index_path):
-            sid = rec.get("session_id")
-            if not sid:
-                continue
-            entry = summaries.setdefault(
-                sid, {"session_id": sid, "status": "running"}
-            )
-            if rec.get("event") == "submit":
-                entry.update(
-                    {
-                        "task": rec.get("task"),
-                        "thread_id": rec.get("thread_id"),
-                        "fleet_id": rec.get("fleet_id"),
-                        "label": rec.get("label"),
-                        "started_ts": rec.get("started_ts") or rec.get("ts"),
-                    }
-                )
-            else:  # a terminal record (result / cancel)
-                outcome = rec.get("outcome")
-                entry.update(
-                    {
-                        "status": _status_for(rec.get("event"), outcome),
-                        "outcome": outcome,
-                        "cost": rec.get("cost"),
-                        "ended_ts": rec.get("ts"),
-                    }
-                )
+        summaries = {
+            entry["session_id"]: entry
+            for entry in self.run_store.list_runs(agency=agency, limit=limit, offset=offset)
+        }
         # Overlay live state: a handle still running trumps a stale "running"
         # index entry that never got a terminal line (e.g. after a crash the
         # entry stays "running" -- but if the handle is gone we can't tell, so we
@@ -454,11 +465,11 @@ class FabriService:
         for sid, handle in self._runs.items():
             if sid in summaries and handle.is_running():
                 summaries[sid]["status"] = "running"
-        return sorted(
-            summaries.values(),
-            key=lambda e: e.get("started_ts") or 0,
-            reverse=True,
-        )
+        return list(summaries.values())
+
+    def list_agencies(self) -> list[dict]:
+        """Return per-agency dashboard cost and reuse series, oldest first."""
+        return self.run_store.agency_aggregates()
 
     def close(self) -> None:
         """Terminate any still-running children + release ask_user bridges."""

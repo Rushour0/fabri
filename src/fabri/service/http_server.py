@@ -7,6 +7,7 @@ fabri imports, no websockets dependency. Three endpoints:
                             ``{"session_id": ...}``. Launches the agent.
 - ``GET  /runs``            ``{"sessions": [...]}`` -- history of every known
                             run (survives restart; see ``list_sessions``).
+- ``GET  /agencies``        per-agency run, cost, and reuse aggregates.
 - ``GET  /questions``       ``{"questions": [...]}`` -- pending ask_user inbox.
 - ``GET  /runs/<id>/events`` Server-Sent Events: one ``data:`` frame per trace
                             event (the live :mod:`fabri.events` vocabulary),
@@ -38,7 +39,7 @@ from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
@@ -88,37 +89,47 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
-        if self.path in ("/health", "/health/"):
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path in ("/health", "/health/"):
             self._send_json(200, {"status": "ok"})
             return
-        if self.path in ("/runs", "/runs/"):
-            self._send_json(200, {"sessions": self.service.list_sessions()})
+        if path in ("/runs", "/runs/"):
+            try:
+                filters = self._run_filters(parsed.query)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, {"sessions": self.service.list_sessions(**filters)})
             return
-        if self.path in ("/questions", "/questions/"):
+        if path in ("/agencies", "/agencies/"):
+            self._send_json(200, {"agencies": self.service.list_agencies()})
+            return
+        if path in ("/questions", "/questions/"):
             self._send_json(200, {"questions": self.service.list_pending_questions()})
             return
-        if self.path in ("/company", "/company/"):
+        if path in ("/company", "/company/"):
             self._send_json(200, {"company": self.server.company})
             return
-        if self.path in ("/catalog", "/catalog/"):
+        if path in ("/catalog", "/catalog/"):
             catalog = self.server.catalog
             self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
             return
-        if self.path in ("/fleets", "/fleets/"):
+        if path in ("/fleets", "/fleets/"):
             self._send_json(200, {"fleets": self.service.list_fleets()})
             return
-        m = _FLEET_RE.match(self.path)
+        m = _FLEET_RE.match(path)
         if m:
             try:
                 self._send_json(200, self.service.fleet_status(m.group(1)))
             except KeyError:
                 self._send_json(404, {"error": f"unknown fleet_id {m.group(1)!r}"})
             return
-        m = _EVENTS_RE.match(self.path)
+        m = _EVENTS_RE.match(path)
         if m:
             self._stream_events(m.group(1))
             return
-        m = _RESULT_RE.match(self.path)
+        m = _RESULT_RE.match(path)
         if m:
             self._send_result(m.group(1))
             return
@@ -126,6 +137,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_studio_asset()
             return
         self._send_json(404, {"error": f"no route for GET {self.path}"})
+
+    @staticmethod
+    def _run_filters(query: str) -> dict[str, str | int | None]:
+        values = parse_qs(query)
+        agency = values.get("agency", [None])[0]
+        try:
+            limit = int(values["limit"][0]) if "limit" in values else None
+            offset = int(values.get("offset", ["0"])[0])
+        except ValueError as exc:
+            raise ValueError("limit and offset must be integers") from exc
+        if limit is not None and limit < 0 or offset < 0:
+            raise ValueError("limit and offset must be non-negative")
+        return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path in ("/slack/events", "/slack/events/"):
@@ -270,7 +294,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/health", "/questions", "/company", "/catalog", "/slack"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
