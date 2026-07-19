@@ -62,6 +62,9 @@ _RESULT_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/result/?$")
 _ANSWER_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/answer/?$")
 _CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/cancel/?$")
 _FLEET_RE = re.compile(r"^/fleets/([A-Za-z0-9_.-]+)/?$")
+_AUTH_BODY_MAX_BYTES = 8 * 1024
+_AUTH_EMAIL_MAX_LENGTH = 254
+_AUTH_PASSWORD_MAX_LENGTH = 1024
 
 
 def studio_assets_available() -> bool:
@@ -114,6 +117,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "auth required"})
         return user_id
 
+    def _require_run_owner(self, session_id: str, caller_id: str) -> bool:
+        """Hide runs not owned by the authenticated caller as missing."""
+        if self.service.run_owner(session_id) != caller_id:
+            self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
         parsed = urlsplit(self.path)
         path = parsed.path
@@ -146,14 +156,16 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         if path in ("/agencies", "/agencies/"):
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
                 return
-            self._send_json(200, {"agencies": self.service.list_agencies()})
+            self._send_json(200, {"agencies": self.service.list_agencies(user_id=user_id)})
             return
         if path in ("/questions", "/questions/"):
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
                 return
-            self._send_json(200, {"questions": self.service.list_pending_questions()})
+            self._send_json(200, {"questions": self.service.list_pending_questions(user_id=user_id)})
             return
         if path in ("/company", "/company/"):
             if self.service.auth_enabled and self._require_user() is None:
@@ -165,28 +177,36 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
             return
         if path in ("/fleets", "/fleets/"):
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
                 return
-            self._send_json(200, {"fleets": self.service.list_fleets()})
+            self._send_json(200, {"fleets": self.service.list_fleets(user_id=user_id)})
             return
         m = _FLEET_RE.match(path)
         if m:
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
                 return
             try:
-                self._send_json(200, self.service.fleet_status(m.group(1)))
+                self._send_json(200, self.service.fleet_status(m.group(1), user_id=user_id))
             except KeyError:
                 self._send_json(404, {"error": f"unknown fleet_id {m.group(1)!r}"})
             return
         m = _EVENTS_RE.match(path)
         if m:
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and (
+                user_id is None or not self._require_run_owner(m.group(1), user_id)
+            ):
                 return
             self._stream_events(m.group(1))
             return
         m = _RESULT_RE.match(path)
         if m:
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and (
+                user_id is None or not self._require_run_owner(m.group(1), user_id)
+            ):
                 return
             self._send_result(m.group(1))
             return
@@ -235,13 +255,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
         m = _ANSWER_RE.match(self.path)
         if m:
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and (
+                user_id is None or not self._require_run_owner(m.group(1), user_id)
+            ):
                 return
             self._answer(m.group(1))
             return
         m = _CANCEL_RE.match(self.path)
         if m:
-            if self.service.auth_enabled and self._require_user() is None:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and (
+                user_id is None or not self._require_run_owner(m.group(1), user_id)
+            ):
                 return
             self._cancel(m.group(1))
             return
@@ -347,12 +373,25 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json(400, {"error": "invalid authentication input"})
+            return
+        if length < 0 or length > _AUTH_BODY_MAX_BYTES:
+            self._send_json(400, {"error": "invalid authentication input"})
+            return
         raw = self.rfile.read(length) if length else b""
+        if len(raw) > _AUTH_BODY_MAX_BYTES:
+            self._send_json(400, {"error": "invalid authentication input"})
+            return
         try:
             req = json.loads(raw or b"{}")
         except json.JSONDecodeError:
             self._send_json(400, {"error": "invalid request JSON"})
+            return
+        if not isinstance(req, dict):
+            self._send_json(400, {"error": "invalid authentication input"})
             return
         email, password = req.get("email"), req.get("password")
         if (
@@ -360,8 +399,10 @@ class _Handler(BaseHTTPRequestHandler):
             or not email.strip()
             or not isinstance(password, str)
             or not password
+            or len(email) > _AUTH_EMAIL_MAX_LENGTH
+            or len(password) > _AUTH_PASSWORD_MAX_LENGTH
         ):
-            self._send_json(400, {"error": "email and password are required"})
+            self._send_json(400, {"error": "invalid authentication input"})
             return
         store = self.service.user_store
         secret = self.service.auth_secret
@@ -369,11 +410,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "authentication is unavailable"})
             return
         if path == "/auth/signup":
-            try:
-                user_id = store.create_user(email, password)
-            except ValueError:
-                self._send_json(409, {"error": "email already registered"})
+            if len(password) < 8:
+                self._send_json(400, {"error": "Password must be at least 8 characters"})
                 return
+            try:
+                store.create_user(email, password)
+            except ValueError:
+                pass
+            self._send_json(200, {"ok": True})
+            return
         else:
             user_id = store.verify_user(email, password)
             if user_id is None:

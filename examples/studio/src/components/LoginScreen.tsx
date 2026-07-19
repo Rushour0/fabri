@@ -6,6 +6,7 @@ export function LoginScreen({ onAuthed }: { onAuthed: (email: string) => void })
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -13,9 +14,16 @@ export function LoginScreen({ onAuthed }: { onAuthed: (email: string) => void })
     if (submitting) return;
     setSubmitting(true);
     setError(null);
+    setNotice(null);
     try {
-      await (mode === "login" ? login(email, password) : signup(email, password));
-      onAuthed(email);
+      if (mode === "login") {
+        await login(email, password);
+        onAuthed(email);
+      } else {
+        await signup(email, password);
+        setMode("login");
+        setNotice("If that email is available, your account was created — please log in.");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Something went wrong. Please try again.");
     } finally {
@@ -89,6 +97,7 @@ export function LoginScreen({ onAuthed }: { onAuthed: (email: string) => void })
           />
         </label>
         {error && <div style={{ marginTop: 13, color: "var(--err)", fontSize: 12.5 }} role="alert">{error}</div>}
+        {notice && <div style={{ marginTop: 13, color: "var(--text-dim)", fontSize: 12.5 }} role="status">{notice}</div>}
         <button className="btn btn--primary" style={{ width: "100%", marginTop: 18 }} type="submit" disabled={submitting}>
           {submitting ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
         </button>

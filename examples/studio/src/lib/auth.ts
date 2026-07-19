@@ -34,9 +34,8 @@ async function submitAuth(path: "/auth/login" | "/auth/signup", email: string, p
   if (res.ok) return;
 
   const messages: Record<number, string> = {
-    400: "Enter an email and password",
+    400: "Enter a valid email and password",
     401: "Wrong email or password",
-    409: "That email is already registered",
   };
   throw new Error(messages[res.status] ?? "Something went wrong. Please try again.");
 }

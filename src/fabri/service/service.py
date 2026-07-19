@@ -261,7 +261,7 @@ class FabriService:
         )
         return {"fleet_id": fleet_id, "sessions": sessions}
 
-    def fleet_status(self, fleet_id: str) -> dict:
+    def fleet_status(self, fleet_id: str, *, user_id: str | None = None) -> dict:
         """Roll one fleet up: member statuses + summed COGS + status counts.
 
         Cost is summed from each member's own recorded cost surface (the same
@@ -269,15 +269,19 @@ class FabriService:
         total COGS is exact per-session even though static specialist cost does
         not roll into a parent run's total.
         """
-        members = [s for s in self.list_sessions() if s.get("fleet_id") == fleet_id]
+        members = [
+            s
+            for s in self.list_sessions(user_id=user_id)
+            if s.get("fleet_id") == fleet_id
+        ]
         if not members:
             raise KeyError(f"unknown fleet_id {fleet_id!r}")
         return {"fleet_id": fleet_id, **_rollup(members)}
 
-    def list_fleets(self) -> list[dict]:
-        """Summarize every fleet (newest first): size, status counts, total COGS."""
+    def list_fleets(self, *, user_id: str | None = None) -> list[dict]:
+        """Summarize visible fleets (newest first): size, status counts, total COGS."""
         by_fleet: dict[str, list[dict]] = {}
-        for s in self.list_sessions():
+        for s in self.list_sessions(user_id=user_id):
             fid = s.get("fleet_id")
             if fid:
                 by_fleet.setdefault(fid, []).append(s)
@@ -347,10 +351,12 @@ class FabriService:
                 f"no pending question {question_id!r} for session {session_id!r}"
             )
 
-    def list_pending_questions(self) -> list[dict]:
-        """Return every pending ask_user question across live runs, oldest first."""
+    def list_pending_questions(self, *, user_id: str | None = None) -> list[dict]:
+        """Return pending questions for visible live runs, oldest first."""
         questions: list[dict] = []
         for session_id, listener in self._asks.items():
+            if user_id is not None and self.run_owner(session_id) != user_id:
+                continue
             meta = self._meta.get(session_id, {})
             for question in listener.pending_questions():
                 entry = {
@@ -363,6 +369,10 @@ class FabriService:
                         entry[key] = meta[key]
                 questions.append(entry)
         return sorted(questions, key=lambda question: question["asked_ts"])
+
+    def run_owner(self, session_id: str) -> str | None:
+        """Return the persisted owner of a run, if it is known and owned."""
+        return self.run_store.run_owner(session_id)
 
     def _close_ask(self, session_id: str) -> None:
         listener = self._asks.pop(session_id, None)
@@ -492,9 +502,9 @@ class FabriService:
                 summaries[sid]["status"] = "running"
         return list(summaries.values())
 
-    def list_agencies(self) -> list[dict]:
+    def list_agencies(self, *, user_id: str | None = None) -> list[dict]:
         """Return per-agency dashboard cost and reuse series, oldest first."""
-        return self.run_store.agency_aggregates()
+        return self.run_store.agency_aggregates(user_id=user_id)
 
     def close(self) -> None:
         """Terminate any still-running children + release ask_user bridges."""

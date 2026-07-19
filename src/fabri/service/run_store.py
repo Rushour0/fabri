@@ -120,19 +120,35 @@ class RunStore:
         with self._connect() as connection:
             return [self._summary(row) for row in connection.execute(query, params)]
 
-    def agency_aggregates(self) -> list[RunRecord]:
+    def run_owner(self, session_id: str) -> str | None:
+        """Return a run's persisted owner, if it exists and has one."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT user_id FROM runs WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return row["user_id"] if row is not None else None
+
+    def agency_aggregates(self, *, user_id: str | None = None) -> list[RunRecord]:
+        clauses = " WHERE user_id = ?" if user_id is not None else ""
+        params: tuple[object, ...] = (user_id,) if user_id is not None else ()
         with self._connect() as connection:
             agencies = connection.execute(
                 "SELECT agency, COUNT(*) AS run_count, COALESCE(SUM(cost_total), 0) AS cost_total "
-                "FROM runs GROUP BY agency ORDER BY agency"
+                f"FROM runs{clauses} GROUP BY agency ORDER BY agency",
+                params,
             ).fetchall()
             output: list[RunRecord] = []
             for aggregate in agencies:
+                run_params: tuple[object, ...] = (aggregate["agency"],)
+                owner_clause = ""
+                if user_id is not None:
+                    owner_clause = " AND user_id = ?"
+                    run_params += (user_id,)
                 runs = connection.execute(
                     """SELECT session_id, finished_at, cost_total, reuse_rate FROM runs
-                    WHERE agency = ?
+                    WHERE agency = ?""" + owner_clause + """
                     ORDER BY finished_at IS NULL, finished_at ASC, submitted_at ASC, session_id ASC""",
-                    (aggregate["agency"],),
+                    run_params,
                 ).fetchall()
                 output.append({
                     "agency": aggregate["agency"],

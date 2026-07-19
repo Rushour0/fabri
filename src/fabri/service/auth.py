@@ -11,6 +11,10 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 
 
+_DUMMY_SALT = b"fabri-auth-dummy"
+_DUMMY_HASH = "00" * 32
+
+
 class UserStore:
     """SQLite-backed email/password user store."""
 
@@ -60,6 +64,16 @@ class UserStore:
                 (self._email(email),),
             ).fetchone()
         if row is None:
+            # Keep unknown-email attempts comparable to a real password check.
+            calculated = hashlib.scrypt(
+                password.encode(),
+                salt=_DUMMY_SALT,
+                n=2**14,
+                r=8,
+                p=1,
+                dklen=32,
+            ).hex()
+            hmac.compare_digest(calculated, _DUMMY_HASH)
             return None
         calculated = hashlib.scrypt(
             password.encode(),
