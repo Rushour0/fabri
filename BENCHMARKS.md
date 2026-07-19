@@ -120,6 +120,30 @@ cross-session reuse is structurally stuck at 0% and this delta does not appear.
 Full run: `.fabri/benchmarks/1784483*/results.md`. The canonical sonnet number is
 still pending._
 
+### Self-improvement integration contracts
+
+These are deterministic, offline integration checks for the two ways fabri
+uses a learned lesson. They are deliberately **not** a replacement for the
+live-model session-N+1 result above: a scripted backend follows the retrieved
+lesson so that CI can catch a wiring or accounting regression without claiming
+that a particular model will generalize the same way.
+
+| date | path | baseline | learned path | measured delta | fabri |
+|---|---|---|---|---|---|
+| 2026-07-20 | dynamic retrieved guideline | 2 turns, 2,000 input + 200 output tokens, $0.00042 | 1 turn, 1,000 input + 100 output tokens, $0.00021 | **↓50.0% priced COGS**, one unnecessary tool turn removed; both complete successfully | 0.18.2 |
+| 2026-07-20 | `fabri repo open-pr` | no durable projection | promoted strategic lesson is written only to a proposed branch and surfaced in a draft PR | source config unchanged; **1/1** learned block and **1/1** draft-PR payload asserted | 0.18.2 |
+
+The dynamic row uses the pricing table for `gpt-4o-mini` and fixed per-turn
+usage emitted by the test backend. Reproduce with:
+
+```bash
+pytest -q tests/test_integration_self_improvement.py
+```
+
+The GitHub path uses a fake provider: it verifies the exact branch content and
+draft-PR request without opening a real pull request from CI. The existing
+provider adapter tests cover GitHub's request shape and deduplication.
+
 ### LongMemEval
 
 | date | cases | exact-match | judge | reference | fabri |

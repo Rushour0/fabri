@@ -4,6 +4,20 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.18.2 — 2026-07-20
+
+### Added
+
+- **Self-improvement integration coverage.** Deterministic, offline tests now
+  cover both the retrieved-guideline path that changes an agent's next-run
+  behavior and the `fabri repo open-pr` path that turns promoted lessons into
+  a reviewable draft pull request without editing the checked-out config.
+- **Reproducible COGS contract benchmark.** The benchmark record now includes
+  a clearly labeled scripted integration result alongside the existing live
+  session-N+1 experiment; it guards against an extra guided turn or a dropped
+  learned-prompt update without presenting synthetic numbers as live-model
+  performance.
+
 ## 0.18.1 — 2026-07-20
 
 ### Fixed
