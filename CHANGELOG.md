@@ -4,6 +4,17 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.16.1 — 2026-07-19
+
+### Fixes
+
+- **COGS: static specialists now roll into the parent total.** A parent run's
+  `total_cost_usd` only counted `spawn_subagent` children — static
+  `tools.agents[]` specialists (and, recursively, a company's whole org tree)
+  were omitted, so multi-agent COGS were undercounted. They now roll up.
+- **Studio: full-width roster/org-chart/fleet surfaces** (the conversation stays
+  a narrow column) so the catalog and org-charts aren't cramped.
+
 ## 0.16.0 — 2026-07-19
 
 ### Studio catalog mode — browse a roster and run any agency/company
