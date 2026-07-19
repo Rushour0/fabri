@@ -31,6 +31,7 @@ from fabri.runtime import (
     build_tool_defs,
     build_tools,
 )
+from fabri.repo import GitHubError, open_or_update_tracking_issue
 from fabri.scaffold import SCAFFOLD_TEMPLATES, next_steps, scaffold
 from fabri.tool_scaffold import SUPPORTED_LANGUAGES, scaffold_tool
 
@@ -463,6 +464,86 @@ def cmd_memory_list(args: argparse.Namespace) -> None:
     entries = store.iterate(kind=kind, limit=args.limit)
     for e in entries:
         print(json.dumps(e.to_payload()))
+
+
+def _repo_token(args: argparse.Namespace) -> str:
+    token = args.token or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    print("GitHub token required: pass --token or set GITHUB_TOKEN", file=sys.stderr)
+    sys.exit(1)
+
+
+def _repo_name(args: argparse.Namespace) -> str:
+    repo = args.repo or os.environ.get("GITHUB_REPOSITORY")
+    if repo:
+        return repo
+    print("GitHub repository required: pass --repo owner/name or set GITHUB_REPOSITORY", file=sys.stderr)
+    sys.exit(1)
+
+
+def _repo_body(args: argparse.Namespace) -> str:
+    if args.body is not None and args.body_file is not None:
+        print("pass either --body or --body-file, not both", file=sys.stderr)
+        sys.exit(1)
+    if args.body_file is not None:
+        try:
+            return Path(args.body_file).read_text()
+        except OSError as error:
+            print(f"could not read body file {args.body_file}: {error}", file=sys.stderr)
+            sys.exit(1)
+    return args.body or ""
+
+
+def cmd_repo_issue(args: argparse.Namespace) -> None:
+    """Create a tracking issue or post an update to its deduplicated issue."""
+    try:
+        url = open_or_update_tracking_issue(
+            _repo_name(args), _repo_token(args), args.title, _repo_body(args), args.key, args.label
+        )
+    except GitHubError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    print(url)
+
+
+def cmd_repo_suggest_prompt(args: argparse.Namespace) -> None:
+    """Propose proven memory guidelines for inclusion in the agent prompt."""
+    config = load_config(args.config)
+    store = _open_store(config["memory"])
+    guidelines = store.iterate(kind=args.kind, limit=args.limit)
+    if not guidelines:
+        print(f"no {args.kind} guidelines yet — the agent hasn't promoted any lessons")
+        return
+
+    intro = (
+        "This agent has learned the following from its own runs (guidelines promoted "
+        "to `strategic` after recurring across ≥3 sessions). Consider folding them into "
+        "its system prompt."
+    )
+    body = "\n\n".join(
+        [
+            intro,
+            "\n".join(f"- {guideline.text}" for guideline in guidelines),
+            "Current system prompt for context:\n\n```\n"
+            f"{config['agent'].get('system_prompt', '')}\n```",
+        ]
+    )
+    agent_name = config["agent"].get("name", "default")
+    title = f"Consider promoted guidelines for {agent_name}'s system prompt"
+    try:
+        url = open_or_update_tracking_issue(
+            _repo_name(args),
+            _repo_token(args),
+            title,
+            body,
+            f"suggest-prompt:{agent_name}",
+            args.label,
+        )
+    except GitHubError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    print(url)
 
 
 def cmd_memory_diff(args: argparse.Namespace) -> None:
@@ -1325,6 +1406,30 @@ def main() -> None:
                              help="Restrict to this kind (repeatable; default: tactical + strategic)")
     p_mem_stale.add_argument("--limit", type=int, default=None)
     p_mem_stale.set_defaults(func=cmd_memory_stale)
+
+    p_repo = sub.add_parser("repo", help="File GitHub issues from a fabri run")
+    repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
+
+    p_repo_issue = repo_sub.add_parser("issue", help="Create or update a deduplicated tracking issue")
+    p_repo_issue.add_argument("--repo", default=None, help="GitHub repository (owner/name)")
+    p_repo_issue.add_argument("--token", default=None, help="GitHub token (default: GITHUB_TOKEN)")
+    p_repo_issue.add_argument("--title", required=True)
+    body_group = p_repo_issue.add_mutually_exclusive_group(required=True)
+    body_group.add_argument("--body", default=None)
+    body_group.add_argument("--body-file", default=None)
+    p_repo_issue.add_argument("--label", action="append", default=["fabri"])
+    p_repo_issue.add_argument("--key", required=True, help="Stable deduplication key")
+    p_repo_issue.set_defaults(func=cmd_repo_issue)
+
+    p_repo_suggest = repo_sub.add_parser(
+        "suggest-prompt", help="Open a deduplicated issue proposing promoted guidelines for the prompt")
+    p_repo_suggest.add_argument("--config", required=True, help="Path to agent.yaml")
+    p_repo_suggest.add_argument("--repo", default=None, help="GitHub repository (owner/name)")
+    p_repo_suggest.add_argument("--token", default=None, help="GitHub token (default: GITHUB_TOKEN)")
+    p_repo_suggest.add_argument("--kind", default="strategic")
+    p_repo_suggest.add_argument("--limit", type=int, default=10)
+    p_repo_suggest.add_argument("--label", action="append", default=["fabri", "self-improving"])
+    p_repo_suggest.set_defaults(func=cmd_repo_suggest_prompt)
 
     p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
     p_replay.add_argument("session_id")
