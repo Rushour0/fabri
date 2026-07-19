@@ -1,0 +1,49 @@
+# fabri — OpenAI benchmark config (NON-canonical, for ad-hoc runs)
+#
+# Mirrors configs/benchmark.yaml exactly EXCEPT the llm block (OpenAI instead of
+# Anthropic) and a fresh sqlite path/collection so a session-N+1 measurement
+# starts from an empty memory store. Any number produced here is labelled with
+# the model below — it is NOT the canonical (Anthropic sonnet) published number.
+
+agent:
+  name: benchmark
+  max_steps: 10
+  output_format: json
+  planner:
+    enabled: false
+    mode: off
+    max_items: 8
+    auto_token_threshold: 80
+  max_cost_usd: null
+
+llm:
+  provider: openai
+  model: gpt-4o-mini
+  max_tokens: 2048
+  api_key_env: OPENAI_API_KEY
+  cache_messages: false
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, write_file, list_dir]
+  sandbox_root: .
+  result_format: toon
+  agents: []
+  decompose:
+    enabled: false
+    max_subquestions: 5
+  retrieval:
+    enabled: false
+    top_k: 6
+    always_include: [spawn_subagent, ask_user, decompose]
+  mcp_servers: []
+
+memory:
+  backend: sqlite
+  collection: benchmark_openai
+  sqlite_path: .fabri/benchmark-openai.db
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30

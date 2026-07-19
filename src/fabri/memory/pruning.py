@@ -241,6 +241,7 @@ def ingest_guideline(
     similarity_threshold: float = SIMILARITY_THRESHOLD,
     promotion_threshold_sessions: int = PROMOTION_THRESHOLD_SESSIONS,
     kind: str = "tactical",
+    dedup_key: str | None = None,
     max_entries: int | None = None,
     eviction_half_life_days: float = 30.0,
     eviction_strategy: str = "delete",
@@ -265,14 +266,21 @@ def ingest_guideline(
         # suppress one of the two signals at retrieval time. Failure-derived
         # kinds (tactical / strategic) still search across both -- that's the
         # promotion path the historical pruning already relied on.
-        if kind in ("success_pattern", "postmortem"):
-            # Both are whole-run signals that dedup against their own kind only,
-            # so a "what worked" / "what this run cost" entry never merges into
-            # a textually similar failure-derived guideline (which would
-            # silently suppress one of the two at retrieval time).
-            existing = store.find_similar(text, threshold=similarity_threshold, kind=kind)
-        else:
-            existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
+        dedup_kind = kind if kind in ("success_pattern", "postmortem") else None
+        existing = (
+            store.find_by_dedup_key(dedup_key, kind=dedup_kind)
+            if dedup_key is not None
+            else None
+        )
+        if existing is None:
+            if kind in ("success_pattern", "postmortem"):
+                # Both are whole-run signals that dedup against their own kind only,
+                # so a "what worked" / "what this run cost" entry never merges into
+                # a textually similar failure-derived guideline (which would
+                # silently suppress one of the two at retrieval time).
+                existing = store.find_similar(text, threshold=similarity_threshold, kind=kind)
+            else:
+                existing = store.find_similar(text, threshold=similarity_threshold, kind=None)
 
         if existing is not None:
             entry, score = existing
@@ -305,6 +313,7 @@ def ingest_guideline(
             tools=tools,
             domain=auto_domain,
             outcome=auto_outcome,
+            dedup_key=dedup_key,
         )
         logger.debug("inserted new %s guideline: %r tools=%s domain=%s", kind, entry.text, entry.tools, entry.domain)
         store.upsert(entry)

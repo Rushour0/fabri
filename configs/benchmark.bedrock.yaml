@@ -1,0 +1,49 @@
+# fabri — Bedrock benchmark config (NON-canonical, for ad-hoc runs)
+#
+# Mirrors configs/benchmark.yaml but runs Claude sonnet via AWS Bedrock
+# (creds from the AWS chain / repo .env; region from AWS_REGION) and points
+# sandbox_root at a fixture workspace with a deterministic recoverable failure,
+# so we can measure whether cross-session guideline reuse REDUCES cost/steps.
+# Fresh sqlite path/collection => the session-N+1 measurement starts empty.
+
+agent:
+  name: benchmark
+  max_steps: 10
+  output_format: json
+  planner:
+    enabled: false
+    mode: off
+    max_items: 8
+    auto_token_threshold: 80
+  max_cost_usd: null
+
+llm:
+  provider: bedrock
+  model: global.anthropic.claude-sonnet-4-6   # inference-profile ID (on-demand raw id unsupported on Bedrock)
+  max_tokens: 2048
+  cache_messages: false
+
+tools:
+  manifest_dir:
+    - builtin
+  enabled: [read_file, write_file, list_dir]
+  sandbox_root: /Users/rushour0/.cache/claude-code-tmp/claude-501/-Users-rushour0-gba-fabri/f05c5346-2a65-4031-81e7-e571748fb773/scratchpad/bench-ws
+  result_format: toon
+  agents: []
+  decompose:
+    enabled: false
+    max_subquestions: 5
+  retrieval:
+    enabled: false
+    top_k: 6
+    always_include: [spawn_subagent, ask_user, decompose]
+  mcp_servers: []
+
+memory:
+  backend: sqlite
+  collection: benchmark_bedrock
+  sqlite_path: .fabri/benchmark-bedrock.db
+  top_k: 5
+  similarity_threshold: 0.85
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 30

@@ -4,6 +4,7 @@ import uuid
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, ingest_guideline
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
+from fabri.orchestrator.pipeline import guideline_dedup_key
 
 COLLECTION = f"test_{uuid.uuid4().hex[:8]}"
 
@@ -104,6 +105,34 @@ def test_tools_accumulate_across_merges_not_overwritten():
     assert set(e2.tools) == {"broken", "sum"}
 
     store.delete(e2.id)
+
+
+def test_dedup_key_merges_paraphrases_but_different_tasks_do_not_merge():
+    store = make_store()
+    first_key = guideline_dedup_key(
+        "tactical", task="Repair the billing import", failed_tool_name="import_csv", error_text="Missing account id",
+    )
+    second_key = guideline_dedup_key(
+        "tactical", task="Repair the inventory import", failed_tool_name="import_csv", error_text="Missing account id",
+    )
+    first = ingest_guideline(
+        store, "Validate account identifiers before loading the billing file.", session_id="s1", dedup_key=first_key,
+    )
+    merged = ingest_guideline(
+        store, "Check every customer reference before retrying the financial upload.", session_id="s2", dedup_key=first_key,
+    )
+    distinct = ingest_guideline(
+        store, "Validate account identifiers before loading the inventory file.", session_id="s3", dedup_key=second_key,
+    )
+
+    assert merged.id == first.id
+    assert merged.hit_count == 2
+    assert set(merged.session_ids) == {"s1", "s2"}
+    assert distinct.id != first.id
+    assert store.count() == 2
+
+    store.delete(first.id)
+    store.delete(distinct.id)
 
 
 def test_concurrent_ingest_does_not_lose_updates():

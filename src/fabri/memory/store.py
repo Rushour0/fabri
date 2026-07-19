@@ -121,6 +121,25 @@ class QdrantMemoryStore:
             return results[0]
         return None
 
+    def find_by_dedup_key(
+        self, dedup_key: str, kind: str | None = None
+    ) -> tuple[MemoryEntry, float] | None:
+        conditions = [
+            qmodels.FieldCondition(key="dedup_key", match=qmodels.MatchValue(value=dedup_key))
+        ]
+        if kind is not None:
+            conditions.append(qmodels.FieldCondition(key="kind", match=qmodels.MatchValue(value=kind)))
+        points, _ = self.client.scroll(
+            collection_name=self.collection,
+            scroll_filter=qmodels.Filter(must=conditions),
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            return None
+        return MemoryEntry.from_payload(points[0].payload), 1.0
+
     def delete(self, point_id: str) -> None:
         self.client.delete(
             collection_name=self.collection,

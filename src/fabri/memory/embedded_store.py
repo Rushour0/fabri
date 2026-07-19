@@ -108,8 +108,15 @@ class SqliteMemoryStore:
                text TEXT NOT NULL,
                kind TEXT NOT NULL,
                payload TEXT NOT NULL,
-               hit_count INTEGER NOT NULL DEFAULT 1
+               hit_count INTEGER NOT NULL DEFAULT 1,
+               dedup_key TEXT
            )"""
+        )
+        columns = {row[1] for row in cur.execute("PRAGMA table_info(guidelines)")}
+        if "dedup_key" not in columns:
+            cur.execute("ALTER TABLE guidelines ADD COLUMN dedup_key TEXT")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guidelines_dedup_key ON guidelines(dedup_key)"
         )
         cur.execute(
             f"""CREATE VIRTUAL TABLE IF NOT EXISTS vec_guidelines USING vec0(
@@ -167,9 +174,12 @@ class SqliteMemoryStore:
         vector = embed(entry.text)
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT OR REPLACE INTO guidelines(id, text, kind, payload, hit_count) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (entry.id, entry.text, entry.kind, json.dumps(entry.to_payload()), entry.hit_count),
+            "INSERT OR REPLACE INTO guidelines(id, text, kind, payload, hit_count, dedup_key) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                entry.id, entry.text, entry.kind, json.dumps(entry.to_payload()), entry.hit_count,
+                entry.dedup_key,
+            ),
         )
         # vec0 doesn't support UPSERT cleanly across versions — delete then insert.
         cur.execute("DELETE FROM vec_guidelines WHERE id = ?", (entry.id,))
@@ -284,6 +294,22 @@ class SqliteMemoryStore:
         if results and results[0][1] >= threshold:
             return results[0]
         return None
+
+    def find_by_dedup_key(
+        self, dedup_key: str, kind: str | None = None
+    ) -> tuple[MemoryEntry, float] | None:
+        if kind is None:
+            row = self.conn.execute(
+                "SELECT payload FROM guidelines WHERE dedup_key = ? LIMIT 1", (dedup_key,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT payload FROM guidelines WHERE dedup_key = ? AND kind = ? LIMIT 1",
+                (dedup_key, kind),
+            ).fetchone()
+        if row is None:
+            return None
+        return MemoryEntry.from_payload(json.loads(row[0])), 1.0
 
     def delete(self, point_id: str) -> None:
         cur = self.conn.cursor()

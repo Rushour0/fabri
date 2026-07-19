@@ -53,6 +53,12 @@ class InMemoryVectorStore:
         r = self.query(text, top_k=1, kind=kind)
         return r[0] if r and r[0][1] >= threshold else None
 
+    def find_by_dedup_key(self, dedup_key, kind=None):
+        for entry, _ in self._e.values():
+            if entry.dedup_key == dedup_key and (kind is None or entry.kind == kind):
+                return entry, 1.0
+        return None
+
     def count(self, kind=None):
         if kind is None:
             return len(self._e)
@@ -378,6 +384,30 @@ def test_readlogs_synthesize_uses_llm_and_prices():
     )
     assert summary.llm_cost_usd > 0.0  # priced from the scripted usage
     assert summary.by_kind.get("tactical", 0) >= 1
+
+
+def test_process_trace_merges_llm_paraphrases_by_dedup_key():
+    store = InMemoryVectorStore()
+    events = [
+        {"type": "start", "task": "Charge a payment safely"},
+        {
+            "type": "tool_call", "name": "charge_card", "args": {},
+            "result": {"ok": False, "error": "Card token expired\nretry failed"},
+        },
+        {"type": "final", "outcome": "failed"},
+    ]
+    llm = ScriptedLLMBackend([
+        LLMResponse(final_text="Refresh an expired card token before charging again."),
+        LLMResponse(final_text="Obtain a new payment credential prior to retrying a declined transaction."),
+    ])
+
+    process_trace("session-one", store, llm, events=events, synthesize=True)
+    process_trace("session-two", store, llm, events=events, synthesize=True)
+
+    entries = store.iterate(kind="tactical")
+    assert len(entries) == 1
+    assert entries[0].hit_count == 2
+    assert set(entries[0].session_ids) == {"session-one", "session-two"}
 
 
 def test_noop_llm_raises_if_called():
