@@ -121,6 +121,10 @@ To get the most out of the UI, your config should:
   the listener writes an `ask_user` event into the run's trace (so it reaches the
   browser over the *same* SSE stream, carrying its `question_id`) and holds the
   socket open until `POST /runs/<id>/answer` supplies the answer.
+- **Authentication is optional for conversation.** With auth enabled, guests can
+  browse the roster and run a live thread immediately. Signing in attaches new
+  runs to an account so they appear in the persistent Conversations sidebar;
+  account dashboards and saved replay remain private to that user.
 
 ## Layout
 
@@ -135,7 +139,7 @@ examples/studio/
     components/
       Message, PlanTimeline, ToolCall, CostSummary   the conversation
       AskUserCard, Composer                          input + human-in-the-loop
-      HistoryList, RunReplay                         history + read-only replay
+      HistoryList, RunReplay                         conversation sidebar + read-only replay
       FleetView, AccountTile                         fleet roll-up + drill-down
     App.tsx              the four-surface shell (Conversation / Company / Fleet / History)
   vite.config.ts         dev proxy → fabri serve
@@ -144,7 +148,7 @@ examples/studio/
 ## Scope
 
 Studio is a copy-and-adapt template, not a hosted product. It does multi-turn
-threads, run history, cancel/retry, live COGS, and fleet roll-ups — but it holds
-the active thread in memory (a hard reload drops the in-flight run; finished runs
-are recoverable from History), and it has no auth or multi-user isolation. Add
-those at the `fabri serve` layer for a production deployment.
+threads, run history, cancel/retry, live COGS, fleet roll-ups, and optional
+email/password isolation. The active guest thread lives in browser memory (a
+hard reload drops it); signed-in runs are recoverable from the Conversations
+sidebar and remain scoped to their owner.

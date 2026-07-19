@@ -79,7 +79,7 @@ def test_auth_routes_hide_another_users_run():
         handler = object.__new__(_Handler)
         handler.server = SimpleNamespace(service=service)
         handler.path = path
-        handler._require_user = lambda: "user-b"
+        handler._current_user = lambda: "user-b"
         responses = []
         handler._send_json = lambda code, payload: responses.append((code, payload))
         setattr(handler, action, lambda _session_id: AssertionError("must not be called"))
@@ -92,11 +92,35 @@ def test_auth_routes_hide_another_users_run():
         assert responses == [(404, {"error": "unknown session_id 'owned-run'"})]
 
 
-def test_catalog_requires_a_session_when_auth_is_enabled():
+def test_auth_routes_allow_unowned_guest_run():
+    service = SimpleNamespace(auth_enabled=True, run_owner=lambda _session_id: None)
+
+    for path, action in (
+        ("/runs/guest-run/events", "_stream_events"),
+        ("/runs/guest-run/result", "_send_result"),
+        ("/runs/guest-run/answer", "_answer"),
+        ("/runs/guest-run/cancel", "_cancel"),
+    ):
+        handler = object.__new__(_Handler)
+        handler.server = SimpleNamespace(service=service)
+        handler.path = path
+        handler._current_user = lambda: None
+        calls = []
+        setattr(handler, action, lambda session_id: calls.append(session_id))
+
+        if action in {"_stream_events", "_send_result"}:
+            handler.do_GET()
+        else:
+            handler.do_POST()
+
+        assert calls == ["guest-run"]
+
+
+def test_catalog_is_public_when_auth_is_enabled():
     handler = object.__new__(_Handler)
     handler.server = SimpleNamespace(
         service=SimpleNamespace(auth_enabled=True, auth_secret="secret"),
-        catalog={"private": {}},
+        catalog={},
     )
     handler.path = "/catalog"
     handler.headers = {}
@@ -105,7 +129,31 @@ def test_catalog_requires_a_session_when_auth_is_enabled():
 
     handler.do_GET()
 
-    assert responses == [(401, {"error": "auth required"})]
+    assert responses == [(200, {"catalog": {"agencies": [], "companies": []}})]
+
+
+def test_submit_allows_guest_and_leaves_run_unowned():
+    submitted = []
+    service = SimpleNamespace(
+        auth_enabled=True,
+        submit=lambda task, overrides, **kwargs: submitted.append(
+            (task, overrides, kwargs)
+        )
+        or "guest-run",
+    )
+    handler = object.__new__(_Handler)
+    handler.server = SimpleNamespace(service=service)
+    handler.path = "/runs"
+    handler.headers = {"Content-Length": "17"}
+    handler.rfile = BytesIO(b'{"task":"try it"}')
+    handler._current_user = lambda: None
+    responses = []
+    handler._send_json = lambda code, payload: responses.append((code, payload))
+
+    handler.do_POST()
+
+    assert submitted == [("try it", None, {"catalog_ref": None, "user_id": None})]
+    assert responses == [(200, {"session_id": "guest-run", "status": "submitted"})]
 
 
 def test_signup_returns_the_same_generic_response_for_existing_email(tmp_path):

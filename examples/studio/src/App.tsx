@@ -69,6 +69,8 @@ function TurnBlock({
 export default function App() {
   const run = useRunEvents();
   const [authState, setAuthState] = useState<AuthState>("loading");
+  const [showAuth, setShowAuth] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   // Tab state lives in the URL hash (#conversation, #questions, #replay/<id>),
   // so tabs are deep-linkable and browser Back/Forward works.
   const { surface, replayId, go, hadInitialHash } = useHashRoute("conversation");
@@ -79,8 +81,9 @@ export default function App() {
   const activeIdx = run.turns.length - 1;
 
   const endRef = useRef<HTMLDivElement>(null);
-  const appVisible = authState !== "loading" && authState !== "anon";
+  const appVisible = authState !== "loading";
   const authEmail = typeof authState === "object" ? authState.email : null;
+  const hasAccountAccess = authState === "disabled" || authEmail !== null;
 
   useEffect(() => {
     let live = true;
@@ -100,11 +103,27 @@ export default function App() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [appVisible, run.turns, run.status, surface]);
 
+  useEffect(() => {
+    if (
+      authState === "anon" &&
+      (surface === "history" || surface === "replay" || surface === "questions" || surface === "fleet")
+    ) {
+      setShowAuth(true);
+    }
+  }, [authState, surface]);
+
+  useEffect(() => {
+    if (hasAccountAccess && surface === "history") go("conversation");
+  }, [go, hasAccountAccess, surface]);
+
   // Pending-question count for the Questions tab badge, so a waiting question is
   // visible from any surface. Lightweight poll, independent of the inbox's own.
   const [pendingCount, setPendingCount] = useState(0);
   useEffect(() => {
-    if (!appVisible) return;
+    if (!appVisible || !hasAccountAccess) {
+      setPendingCount(0);
+      return;
+    }
     let alive = true;
     const poll = () =>
       listQuestions()
@@ -116,7 +135,7 @@ export default function App() {
       alive = false;
       clearInterval(id);
     };
-  }, [appVisible]);
+  }, [appVisible, hasAccountAccess]);
 
   // The served company's org structure (null when Studio is pointed at a single
   // agency). Fetched once — a served config doesn't change over a session.
@@ -159,6 +178,18 @@ export default function App() {
     go("replay", sessionId);
   };
 
+  const openSavedConversation = (sessionId: string) => {
+    setReplayFrom(surface === "replay" || surface === "history" ? "conversation" : surface);
+    setSidebarOpen(false);
+    go("replay", sessionId);
+  };
+
+  const newConversation = () => {
+    run.reset();
+    setSidebarOpen(false);
+    go("conversation");
+  };
+
   const empty = surface === "conversation" && !hasThread && run.status === "idle";
 
   // The app frame is always full-width so switching tabs never resizes it
@@ -172,20 +203,36 @@ export default function App() {
       await logout();
     } finally {
       setAuthState("anon");
+      go("conversation");
     }
   };
 
   if (authState === "loading") {
     return <main style={{ minHeight: "100%", display: "grid", placeItems: "center" }}>Loading…</main>;
   }
-  if (authState === "anon") {
-    return <LoginScreen onAuthed={(email) => setAuthState({ email })} />;
+  if (showAuth) {
+    return (
+      <LoginScreen
+        onAuthed={(email) => {
+          setAuthState({ email });
+          setShowAuth(false);
+        }}
+        onContinueAsGuest={() => {
+          setAuthState("anon");
+          setShowAuth(false);
+          go("conversation");
+        }}
+      />
+    );
   }
 
   return (
     <div className="app">
       <header className="header">
         <div className="header__brand">
+          <button className="sidebar-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open conversations">
+            Conversations
+          </button>
           <span className="header__logo" aria-hidden />
           <span className="header__title">Fabri Studio</span>
         </div>
@@ -211,29 +258,27 @@ export default function App() {
             >
               Company
             </button>
-            <button
-              className={"tab" + (surface === "questions" ? " tab--on" : "")}
-              onClick={() => go("questions")}
-            >
-              Questions
-              {pendingCount > 0 && (
-                <span className="tab__badge" aria-label={`${pendingCount} waiting`}>
-                  {pendingCount}
-                </span>
-              )}
-            </button>
-            <button
-              className={"tab" + (surface === "fleet" ? " tab--on" : "")}
-              onClick={() => go("fleet")}
-            >
-              Fleet
-            </button>
-            <button
-              className={"tab" + (surface === "history" || surface === "replay" ? " tab--on" : "")}
-              onClick={() => go("history")}
-            >
-              History
-            </button>
+            {hasAccountAccess && (
+              <button
+                className={"tab" + (surface === "questions" ? " tab--on" : "")}
+                onClick={() => go("questions")}
+              >
+                Questions
+                {pendingCount > 0 && (
+                  <span className="tab__badge" aria-label={`${pendingCount} waiting`}>
+                    {pendingCount}
+                  </span>
+                )}
+              </button>
+            )}
+            {hasAccountAccess && (
+              <button
+                className={"tab" + (surface === "fleet" ? " tab--on" : "")}
+                onClick={() => go("fleet")}
+              >
+                Fleet
+              </button>
+            )}
             </nav>
             {authEmail && (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -250,85 +295,105 @@ export default function App() {
         </div>
       </header>
 
-      <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>
-        {surface === "history" && <HistoryList onOpen={(id) => openReplay(id, "history")} />}
-        {surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
-        {surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
-        {surface === "replay" && replayId && (
-          <RunReplay key={replayId} sessionId={replayId} onBack={() => go(replayFrom)} />
-        )}
-        {surface === "catalog" && catalog && <CatalogView catalog={catalog} onRun={hire} />}
-        {surface === "company" && (
-          activeCompanyOrg ? (
-            // A company is served/selected: draw its org chart; overlay live status
-            // + cost when a run streams.
-            <CompanyOrgChart company={activeCompanyOrg} events={run.turns[activeIdx]?.events} />
-          ) : hasThread ? (
-            <AgencyGraph events={run.turns[activeIdx]?.events ?? []} />
-          ) : (
-            <div className="agency-empty">Start a task in Conversation to watch your agency's agents work together.</div>
-          )
-        )}
-
-        {surface === "conversation" && (
-          <>
-            {empty && (
-              <div className="empty">
-                <p className="empty__title">Talk to your fabri agency</p>
-                <p className="empty__sub">
-                  Submit a task below. The manager streams its plan, tool calls, and cost here — and
-                  asks you questions when it needs a decision. Follow-ups continue the same thread.
-                </p>
-              </div>
-            )}
-
-            {run.turns.map((turn, i) => (
-              <TurnBlock
-                key={turn.sessionId ?? `turn-${i}`}
-                turn={turn}
-                active={i === activeIdx}
-                onAnswer={run.answer}
-              />
-            ))}
-
-            {run.error && <div className="error-banner">{run.error}</div>}
-            <div ref={endRef} />
-          </>
-        )}
-      </main>
-
-      {surface === "conversation" && (
-        <footer className="footer footer--narrow">
-          <div className="footer__stack">
-            {catalog && selection && (
-              <div className="running-as">
-                <span className="running-as__label">Running</span>
-                <span className="running-as__name">{selection.title}</span>
-                <span className={"running-as__kind running-as__kind--" + selection.kind}>{selection.kind}</span>
-                <button className="running-as__change" onClick={() => go("catalog")}>
-                  change
-                </button>
-              </div>
-            )}
-            {catalog && !selection && (
-              <div className="running-as running-as--empty">
-                Pick an agency or company from the <button className="running-as__change" onClick={() => go("catalog")}>Roster</button> to run.
-              </div>
-            )}
-            {hasThread && !busy && (
-              <button className="footer__new" onClick={run.reset}>
-                New thread
-              </button>
-            )}
-            <Composer
-              onSubmit={(task) => run.start(task, selection?.ref)}
-              onCancel={run.cancel}
-              busy={busy}
-              followup={hasThread}
-            />
+      <div className="workspace">
+        <aside className={"conversation-sidebar" + (sidebarOpen ? " conversation-sidebar--open" : "")} aria-label="Saved conversations">
+          <div className="conversation-sidebar__header">
+            <span>Conversations</span>
+            <button className="conversation-sidebar__new" onClick={newConversation} aria-label="New conversation" title="New conversation">+</button>
+            <button className="conversation-sidebar__close" onClick={() => setSidebarOpen(false)} aria-label="Close conversations">×</button>
           </div>
-        </footer>
-      )}
+          {hasAccountAccess ? (
+            <HistoryList
+              onOpen={openSavedConversation}
+              refreshKey={`${run.turns.length}:${run.status}`}
+            />
+          ) : (
+            <div className="conversation-sidebar__guest">
+              <p>Sign in to save conversations and reopen them later.</p>
+              <button className="btn" onClick={() => setShowAuth(true)}>Save conversation history</button>
+            </div>
+          )}
+        </aside>
+
+        <div className="main-pane">
+          <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>
+            {hasAccountAccess && surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
+            {hasAccountAccess && surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
+            {hasAccountAccess && surface === "replay" && replayId && (
+              <RunReplay key={replayId} sessionId={replayId} onBack={() => go(replayFrom)} />
+            )}
+            {surface === "catalog" && catalog && <CatalogView catalog={catalog} onRun={hire} />}
+            {surface === "company" && (
+              activeCompanyOrg ? (
+                <CompanyOrgChart company={activeCompanyOrg} events={run.turns[activeIdx]?.events} />
+              ) : hasThread ? (
+                <AgencyGraph events={run.turns[activeIdx]?.events ?? []} />
+              ) : (
+                <div className="agency-empty">Start a task in Conversation to watch your agency's agents work together.</div>
+              )
+            )}
+
+            {surface === "conversation" && (
+              <>
+                {empty && (
+                  <div className="empty">
+                    <p className="empty__title">Talk to your fabri agency</p>
+                    <p className="empty__sub">
+                      Submit a task below. The manager streams its plan, tool calls, and cost here — and
+                      asks you questions when it needs a decision. Follow-ups continue the same thread.
+                    </p>
+                  </div>
+                )}
+
+                {run.turns.map((turn, i) => (
+                  <TurnBlock
+                    key={turn.sessionId ?? `turn-${i}`}
+                    turn={turn}
+                    active={i === activeIdx}
+                    onAnswer={run.answer}
+                  />
+                ))}
+
+                {run.error && <div className="error-banner">{run.error}</div>}
+                <div ref={endRef} />
+              </>
+            )}
+          </main>
+
+          {surface === "conversation" && (
+            <footer className="footer footer--narrow">
+              <div className="footer__stack">
+                {catalog && selection && (
+                  <div className="running-as">
+                    <span className="running-as__label">Running</span>
+                    <span className="running-as__name">{selection.title}</span>
+                    <span className={"running-as__kind running-as__kind--" + selection.kind}>{selection.kind}</span>
+                    <button className="running-as__change" onClick={() => go("catalog")}>
+                      change
+                    </button>
+                  </div>
+                )}
+                {catalog && !selection && (
+                  <div className="running-as running-as--empty">
+                    Pick an agency or company from the <button className="running-as__change" onClick={() => go("catalog")}>Roster</button> to run.
+                  </div>
+                )}
+                {hasThread && !busy && (
+                  <button className="footer__new" onClick={newConversation}>
+                    New thread
+                  </button>
+                )}
+                <Composer
+                  onSubmit={(task) => run.start(task, selection?.ref)}
+                  onCancel={run.cancel}
+                  busy={busy}
+                  followup={hasThread}
+                />
+              </div>
+            </footer>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

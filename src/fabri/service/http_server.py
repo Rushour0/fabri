@@ -117,9 +117,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "auth required"})
         return user_id
 
-    def _require_run_owner(self, session_id: str, caller_id: str) -> bool:
-        """Hide runs not owned by the authenticated caller as missing."""
-        if self.service.run_owner(session_id) != caller_id:
+    def _authorize_run(self, session_id: str) -> bool:
+        """Allow capability-style guest runs or the authenticated run owner."""
+        owner_id = self.service.run_owner(session_id)
+        if owner_id is None:
+            # Anonymous runs are intentionally not attached to an account. Their
+            # UUID session id is the capability needed to stream or control the
+            # live run; they never appear in an authenticated user's history.
+            return True
+        caller_id = self._current_user()
+        if caller_id is None:
+            self._send_json(401, {"error": "auth required"})
+            return False
+        if owner_id != caller_id:
             self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
             return False
         return True
@@ -168,13 +178,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"questions": self.service.list_pending_questions(user_id=user_id)})
             return
         if path in ("/company", "/company/"):
-            if self.service.auth_enabled and self._require_user() is None:
-                return
             self._send_json(200, {"company": self.server.company})
             return
         if path in ("/catalog", "/catalog/"):
-            if self.service.auth_enabled and self._require_user() is None:
-                return
             catalog = self.server.catalog
             self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
             return
@@ -196,19 +202,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         m = _EVENTS_RE.match(path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and (
-                user_id is None or not self._require_run_owner(m.group(1), user_id)
-            ):
+            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
                 return
             self._stream_events(m.group(1))
             return
         m = _RESULT_RE.match(path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and (
-                user_id is None or not self._require_run_owner(m.group(1), user_id)
-            ):
+            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
                 return
             self._send_result(m.group(1))
             return
@@ -257,19 +257,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         m = _ANSWER_RE.match(self.path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and (
-                user_id is None or not self._require_run_owner(m.group(1), user_id)
-            ):
+            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
                 return
             self._answer(m.group(1))
             return
         m = _CANCEL_RE.match(self.path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and (
-                user_id is None or not self._require_run_owner(m.group(1), user_id)
-            ):
+            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
                 return
             self._cancel(m.group(1))
             return
@@ -282,9 +276,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path not in ("/runs", "/runs/"):
             self._send_json(404, {"error": f"no route for POST {self.path}"})
             return
-        user_id = self._require_user() if self.service.auth_enabled else None
-        if self.service.auth_enabled and user_id is None:
-            return
+        # Signing in is optional for live conversations. Authenticated runs are
+        # attached to the account and appear in History; guest runs stay
+        # unowned and are accessible only through their UUID session id.
+        user_id = self._current_user() if self.service.auth_enabled else None
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:

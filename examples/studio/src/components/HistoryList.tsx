@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { listRuns, type SessionSummary } from "../lib/api";
 
-// Run history — the persisted session index (GET /runs), which survives a
-// `fabri serve` restart. Grouped by thread so a multi-turn conversation reads as
-// one entry list, newest first. Selecting a run opens it read-only.
+// Saved conversations from the persisted session index (GET /runs). Multiple
+// runs sharing a thread_id collapse into one sidebar row: the original task is
+// its title, while selecting it opens the newest run in that conversation.
 
 const STATUS_LABEL: Record<string, string> = {
   running: "Running",
@@ -23,7 +23,13 @@ function when(ts: number | undefined): string {
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-export function HistoryList({ onOpen }: { onOpen: (sessionId: string) => void }) {
+export function HistoryList({
+  onOpen,
+  refreshKey,
+}: {
+  onOpen: (sessionId: string) => void;
+  refreshKey?: string;
+}) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,27 +41,48 @@ export function HistoryList({ onOpen }: { onOpen: (sessionId: string) => void })
     return () => {
       live = false;
     };
-  }, []);
+  }, [refreshKey]);
 
   if (error) return <div className="error-banner">Couldn't load history: {error}</div>;
   if (!sessions) return <div className="history__empty">Loading history…</div>;
   if (sessions.length === 0)
-    return <div className="history__empty">No runs yet. Start one from the conversation.</div>;
+    return <div className="history__empty">Your saved conversations will appear here.</div>;
+
+  const conversations = new Map<
+    string,
+    { latest: SessionSummary; title: string; turns: number }
+  >();
+  for (const session of sessions) {
+    const key = session.thread_id ?? session.session_id;
+    const existing = conversations.get(key);
+    if (existing) {
+      existing.turns += 1;
+      if (session.task) existing.title = session.task;
+    } else {
+      conversations.set(key, {
+        latest: session,
+        title: session.task ?? session.session_id,
+        turns: 1,
+      });
+    }
+  }
 
   return (
-    <ul className="history">
-      {sessions.map((s) => {
-        const cost = money(s.cost?.total_cost_usd);
+    <ul className="history history--sidebar">
+      {[...conversations.entries()].map(([key, conversation]) => {
+        const { latest, title, turns } = conversation;
+        const cost = money(latest.cost?.total_cost_usd);
         return (
-          <li key={s.session_id}>
-            <button className="history__item" onClick={() => onOpen(s.session_id)}>
-              <span className={`history__badge history__badge--${s.status}`}>
-                {STATUS_LABEL[s.status] ?? s.status}
-              </span>
-              <span className="history__task">{s.task ?? s.session_id}</span>
+          <li key={key}>
+            <button className="history__item" onClick={() => onOpen(latest.session_id)} title={title}>
+              <span className="history__task">{title}</span>
               <span className="history__meta">
+                <span className={`history__state history__state--${latest.status}`}>
+                  {STATUS_LABEL[latest.status] ?? latest.status}
+                </span>
+                {turns > 1 && <span>{turns} turns</span>}
                 {cost && <span className="history__cost">{cost}</span>}
-                <span className="history__time">{when(s.started_ts)}</span>
+                <span className="history__time">{when(latest.started_ts)}</span>
               </span>
             </button>
           </li>

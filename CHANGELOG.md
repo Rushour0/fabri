@@ -4,6 +4,21 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.18.4 — 2026-07-20
+
+### Changed
+
+- **Studio no longer forces sign-up.** When authentication is enabled, visitors
+  can browse the roster and run live conversations as guests. Signing in is
+  requested only for saved history and account-scoped dashboards; owned runs
+  retain their existing cross-user access controls.
+- **Conversation history is now a sidebar.** Saved runs are grouped into
+  conversations by thread and remain one click away without replacing the main
+  work surface. Guests see the same rail with a clear, optional save-history
+  action.
+- **Password visibility control.** Login and sign-up now include an accessible
+  show/hide-password button, plus a clear path to continue without saving.
+
 ## 0.18.3 — 2026-07-20
 
 ### Added

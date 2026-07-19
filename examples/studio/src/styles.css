@@ -76,6 +76,100 @@ body {
   border-inline: 1px solid var(--border);
 }
 
+.workspace {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.main-pane {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.conversation-sidebar {
+  display: flex;
+  width: 252px;
+  min-width: 252px;
+  min-height: 0;
+  flex-direction: column;
+  padding: 12px 9px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--surface) 58%, var(--bg));
+  border-right: 1px solid var(--border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-2) transparent;
+}
+
+.conversation-sidebar__header {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 5px 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.conversation-sidebar__new,
+.conversation-sidebar__close,
+.sidebar-toggle {
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.conversation-sidebar__new {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  margin-left: auto;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.conversation-sidebar__new:hover {
+  color: var(--text);
+  border-color: var(--border-2);
+}
+
+.conversation-sidebar__close,
+.sidebar-toggle {
+  display: none;
+}
+
+.conversation-sidebar__guest {
+  margin: 6px 4px;
+  padding: 12px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.conversation-sidebar__guest p {
+  margin: 0 0 11px;
+}
+
+.conversation-sidebar__guest .btn {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 11.5px;
+}
+
 /* The conversation reads as a centered column inside the stable wide frame —
    each turn/empty/error block is capped and centered, while the scroll area
    itself stays full-width (scrollbar at the frame edge). align-items centers the
@@ -995,6 +1089,130 @@ body {
 .history__time {
   font-size: 11.5px;
   color: var(--text-faint);
+}
+
+.history--sidebar {
+  gap: 2px;
+}
+
+.history--sidebar .history__item {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.history--sidebar .history__item:hover {
+  background: var(--surface-2);
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.history--sidebar .history__task {
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.history--sidebar .history__meta {
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.history__state {
+  color: var(--text-faint);
+}
+
+.history__state--running {
+  color: var(--accent-2);
+}
+
+.history__state--error {
+  color: var(--err);
+}
+
+.history--sidebar .history__cost,
+.history--sidebar .history__time {
+  font-size: inherit;
+}
+
+.history--sidebar + .history__empty,
+.conversation-sidebar .history__empty {
+  margin: 18px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 800px) {
+  .header {
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .header__brand {
+    gap: 7px;
+  }
+
+  .header__title,
+  .header__right > .status {
+    display: none;
+  }
+
+  .header__right {
+    min-width: 0;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .header__right .tabs {
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .header__right .tab {
+    padding-inline: 8px;
+    white-space: nowrap;
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+    padding: 4px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-size: 11px;
+  }
+
+  .conversation-sidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 12;
+    width: min(290px, calc(100vw - 40px));
+    transform: translateX(-101%);
+    box-shadow: var(--shadow-lg);
+    transition: transform 0.2s var(--ease);
+  }
+
+  .conversation-sidebar--open {
+    transform: translateX(0);
+  }
+
+  .conversation-sidebar__close {
+    display: grid;
+    width: 25px;
+    height: 25px;
+    margin-left: 5px;
+    padding: 0;
+    place-items: center;
+    font-size: 18px;
+  }
 }
 
 /* ---------- replay (read-only past run) ---------- */
