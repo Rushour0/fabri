@@ -138,8 +138,11 @@ export default function App() {
 
   const empty = surface === "conversation" && !hasThread && run.status === "idle";
 
+  // Wide surfaces (the roster, org-charts, fleet, history) get the full width;
+  // the conversation stays a readable narrow column.
+  const wide = surface === "catalog" || surface === "company" || surface === "fleet" || surface === "history";
   return (
-    <div className="app">
+    <div className={"app" + (wide ? " app--wide" : "")}>
       <header className="header">
         <div className="header__brand">
           <span className="header__logo" aria-hidden />

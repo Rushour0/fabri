@@ -62,6 +62,11 @@ body {
   max-width: 720px;
   margin: 0 auto;
   border-inline: 1px solid var(--border);
+  transition: max-width 0.25s var(--ease);
+}
+/* Full-width for the roster / org-charts / fleet / history. */
+.app--wide {
+  max-width: min(1440px, 100vw);
 }
 
 /* ---------- header ---------- */
@@ -1668,9 +1673,8 @@ body {
 
 /* ---------- catalog (roster front door) ---------- */
 .catalog {
-  max-width: 940px;
-  margin: 0 auto;
-  padding: 20px 0 48px;
+  width: 100%;
+  padding: 8px 28px 56px;
 }
 .catalog__head {
   margin-bottom: 24px;
