@@ -4,6 +4,19 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.17.0 — 2026-07-20
+
+### `fabri repo` — self-improving, in your repo (GitHub)
+
+- **`fabri repo suggest-prompt`** reads an agent's promoted `strategic` guidelines
+  (lessons that recurred across ≥3 sessions) and opens a **deduplicated GitHub
+  issue** proposing they be folded into the agent's prompt — the self-improving
+  memory loop made visible and reviewable in the repo.
+- **`fabri repo issue`** files/refreshes a deduplicated tracking issue (a hidden
+  marker + list-before-create, so re-runs comment instead of spamming duplicates).
+- GitHub-only for now, token via `GITHUB_TOKEN` (Actions-native), stdlib only. See
+  `docs/repo-agent.md` for a copy-paste GitHub Actions workflow.
+
 ## 0.16.4 — 2026-07-19
 
 ### Studio
