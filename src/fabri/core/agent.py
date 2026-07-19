@@ -1239,13 +1239,33 @@ def _dispatch_tool_calls(
             had_failure = True
             logger.warning("step %d: tool %s failed: %s", step_num, call.name, result.get("error"))
 
-        # Roll the child's end-to-end cost into the parent. Prefer
-        # total_cost_usd (includes grandchildren); fall back to cost_usd.
-        # A child on an older fabri without cost fields contributes 0.
+        # Roll a child agent's end-to-end cost into the parent. BOTH
+        # spawn_subagent AND static tools.agents[] specialists return the run
+        # envelope with `session_id` + `usage`, so both must be counted or the
+        # parent's total_cost_usd silently undercounts its own specialists (and,
+        # recursively, a company's whole org tree). Prefer total_cost_usd
+        # (includes grandchildren); an older-fabri child without cost adds 0.
+        child = result.get("result")
+        child_usage = child.get("usage") if isinstance(child, dict) else None
+        is_agent_child = call.name == SPAWN_SUBAGENT_TOOL_NAME or (
+            isinstance(child, dict) and "session_id" in child and isinstance(child_usage, dict)
+        )
+        if (
+            is_agent_child
+            and on_subagent_cost is not None
+            and bool(result.get("ok"))
+            and isinstance(child_usage, dict)
+        ):
+            child_cost = child_usage.get("total_cost_usd")
+            if child_cost is None:
+                child_cost = child_usage.get("cost_usd")
+            if isinstance(child_cost, (int, float)):
+                on_subagent_cost(float(child_cost))
+
+        # spawn_subagent-specific bookkeeping: nested-outcome surfacing, the
+        # unaccounted-cost marker, and fan-out stats.
         if call.name == SPAWN_SUBAGENT_TOOL_NAME:
             ok = bool(result.get("ok"))
-            child = result.get("result")
-            child_usage = child.get("usage") if isinstance(child, dict) else None
             # A spawn_subagent call can exit 0 (ok=True -- the subprocess
             # tool contract is intact) while the nested run's own outcome is
             # worse than SUCCESS -- e.g. SUCCESS_WITH_RECOVERY means the
@@ -1256,12 +1276,6 @@ def _dispatch_tool_calls(
             nested_outcome = child.get("outcome") if isinstance(child, dict) else None
             if ok and nested_outcome is not None and nested_outcome != Outcome.SUCCESS.value:
                 had_failure = True
-            if on_subagent_cost is not None and ok and isinstance(child_usage, dict):
-                child_cost = child_usage.get("total_cost_usd")
-                if child_cost is None:
-                    child_cost = child_usage.get("cost_usd")
-                if isinstance(child_cost, (int, float)):
-                    on_subagent_cost(float(child_cost))
             # A spawn that failed without surfacing usage (e.g. qdrant down ->
             # the runner crashed before printing its final JSON) almost always
             # burned real provider tokens that the parent can't roll into its
