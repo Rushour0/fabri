@@ -10,10 +10,12 @@
   --text-dim: #9497a3; /* tier 2 — narration, labels, timestamps */
   --text-faint: #7c7f8b; /* tier 3 — thought, meta, chrome (AA-legible) */
 
-  /* One deliberate accent. Amber = "this needs you." Used ONLY on the ask
-     card + pending indicator, never decoratively. Manager messages own no hue. */
-  --accent: #d7a13b;
-  --accent-soft: rgba(215, 161, 59, 0.14);
+  /* One deliberate accent. Blue = "this needs you" / primary action. Used ONLY
+     on the ask card + pending indicator + focus, never decoratively. Manager
+     messages own no hue. --accent-2 is a lighter companion for hover/highlights. */
+  --accent: #0d92f4;
+  --accent-2: #80c4e9;
+  --accent-soft: rgba(13, 146, 244, 0.15);
   --ok: #5fbf8f;
   --err: #e2695f;
 
@@ -59,14 +61,27 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-width: 720px;
+  /* Always full-width so switching tabs never resizes the frame. List surfaces
+     fill it; the conversation centers its own readable column (below). */
+  max-width: min(1440px, 100vw);
   margin: 0 auto;
   border-inline: 1px solid var(--border);
-  transition: max-width 0.25s var(--ease);
 }
-/* Full-width for the roster / org-charts / fleet / history. */
-.app--wide {
-  max-width: min(1440px, 100vw);
+/* The conversation reads as a centered column inside the stable wide frame —
+   each turn/empty/error block is capped and centered, while the scroll area
+   itself stays full-width (scrollbar at the frame edge). align-items centers the
+   flex children robustly, even ones with their own margin (e.g. .empty). */
+.thread--narrow {
+  align-items: center;
+}
+.thread--narrow > * {
+  width: 100%;
+  max-width: 768px;
+}
+.footer--narrow .footer__stack {
+  width: 100%;
+  max-width: 768px;
+  margin-inline: auto;
 }
 
 /* ---------- header ---------- */
