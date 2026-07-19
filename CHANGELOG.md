@@ -4,6 +4,31 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.16.2 — 2026-07-19
+
+### Studio
+
+- **Tabs are URL-tracked and deep-linkable.** Tab state now lives in the URL hash
+  (`#conversation`, `#questions`, `#replay/<id>`) via a small `useHashRoute` hook
+  (no router dependency), so tabs survive reloads and browser Back/Forward works.
+- **Fixed the Questions width regression.** Switching to the Questions inbox
+  snapped the layout back to the narrow conversation column; it now gets the full
+  width like the other list surfaces (Roster/Company/Fleet/History). A replay
+  inherits the width of the surface that opened it.
+
+### Fixes
+
+- **CI: install the `embeddings` extra so the memory/retrieval suite runs.** The
+  test job installed only `.[dev,sqlite]`, so ~30 memory/retrieval/eval-gate tests
+  errored on the missing `sentence-transformers` or silently no-op'd and failed
+  downstream. CI now installs CPU-only torch + `.[dev,sqlite,embeddings]`.
+
+### Internal
+
+- Release workflow now cuts a GitHub Release (notes from this changelog) after the
+  PyPI publish. Added `docs/roadmap/connectors.md` (Track C — agents that run
+  inside a company's repos/Slack), scoping only.
+
 ## 0.16.1 — 2026-07-19
 
 ### Fixes
