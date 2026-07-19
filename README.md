@@ -116,7 +116,8 @@ service can track COGS without parsing logs. See `fabri.pricing`.
 ## Install
 
 ```bash
-pip install fabri                       # the `fabri` command lands on PATH
+pip install fabri                       # lean base install; agencies run without memory learning
+pip install "fabri[embeddings]"         # enable memory retrieval and learning
 docker run -p 6333:6333 qdrant/qdrant   # vector store for memory
 export ANTHROPIC_API_KEY=...
 ```

@@ -10,6 +10,7 @@ from fabri.memory.compress import (
     synthesize_guideline,
     synthesize_success_pattern,
 )
+from fabri.memory.embeddings import embeddings_available
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD, ingest_guideline
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
@@ -166,6 +167,10 @@ def process_trace(
     arbitrarily large external log costs $0; `llm` is never invoked in that
     mode. Both default to today's behaviour (read from disk, LLM synthesis) so
     every existing caller is byte-identical."""
+    if not embeddings_available():
+        logger.info("memory learning disabled — install fabri[embeddings] to enable")
+        return []
+
     if events is None:
         events = read_trace(session_id)
     task = next((e["task"] for e in events if e.get("type") == EventType.START.value), "")

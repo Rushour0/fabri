@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterable, TypeVar
 
 from fabri.events import EventType
-from fabri.memory.embeddings import embed
+from fabri.memory.embeddings import embeddings_available, embed
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
 
@@ -39,6 +39,15 @@ DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
 # Keyed on (tool name, description) so a description edit invalidates.
 _tool_embedding_cache: dict[tuple[str, str], list[float]] = {}
+_embeddings_disabled_logged = False
+
+
+def _log_embeddings_disabled() -> None:
+    """Report optional-memory degradation once per process."""
+    global _embeddings_disabled_logged
+    if not _embeddings_disabled_logged:
+        logger.info("memory retrieval disabled — install fabri[embeddings] to enable")
+        _embeddings_disabled_logged = True
 
 # Optional rank_bm25 for Qdrant client-side BM25 (no-op when not installed).
 try:
@@ -297,6 +306,11 @@ def retrieve_tools(
     all_tools = list(registry.list())
     if not all_tools:
         return []
+    if not embeddings_available():
+        _log_embeddings_disabled()
+        # Keep agencies usable without vector ranking: all tools remain
+        # available rather than silently hiding capabilities needed to run.
+        return all_tools
     task_vec = embed(task or "")
     always_set = set(always_include)
     ranked = sorted(
@@ -483,6 +497,10 @@ def _retrieve_inner(
     retrieval decided (strategy, pool sizes, BM25 fired/fell-back, slot counts,
     MMR, and a lean per-candidate list). Trace-only, never enters the prompt.
     See docs/design/memory-observability-plan.md (unit A)."""
+    if not embeddings_available():
+        _log_embeddings_disabled()
+        return "", []
+
     rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
     strategy = rcfg.strategy
 
