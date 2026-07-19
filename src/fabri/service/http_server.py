@@ -45,6 +45,13 @@ from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
 from fabri.service.slack_events import handle_slack_event
 from fabri.service.service import FabriService
+from fabri.service.auth import (
+    build_clear_cookie,
+    build_set_cookie,
+    parse_cookie,
+    sign_session,
+    verify_session,
+)
 
 logger = get_logger()
 
@@ -80,35 +87,77 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # quiet the default stderr spam
         logger.debug("fabri serve: " + fmt, *args)
 
-    def _send_json(self, code: int, payload: dict) -> None:
+    def _send_json(
+        self, code: int, payload: dict, *, extra_headers: Mapping[str, str] | None = None
+    ) -> None:
         body = json.dumps(payload).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def _current_user(self) -> str | None:
+        if not self.service.auth_enabled:
+            return None
+        secret = self.service.auth_secret
+        if not secret:
+            return None
+        token = parse_cookie(self.headers.get("Cookie", "")).get("fabri_session", "")
+        return verify_session(token, secret)
+
+    def _require_user(self) -> str | None:
+        user_id = self._current_user()
+        if user_id is None:
+            self._send_json(401, {"error": "auth required"})
+        return user_id
 
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
         parsed = urlsplit(self.path)
         path = parsed.path
+        if self.service.auth_enabled and path in ("/auth/me", "/auth/me/"):
+            user_id = self._current_user()
+            user = (
+                self.service.user_store.get_user(user_id)
+                if user_id and self.service.user_store
+                else None
+            )
+            if user is None:
+                self._send_json(401, {"error": "auth required"})
+            else:
+                self._send_json(200, {"email": user["email"]})
+            return
         if path in ("/health", "/health/"):
             self._send_json(200, {"status": "ok"})
             return
         if path in ("/runs", "/runs/"):
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
             try:
                 filters = self._run_filters(parsed.query)
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
-            self._send_json(200, {"sessions": self.service.list_sessions(**filters)})
+            self._send_json(
+                200, {"sessions": self.service.list_sessions(**filters, user_id=user_id)}
+            )
             return
         if path in ("/agencies", "/agencies/"):
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._send_json(200, {"agencies": self.service.list_agencies()})
             return
         if path in ("/questions", "/questions/"):
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._send_json(200, {"questions": self.service.list_pending_questions()})
             return
         if path in ("/company", "/company/"):
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._send_json(200, {"company": self.server.company})
             return
         if path in ("/catalog", "/catalog/"):
@@ -116,10 +165,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
             return
         if path in ("/fleets", "/fleets/"):
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._send_json(200, {"fleets": self.service.list_fleets()})
             return
         m = _FLEET_RE.match(path)
         if m:
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             try:
                 self._send_json(200, self.service.fleet_status(m.group(1)))
             except KeyError:
@@ -127,10 +180,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         m = _EVENTS_RE.match(path)
         if m:
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._stream_events(m.group(1))
             return
         m = _RESULT_RE.match(path)
         if m:
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._send_result(m.group(1))
             return
         if self.serve_studio and not self._is_api_path(self.path):
@@ -152,6 +209,13 @@ class _Handler(BaseHTTPRequestHandler):
         return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.service.auth_enabled and self.path.rstrip("/") in {
+            "/auth/signup",
+            "/auth/login",
+            "/auth/logout",
+        }:
+            self._auth_post(self.path.rstrip("/"))
+            return
         if self.path in ("/slack/events", "/slack/events/"):
             if not self.slack_cfg.get("events_enabled"):
                 self._send_json(404, {"error": f"no route for POST {self.path}"})
@@ -171,17 +235,27 @@ class _Handler(BaseHTTPRequestHandler):
             return
         m = _ANSWER_RE.match(self.path)
         if m:
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._answer(m.group(1))
             return
         m = _CANCEL_RE.match(self.path)
         if m:
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             self._cancel(m.group(1))
             return
         if self.path in ("/fleets", "/fleets/"):
-            self._submit_fleet()
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            self._submit_fleet(user_id=user_id)
             return
         if self.path not in ("/runs", "/runs/"):
             self._send_json(404, {"error": f"no route for POST {self.path}"})
+            return
+        user_id = self._require_user() if self.service.auth_enabled else None
+        if self.service.auth_enabled and user_id is None:
             return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
@@ -196,7 +270,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             session_id = self.service.submit(
-                task, req.get("overrides"), catalog_ref=req.get("catalog_ref")
+                task,
+                req.get("overrides"),
+                catalog_ref=req.get("catalog_ref"),
+                user_id=user_id,
             )
         except KeyError as e:
             self._send_json(400, {"error": str(e)})
@@ -237,7 +314,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, result)
 
-    def _submit_fleet(self) -> None:
+    def _submit_fleet(self, *, user_id: str | None = None) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
@@ -250,11 +327,73 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "fleet request requires a non-empty 'items' list"})
             return
         try:
-            result = self.service.submit_fleet(items, req.get("overrides"))
+            result = self.service.submit_fleet(
+                items, req.get("overrides"), user_id=user_id
+            )
         except Exception as e:  # bind/launch/validation -> 400, not 500 HTML
             self._send_json(400, {"error": str(e)})
             return
         self._send_json(200, result)
+
+    def _auth_post(self, path: str) -> None:
+        if path == "/auth/logout":
+            self._send_json(
+                200,
+                {"ok": True},
+                extra_headers={
+                    "Set-Cookie": build_clear_cookie(
+                        self.service.auth_cfg.get("secure_cookie", True)
+                    )
+                },
+            )
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": "invalid request JSON"})
+            return
+        email, password = req.get("email"), req.get("password")
+        if (
+            not isinstance(email, str)
+            or not email.strip()
+            or not isinstance(password, str)
+            or not password
+        ):
+            self._send_json(400, {"error": "email and password are required"})
+            return
+        store = self.service.user_store
+        secret = self.service.auth_secret
+        if store is None or secret is None:
+            self._send_json(500, {"error": "authentication is unavailable"})
+            return
+        if path == "/auth/signup":
+            try:
+                user_id = store.create_user(email, password)
+            except ValueError:
+                self._send_json(409, {"error": "email already registered"})
+                return
+        else:
+            user_id = store.verify_user(email, password)
+            if user_id is None:
+                self._send_json(401, {"error": "invalid email or password"})
+                return
+        user = store.get_user(user_id)
+        if user is None:
+            self._send_json(500, {"error": "authentication is unavailable"})
+            return
+        ttl_s = self.service.auth_cfg.get("session_ttl_s", 604800)
+        token = sign_session(user_id, secret, ttl_s)
+        self._send_json(
+            200,
+            {"email": user["email"]},
+            extra_headers={
+                "Set-Cookie": build_set_cookie(
+                    token, ttl_s, self.service.auth_cfg.get("secure_cookie", True)
+                )
+            },
+        )
 
     def _stream_events(self, session_id: str) -> None:
         try:
@@ -294,7 +433,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")

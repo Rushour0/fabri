@@ -2,6 +2,19 @@
 // All paths are same-origin — the Vite dev server proxies them to `fabri serve`.
 import type { CostSurface, RunResult } from "./events";
 
+const unauthorizedListeners = new Set<() => void>();
+
+export function onUnauthorized(listener: () => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => unauthorizedListeners.delete(listener);
+}
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, { ...init, credentials: "same-origin" });
+  if (res.status === 401) unauthorizedListeners.forEach((listener) => listener());
+  return res;
+}
+
 export interface SubmitResponse {
   session_id: string;
   status: string;
@@ -21,7 +34,7 @@ export async function submitRun(task: string, opts: SubmitOptions = {}): Promise
   if (opts.threadId) body.thread_id = opts.threadId;
   if (opts.fleetId) body.fleet_id = opts.fleetId;
   if (opts.catalogRef) body.catalog_ref = opts.catalogRef;
-  const res = await fetch("/runs", {
+  const res = await apiFetch("/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -41,7 +54,7 @@ export async function answerAsk(
   answer: string,
   selectedOption?: string,
 ): Promise<void> {
-  const res = await fetch(`/runs/${encodeURIComponent(sessionId)}/answer`, {
+  const res = await apiFetch(`/runs/${encodeURIComponent(sessionId)}/answer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -58,7 +71,7 @@ export async function answerAsk(
 
 // Terminate a still-running run (POST /runs/<id>/cancel).
 export async function cancelRun(sessionId: string): Promise<void> {
-  const res = await fetch(`/runs/${encodeURIComponent(sessionId)}/cancel`, {
+  const res = await apiFetch(`/runs/${encodeURIComponent(sessionId)}/cancel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
@@ -84,7 +97,7 @@ export interface SessionSummary {
 }
 
 export async function listRuns(): Promise<SessionSummary[]> {
-  const res = await fetch("/runs");
+  const res = await apiFetch("/runs");
   if (!res.ok) throw new Error(`list runs failed (${res.status})`);
   const body = await res.json();
   return body.sessions ?? [];
@@ -93,7 +106,7 @@ export async function listRuns(): Promise<SessionSummary[]> {
 // Blocking result fetch (GET /runs/<id>/result) — used to replay a finished run
 // selected from history.
 export async function getResult(sessionId: string): Promise<RunResult> {
-  const res = await fetch(`/runs/${encodeURIComponent(sessionId)}/result`);
+  const res = await apiFetch(`/runs/${encodeURIComponent(sessionId)}/result`);
   if (!res.ok) throw new Error(`result failed (${res.status})`);
   return res.json();
 }
@@ -114,7 +127,7 @@ export interface PendingQuestion {
 
 // Every pending ask_user question across all in-flight runs, oldest first.
 export async function listQuestions(): Promise<PendingQuestion[]> {
-  const res = await fetch("/questions");
+  const res = await apiFetch("/questions");
   if (!res.ok) throw new Error(`list questions failed (${res.status})`);
   const body = await res.json();
   return body.questions ?? [];
@@ -146,7 +159,7 @@ export interface Company {
 // The served company's org structure, or null when Studio is pointed at a single
 // agency (`--config`) rather than a company (`--company`).
 export async function getCompany(): Promise<Company | null> {
-  const res = await fetch("/company");
+  const res = await apiFetch("/company");
   if (!res.ok) throw new Error(`get company failed (${res.status})`);
   const body = await res.json();
   return body.company ?? null;
@@ -188,7 +201,7 @@ export interface Catalog {
 // The served roster, or null when Studio runs a single agency/company (not
 // `--catalog` mode). Non-null → Studio shows the catalog as its front door.
 export async function getCatalog(): Promise<Catalog | null> {
-  const res = await fetch("/catalog");
+  const res = await apiFetch("/catalog");
   if (!res.ok) throw new Error(`get catalog failed (${res.status})`);
   const body = await res.json();
   return body.catalog ?? null;
@@ -226,7 +239,7 @@ export async function submitFleet(
   items: FleetItem[],
   overrides?: Record<string, unknown>,
 ): Promise<{ fleet_id: string; sessions: { session_id: string; label?: string }[] }> {
-  const res = await fetch("/fleets", {
+  const res = await apiFetch("/fleets", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ items, ...(overrides ? { overrides } : {}) }),
@@ -239,13 +252,13 @@ export async function submitFleet(
 }
 
 export async function listFleets(): Promise<FleetSummary[]> {
-  const res = await fetch("/fleets");
+  const res = await apiFetch("/fleets");
   if (!res.ok) throw new Error(`list fleets failed (${res.status})`);
   return (await res.json()).fleets ?? [];
 }
 
 export async function getFleetStatus(fleetId: string): Promise<FleetStatus> {
-  const res = await fetch(`/fleets/${encodeURIComponent(fleetId)}`);
+  const res = await apiFetch(`/fleets/${encodeURIComponent(fleetId)}`);
   if (!res.ok) throw new Error(`fleet status failed (${res.status})`);
   return res.json();
 }

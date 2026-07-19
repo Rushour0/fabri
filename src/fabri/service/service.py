@@ -31,6 +31,7 @@ from threading import Lock
 from fabri.config import ConfigError, load_config
 from fabri.events import EventType
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
+from fabri.service.auth import UserStore
 from fabri.service.binding import bind_run_config, merge_overrides
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.run_store import RunStore
@@ -84,10 +85,12 @@ class FabriService:
                 str(self.template_config) if self.template_config else None
             )
             self._slack_cfg = loaded_config.get("routing", {}).get("slack", {})
+            self.auth_cfg = loaded_config.get("auth", {})
             self._default_agency = loaded_config.get("agent", {}).get("name", "default")
         except ConfigError:
             _LOG.warning("could not load Slack routing configuration", exc_info=True)
             self._slack_cfg = {}
+            self.auth_cfg = {}
             self._default_agency = "default"
         self.home_root = (
             Path(home_root)
@@ -97,6 +100,19 @@ class FabriService:
             else Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve"
         )
         self.home_root.mkdir(parents=True, exist_ok=True)
+        self.auth_enabled = bool(self.auth_cfg.get("enabled"))
+        self.auth_secret: str | None = None
+        self.user_store: UserStore | None = None
+        if self.auth_enabled:
+            secret_env = self.auth_cfg.get("session_secret_env", "FABRI_AUTH_SECRET")
+            secret = os.environ.get(secret_env)
+            if not secret:
+                raise RuntimeError(
+                    f"authentication is enabled; set the {secret_env} environment variable"
+                )
+            self.auth_secret = secret
+            db_path = self.auth_cfg.get("db_path") or self.home_root / "auth.db"
+            self.user_store = UserStore(db_path)
         self.sync_hook: FileSyncHook = sync_hook or NoOpSyncHook()
         self.command_builder = command_builder
         self._runs: dict[str, RunHandle] = {}
@@ -145,6 +161,7 @@ class FabriService:
         fleet_id: str | None = None,
         label: str | None = None,
         catalog_ref: str | None = None,
+        user_id: str | None = None,
     ) -> str:
         """Bind a per-run config, launch the agent, return its ``session_id``.
 
@@ -196,6 +213,7 @@ class FabriService:
             "label": label,
             "started_ts": round(time.time(), 3),
             "agency": agency,
+            "user_id": user_id,
         }
         self._meta[session_id] = meta
         self._append_index({"event": "submit", **meta})
@@ -207,10 +225,13 @@ class FabriService:
             thread_id=thread_id,
             fleet_id=fleet_id,
             label=label,
+            user_id=user_id,
         )
         return session_id
 
-    def submit_fleet(self, items: list[dict], overrides: dict | None = None) -> dict:
+    def submit_fleet(
+        self, items: list[dict], overrides: dict | None = None, *, user_id: str | None = None
+    ) -> dict:
         """Fan one batch out to N runs sharing a ``fleet_id``.
 
         ``items`` is a list of ``{"task", "label"?, "overrides"?}``. Fleet-level
@@ -232,6 +253,7 @@ class FabriService:
                 item_overrides or None,
                 fleet_id=fleet_id,
                 label=it.get("label"),
+                user_id=user_id,
             )
             sessions.append({"session_id": sid, "label": it.get("label")})
         self._append_index(
@@ -444,7 +466,8 @@ class FabriService:
         )
 
     def list_sessions(
-        self, *, agency: str | None = None, limit: int | None = None, offset: int = 0
+        self, *, agency: str | None = None, limit: int | None = None, offset: int = 0,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Return a summary of every known run, newest first.
 
@@ -456,7 +479,9 @@ class FabriService:
         """
         summaries = {
             entry["session_id"]: entry
-            for entry in self.run_store.list_runs(agency=agency, limit=limit, offset=offset)
+            for entry in self.run_store.list_runs(
+                agency=agency, limit=limit, offset=offset, user_id=user_id
+            )
         }
         # Overlay live state: a handle still running trumps a stale "running"
         # index entry that never got a terminal line (e.g. after a crash the

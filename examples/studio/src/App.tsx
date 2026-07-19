@@ -13,7 +13,9 @@ import { QuestionsInbox } from "./components/QuestionsInbox";
 import { CompanyOrgChart } from "./components/CompanyOrgChart";
 import { CatalogView, type CatalogSelection } from "./components/CatalogView";
 import { useHashRoute, type Surface } from "./hooks/useHashRoute";
-import { listQuestions, getCompany, getCatalog, type Company, type Catalog } from "./lib/api";
+import { listQuestions, getCompany, getCatalog, onUnauthorized, type Company, type Catalog } from "./lib/api";
+import { getMe, logout, type AuthState } from "./lib/auth";
+import { LoginScreen } from "./components/LoginScreen";
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -66,6 +68,7 @@ function TurnBlock({
 
 export default function App() {
   const run = useRunEvents();
+  const [authState, setAuthState] = useState<AuthState>("loading");
   // Tab state lives in the URL hash (#conversation, #questions, #replay/<id>),
   // so tabs are deep-linkable and browser Back/Forward works.
   const { surface, replayId, go, hadInitialHash } = useHashRoute("conversation");
@@ -76,15 +79,32 @@ export default function App() {
   const activeIdx = run.turns.length - 1;
 
   const endRef = useRef<HTMLDivElement>(null);
+  const appVisible = authState !== "loading" && authState !== "anon";
+  const authEmail = typeof authState === "object" ? authState.email : null;
+
   useEffect(() => {
+    let live = true;
+    getMe().then((state) => {
+      if (live) setAuthState(state);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => onUnauthorized(() => setAuthState("anon")), []);
+
+  useEffect(() => {
+    if (!appVisible) return;
     if (surface !== "conversation") return;
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [run.turns, run.status, surface]);
+  }, [appVisible, run.turns, run.status, surface]);
 
   // Pending-question count for the Questions tab badge, so a waiting question is
   // visible from any surface. Lightweight poll, independent of the inbox's own.
   const [pendingCount, setPendingCount] = useState(0);
   useEffect(() => {
+    if (!appVisible) return;
     let alive = true;
     const poll = () =>
       listQuestions()
@@ -96,22 +116,24 @@ export default function App() {
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [appVisible]);
 
   // The served company's org structure (null when Studio is pointed at a single
   // agency). Fetched once — a served config doesn't change over a session.
   const [company, setCompany] = useState<Company | null>(null);
   useEffect(() => {
+    if (!appVisible) return;
     getCompany()
       .then(setCompany)
       .catch(() => setCompany(null));
-  }, []);
+  }, [appVisible]);
 
   // The served roster (null unless Studio runs in `--catalog` mode). When present,
   // the Catalog is the front door and each run targets the picked entry.
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [selection, setSelection] = useState<CatalogSelection | null>(null);
   useEffect(() => {
+    if (!appVisible) return;
     getCatalog()
       .then((c) => {
         setCatalog(c);
@@ -120,7 +142,7 @@ export default function App() {
         if (c && !hadInitialHash) go("catalog");
       })
       .catch(() => setCatalog(null));
-  }, []);
+  }, [appVisible, go, hadInitialHash]);
 
   // Hire a catalog entry: it becomes the run target; start a fresh thread and
   // drop into the conversation to give it a task.
@@ -145,6 +167,21 @@ export default function App() {
   // conversation instead centers its own readable column inside the stable
   // frame — see `.thread--narrow` / `.footer--narrow` in styles.css.
   const narrowColumn = surface === "conversation";
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } finally {
+      setAuthState("anon");
+    }
+  };
+
+  if (authState === "loading") {
+    return <main style={{ minHeight: "100%", display: "grid", placeItems: "center" }}>Loading…</main>;
+  }
+  if (authState === "anon") {
+    return <LoginScreen onAuthed={(email) => setAuthState({ email })} />;
+  }
+
   return (
     <div className="app">
       <header className="header">
@@ -152,7 +189,7 @@ export default function App() {
           <span className="header__logo" aria-hidden />
           <span className="header__title">Fabri Studio</span>
         </div>
-        <div className="header__right">
+          <div className="header__right">
           <nav className="tabs" aria-label="views">
             {catalog && (
               <button
@@ -197,8 +234,16 @@ export default function App() {
             >
               History
             </button>
-          </nav>
-          <div className={`status status--${run.status}`}>
+            </nav>
+            {authEmail && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ maxWidth: 180, overflow: "hidden", color: "var(--text-dim)", fontSize: 12, textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{authEmail}</span>
+                <button className="btn" style={{ padding: "5px 9px", fontSize: 12 }} onClick={handleLogout}>
+                  Log out
+                </button>
+              </div>
+            )}
+            <div className={`status status--${run.status}`}>
             <span className="status__dot" aria-hidden />
             {STATUS_LABEL[run.status] ?? run.status}
           </div>

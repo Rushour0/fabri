@@ -75,6 +75,7 @@ body {
   margin: 0 auto;
   border-inline: 1px solid var(--border);
 }
+
 /* The conversation reads as a centered column inside the stable wide frame —
    each turn/empty/error block is capped and centered, while the scroll area
    itself stays full-width (scrollbar at the frame edge). align-items centers the
