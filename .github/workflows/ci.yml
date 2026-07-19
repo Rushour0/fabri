@@ -28,11 +28,24 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Cache embedding model
+        # all-MiniLM-L6-v2 (~90MB) is downloaded on first embed; cache the HF
+        # hub dir so the retrieval-eval gate + memory tests don't re-fetch it.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
+
       - name: Install
-        # sqlite extra pulls in sqlite-vec so the SqliteMemoryStore-backed
-        # retrieval-eval gate (tests/test_retrieval_eval_gate.py) runs instead
-        # of skipping. FTS5 BM25 is a Python built-in — no bm25 extra needed.
-        run: pip install -e ".[dev,sqlite]"
+        # sqlite -> sqlite-vec (SqliteMemoryStore); FTS5 BM25 is a Python
+        # built-in (no bm25 extra needed). embeddings -> sentence-transformers,
+        # which the memory/retrieval suite and the retrieval-eval CI gate
+        # (tests/test_retrieval_eval_gate.py) require — without it ~30 tests
+        # error/no-op. Install CPU-only torch FIRST so the embeddings extra
+        # doesn't pull the multi-GB CUDA torch build.
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,sqlite,embeddings]"
 
       - name: Test
         run: pytest tests/ -q
