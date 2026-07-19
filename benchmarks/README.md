@@ -7,6 +7,10 @@ agent memory and company orchestration work.
   study.
 - `fixtures/company_release_readiness/` is a seeded, multi-role release
   readiness company fixture for fresh-company replica runs.
+- `datasets/company_memory_experiments.yaml` defines dynamic roster-company
+  experiments using the existing `fabri company compile` and `fabri run`
+  commands; it stores prompts and deterministic expected-output assertions,
+  not company runtime code.
 - `runs/` is intentionally ignored. It can contain provisional traces,
   workspace state, and model output. Only validated, reviewed aggregate
   results should be published separately.
