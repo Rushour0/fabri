@@ -136,9 +136,9 @@ function reducer(state: State, action: Action): State {
 }
 
 // Compact transcript preamble so a follow-up turn has conversational continuity.
-// fabri's memory carries facts/guidelines across turns (we also bind a shared
-// memory collection per thread), but raw "what did you just say" continuity is
-// most reliable when the prior exchange is restated in the task itself.
+// Durable memory stays in the configured agency/company collection so learning
+// survives across conversation threads; raw "what did you just say" continuity
+// is carried explicitly here.
 function threadPreamble(turns: Turn[]): string {
   const parts: string[] = [];
   turns.forEach((t, i) => {
@@ -231,14 +231,14 @@ export function useRunEvents(): UseRunEvents {
       const isFollowup = prior.turns.length > 0;
       dispatch({ kind: "submit", task, threadId });
 
-      // Follow-ups share a memory collection (fabri carries facts across turns)
-      // and get a transcript preamble for raw conversational continuity.
-      const overrides = { memory: { collection: threadId } };
+      // Do not override memory.collection with the thread id. Roster agencies
+      // and companies need their configured collection to accumulate durable
+      // cross-session context; this preamble carries thread-local continuity.
       const effectiveTask = isFollowup ? threadPreamble(prior.turns) + task : task;
 
       let sessionId: string;
       try {
-        const res = await submitRun(effectiveTask, { threadId, overrides, catalogRef });
+        const res = await submitRun(effectiveTask, { threadId, catalogRef });
         sessionId = res.session_id;
       } catch (e) {
         dispatch({ kind: "error", error: e instanceof Error ? e.message : String(e) });

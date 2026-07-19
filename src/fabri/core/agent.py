@@ -17,6 +17,7 @@ from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
 from fabri.core.structured import parse_response
 from fabri.memory.store import QdrantMemoryStore
+from fabri.memory.output import split_agent_output
 from fabri.orchestrator.retrieval import (
     DEFAULT_TOOL_TOP_K,
     DEFAULT_TOP_K,
@@ -811,6 +812,12 @@ def _run_single_attempt(
             "outcome": outcome.value,
             "text": last_assistant_text[0],
         })
+
+    # Preserve the full final event for post-run memory mining, but keep the
+    # machine-readable AGENT_MEMORY block out of the human-facing result.
+    # Marker-free answers are byte-identical.
+    if success and final_text:
+        final_text, _ = split_agent_output(final_text)
 
     # cost_by_model covers own tokens only — a child's cost arrives as one
     # USD figure that can't be re-split by model. cost_usd = own; total_cost_usd

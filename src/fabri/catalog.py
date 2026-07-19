@@ -86,7 +86,9 @@ def _install_companies(
             continue
         company_toml = source_dir / "companies" / name / "company.toml"
         try:
-            config = compile_company(company_toml, work_dir / "companies")
+            config = compile_company(
+                company_toml, work_dir / "companies", run_from=Path.cwd()
+            )
             org = company_org(company_toml)
         except (OSError, ValueError) as exc:
             _LOG.warning("skipping catalog company %r: %s", name, exc)

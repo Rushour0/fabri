@@ -49,6 +49,10 @@ def test_catalog_preinstalls_lists_and_binds_selected_template(tmp_path: Path) -
     for item in catalog.values():
         assert Path(item["config"]).is_file()
         assert load_config(str(item["config"]))
+    company_config = load_config(str(catalog["acme-eng"]["config"]))
+    assert company_config["memory"]["sqlite_path"] == str(
+        (Path.cwd() / ".fabri" / "acme_eng.db").resolve()
+    )
 
     listing = catalog_listing(catalog)
     assert listing["agencies"] == [{

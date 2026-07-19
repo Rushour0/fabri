@@ -59,6 +59,9 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
     assert root_config.exists()
     root = yaml.safe_load(root_config.read_text())
     assert [agent["name"] for agent in root["tools"]["agents"]] == ["vp_eng"]
+    assert root["memory"]["collection"] == "acme_eng_company"
+    assert root["memory"]["record_postmortems"] is True
+    assert "<!-- AGENT_MEMORY -->" in root["agent"]["system_prompt"]
 
     vp_path = root_config.parent / "vp_eng.yaml"
     vp = yaml.safe_load(vp_path.read_text())
@@ -72,3 +75,18 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
     assert bug_config["memory"]["collection"] == "acme_eng_bugs_manager"
     assert writer_config["memory"]["collection"] == "acme_eng_writer_manager"
     assert bug_config["memory"]["collection"] != writer_config["memory"]["collection"]
+
+
+def test_compile_company_can_anchor_memory_outside_ephemeral_output(
+    tmp_path: Path,
+) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "company_3level" / "company.toml"
+    durable_root = tmp_path / "durable"
+
+    root_config = compile_company(fixture, tmp_path / "compiled", run_from=durable_root)
+    root = yaml.safe_load(root_config.read_text())
+    vp = yaml.safe_load((root_config.parent / "vp_eng.yaml").read_text())
+
+    expected = str((durable_root / ".fabri" / "acme_eng.db").resolve())
+    assert root["memory"]["sqlite_path"] == expected
+    assert vp["memory"]["sqlite_path"] == expected

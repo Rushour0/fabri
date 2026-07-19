@@ -17,21 +17,14 @@ Two halves, both project-agnostic:
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Sequence
 
-# The marker that separates the user-facing prose from the machine-readable
-# memory block in an agent's final output. Defined once here so the prompt
-# skeleton, the splitter, and the trace miner never drift on its spelling.
-AGENT_MEMORY_MARKER = "<!-- AGENT_MEMORY -->"
-
-# A memory line is `KEY: value`; the key starts with a letter and uses only
-# word chars / spaces, so a value containing a colon (or a `- ` list item)
-# doesn't get misread as a key.
-_MEMORY_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_ ]*):\s?(.*)$")
-# A nested list line under the most recent key: `- item` or `* item`.
-_MEMORY_LIST_RE = re.compile(r"^[-*]\s+(.*)$")
+from fabri.memory.output import (
+    AGENT_MEMORY_MARKER,
+    format_agent_memory,
+    split_agent_output,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -203,78 +196,3 @@ def new_prompt(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return {"path": str(path), "created": True}
-
-
-# ---------------------------------------------------------------------------
-# split_agent_output / format_agent_memory: the prose / memory output split
-# ---------------------------------------------------------------------------
-
-
-def split_agent_output(text: str) -> tuple[str, dict | None]:
-    """Split an agent's final `text` on :data:`AGENT_MEMORY_MARKER`.
-
-    Returns ``(prose, memory)`` where `prose` is everything before the marker
-    (the human-facing answer) and `memory` is the parsed structured block below
-    it, or ``None`` when the marker is absent. The block is a simple
-    ``KEY: value`` format; a key whose value is empty followed by ``- item``
-    lines becomes a list (e.g. ``CHANGES:`` -> ``["...", "..."]``). Robust to a
-    missing marker, an empty block, and stray lines.
-    """
-    if text is None:
-        return "", None
-    if AGENT_MEMORY_MARKER not in text:
-        return text, None
-
-    prose, _, block = text.partition(AGENT_MEMORY_MARKER)
-    memory = _parse_memory_block(block)
-    return prose.rstrip(), memory
-
-
-def _parse_memory_block(block: str) -> dict | None:
-    """Parse the lines under the marker into a dict. Returns None when the block
-    holds nothing parseable, so a bare marker with no content reads as 'no
-    memory' rather than an empty dict."""
-    memory: dict[str, object] = {}
-    current_key: str | None = None
-
-    for raw in block.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-
-        list_match = _MEMORY_LIST_RE.match(line)
-        if list_match and current_key is not None:
-            # Promote the current key's value to a list and append the item.
-            existing = memory.get(current_key)
-            if not isinstance(existing, list):
-                memory[current_key] = [] if existing in (None, "") else [existing]
-            memory[current_key].append(list_match.group(1).strip())  # type: ignore[union-attr]
-            continue
-
-        key_match = _MEMORY_KEY_RE.match(line)
-        if key_match:
-            current_key = key_match.group(1).strip()
-            memory[current_key] = key_match.group(2).strip()
-            continue
-        # A non-matching, non-empty line is treated as a continuation of the
-        # current string value rather than dropped, so multi-line values survive.
-        if current_key is not None and isinstance(memory.get(current_key), str):
-            sep = " " if memory[current_key] else ""
-            memory[current_key] = f"{memory[current_key]}{sep}{line}"
-
-    return memory or None
-
-
-def format_agent_memory(memory: dict) -> str:
-    """Render a memory dict back into a marker-fenced block -- the inverse of
-    :func:`split_agent_output` for list/string values, so a dict round-trips.
-    String values become ``KEY: value``; list values become ``KEY:`` followed by
-    ``- item`` lines."""
-    lines = [AGENT_MEMORY_MARKER]
-    for key, value in memory.items():
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            lines.extend(f"- {item}" for item in value)
-        else:
-            lines.append(f"{key}: {value}")
-    return "\n".join(lines)

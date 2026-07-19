@@ -2,7 +2,6 @@ import hashlib
 import re
 from typing import Callable
 
-from fabri.builder.prompt_kit import split_agent_output
 from fabri.core.llm import LLMBackend, LLMUsage
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType
@@ -12,6 +11,7 @@ from fabri.memory.compress import (
     synthesize_guideline,
     synthesize_success_pattern,
 )
+from fabri.memory.output import split_agent_output
 from fabri.memory.embeddings import embeddings_available
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD, ingest_guideline
 from fabri.memory.schema import MemoryEntry

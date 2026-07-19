@@ -1374,7 +1374,9 @@ def cmd_studio(args: argparse.Namespace) -> None:
                 print("--company supplied; ignoring --config", file=sys.stderr)
             try:
                 root = compile_company(
-                    args.company, tempfile.mkdtemp(prefix="fabri-company-")
+                    args.company,
+                    tempfile.mkdtemp(prefix="fabri-company-"),
+                    run_from=Path.cwd(),
                 )
                 company = company_org(args.company)
             except (OSError, ValueError) as exc:

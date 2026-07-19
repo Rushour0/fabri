@@ -11,6 +11,10 @@ from fabri.builder import (
     split_agent_output,
 )
 from fabri.orchestrator.pipeline import extract_agent_memory
+from fabri.core.agent import run_agent
+from fabri.core.llm import LLMResponse, ScriptedLLMBackend
+from fabri.orchestrator.traces import read_trace
+from fabri.tools.registry import ToolRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +160,22 @@ def test_extract_agent_memory_none_without_marker_or_final():
     ) is None
     # no final event at all -> None
     assert extract_agent_memory([{"type": "start", "task": "t"}]) is None
+
+
+class _ColdStore:
+    def count(self) -> int:
+        return 0
+
+
+def test_agent_memory_is_mined_but_hidden_from_human_result() -> None:
+    raw = f"Done.\n{AGENT_MEMORY_MARKER}\nTASK: t\nOUTCOME: success\n"
+    result = run_agent(
+        "t",
+        ScriptedLLMBackend([LLMResponse(final_text=raw)]),
+        ToolRegistry([]),
+        _ColdStore(),
+    )
+
+    assert result["final_text"] == "Done."
+    events = read_trace(result["session_id"])
+    assert extract_agent_memory(events) == {"TASK": "t", "OUTCOME": "success"}

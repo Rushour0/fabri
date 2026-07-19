@@ -4,6 +4,24 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.18.3 — 2026-07-20
+
+### Added
+
+- **Durable company memory.** Compiled companies now have an explicit root
+  institutional-memory collection, record a postmortem for every company task,
+  and capture durable facts, decisions, insights, and open loops for later
+  sessions. Catalog and Studio compilation anchor the SQLite database outside
+  temporary build directories.
+
+### Fixed
+
+- **Roster learning survives new chats.** Studio no longer replaces an
+  agency/company's configured memory collection with a per-thread collection.
+  Conversation continuity remains in the transcript preamble while durable
+  learning accumulates across sessions. Machine-readable `AGENT_MEMORY` blocks
+  remain available to the trace miner but are hidden from human-facing results.
+
 ## 0.18.2 — 2026-07-20
 
 ### Added
