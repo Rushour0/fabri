@@ -67,3 +67,42 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # After the package is live on PyPI, cut a GitHub Release for the tag with the
+  # notes pulled from the matching CHANGELOG.md section and the built artifacts
+  # attached. Keeps the GitHub Releases page in lockstep with PyPI, no manual step.
+  github-release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # required to create the Release object
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Extract changelog section for this tag
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Grab everything under "## <version> …" up to the next "## " heading.
+          notes=$(awk -v ver="$version" '
+            $0 ~ ("^## " ver "([ ).—-]|$)") { grab=1; next }
+            grab && /^## / { exit }
+            grab { print }
+          ' CHANGELOG.md)
+          if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            notes="Release ${GITHUB_REF_NAME}. See CHANGELOG.md."
+          fi
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$notes"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.body }}
+          files: dist/*
+          fail_on_unmatched_files: true
