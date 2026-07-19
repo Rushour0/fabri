@@ -4,9 +4,11 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/fabri.svg)](https://pypi.org/project/fabri/)
 
-**The self-improving agent engine you build products on.** Describe a
-product; fabri scaffolds the agents, tools, and prompts — and they get
-cheaper and more reliable every run.
+**The self-improving agent engine you build products on.** Most agent
+frameworks ship prompts that never change. fabri's agents mine their own run
+traces into memory, so they stop repeating their mistakes — measurably fewer
+steps and lower cost on tasks they can learn from
+([benchmarks](https://github.com/Rushour0/fabri/blob/main/BENCHMARKS.md)).
 
 fabri is split into two layers: an **engine** (a frugal agent loop, per-role
 LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
@@ -161,14 +163,24 @@ no embedding API calls.
 
 ## Quickstart
 
+Scaffold a multi-agent **agency**, run it on a task, and watch it learn — no docker:
+
 ```bash
-fabri init demo && cd demo
-fabri --config agent.yaml run "greet Ada with the hello tool"
+pip install "fabri[self-improving]"        # memory loop on; local sqlite-vec, no docker
+export OPENAI_API_KEY=...                   # the bug-crew template ships OpenAI configs
+
+fabri new agency demo                       # scaffolds a bug-triage crew: triager → fixer → tester
+fabri --config demo/agent.openai.yaml run "triage and fix the failing test in workspace/"
+
+# or watch it live in the browser:
+fabri serve --config demo/agent.openai.yaml
+fabri studio
 ```
 
-`fabri init` writes an `agent.yaml`, an example tool under
-`tools/agent_tools/`, and a `docker-compose.yml`. You edit those, not
-the library.
+Each run mines guidelines from its own trace, so the crew avoids its own repeat
+mistakes on the next run. Prefer a single agent? `fabri init demo` scaffolds one
+(an `agent.yaml`, an example tool under `tools/agent_tools/`, and a
+`docker-compose.yml`) — you edit those, not the library.
 
 ## Commands
 
