@@ -1,10 +1,6 @@
 name: Fabri code-review crew
 description: Review a pull-request diff with fabri and post one summary comment.
 inputs:
-  config:
-    description: Path to the fabri agency configuration.
-    required: false
-    default: examples/agencies/code-review-crew/agent.openai.yaml
   provider:
     description: LLM provider recorded for the review run.
     required: false
@@ -33,7 +29,8 @@ runs:
         python-version: '3.11'
     - name: Install fabri with self-improving memory
       shell: bash
-      run: pip install "fabri[self-improving]"
+      # Keep this version aligned with the action ref.
+      run: pip install "fabri[self-improving]==0.17.0"
     - name: Save pull-request diff for the crew
       shell: bash
       env:
@@ -44,8 +41,7 @@ runs:
         if [ -z "$PR_NUMBER" ]; then
           PR_NUMBER="$(gh pr view --json number --jq .number --repo "$GITHUB_REPOSITORY")"
         fi
-        mkdir -p examples/agencies/code-review-crew/workspace
-        gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > examples/agencies/code-review-crew/workspace/pr.diff
+        gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/pr.diff"
         echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
     - name: Run code-review crew
       shell: bash
@@ -55,9 +51,11 @@ runs:
         PR_NUMBER: ${{ env.PR_NUMBER }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         GITHUB_REPOSITORY: ${{ github.repository }}
-        FABRI_CONFIG: ${{ inputs.config }}
+        FABRI_CONFIG: ${{ github.action_path }}/../agencies/code-review-crew/agent.openai.yaml
         FABRI_PROVIDER: ${{ inputs.provider }}
         FABRI_MODEL: ${{ inputs.model }}
         FABRI_API_KEY_ENV: ${{ inputs.api-key-env }}
         FAIL_ON: ${{ inputs.fail-on }}
-      run: python examples/github-action/review.py
+      run: |
+        cd "$GITHUB_ACTION_PATH/../.."
+        python "$GITHUB_ACTION_PATH/review.py"
