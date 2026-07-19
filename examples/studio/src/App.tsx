@@ -139,16 +139,14 @@ export default function App() {
 
   const empty = surface === "conversation" && !hasThread && run.status === "idle";
 
-  // Wide surfaces (the roster, org-charts, fleet, history, and the questions
-  // inbox — a list surface like the others) get the full width; the conversation
-  // stays a readable narrow column. A replay inherits the width of whatever
-  // surface opened it, so replays launched from a wide list stay wide.
-  const WIDE_SURFACES: Surface[] = ["catalog", "company", "fleet", "history", "questions"];
-  const wide =
-    WIDE_SURFACES.includes(surface) ||
-    (surface === "replay" && WIDE_SURFACES.includes(replayFrom));
+  // The app frame is always full-width so switching tabs never resizes it
+  // (the old per-surface toggle made the whole frame animate 720<->1440, which
+  // read as the conversation "shrinking"). List surfaces fill the frame; the
+  // conversation instead centers its own readable column inside the stable
+  // frame — see `.thread--narrow` / `.footer--narrow` in styles.css.
+  const narrowColumn = surface === "conversation";
   return (
-    <div className={"app" + (wide ? " app--wide" : "")}>
+    <div className="app">
       <header className="header">
         <div className="header__brand">
           <span className="header__logo" aria-hidden />
@@ -207,7 +205,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="thread">
+      <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>
         {surface === "history" && <HistoryList onOpen={(id) => openReplay(id, "history")} />}
         {surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
         {surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
@@ -255,7 +253,7 @@ export default function App() {
       </main>
 
       {surface === "conversation" && (
-        <footer className="footer">
+        <footer className="footer footer--narrow">
           <div className="footer__stack">
             {catalog && selection && (
               <div className="running-as">
