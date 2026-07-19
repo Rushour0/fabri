@@ -4,6 +4,14 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.18.1 — 2026-07-20
+
+### Fixed
+
+- **Studio auth hardening.** The catalog now requires a session whenever Studio
+  authentication is enabled, and cross-user access to run events, results,
+  answers, and cancellation remains explicitly regression-tested.
+
 ## 0.18.0 — 2026-07-20
 
 ### Studio — login + per-user conversation history
