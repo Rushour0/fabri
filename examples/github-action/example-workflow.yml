@@ -11,12 +11,12 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       # Caching this directory makes the crew's SQLite memory per-repo and cumulative.
       - uses: actions/cache@v4
         with:
           path: .fabri/
           key: code-review-mem-${{ github.repository }}
+      # In production pin to a release tag or SHA, e.g. @v0.17.0, rather than @main.
       - uses: Rushour0/fabri/examples/github-action@main
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
