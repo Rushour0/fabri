@@ -1638,7 +1638,7 @@ def main() -> None:
     p_serve.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080; 0 = OS-assigned)")
     p_serve.add_argument("--home-root", dest="home_root", default=None,
-                         help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)")
+                         help="Parent dir for per-run FABRI_HOME workspaces (default: $FABRI_HOME/serve or ~/.fabri/serve)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_studio = sub.add_parser(
@@ -1672,7 +1672,7 @@ def main() -> None:
         "--home-root",
         dest="home_root",
         default=None,
-        help="Parent dir for per-run FABRI_HOME workspaces (default: a fresh temp dir)",
+        help="Parent dir for per-run FABRI_HOME workspaces (default: $FABRI_HOME/serve or ~/.fabri/serve)",
     )
     p_studio.set_defaults(func=cmd_studio)
 

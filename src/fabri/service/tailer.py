@@ -165,6 +165,7 @@ def extract_cost(events: list[dict]) -> dict:
                 "subagent_failed_count",
                 "subagent_regret_count",
                 "guideline_reuse_rate",
+                "guidelines_from_prior_sessions",
             ):
                 if key in ev:
                     metrics[key] = ev.get(key)
