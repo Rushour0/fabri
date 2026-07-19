@@ -4,6 +4,7 @@ import importlib.resources
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -31,7 +32,7 @@ from fabri.runtime import (
     build_tool_defs,
     build_tools,
 )
-from fabri.repo import GitHubError, open_or_update_tracking_issue
+from fabri.repo import detect_provider, get_provider
 from fabri.scaffold import SCAFFOLD_TEMPLATES, next_steps, scaffold
 from fabri.tool_scaffold import SUPPORTED_LANGUAGES, scaffold_tool
 
@@ -466,19 +467,31 @@ def cmd_memory_list(args: argparse.Namespace) -> None:
         print(json.dumps(e.to_payload()))
 
 
-def _repo_token(args: argparse.Namespace) -> str:
-    token = args.token or os.environ.get("GITHUB_TOKEN")
+def _repo_provider_name(args: argparse.Namespace) -> str:
+    requested = getattr(args, "provider", "auto")
+    return detect_provider(getattr(args, "repo", None), dict(os.environ)) if requested == "auto" else requested
+
+
+def _repo_token(args: argparse.Namespace, provider_name: str | None = None) -> str:
+    provider = provider_name or _repo_provider_name(args)
+    token = args.token or os.environ.get(f"{provider.upper()}_TOKEN")
     if token:
         return token
-    print("GitHub token required: pass --token or set GITHUB_TOKEN", file=sys.stderr)
+    print(f"{provider} token required: pass --token or set {provider.upper()}_TOKEN", file=sys.stderr)
     sys.exit(1)
 
 
-def _repo_name(args: argparse.Namespace) -> str:
-    repo = args.repo or os.environ.get("GITHUB_REPOSITORY")
+def _repo_name(args: argparse.Namespace, provider_name: str | None = None) -> str:
+    provider = provider_name or _repo_provider_name(args)
+    env_names = {
+        "github": ("GITHUB_REPOSITORY",),
+        "gitlab": ("CI_PROJECT_PATH",),
+        "bitbucket": ("BITBUCKET_REPO_FULL_NAME",),
+    }
+    repo = args.repo or next((os.environ[name] for name in env_names[provider] if os.environ.get(name)), None)
     if repo:
         return repo
-    print("GitHub repository required: pass --repo owner/name or set GITHUB_REPOSITORY", file=sys.stderr)
+    print(f"{provider} repository required: pass --repo owner/name or set its CI repository variable", file=sys.stderr)
     sys.exit(1)
 
 
@@ -498,10 +511,11 @@ def _repo_body(args: argparse.Namespace) -> str:
 def cmd_repo_issue(args: argparse.Namespace) -> None:
     """Create a tracking issue or post an update to its deduplicated issue."""
     try:
-        url = open_or_update_tracking_issue(
-            _repo_name(args), _repo_token(args), args.title, _repo_body(args), args.key, args.label
+        provider_name = _repo_provider_name(args)
+        url = get_provider(provider_name, _repo_token(args, provider_name)).open_or_update_issue(
+            _repo_name(args, provider_name), args.title, _repo_body(args), args.key, args.label
         )
-    except GitHubError as error:
+    except RuntimeError as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
     print(url)
@@ -532,15 +546,98 @@ def cmd_repo_suggest_prompt(args: argparse.Namespace) -> None:
     agent_name = config["agent"].get("name", "default")
     title = f"Consider promoted guidelines for {agent_name}'s system prompt"
     try:
-        url = open_or_update_tracking_issue(
-            _repo_name(args),
-            _repo_token(args),
+        provider_name = _repo_provider_name(args)
+        url = get_provider(provider_name, _repo_token(args, provider_name)).open_or_update_issue(
+            _repo_name(args, provider_name),
             title,
             body,
             f"suggest-prompt:{agent_name}",
             args.label,
         )
-    except GitHubError as error:
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    print(url)
+
+
+_FABRI_BLOCK_START = "# --- fabri: learned from prior runs (auto-proposed) ---"
+_FABRI_BLOCK_END = "# --- end fabri ---"
+
+
+def apply_learned_block(yaml_text: str, guidelines: list[str]) -> str:
+    """Insert or replace fabri's literal-block comments without reformatting YAML."""
+    lines = yaml_text.splitlines(keepends=True)
+    scalar_at: int | None = None
+    key_indent = ""
+    for index, line in enumerate(lines):
+        match = re.match(r"^(?P<indent>[ \t]*)system_prompt:\s*[>|][+-]?\s*(?:#.*)?(?:\r?\n)?$", line)
+        if match:
+            scalar_at, key_indent = index, match.group("indent")
+            break
+    if scalar_at is None:
+        raise ValueError("system_prompt must use a YAML literal or folded block scalar")
+    scalar_end = len(lines)
+    for index in range(scalar_at + 1, len(lines)):
+        content = lines[index]
+        if content.strip() and len(content) - len(content.lstrip(" \t")) <= len(key_indent):
+            scalar_end = index
+            break
+    content_indent = key_indent + "  "
+    for line in lines[scalar_at + 1:scalar_end]:
+        if line.strip():
+            content_indent = line[:len(line) - len(line.lstrip(" \t"))]
+            break
+    newline = "\r\n" if "\r\n" in yaml_text else "\n"
+    block = [content_indent + _FABRI_BLOCK_START + newline]
+    block.extend(content_indent + f"# - {guideline}" + newline for guideline in guidelines)
+    block.append(content_indent + _FABRI_BLOCK_END + newline)
+    start = end = None
+    for index in range(scalar_at + 1, scalar_end):
+        stripped = lines[index].strip()
+        if stripped == _FABRI_BLOCK_START:
+            start = index
+        elif start is not None and stripped == _FABRI_BLOCK_END:
+            end = index + 1
+            break
+    if start is not None and end is not None:
+        lines[start:end] = block
+    else:
+        lines[scalar_end:scalar_end] = block
+    return "".join(lines)
+
+
+def cmd_repo_open_pr(args: argparse.Namespace) -> None:
+    """Propose learned guidelines as a one-file draft pull request."""
+    config = load_config(args.config)
+    store = _open_store(config["memory"])
+    guidelines = store.iterate(kind=args.kind, limit=args.limit)
+    if not guidelines:
+        print(f"no {args.kind} guidelines yet")
+        return
+    config_path = Path(args.config).resolve()
+    try:
+        relative_path = config_path.relative_to(Path.cwd().resolve())
+    except ValueError:
+        print("--config must be inside the repository root", file=sys.stderr)
+        sys.exit(1)
+    edited = apply_learned_block(config_path.read_text(), [guideline.text for guideline in guidelines])
+    agent_name = config["agent"].get("name", "default")
+    title = f"fabri: propose learned guidelines for {agent_name}"
+    body = "\n\n".join([
+        "This draft applies promoted guidelines to the agent's `system_prompt` for maintainer review.",
+        "\n".join(f"- {guideline.text}" for guideline in guidelines),
+    ])
+    try:
+        provider_name = _repo_provider_name(args)
+        provider = get_provider(provider_name, _repo_token(args, provider_name))
+        provider.push_branch(
+            _repo_name(args, provider_name), args.base, args.branch, str(relative_path), edited,
+            f"fabri: propose learned guidelines for {agent_name}",
+        )
+        url = provider.open_or_update_pr(
+            _repo_name(args, provider_name), title, body, f"open-pr:{agent_name}", args.branch, args.base,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
     print(url)
@@ -1407,12 +1504,13 @@ def main() -> None:
     p_mem_stale.add_argument("--limit", type=int, default=None)
     p_mem_stale.set_defaults(func=cmd_memory_stale)
 
-    p_repo = sub.add_parser("repo", help="File GitHub issues from a fabri run")
+    p_repo = sub.add_parser("repo", help="File issues and draft PRs from a fabri run")
     repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
 
     p_repo_issue = repo_sub.add_parser("issue", help="Create or update a deduplicated tracking issue")
-    p_repo_issue.add_argument("--repo", default=None, help="GitHub repository (owner/name)")
-    p_repo_issue.add_argument("--token", default=None, help="GitHub token (default: GITHUB_TOKEN)")
+    p_repo_issue.add_argument("--repo", default=None, help="Repository (owner/name)")
+    p_repo_issue.add_argument("--token", default=None, help="Provider token")
+    p_repo_issue.add_argument("--provider", choices=("auto", "github", "gitlab", "bitbucket"), default="auto")
     p_repo_issue.add_argument("--title", required=True)
     body_group = p_repo_issue.add_mutually_exclusive_group(required=True)
     body_group.add_argument("--body", default=None)
@@ -1424,12 +1522,25 @@ def main() -> None:
     p_repo_suggest = repo_sub.add_parser(
         "suggest-prompt", help="Open a deduplicated issue proposing promoted guidelines for the prompt")
     p_repo_suggest.add_argument("--config", required=True, help="Path to agent.yaml")
-    p_repo_suggest.add_argument("--repo", default=None, help="GitHub repository (owner/name)")
-    p_repo_suggest.add_argument("--token", default=None, help="GitHub token (default: GITHUB_TOKEN)")
+    p_repo_suggest.add_argument("--repo", default=None, help="Repository (owner/name)")
+    p_repo_suggest.add_argument("--token", default=None, help="Provider token")
+    p_repo_suggest.add_argument("--provider", choices=("auto", "github", "gitlab", "bitbucket"), default="auto")
     p_repo_suggest.add_argument("--kind", default="strategic")
     p_repo_suggest.add_argument("--limit", type=int, default=10)
     p_repo_suggest.add_argument("--label", action="append", default=["fabri", "self-improving"])
     p_repo_suggest.set_defaults(func=cmd_repo_suggest_prompt)
+
+    p_repo_open_pr = repo_sub.add_parser(
+        "open-pr", help="Open or update a draft PR that applies promoted prompt guidelines")
+    p_repo_open_pr.add_argument("--config", required=True, help="Path to agent.yaml inside the repository")
+    p_repo_open_pr.add_argument("--repo", default=None, help="Repository (owner/name)")
+    p_repo_open_pr.add_argument("--token", default=None, help="Provider token")
+    p_repo_open_pr.add_argument("--provider", choices=("auto", "github", "gitlab", "bitbucket"), default="auto")
+    p_repo_open_pr.add_argument("--kind", default="strategic")
+    p_repo_open_pr.add_argument("--limit", type=int, default=10)
+    p_repo_open_pr.add_argument("--base", default="main")
+    p_repo_open_pr.add_argument("--branch", default="fabri/self-improve")
+    p_repo_open_pr.set_defaults(func=cmd_repo_open_pr)
 
     p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
     p_replay.add_argument("session_id")

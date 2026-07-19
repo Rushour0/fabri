@@ -7,6 +7,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .base import push_branch_with_url, token_url
+
 
 class GitHubError(RuntimeError):
     """A GitHub API request failed."""
@@ -103,3 +105,53 @@ def find_open_issue_with_marker(
         if marker in (issue.get("body") or ""):
             return issue
     return None
+
+
+class GitHubProvider:
+    """GitHub implementation of fabri's small repository-provider contract."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def open_or_update_issue(
+        self, repo: str, title: str, body: str, key: str, labels: list[str]
+    ) -> str:
+        marker = f"<!-- fabri:repo:{key} -->"
+        marked_body = f"{body.rstrip()}\n\n{marker}"
+        existing = find_open_issue_with_marker(
+            repo, self.token, marker, label=labels[0] if labels else None
+        )
+        if existing is not None:
+            comment_issue(repo, self.token, existing["number"], f"Update:\n\n{marked_body}")
+            return existing["html_url"]
+        return create_issue(repo, self.token, title, marked_body, labels=labels)
+
+    def open_or_update_pr(
+        self, repo: str, title: str, body: str, key: str, head: str, base: str
+    ) -> str:
+        marker = f"<!-- fabri:repo:{key} -->"
+        marked_body = f"{body.rstrip()}\n\n{marker}"
+        _, pulls = _http(
+            "GET", f"https://api.github.com/repos/{repo}/pulls?{urlencode({'state': 'open'})}", self.token
+        )
+        for pull in pulls:
+            if marker in (pull.get("body") or ""):
+                _, updated = _http(
+                    "PATCH", f"https://api.github.com/repos/{repo}/pulls/{pull['number']}",
+                    self.token, {"title": title, "body": marked_body, "head": head, "base": base},
+                )
+                return updated["html_url"]
+        _, created = _http(
+            "POST", f"https://api.github.com/repos/{repo}/pulls", self.token,
+            {"title": title, "body": marked_body, "head": head, "base": base, "draft": True},
+        )
+        return created["html_url"]
+
+    def push_branch(
+        self, repo: str, base: str, new_branch: str, file_path: str,
+        file_text: str, commit_msg: str,
+    ) -> None:
+        push_branch_with_url(
+            token_url("x-access-token", self.token, "github.com", repo), base, new_branch,
+            file_path, file_text, commit_msg,
+        )
