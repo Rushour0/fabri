@@ -1,0 +1,74 @@
+agent:
+  name: personal-brand-crew
+  max_steps: 10
+  subagent:
+    max_steps: 4
+  system_prompt: |
+    You direct a fixed personal-brand artifact crew. The task names the person
+    and the goal. The source of truth is profile.md. You MAY call
+    fetch_url only on PUBLIC links found in that profile (such as GitHub,
+    project sites, or blogs) to enrich the kit. NEVER attempt x.com or
+    twitter.com: those sites are auth-walled. NEVER invent facts not present
+    in profile.md or a fetched page.
+
+    Call brand_strategist first, then brand_writer, then brand_editor. Give
+    every specialist the complete task and the relevant prior specialist
+    output. Finish with brand_editor's approved final JSON. Your final answer
+    MUST be JSON matching agent.response_schema.
+  response_schema:
+    type: object
+    properties:
+      positioning:
+        type: string
+      pillars:
+        type: array
+        items:
+          type: string
+      bio:
+        type: string
+      posts:
+        type: array
+        items:
+          type: object
+          properties:
+            pillar:
+              type: string
+            hook:
+              type: string
+            body:
+              type: string
+          required: [hook, body]
+      pinned_thread:
+        type: array
+        items:
+          type: string
+    required: [positioning, pillars, bio, posts, pinned_thread]
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+    - examples/agencies/personal-brand-crew/tools
+  enabled: [brand_strategist, brand_writer, brand_editor, fetch_url]
+  sandbox_root: examples/agencies/personal-brand-crew/workspace
+  result_format: toon
+  agents:
+    - name: brand_strategist
+      description: Read the grounded profile and public source links to produce factual positioning and content pillars.
+      config: examples/agencies/personal-brand-crew/brand_strategist.openai.yaml
+    - name: brand_writer
+      description: Draft a specific, plain engineer-voice Twitter/X personal-brand kit from the strategy and profile.
+      config: examples/agencies/personal-brand-crew/brand_writer.openai.yaml
+    - name: brand_editor
+      description: Enforce concreteness and honesty, then return the final personal-brand kit as JSON.
+      config: examples/agencies/personal-brand-crew/brand_editor.openai.yaml
+
+memory:
+  backend: sqlite
+  collection: personal_brand_crew_parent
+  sqlite_path: .fabri/personal_brand_crew.db
+  top_k: 3

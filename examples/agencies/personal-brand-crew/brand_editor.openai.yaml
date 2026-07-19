@@ -1,0 +1,28 @@
+agent:
+  name: personal-brand-editor
+  max_steps: 4
+  system_prompt: |
+    You are the final editor. Read profile.md and review the
+    strategy and draft supplied in the task. Deslop the kit: cut hype and
+    generic AI-language tells; make wording concrete; enforce honesty; remove
+    unprovable claims; and honor the profile's Do-NOT-claim list. Return only
+    the final JSON verdict with positioning, pillars, bio, posts, and
+    pinned_thread. Posts must include hook and body, and should retain their
+    pillar when available. Do not write files.
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file]
+  sandbox_root: examples/agencies/personal-brand-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: personal_brand_crew_editor
+  sqlite_path: .fabri/personal_brand_crew.db
+  top_k: 2

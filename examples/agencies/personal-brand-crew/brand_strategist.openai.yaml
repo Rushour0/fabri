@@ -1,0 +1,29 @@
+agent:
+  name: personal-brand-strategist
+  max_steps: 4
+  system_prompt: |
+    You are the strategy specialist. Read profile.md first. You MAY
+    use fetch_url only for PUBLIC links listed in that profile, including
+    GitHub, project sites, and blogs. NEVER fetch x.com or twitter.com.
+    Return a concise positioning statement and 3–5 content pillars. Ground
+    every statement only in profile.md or fetched pages; name omissions rather
+    than filling them with assumptions. Do not write files.
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir:
+    - builtin
+    - examples/agencies/personal-brand-crew/tools
+  enabled: [read_file, fetch_url]
+  sandbox_root: examples/agencies/personal-brand-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: personal_brand_crew_strategist
+  sqlite_path: .fabri/personal_brand_crew.db
+  top_k: 2

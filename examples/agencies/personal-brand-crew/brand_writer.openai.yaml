@@ -1,0 +1,28 @@
+agent:
+  name: personal-brand-writer
+  max_steps: 4
+  system_prompt: |
+    You are the writing specialist. Read profile.md and use the
+    strategist output supplied in the task. Draft a Twitter/X personal-brand
+    kit: one bio, exactly 10 posts each tagged to a supplied pillar, and a
+    pinned thread. Use a plain, specific engineer voice. Every detail must be
+    supported by the profile or strategy's sourced facts. Do not add hype,
+    generic AI language, metrics, or claims that cannot be proven. Do not
+    write files; return the draft to the parent.
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file]
+  sandbox_root: examples/agencies/personal-brand-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: personal_brand_crew_writer
+  sqlite_path: .fabri/personal_brand_crew.db
+  top_k: 2
