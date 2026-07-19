@@ -1,3 +1,5 @@
+import hashlib
+import re
 from typing import Callable
 
 from fabri.builder.prompt_kit import split_agent_output
@@ -30,6 +32,31 @@ def _error_signature(result: dict) -> str:
     err = (result or {}).get("error") or ""
     first = err.strip().splitlines()[0] if err.strip() else "unknown"
     return first[:50]
+
+
+def guideline_dedup_key(
+    kind: str,
+    task: str = "",
+    tool_names: list[str] | None = None,
+    failed_tool_name: str = "",
+    error_text: str = "",
+    path: str = "",
+) -> str:
+    """Return a stable key for a mined lesson, independent of LLM wording."""
+    normalized_task = re.sub(r"\s+", " ", task).strip().lower()
+    if kind == "success_pattern":
+        signature = f"success_pattern::{normalized_task}::{'|'.join(tool_names or [])}"
+    elif kind == "tactical":
+        first_line = error_text.strip().splitlines()[0] if error_text.strip() else "unknown"
+        error_signature = re.sub(r"\s+", " ", first_line).strip().lower()[:160]
+        signature = f"tactical::{normalized_task}::{failed_tool_name}::{error_signature}"
+    elif kind == "postmortem":
+        signature = f"postmortem::{normalized_task}"
+    elif kind == "discrepancy":
+        signature = f"discrepancy::{path}"
+    else:
+        raise ValueError(f"unsupported guideline dedup kind: {kind}")
+    return hashlib.sha256(signature.encode()).hexdigest()
 
 
 def build_postmortem_text(events: list[dict], max_task_chars: int = 140) -> str:
@@ -193,6 +220,7 @@ def process_trace(
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
             kind="postmortem",
+            dedup_key=guideline_dedup_key("postmortem", task=task),
             max_entries=max_entries,
             eviction_half_life_days=eviction_half_life_days,
             eviction_strategy=eviction_strategy,
@@ -249,6 +277,9 @@ def process_trace(
                 similarity_threshold=similarity_threshold,
                 promotion_threshold_sessions=promotion_threshold_sessions,
                 kind="success_pattern",
+                dedup_key=guideline_dedup_key(
+                    "success_pattern", task=task, tool_names=tool_names,
+                ),
                 max_entries=max_entries,
                 eviction_half_life_days=eviction_half_life_days,
                 eviction_strategy=eviction_strategy,
@@ -270,6 +301,7 @@ def process_trace(
             tools=["write_file", "edit_file"],
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
+            dedup_key=guideline_dedup_key("discrepancy", path=path),
             max_entries=max_entries,
             eviction_half_life_days=eviction_half_life_days,
             eviction_strategy=eviction_strategy,
@@ -305,6 +337,12 @@ def process_trace(
             tools=[event["name"]],
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
+            dedup_key=guideline_dedup_key(
+                "tactical",
+                task=task,
+                failed_tool_name=event["name"],
+                error_text=(event.get("result") or {}).get("error") or "",
+            ),
             max_entries=max_entries,
             eviction_half_life_days=eviction_half_life_days,
             eviction_strategy=eviction_strategy,

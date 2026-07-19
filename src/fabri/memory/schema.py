@@ -29,6 +29,7 @@ class MemoryEntry:
     outcome: str = "unknown"          # "failure"|"partial"|"success"|"unknown"
     agent_id: str | None = None       # which agent produced this entry
     task_embedding_hash: str | None = None  # sha256(task)[:8] for clustering
+    dedup_key: str | None = None      # stable signature of the mined lesson inputs
 
     @property
     def id(self) -> str:
@@ -62,6 +63,7 @@ class MemoryEntry:
             "outcome": self.outcome,
             "agent_id": self.agent_id,
             "task_embedding_hash": self.task_embedding_hash,
+            "dedup_key": self.dedup_key,
         }
 
     @classmethod
@@ -79,4 +81,5 @@ class MemoryEntry:
             outcome=payload.get("outcome", "unknown"),
             agent_id=payload.get("agent_id"),
             task_embedding_hash=payload.get("task_embedding_hash"),
+            dedup_key=payload.get("dedup_key"),
         )

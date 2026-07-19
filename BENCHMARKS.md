@@ -8,7 +8,7 @@ Two benchmarks back the claim — one fabri-specific, one industry-standard.
 
 | benchmark | what it measures | status |
 |---|---|---|
-| **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | runner shipped, results pending |
+| **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | first result landed (gpt-4o-mini, failure-recovery task): ↓7.8% cost, steps 5→4, reuse 0→67%; canonical sonnet number still pending |
 | **LongMemEval** | The "memory loop is real" claim — exact-match accuracy on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) public dataset. Apples-to-apples with Mastra (94.87%), Letta, Zep. | runner shipped, results pending |
 
 If you re-run any benchmark and get a different number, **the
@@ -103,11 +103,22 @@ explains *why* each strategic value was chosen.
 
 | date | task | runs | first $ | median-of-last-3 $ | delta | fabri |
 |---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — |
+| 2026-07-19 | read wrong-ext file → recover + summarize | 6 | $0.0006 | $0.0005 | ↓7.8% | 0.16.4* |
 
-_Add a row here when a real run lands. Keep the task description short
-(<60 chars) — paste the full task into the corresponding
-`.fabri/benchmarks/<timestamp>/results.md` file and link if needed._
+Beyond cost: **steps 5 → 4** (run 1 recovered from a failed read via `list_dir`;
+runs 2–6 skipped the failed call and went straight to `list_dir`), **outcome
+success_with_recovery → success**, **guideline-reuse 0% → 67%**. The agent learned
+to avoid its own first-run mistake — the self-improving loop working end to end.
+
+_\*Caveats (read before citing): run on **`gpt-4o-mini`** via
+`configs/benchmark.openai-recovery.yaml`, **not** the canonical anthropic-sonnet
+`configs/benchmark.yaml` (Bedrock Anthropic is account-gated here and no
+`ANTHROPIC_API_KEY` was set). It is a **constructed failure-recovery task** (the
+workspace deliberately hides the file under a different extension) and depends on
+the **guideline-dedup fix** (deterministic `dedup_key`) — without that fix
+cross-session reuse is structurally stuck at 0% and this delta does not appear.
+Full run: `.fabri/benchmarks/1784483*/results.md`. The canonical sonnet number is
+still pending._
 
 ### LongMemEval
 
