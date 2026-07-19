@@ -173,6 +173,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"company": self.server.company})
             return
         if path in ("/catalog", "/catalog/"):
+            if self.service.auth_enabled and self._require_user() is None:
+                return
             catalog = self.server.catalog
             self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
             return
