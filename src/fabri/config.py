@@ -288,6 +288,9 @@ DEFAULT_CONFIG = {
         "slack": {
             "enabled": False,
             "bot_token_env": "SLACK_BOT_TOKEN",
+            "signing_secret_env": "SLACK_SIGNING_SECRET",
+            "events_enabled": False,
+            "mention_agency": None,
             "default_channel": None,
             "default_user": None,
             "studio_base_url": None,
@@ -464,6 +467,7 @@ def _apply_env_overrides(cfg: dict) -> dict:
     - ``FABRI_OTLP_INSECURE`` -> ``observability.otlp_insecure`` (1/true/yes/on)
     - ``FABRI_OTLP_HEADERS`` -> ``observability.otlp_headers`` ("k=v,k2=v2")
     - ``FABRI_SLACK_ENABLED`` -> ``routing.slack.enabled`` (1/true/yes/on)
+    - ``FABRI_SLACK_EVENTS`` -> ``routing.slack.events_enabled`` (1/true/yes/on)
     - ``FABRI_SLACK_CHANNEL`` -> ``routing.slack.default_channel``
     - ``FABRI_SLACK_USER`` -> ``routing.slack.default_user``
     - ``FABRI_SLACK_STUDIO_URL`` -> ``routing.slack.studio_base_url``
@@ -505,6 +509,9 @@ def _apply_env_overrides(cfg: dict) -> dict:
     enabled = os.environ.get("FABRI_SLACK_ENABLED")
     if enabled is not None:
         slack_over["enabled"] = enabled.strip().lower() in ("1", "true", "yes", "on")
+    events_enabled = os.environ.get("FABRI_SLACK_EVENTS")
+    if events_enabled is not None:
+        slack_over["events_enabled"] = events_enabled.strip().lower() in ("1", "true", "yes", "on")
     channel = os.environ.get("FABRI_SLACK_CHANNEL")
     if channel:
         slack_over["default_channel"] = channel
