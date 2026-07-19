@@ -4,6 +4,21 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.18.0 — 2026-07-20
+
+### Studio — login + per-user conversation history
+
+- **Opt-in email+password auth.** Sign in and see only your own runs/history.
+  Off by default (`FABRI_AUTH_ENABLED=1` + `FABRI_AUTH_SECRET`). scrypt-hashed
+  passwords, HMAC-signed **HttpOnly** session cookies, **per-run ownership
+  checks** (no cross-user access), and per-user scoping of history / questions /
+  fleets / agency cost totals. Login/signup UI in Studio; unchanged when off.
+
+### `fabri repo` — open PRs + more providers
+
+- **Open pull requests** from a run (not just issues), and **GitLab + Bitbucket**
+  adapters alongside GitHub behind a common repo-provider interface.
+
 ## 0.17.0 — 2026-07-20
 
 ### `fabri repo` — self-improving, in your repo (GitHub)
