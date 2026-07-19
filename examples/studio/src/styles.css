@@ -16,6 +16,14 @@
   --accent: #0d92f4;
   --accent-2: #80c4e9;
   --accent-soft: rgba(13, 146, 244, 0.15);
+  --accent-strong: #2ba0ff; /* hover brighten */
+
+  /* Layered depth + a blue focus/hover glow — the "little things". */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 6px 20px -8px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+  --ring: 0 0 0 3px var(--accent-soft);
+  --glow-accent: 0 6px 20px -6px rgba(13, 146, 244, 0.5);
   --ok: #5fbf8f;
   --err: #e2695f;
 
@@ -109,7 +117,8 @@ body {
   width: 15px;
   height: 15px;
   border-radius: 4px;
-  background: linear-gradient(135deg, var(--text) 0%, var(--text-dim) 100%);
+  background: linear-gradient(135deg, var(--accent-2) 0%, var(--accent) 100%);
+  box-shadow: 0 0 12px -2px rgba(13, 146, 244, 0.55);
   transform: rotate(45deg);
   flex: none;
 }
@@ -797,26 +806,35 @@ body {
   font-size: 13.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+  transition: border-color 0.18s var(--ease), background 0.18s var(--ease),
+    transform 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
 .btn:hover:not(:disabled) {
   border-color: var(--text-faint);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-/* Primary CTA = neutral high-contrast (Vercel-style), so the amber accent stays
-   exclusively semantic ("needs you"), never just "the button color". */
+/* Primary CTA = the blue accent, with a soft glow + lift. The "needs you" ask
+   card stays distinct as a full glowing bordered card, not just a colored pill. */
 .btn--primary {
-  background: var(--text);
-  border-color: var(--text);
-  color: var(--bg);
+  background: linear-gradient(180deg, var(--accent-strong) 0%, var(--accent) 100%);
+  border-color: var(--accent);
+  color: #fff;
   font-weight: 600;
+  box-shadow: var(--glow-accent);
 }
 .btn--primary:hover:not(:disabled) {
-  background: #fff;
-  border-color: #fff;
+  background: linear-gradient(180deg, #46b0ff 0%, var(--accent-strong) 100%);
+  border-color: var(--accent-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px -6px rgba(13, 146, 244, 0.6);
 }
 
 /* ---------- error banner (transport-level) ---------- */
@@ -854,15 +872,18 @@ body {
   padding: 4px 10px;
   border-radius: 6px;
   cursor: pointer;
-  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+  transition: color 0.18s var(--ease), background 0.18s var(--ease),
+    box-shadow 0.18s var(--ease);
 }
 .tab:hover {
-  color: var(--text-dim);
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
 }
-.tab--on {
+.tab--on,
+.tab--on:hover {
   background: var(--surface);
   color: var(--text);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border-2);
 }
 
 /* ---------- turn (one exchange in the thread) ---------- */
@@ -882,7 +903,7 @@ body {
   margin-bottom: 4px;
 }
 .turn__task-bubble {
-  background: var(--surface-2);
+  background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 100%);
   border: 1px solid var(--border-2);
   border-radius: 10px 10px 3px 10px;
   padding: 8px 13px;
@@ -890,6 +911,7 @@ body {
   color: var(--text);
   max-width: 78%;
   white-space: pre-wrap;
+  box-shadow: var(--shadow-sm);
 }
 
 /* ---------- history ---------- */
@@ -1210,11 +1232,12 @@ body {
   font-size: 14.5px;
   resize: none;
   line-height: 1.45;
-  transition: border-color 0.15s var(--ease);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
 .composer__input:focus {
   outline: none;
-  border-color: var(--text-faint);
+  border-color: var(--accent);
+  box-shadow: var(--ring);
 }
 .composer__input::placeholder {
   color: var(--text-faint);
@@ -1848,4 +1871,60 @@ body {
   outline: none;
   box-shadow: 0 0 0 2px var(--accent-soft);
   border-radius: 4px;
+}
+
+/* ---------- polish pass: depth, hover, motion (the little things) ---------- */
+
+/* Elevated list rows lift a touch on hover so History/Fleet/Questions feel alive. */
+.history__item {
+  transition: border-color 0.18s var(--ease), background 0.18s var(--ease),
+    transform 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+.history__item:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+/* The "needs you" ask card gets a gentle, slow breathing glow so a waiting
+   question is noticeable without being loud. */
+.ask {
+  box-shadow: var(--shadow-md), 0 0 0 1px var(--accent-soft);
+  animation: rise 0.28s var(--ease) both, ask-glow 3.4s var(--ease) 0.4s infinite;
+}
+@keyframes ask-glow {
+  0%,
+  100% {
+    box-shadow: var(--shadow-md), 0 0 0 1px var(--accent-soft);
+  }
+  50% {
+    box-shadow: var(--shadow-md), 0 0 0 1px var(--accent),
+      0 0 22px -6px rgba(13, 146, 244, 0.45);
+  }
+}
+
+/* Composer/footer surface reads as a raised panel. */
+.footer {
+  box-shadow: 0 -1px 0 var(--border), 0 -12px 24px -20px rgba(0, 0, 0, 0.6);
+}
+
+/* Softer, blue-tinted scrollbar thumb. */
+.thread {
+  scrollbar-color: var(--border-2) transparent;
+}
+
+/* Respect users who ask for less motion — kill entrance/loop animations and
+   transforms, keep instant state changes. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .btn:hover:not(:disabled),
+  .history__item:hover,
+  .tab:hover {
+    transform: none;
+  }
 }
