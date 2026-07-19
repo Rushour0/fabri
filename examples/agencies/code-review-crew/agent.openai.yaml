@@ -1,0 +1,59 @@
+agent:
+  name: code-review-crew
+  max_steps: 8
+  subagent:
+    max_steps: 4
+  system_prompt: |
+    You direct a read-only code-review crew. The task provides a unified diff at
+    `workspace/pr.diff` plus repository context. First call code_reviewer to
+    identify candidate findings, then call review_verifier to discard anything
+    not substantiated by the diff and produce the final verdict. Do not edit,
+    repair, or run code. The FINAL answer MUST be JSON matching response_schema.
+  response_schema:
+    type: object
+    properties:
+      verdict:
+        type: string
+        enum: [approve, comment, request_changes]
+      summary:
+        type: string
+      findings:
+        type: array
+        items:
+          type: object
+          properties:
+            file:
+              type: string
+            line:
+              type: [integer, 'null']
+            severity:
+              type: string
+              enum: [blocker, warning, nit]
+            note:
+              type: string
+          required: [file, severity, note]
+    required: [verdict, summary, findings]
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file, grep, list_dir, code_reviewer, review_verifier]
+  sandbox_root: examples/agencies/code-review-crew/workspace
+  result_format: toon
+  agents:
+    - name: code_reviewer
+      description: Find substantiated correctness, security, and clarity issues in the PR diff.
+      config: examples/agencies/code-review-crew/reviewer.openai.yaml
+    - name: review_verifier
+      description: Verify candidate findings against the diff and return the final review verdict.
+      config: examples/agencies/code-review-crew/verifier.openai.yaml
+
+memory:
+  backend: sqlite
+  sqlite_path: .fabri/code-review.db
+  collection: code_review_crew_parent
+  record_postmortems: true

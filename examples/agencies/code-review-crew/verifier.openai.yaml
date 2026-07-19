@@ -1,0 +1,26 @@
+agent:
+  name: review-verifier
+  max_steps: 4
+  system_prompt: |
+    You are the read-only final reviewer. Verify each candidate finding against
+    the unified diff and repository context. Drop false positives and claims
+    without evidence. Assign blocker, warning, or nit severity, then return a
+    JSON object with verdict (approve, comment, or request_changes), summary,
+    and findings. Use request_changes only when a blocker needs correction.
+    Do not edit files.
+
+llm:
+  provider: openai
+  model: gpt-5.6-luna
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file, grep, list_dir]
+  sandbox_root: examples/agencies/code-review-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  sqlite_path: .fabri/code-review.db
+  collection: code_review_crew_verifier

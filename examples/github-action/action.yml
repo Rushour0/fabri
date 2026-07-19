@@ -1,0 +1,63 @@
+name: Fabri code-review crew
+description: Review a pull-request diff with fabri and post one summary comment.
+inputs:
+  config:
+    description: Path to the fabri agency configuration.
+    required: false
+    default: examples/agencies/code-review-crew/agent.openai.yaml
+  provider:
+    description: LLM provider recorded for the review run.
+    required: false
+    default: openai
+  model:
+    description: LLM model recorded for the review run.
+    required: false
+    default: gpt-5.6-terra
+  api-key-env:
+    description: Environment variable name holding the provider API key.
+    required: false
+    default: OPENAI_API_KEY
+  fail-on:
+    description: Verdict that should fail the Action check.
+    required: false
+    default: request_changes
+  github-token:
+    description: Token used to read and comment on the pull request.
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install fabri with self-improving memory
+      shell: bash
+      run: pip install "fabri[self-improving]"
+    - name: Save pull-request diff for the crew
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        if [ -z "$PR_NUMBER" ]; then
+          PR_NUMBER="$(gh pr view --json number --jq .number --repo "$GITHUB_REPOSITORY")"
+        fi
+        mkdir -p examples/agencies/code-review-crew/workspace
+        gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > examples/agencies/code-review-crew/workspace/pr.diff
+        echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
+    - name: Run code-review crew
+      shell: bash
+      env:
+        OPENAI_API_KEY: ${{ env.OPENAI_API_KEY }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ env.PR_NUMBER }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        FABRI_CONFIG: ${{ inputs.config }}
+        FABRI_PROVIDER: ${{ inputs.provider }}
+        FABRI_MODEL: ${{ inputs.model }}
+        FABRI_API_KEY_ENV: ${{ inputs.api-key-env }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: python examples/github-action/review.py

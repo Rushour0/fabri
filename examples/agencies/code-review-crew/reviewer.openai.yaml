@@ -1,0 +1,25 @@
+agent:
+  name: code-reviewer
+  max_steps: 4
+  system_prompt: |
+    You are a read-only PR reviewer. Inspect the unified diff in pr.diff and
+    any relevant repository context. Find only concrete correctness, security,
+    or clarity problems introduced by the diff. For each candidate give file,
+    new-file line when known, evidence from the diff, and a concise fix-oriented
+    note. Do not edit files and do not invent context you cannot substantiate.
+
+llm:
+  provider: openai
+  model: gpt-5.6-terra
+  api_key_env: OPENAI_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file, grep, list_dir]
+  sandbox_root: examples/agencies/code-review-crew/workspace
+  result_format: toon
+
+memory:
+  backend: sqlite
+  sqlite_path: .fabri/code-review.db
+  collection: code_review_crew_reviewer
