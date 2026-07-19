@@ -256,14 +256,27 @@ class FabriService:
             event = {"type": EventType.ASK_USER.value}
             event.update({k: v for k, v in q.items() if v is not None})
             append_trace_event(trace_path, event)
-            post_ask_user_question(
+            from fabri.service import slack_events
+
+            task = self._meta.get(session_id, {}).get("task", "")
+            routed = slack_events.route_question_to_thread(
                 self._slack_cfg,
-                session_id=session_id,
-                question=q.get("question", ""),
+                session_id,
+                task,
                 question_id=q.get("question_id", ""),
+                question=q.get("question", ""),
                 options=q.get("options"),
                 default=q.get("default"),
             )
+            if not routed:
+                post_ask_user_question(
+                    self._slack_cfg,
+                    session_id=session_id,
+                    question=q.get("question", ""),
+                    question_id=q.get("question_id", ""),
+                    options=q.get("options"),
+                    default=q.get("default"),
+                )
 
         listener = AskUserListener(sock_path, on_question)
         listener.start()

@@ -42,6 +42,7 @@ from urllib.parse import unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
+from fabri.service.slack_events import handle_slack_event
 from fabri.service.service import FabriService
 
 logger = get_logger()
@@ -70,6 +71,10 @@ class _Handler(BaseHTTPRequestHandler):
     @property
     def serve_studio(self) -> bool:
         return cast("FabriHTTPServer", self.server).serve_studio
+
+    @property
+    def slack_cfg(self) -> dict:
+        return self.service._slack_cfg
 
     def log_message(self, fmt: str, *args) -> None:  # quiet the default stderr spam
         logger.debug("fabri serve: " + fmt, *args)
@@ -123,6 +128,23 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"no route for GET {self.path}"})
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path in ("/slack/events", "/slack/events/"):
+            if not self.slack_cfg.get("events_enabled"):
+                self._send_json(404, {"error": f"no route for POST {self.path}"})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            status, body, extra_headers = handle_slack_event(
+                raw, self.headers, self.service, self.slack_cfg
+            )
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         m = _ANSWER_RE.match(self.path)
         if m:
             self._answer(m.group(1))
@@ -248,7 +270,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/health", "/questions", "/company", "/catalog"))
+                   for prefix in ("/runs", "/fleets", "/health", "/questions", "/company", "/catalog", "/slack"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
