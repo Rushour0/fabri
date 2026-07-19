@@ -45,11 +45,15 @@ class RunStore:
                     thread_id TEXT,
                     fleet_id TEXT,
                     label TEXT,
+                    user_id TEXT,
                     terminal_event TEXT
                 )
                 """
             )
             connection.execute("CREATE INDEX IF NOT EXISTS runs_agency_submitted ON runs(agency, submitted_at)")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
+            if "user_id" not in columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN user_id TEXT")
 
     def is_empty(self) -> bool:
         with self._connect() as connection:
@@ -58,13 +62,14 @@ class RunStore:
     def record_submit(
         self, *, session_id: str, agency: str, task: str, submitted_at: float,
         thread_id: str | None = None, fleet_id: str | None = None, label: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO runs
-                (session_id, agency, task, submitted_at, thread_id, fleet_id, label)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (session_id, agency, task, submitted_at, thread_id, fleet_id, label),
+                (session_id, agency, task, submitted_at, thread_id, fleet_id, label, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, agency, task, submitted_at, thread_id, fleet_id, label, user_id),
             )
 
     def record_terminal(
@@ -90,12 +95,18 @@ class RunStore:
                 ),
             )
 
-    def list_runs(self, *, agency: str | None = None, limit: int | None = None, offset: int = 0) -> list[RunRecord]:
+    def list_runs(
+        self, *, agency: str | None = None, limit: int | None = None, offset: int = 0,
+        user_id: str | None = None,
+    ) -> list[RunRecord]:
         clauses: list[str] = []
         params: list[object] = []
         if agency is not None:
             clauses.append("agency = ?")
             params.append(agency)
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
         query = "SELECT * FROM runs"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -109,19 +120,35 @@ class RunStore:
         with self._connect() as connection:
             return [self._summary(row) for row in connection.execute(query, params)]
 
-    def agency_aggregates(self) -> list[RunRecord]:
+    def run_owner(self, session_id: str) -> str | None:
+        """Return a run's persisted owner, if it exists and has one."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT user_id FROM runs WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return row["user_id"] if row is not None else None
+
+    def agency_aggregates(self, *, user_id: str | None = None) -> list[RunRecord]:
+        clauses = " WHERE user_id = ?" if user_id is not None else ""
+        params: tuple[object, ...] = (user_id,) if user_id is not None else ()
         with self._connect() as connection:
             agencies = connection.execute(
                 "SELECT agency, COUNT(*) AS run_count, COALESCE(SUM(cost_total), 0) AS cost_total "
-                "FROM runs GROUP BY agency ORDER BY agency"
+                f"FROM runs{clauses} GROUP BY agency ORDER BY agency",
+                params,
             ).fetchall()
             output: list[RunRecord] = []
             for aggregate in agencies:
+                run_params: tuple[object, ...] = (aggregate["agency"],)
+                owner_clause = ""
+                if user_id is not None:
+                    owner_clause = " AND user_id = ?"
+                    run_params += (user_id,)
                 runs = connection.execute(
                     """SELECT session_id, finished_at, cost_total, reuse_rate FROM runs
-                    WHERE agency = ?
+                    WHERE agency = ?""" + owner_clause + """
                     ORDER BY finished_at IS NULL, finished_at ASC, submitted_at ASC, session_id ASC""",
-                    (aggregate["agency"],),
+                    run_params,
                 ).fetchall()
                 output.append({
                     "agency": aggregate["agency"],
@@ -180,6 +207,7 @@ class RunStore:
                     session_id=session_id, agency=record.get("agency") or default_agency,
                     task=record.get("task") or "", submitted_at=record.get("started_ts") or record.get("ts") or 0,
                     thread_id=record.get("thread_id"), fleet_id=record.get("fleet_id"), label=record.get("label"),
+                    user_id=record.get("user_id"),
                 )
             elif record.get("event") in {"result", "cancel"}:
                 self.record_terminal(

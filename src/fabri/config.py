@@ -297,6 +297,13 @@ DEFAULT_CONFIG = {
             "studio_base_url": None,
         },
     },
+    "auth": {
+        "enabled": False,
+        "session_secret_env": "FABRI_AUTH_SECRET",
+        "session_ttl_s": 604800,
+        "secure_cookie": True,
+        "db_path": None,
+    },
 }
 
 
@@ -473,6 +480,8 @@ def _apply_env_overrides(cfg: dict) -> dict:
     - ``FABRI_SLACK_OWNED_CHANNEL`` -> ``routing.slack.owned_channel``
     - ``FABRI_SLACK_USER`` -> ``routing.slack.default_user``
     - ``FABRI_SLACK_STUDIO_URL`` -> ``routing.slack.studio_base_url``
+    - ``FABRI_AUTH_ENABLED`` -> ``auth.enabled`` (1/true/yes/on)
+    - ``FABRI_AUTH_SECURE_COOKIE`` -> ``auth.secure_cookie`` (0/false/no/off disables it)
     """
     out = cfg
 
@@ -530,6 +539,16 @@ def _apply_env_overrides(cfg: dict) -> dict:
         routing = dict(out.get("routing") or {})
         routing["slack"] = {**(routing.get("slack") or {}), **slack_over}
         out = {**out, "routing": routing}
+
+    auth_over: dict = {}
+    auth_enabled = os.environ.get("FABRI_AUTH_ENABLED")
+    if auth_enabled is not None:
+        auth_over["enabled"] = auth_enabled.strip().lower() in ("1", "true", "yes", "on")
+    secure_cookie = os.environ.get("FABRI_AUTH_SECURE_COOKIE")
+    if secure_cookie is not None:
+        auth_over["secure_cookie"] = secure_cookie.strip().lower() not in ("0", "false", "no", "off")
+    if auth_over:
+        out = {**out, "auth": {**(out.get("auth") or {}), **auth_over}}
 
     return out
 
