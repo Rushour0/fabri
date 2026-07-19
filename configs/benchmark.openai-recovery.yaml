@@ -7,6 +7,7 @@
 
 agent:
   name: benchmark
+  retrieved_guidelines_task_precedence: true
   max_steps: 10
   output_format: json
   planner:
@@ -47,3 +48,4 @@ memory:
   similarity_threshold: 0.85
   promotion_threshold_sessions: 3
   guideline_max_tokens: 30
+  success_pattern_requires_evidence: true

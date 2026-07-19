@@ -42,6 +42,7 @@ class AgentRunConfig:
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS
     system_prompt: str = ""
     system_prompt_prefix: str = ""
+    retrieved_guidelines_task_precedence: bool = False
     result_format: str = "toon"
     output_format: str = "json"
     planner_mode: str = "off"
@@ -78,6 +79,9 @@ class AgentRunConfig:
             ),
             system_prompt=agent.get("system_prompt", ""),
             system_prompt_prefix=agent.get("system_prompt_prefix", ""),
+            retrieved_guidelines_task_precedence=agent.get(
+                "retrieved_guidelines_task_precedence", False
+            ),
             result_format=tools.get("result_format", cls.result_format),
             output_format=agent.get("output_format", cls.output_format),
             planner_mode=planner_mode_from_cfg(planner),
@@ -114,6 +118,7 @@ class AgentRunConfig:
             "max_parallel_spawns": self.max_parallel_spawns,
             "system_prompt": self.system_prompt,
             "system_prompt_prefix": self.system_prompt_prefix,
+            "retrieved_guidelines_task_precedence": self.retrieved_guidelines_task_precedence,
             "result_format": self.result_format,
             "output_format": self.output_format,
             "planner_mode": self.planner_mode,

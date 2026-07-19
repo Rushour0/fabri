@@ -1,4 +1,11 @@
-from fabri.benchmarks.openai_recovery_study import grade_summary, summarize
+from fabri.benchmarks.openai_recovery_study import (
+    HOLDOUT_TASK,
+    TASK,
+    grade_holdout_summary,
+    grade_summary,
+    summarize,
+    task_for_session,
+)
 from fabri.events import EventType
 from fabri.orchestrator.pipeline import file_recovery_evidence
 
@@ -11,6 +18,21 @@ def test_grade_summary_requires_every_agenda_item(tmp_path):
     )
 
     assert grade_summary(tmp_path)
+
+
+def test_grade_holdout_summary_requires_every_brief_item(tmp_path):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "brief_summary.txt").write_text(
+        "The rollback owner must be confirmed. Send the customer update today."
+    )
+
+    assert grade_holdout_summary(tmp_path)
+
+
+def test_task_for_session_uses_training_then_holdout():
+    assert task_for_session(1) == ("training", TASK)
+    assert task_for_session(2) == ("holdout", HOLDOUT_TASK)
 
 
 def test_summarize_reports_rubric_and_cost_change():

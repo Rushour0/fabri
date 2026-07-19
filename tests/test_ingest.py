@@ -300,6 +300,22 @@ def test_process_trace_deterministic_events_no_llm():
     # NoOpLLM never raised → no synthesis call happened.
 
 
+def test_process_trace_skips_generic_success_when_evidence_is_required():
+    store = InMemoryVectorStore()
+
+    entries = process_trace(
+        "sess-evidence-only",
+        store,
+        NoOpLLM(),
+        events=_run_events(),
+        record_postmortem=True,
+        synthesize=False,
+        success_pattern_requires_evidence=True,
+    )
+
+    assert {entry.kind for entry in entries} == {"postmortem", "tactical"}
+
+
 def test_process_trace_reads_disk_when_events_none(monkeypatch):
     # Back-compat: the default path still calls read_trace(session_id).
     called = {}
