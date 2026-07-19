@@ -42,6 +42,11 @@ dependencies = [
 embeddings = ["sentence-transformers>=3.0"]
 sqlite = ["sqlite-vec>=0.1.6"]         # G16: embedded vector store (no docker)
 bm25 = ["rank-bm25>=0.2.2"]            # client-side BM25 for Qdrant hybrid retrieval
+# One-command install for the self-improving stack — memory (sqlite-vec store +
+# sentence-transformers embeddings) + hybrid retrieval (bm25). This is what lets
+# agencies learn and get cheaper/better every run:
+#   pip install "fabri[self-improving]"
+self-improving = ["sqlite-vec>=0.1.6", "sentence-transformers>=3.0", "rank-bm25>=0.2.2"]
 otel = [                               # X1: export the trace spine to any OTLP backend
     "opentelemetry-sdk>=1.24",
     "opentelemetry-exporter-otlp-proto-http>=1.24",   # default (observability.otlp_protocol: http)

@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 
 _MISSING_EMBEDDINGS_MESSAGE = (
-    "sentence-transformers is not installed — `pip install 'fabri[embeddings]'` "
-    "to enable memory retrieval/learning"
+    "sentence-transformers is not installed — `pip install 'fabri[self-improving]'` "
+    "to enable the self-improving stack (memory retrieval + learning)"
 )
 
 
