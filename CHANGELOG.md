@@ -4,6 +4,19 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.16.0 — 2026-07-19
+
+### Studio catalog mode — browse a roster and run any agency/company
+
+- **`fabri studio --catalog <rosters-dir>`** turns Studio into a catalog-first
+  control plane: it pre-installs every agency and compiles every company from a
+  roster (e.g. a checkout of `fabri-rosters`), serves `GET /catalog`, and each
+  run targets the entry you pick (`catalog_ref` on `POST /runs`).
+- Studio gets a **Roster** home surface — agency + company cards, each with a
+  Run button; picking one shows a "Running <name>" banner, and companies drive
+  the multi-level org-chart. A run of a multi-agent agency/company shows its
+  sub-agents and their live per-agent COGS.
+
 ## 0.15.1 — 2026-07-19
 
 - Base installs are now lean: `sentence-transformers` is optional. Use
