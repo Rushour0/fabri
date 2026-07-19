@@ -11,7 +11,8 @@ import { FleetView } from "./components/FleetView";
 import { AgencyGraph } from "./components/AgencyGraph";
 import { QuestionsInbox } from "./components/QuestionsInbox";
 import { CompanyOrgChart } from "./components/CompanyOrgChart";
-import { listQuestions, getCompany, type Company } from "./lib/api";
+import { CatalogView, type CatalogSelection } from "./components/CatalogView";
+import { listQuestions, getCompany, getCatalog, type Company, type Catalog } from "./lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -22,7 +23,7 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-type Surface = "conversation" | "company" | "questions" | "history" | "fleet" | "replay";
+type Surface = "catalog" | "conversation" | "company" | "questions" | "history" | "fleet" | "replay";
 
 // One turn of the thread: the user's task, then the agent's streamed timeline,
 // then that turn's pending questions and cost fallback. Only the active (last)
@@ -106,6 +107,29 @@ export default function App() {
       .catch(() => setCompany(null));
   }, []);
 
+  // The served roster (null unless Studio runs in `--catalog` mode). When present,
+  // the Catalog is the front door and each run targets the picked entry.
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [selection, setSelection] = useState<CatalogSelection | null>(null);
+  useEffect(() => {
+    getCatalog()
+      .then((c) => {
+        setCatalog(c);
+        if (c) setSurface("catalog"); // land on the roster in catalog mode
+      })
+      .catch(() => setCatalog(null));
+  }, []);
+
+  // Hire a catalog entry: it becomes the run target; start a fresh thread and
+  // drop into the conversation to give it a task.
+  const hire = (sel: CatalogSelection) => {
+    setSelection(sel);
+    run.reset();
+    setSurface("conversation");
+  };
+  // A company selection drives the Company org-chart even without a live run yet.
+  const activeCompanyOrg = selection?.kind === "company" ? selection.org ?? null : company;
+
   const openReplay = (sessionId: string, from: Surface) => {
     setReplayId(sessionId);
     setReplayFrom(from);
@@ -123,6 +147,14 @@ export default function App() {
         </div>
         <div className="header__right">
           <nav className="tabs" aria-label="views">
+            {catalog && (
+              <button
+                className={"tab" + (surface === "catalog" ? " tab--on" : "")}
+                onClick={() => setSurface("catalog")}
+              >
+                Roster
+              </button>
+            )}
             <button
               className={"tab" + (surface === "conversation" ? " tab--on" : "")}
               onClick={() => setSurface("conversation")}
@@ -173,11 +205,12 @@ export default function App() {
         {surface === "replay" && replayId && (
           <RunReplay key={replayId} sessionId={replayId} onBack={() => setSurface(replayFrom)} />
         )}
+        {surface === "catalog" && catalog && <CatalogView catalog={catalog} onRun={hire} />}
         {surface === "company" && (
-          company ? (
-            // A whole company is served (`fabri studio --company`): draw its org
-            // chart from GET /company; overlay live status + cost when a run streams.
-            <CompanyOrgChart company={company} events={run.turns[activeIdx]?.events} />
+          activeCompanyOrg ? (
+            // A company is served/selected: draw its org chart; overlay live status
+            // + cost when a run streams.
+            <CompanyOrgChart company={activeCompanyOrg} events={run.turns[activeIdx]?.events} />
           ) : hasThread ? (
             <AgencyGraph events={run.turns[activeIdx]?.events ?? []} />
           ) : (
@@ -215,12 +248,32 @@ export default function App() {
       {surface === "conversation" && (
         <footer className="footer">
           <div className="footer__stack">
+            {catalog && selection && (
+              <div className="running-as">
+                <span className="running-as__label">Running</span>
+                <span className="running-as__name">{selection.title}</span>
+                <span className={"running-as__kind running-as__kind--" + selection.kind}>{selection.kind}</span>
+                <button className="running-as__change" onClick={() => setSurface("catalog")}>
+                  change
+                </button>
+              </div>
+            )}
+            {catalog && !selection && (
+              <div className="running-as running-as--empty">
+                Pick an agency or company from the <button className="running-as__change" onClick={() => setSurface("catalog")}>Roster</button> to run.
+              </div>
+            )}
             {hasThread && !busy && (
               <button className="footer__new" onClick={run.reset}>
                 New thread
               </button>
             )}
-            <Composer onSubmit={run.start} onCancel={run.cancel} busy={busy} followup={hasThread} />
+            <Composer
+              onSubmit={(task) => run.start(task, selection?.ref)}
+              onCancel={run.cancel}
+              busy={busy}
+              followup={hasThread}
+            />
           </div>
         </footer>
       )}

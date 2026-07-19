@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 import uuid
 
 from fabri.admin import AdminAuthError, describe_config, render_dashboard, require_admin
@@ -1168,31 +1169,49 @@ def cmd_studio(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    company = None
-    template_config = args.config
-    if args.company:
-        if args.config:
-            print("--company supplied; ignoring --config", file=sys.stderr)
-        import tempfile
+    if args.catalog:
+        from fabri.catalog import load_catalog
 
+        if args.config or args.company:
+            print("--catalog supplied; ignoring --config and --company", file=sys.stderr)
         try:
-            root = compile_company(
-                args.company, tempfile.mkdtemp(prefix="fabri-company-")
+            if args.home_root:
+                Path(args.home_root).mkdir(parents=True, exist_ok=True)
+            work_dir = Path(
+                tempfile.mkdtemp(prefix="fabri-catalog-", dir=args.home_root or None)
             )
-            company = company_org(args.company)
+            catalog = load_catalog(args.catalog, work_dir)
         except (OSError, ValueError) as exc:
-            print(f"company error: {exc}", file=sys.stderr)
+            print(f"catalog error: {exc}", file=sys.stderr)
             sys.exit(1)
-        template_config = str(root)
+        service = FabriService(catalog=catalog, home_root=args.home_root)
+        server = serve_http(
+            service, host=args.host, port=args.port, serve_studio=True, catalog=catalog
+        )
+    else:
+        company = None
+        template_config = args.config
+        if args.company:
+            if args.config:
+                print("--company supplied; ignoring --config", file=sys.stderr)
+            try:
+                root = compile_company(
+                    args.company, tempfile.mkdtemp(prefix="fabri-company-")
+                )
+                company = company_org(args.company)
+            except (OSError, ValueError) as exc:
+                print(f"company error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            template_config = str(root)
 
-    service = FabriService(template_config=template_config, home_root=args.home_root)
-    server = serve_http(
-        service,
-        host=args.host,
-        port=args.port,
-        serve_studio=True,
-        company=company,
-    )
+        service = FabriService(template_config=template_config, home_root=args.home_root)
+        server = serve_http(
+            service,
+            host=args.host,
+            port=args.port,
+            serve_studio=True,
+            company=company,
+        )
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)
     try:
@@ -1530,6 +1549,11 @@ def main() -> None:
         "--company",
         default=None,
         help="Company TOML to compile and serve as the Studio run template.",
+    )
+    p_studio.add_argument(
+        "--catalog",
+        default=None,
+        help="Roster directory to pre-install and serve; takes precedence over --config/--company.",
     )
     p_studio.add_argument("--host", default="127.0.0.1",
                           help="Bind host (default: 127.0.0.1)")
