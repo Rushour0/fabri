@@ -291,6 +291,7 @@ DEFAULT_CONFIG = {
             "signing_secret_env": "SLACK_SIGNING_SECRET",
             "events_enabled": False,
             "mention_agency": None,
+            "owned_channel": None,
             "default_channel": None,
             "default_user": None,
             "studio_base_url": None,
@@ -469,6 +470,7 @@ def _apply_env_overrides(cfg: dict) -> dict:
     - ``FABRI_SLACK_ENABLED`` -> ``routing.slack.enabled`` (1/true/yes/on)
     - ``FABRI_SLACK_EVENTS`` -> ``routing.slack.events_enabled`` (1/true/yes/on)
     - ``FABRI_SLACK_CHANNEL`` -> ``routing.slack.default_channel``
+    - ``FABRI_SLACK_OWNED_CHANNEL`` -> ``routing.slack.owned_channel``
     - ``FABRI_SLACK_USER`` -> ``routing.slack.default_user``
     - ``FABRI_SLACK_STUDIO_URL`` -> ``routing.slack.studio_base_url``
     """
@@ -515,6 +517,9 @@ def _apply_env_overrides(cfg: dict) -> dict:
     channel = os.environ.get("FABRI_SLACK_CHANNEL")
     if channel:
         slack_over["default_channel"] = channel
+    owned_channel = os.environ.get("FABRI_SLACK_OWNED_CHANNEL")
+    if owned_channel:
+        slack_over["owned_channel"] = owned_channel
     user = os.environ.get("FABRI_SLACK_USER")
     if user:
         slack_over["default_user"] = user
