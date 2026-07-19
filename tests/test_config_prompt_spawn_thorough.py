@@ -22,6 +22,7 @@ from fabri.core.agent import (
     FILE_EDIT_POLICY,
     FRUGALITY_POLICY,
     TOON_RESULT_NOTE,
+    RETRIEVED_GUIDELINES_TASK_PRECEDENCE,
     build_system_prompt,
 )
 from fabri.tools.examples.spawn_subagent import (
@@ -188,7 +189,7 @@ def test_system_prompt_override_still_gets_all_gated_policies():
     assert TOON_RESULT_NOTE in out
 
 
-def test_context_block_appears_last():
+def test_context_block_precedes_task_requirement_policy():
     desc = (
         "- edit_file: edit\n- write_file: write\n"
         "- spawn_subagent: spawn\n- batch: many"
@@ -210,7 +211,8 @@ def test_context_block_appears_last():
         TOON_RESULT_NOTE,
     ):
         assert out.index(earlier) < out.index(ctx)
-    assert out.rstrip().endswith(ctx)
+    assert out.index(ctx) < out.index(RETRIEVED_GUIDELINES_TASK_PRECEDENCE)
+    assert out.rstrip().endswith(RETRIEVED_GUIDELINES_TASK_PRECEDENCE)
 
 
 def test_empty_tool_descriptions_omits_available_tools_block():

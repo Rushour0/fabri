@@ -26,9 +26,9 @@ DEFAULT_CONFIG = {
         # whatever follows.
         "system_prompt": "",
         "system_prompt_prefix": "",
-        # Optional prompt hardening for retrieved memory. Kept off by default
-        # while benchmark evidence determines whether to enable it globally.
-        "retrieved_guidelines_task_precedence": False,
+        # Retrieved memory is always a fallible method hint; current task
+        # requirements and deliverables take precedence.
+        "retrieved_guidelines_task_precedence": True,
         # Format the model is asked to PRODUCE structured output in
         # (decompose). Native tool-call arguments are always provider JSON
         # regardless. "toon" is opt-in with json fallback.

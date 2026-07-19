@@ -118,7 +118,7 @@ def run_benchmark(
             system_prompt=config["agent"].get("system_prompt", ""),
             system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
             retrieved_guidelines_task_precedence=config["agent"].get(
-                "retrieved_guidelines_task_precedence", False
+                "retrieved_guidelines_task_precedence", True
             ),
             result_format=tools_cfg.get("result_format", "toon"),
             output_format=config["agent"].get("output_format", "json"),

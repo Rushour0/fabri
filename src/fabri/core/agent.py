@@ -113,7 +113,7 @@ def build_system_prompt(
     system_prompt: str = "",
     system_prompt_prefix: str = "",
     result_format: str = "json",
-    retrieved_guidelines_task_precedence: bool = False,
+    retrieved_guidelines_task_precedence: bool = True,
 ) -> str:
     identity = system_prompt or DEFAULT_AGENT_IDENTITY
     # Word-boundary match because tool_descriptions is a bullet list
@@ -187,7 +187,7 @@ def _run_single_attempt(
     response_fallback: object | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
     retrieval_config: RetrievalConfig | None = None,
-    retrieved_guidelines_task_precedence: bool = False,
+    retrieved_guidelines_task_precedence: bool = True,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -1047,7 +1047,7 @@ def run_agent(
     repair: dict | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
     retrieval_config: RetrievalConfig | None = None,
-    retrieved_guidelines_task_precedence: bool = False,
+    retrieved_guidelines_task_precedence: bool = True,
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
