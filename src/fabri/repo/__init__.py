@@ -8,6 +8,7 @@ from .github import (
     find_open_issue_with_marker,
     list_open_issues_with_label,
 )
+from .base import RepoProvider, detect_provider, get_provider
 
 
 def open_or_update_tracking_issue(
@@ -19,6 +20,9 @@ def open_or_update_tracking_issue(
     labels: list[str] | None = None,
 ) -> str:
     """Create a marked tracking issue, or append a marked update to it."""
+    # Kept as the original GitHub-compatible public helper.  New CLI code uses
+    # the provider interface directly, while callers of this helper retain its
+    # exact historical request shape (notably `labels=None`).
     marker = f"<!-- fabri:repo:{key} -->"
     marked_body = f"{body.rstrip()}\n\n{marker}"
     existing = find_open_issue_with_marker(
@@ -37,4 +41,7 @@ __all__ = [
     "find_open_issue_with_marker",
     "list_open_issues_with_label",
     "open_or_update_tracking_issue",
+    "RepoProvider",
+    "detect_provider",
+    "get_provider",
 ]

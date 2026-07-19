@@ -14,6 +14,10 @@ that ships.
   memory loop made visible and reviewable in the repo.
 - **`fabri repo issue`** files/refreshes a deduplicated tracking issue (a hidden
   marker + list-before-create, so re-runs comment instead of spamming duplicates).
+- **Easy setup, by design:** it runs in a GitHub Action from a single workflow
+  file with only the built-in `GITHUB_TOKEN` — no model API key, no server. Live
+  reference: [Rushour0/fabri-repo-demo](https://github.com/Rushour0/fabri-repo-demo)
+  files its own self-improvement issue weekly.
 - GitHub-only for now, token via `GITHUB_TOKEN` (Actions-native), stdlib only. See
   `docs/repo-agent.md` for a copy-paste GitHub Actions workflow.
 
