@@ -12,6 +12,7 @@ import { AgencyGraph } from "./components/AgencyGraph";
 import { QuestionsInbox } from "./components/QuestionsInbox";
 import { CompanyOrgChart } from "./components/CompanyOrgChart";
 import { CatalogView, type CatalogSelection } from "./components/CatalogView";
+import { useHashRoute, type Surface } from "./hooks/useHashRoute";
 import { listQuestions, getCompany, getCatalog, type Company, type Catalog } from "./lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -22,8 +23,6 @@ const STATUS_LABEL: Record<string, string> = {
   error: "Error",
   cancelled: "Cancelled",
 };
-
-type Surface = "catalog" | "conversation" | "company" | "questions" | "history" | "fleet" | "replay";
 
 // One turn of the thread: the user's task, then the agent's streamed timeline,
 // then that turn's pending questions and cost fallback. Only the active (last)
@@ -67,8 +66,9 @@ function TurnBlock({
 
 export default function App() {
   const run = useRunEvents();
-  const [surface, setSurface] = useState<Surface>("conversation");
-  const [replayId, setReplayId] = useState<string | null>(null);
+  // Tab state lives in the URL hash (#conversation, #questions, #replay/<id>),
+  // so tabs are deep-linkable and browser Back/Forward works.
+  const { surface, replayId, go, hadInitialHash } = useHashRoute("conversation");
   // Where the replay was opened from, so its back button returns there.
   const [replayFrom, setReplayFrom] = useState<Surface>("history");
   const busy = run.status === "submitting" || run.status === "running";
@@ -115,7 +115,9 @@ export default function App() {
     getCatalog()
       .then((c) => {
         setCatalog(c);
-        if (c) setSurface("catalog"); // land on the roster in catalog mode
+        // Land on the roster in catalog mode, unless the URL already deep-links
+        // a specific tab.
+        if (c && !hadInitialHash) go("catalog");
       })
       .catch(() => setCatalog(null));
   }, []);
@@ -125,22 +127,26 @@ export default function App() {
   const hire = (sel: CatalogSelection) => {
     setSelection(sel);
     run.reset();
-    setSurface("conversation");
+    go("conversation");
   };
   // A company selection drives the Company org-chart even without a live run yet.
   const activeCompanyOrg = selection?.kind === "company" ? selection.org ?? null : company;
 
   const openReplay = (sessionId: string, from: Surface) => {
-    setReplayId(sessionId);
     setReplayFrom(from);
-    setSurface("replay");
+    go("replay", sessionId);
   };
 
   const empty = surface === "conversation" && !hasThread && run.status === "idle";
 
-  // Wide surfaces (the roster, org-charts, fleet, history) get the full width;
-  // the conversation stays a readable narrow column.
-  const wide = surface === "catalog" || surface === "company" || surface === "fleet" || surface === "history";
+  // Wide surfaces (the roster, org-charts, fleet, history, and the questions
+  // inbox — a list surface like the others) get the full width; the conversation
+  // stays a readable narrow column. A replay inherits the width of whatever
+  // surface opened it, so replays launched from a wide list stay wide.
+  const WIDE_SURFACES: Surface[] = ["catalog", "company", "fleet", "history", "questions"];
+  const wide =
+    WIDE_SURFACES.includes(surface) ||
+    (surface === "replay" && WIDE_SURFACES.includes(replayFrom));
   return (
     <div className={"app" + (wide ? " app--wide" : "")}>
       <header className="header">
@@ -153,26 +159,26 @@ export default function App() {
             {catalog && (
               <button
                 className={"tab" + (surface === "catalog" ? " tab--on" : "")}
-                onClick={() => setSurface("catalog")}
+                onClick={() => go("catalog")}
               >
                 Roster
               </button>
             )}
             <button
               className={"tab" + (surface === "conversation" ? " tab--on" : "")}
-              onClick={() => setSurface("conversation")}
+              onClick={() => go("conversation")}
             >
               Conversation
             </button>
             <button
               className={"tab" + (surface === "company" ? " tab--on" : "")}
-              onClick={() => setSurface("company")}
+              onClick={() => go("company")}
             >
               Company
             </button>
             <button
               className={"tab" + (surface === "questions" ? " tab--on" : "")}
-              onClick={() => setSurface("questions")}
+              onClick={() => go("questions")}
             >
               Questions
               {pendingCount > 0 && (
@@ -183,13 +189,13 @@ export default function App() {
             </button>
             <button
               className={"tab" + (surface === "fleet" ? " tab--on" : "")}
-              onClick={() => setSurface("fleet")}
+              onClick={() => go("fleet")}
             >
               Fleet
             </button>
             <button
               className={"tab" + (surface === "history" || surface === "replay" ? " tab--on" : "")}
-              onClick={() => setSurface("history")}
+              onClick={() => go("history")}
             >
               History
             </button>
@@ -206,7 +212,7 @@ export default function App() {
         {surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
         {surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
         {surface === "replay" && replayId && (
-          <RunReplay key={replayId} sessionId={replayId} onBack={() => setSurface(replayFrom)} />
+          <RunReplay key={replayId} sessionId={replayId} onBack={() => go(replayFrom)} />
         )}
         {surface === "catalog" && catalog && <CatalogView catalog={catalog} onRun={hire} />}
         {surface === "company" && (
@@ -256,14 +262,14 @@ export default function App() {
                 <span className="running-as__label">Running</span>
                 <span className="running-as__name">{selection.title}</span>
                 <span className={"running-as__kind running-as__kind--" + selection.kind}>{selection.kind}</span>
-                <button className="running-as__change" onClick={() => setSurface("catalog")}>
+                <button className="running-as__change" onClick={() => go("catalog")}>
                   change
                 </button>
               </div>
             )}
             {catalog && !selection && (
               <div className="running-as running-as--empty">
-                Pick an agency or company from the <button className="running-as__change" onClick={() => setSurface("catalog")}>Roster</button> to run.
+                Pick an agency or company from the <button className="running-as__change" onClick={() => go("catalog")}>Roster</button> to run.
               </div>
             )}
             {hasThread && !busy && (
