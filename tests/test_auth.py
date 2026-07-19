@@ -67,6 +67,47 @@ def test_run_owner_returns_only_the_persisted_owner(tmp_path):
     assert store.run_owner("unknown-run") is None
 
 
+def test_auth_routes_hide_another_users_run():
+    service = SimpleNamespace(auth_enabled=True, run_owner=lambda _session_id: "user-a")
+
+    for path, action in (
+        ("/runs/owned-run/events", "_stream_events"),
+        ("/runs/owned-run/result", "_send_result"),
+        ("/runs/owned-run/answer", "_answer"),
+        ("/runs/owned-run/cancel", "_cancel"),
+    ):
+        handler = object.__new__(_Handler)
+        handler.server = SimpleNamespace(service=service)
+        handler.path = path
+        handler._require_user = lambda: "user-b"
+        responses = []
+        handler._send_json = lambda code, payload: responses.append((code, payload))
+        setattr(handler, action, lambda _session_id: AssertionError("must not be called"))
+
+        if action in {"_stream_events", "_send_result"}:
+            handler.do_GET()
+        else:
+            handler.do_POST()
+
+        assert responses == [(404, {"error": "unknown session_id 'owned-run'"})]
+
+
+def test_catalog_requires_a_session_when_auth_is_enabled():
+    handler = object.__new__(_Handler)
+    handler.server = SimpleNamespace(
+        service=SimpleNamespace(auth_enabled=True, auth_secret="secret"),
+        catalog={"private": {}},
+    )
+    handler.path = "/catalog"
+    handler.headers = {}
+    responses = []
+    handler._send_json = lambda code, payload: responses.append((code, payload))
+
+    handler.do_GET()
+
+    assert responses == [(401, {"error": "auth required"})]
+
+
 def test_signup_returns_the_same_generic_response_for_existing_email(tmp_path):
     store = UserStore(tmp_path / "auth.db")
     handler = object.__new__(_Handler)
