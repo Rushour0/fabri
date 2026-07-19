@@ -168,7 +168,7 @@ export interface UseRunEvents {
   turns: Turn[];
   status: RunStatus;
   error: string | null;
-  start: (task: string) => Promise<void>;
+  start: (task: string, catalogRef?: string) => Promise<void>;
   answer: (questionId: string, answer: string, selectedOption?: string) => Promise<void>;
   cancel: () => Promise<void>;
   reset: () => void;
@@ -224,7 +224,7 @@ export function useRunEvents(): UseRunEvents {
   );
 
   const start = useCallback(
-    async (task: string) => {
+    async (task: string, catalogRef?: string) => {
       closeStream();
       const prior = stateRef.current;
       const threadId = prior.threadId ?? genThreadId();
@@ -238,7 +238,7 @@ export function useRunEvents(): UseRunEvents {
 
       let sessionId: string;
       try {
-        const res = await submitRun(effectiveTask, { threadId, overrides });
+        const res = await submitRun(effectiveTask, { threadId, overrides, catalogRef });
         sessionId = res.session_id;
       } catch (e) {
         dispatch({ kind: "error", error: e instanceof Error ? e.message : String(e) });

@@ -11,6 +11,8 @@ export interface SubmitOptions {
   threadId?: string;
   fleetId?: string;
   overrides?: Record<string, unknown>;
+  // In catalog mode, which roster entry (agency/company name) to run this task on.
+  catalogRef?: string;
 }
 
 export async function submitRun(task: string, opts: SubmitOptions = {}): Promise<SubmitResponse> {
@@ -18,6 +20,7 @@ export async function submitRun(task: string, opts: SubmitOptions = {}): Promise
   if (opts.overrides) body.overrides = opts.overrides;
   if (opts.threadId) body.thread_id = opts.threadId;
   if (opts.fleetId) body.fleet_id = opts.fleetId;
+  if (opts.catalogRef) body.catalog_ref = opts.catalogRef;
   const res = await fetch("/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -147,6 +150,48 @@ export async function getCompany(): Promise<Company | null> {
   if (!res.ok) throw new Error(`get company failed (${res.status})`);
   const body = await res.json();
   return body.company ?? null;
+}
+
+// ---- catalog (GET /catalog) — the roster Studio serves in `--catalog` mode ----
+
+export interface CatalogAgency {
+  ref: string;
+  kind: "agency";
+  name: string;
+  title: string;
+  tagline?: string;
+  category?: string;
+  deliverable?: string;
+  agents?: number;
+  tools?: number;
+  max_cost_usd?: number;
+  self_improving?: boolean;
+}
+
+export interface CatalogCompany {
+  ref: string;
+  kind: "company";
+  name: string;
+  title: string;
+  positioning?: string;
+  node_count?: number;
+  member_agencies?: string[];
+  max_cost_usd?: number;
+  org: Company; // the compiled org structure, for the Company org-chart
+}
+
+export interface Catalog {
+  agencies: CatalogAgency[];
+  companies: CatalogCompany[];
+}
+
+// The served roster, or null when Studio runs a single agency/company (not
+// `--catalog` mode). Non-null → Studio shows the catalog as its front door.
+export async function getCatalog(): Promise<Catalog | null> {
+  const res = await fetch("/catalog");
+  if (!res.ok) throw new Error(`get catalog failed (${res.status})`);
+  const body = await res.json();
+  return body.catalog ?? null;
 }
 
 // ---- fleets (POST/GET /fleets) ----

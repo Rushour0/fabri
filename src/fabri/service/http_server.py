@@ -24,6 +24,7 @@ fabri imports, no websockets dependency. Three endpoints:
 - ``GET  /fleets/<id>``     one fleet's member statuses + summed COGS.
 - ``GET  /health``          ``{"status": "ok"}``.
 - ``GET  /company``         ``{"company": {...} | null}`` -- served company org chart.
+- ``GET  /catalog``         ``{"catalog": {...} | null}`` -- installed roster entries.
 
 Built on :class:`http.server.ThreadingHTTPServer` so a streaming ``events``
 request doesn't block a concurrent ``POST /runs``.
@@ -33,12 +34,14 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 from urllib.parse import unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
+from fabri.catalog import catalog_listing
 from fabri.service.service import FabriService
 
 logger = get_logger()
@@ -92,6 +95,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path in ("/company", "/company/"):
             self._send_json(200, {"company": self.server.company})
             return
+        if self.path in ("/catalog", "/catalog/"):
+            catalog = self.server.catalog
+            self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
+            return
         if self.path in ("/fleets", "/fleets/"):
             self._send_json(200, {"fleets": self.service.list_fleets()})
             return
@@ -142,7 +149,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "request missing required field 'task'"})
             return
         try:
-            session_id = self.service.submit(task, req.get("overrides"))
+            session_id = self.service.submit(
+                task, req.get("overrides"), catalog_ref=req.get("catalog_ref")
+            )
+        except KeyError as e:
+            self._send_json(400, {"error": str(e)})
+            return
         except Exception as e:  # surface bind/launch errors as 400, not 500 HTML
             self._send_json(400, {"error": str(e)})
             return
@@ -236,7 +248,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/health", "/questions", "/company"))
+                   for prefix in ("/runs", "/fleets", "/health", "/questions", "/company", "/catalog"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
@@ -273,11 +285,13 @@ class FabriHTTPServer(ThreadingHTTPServer):
         *,
         serve_studio: bool = False,
         company: dict | None = None,
+        catalog: Mapping[str, dict] | None = None,
     ) -> None:
         super().__init__(address, _Handler)
         self.service = service
         self.serve_studio = serve_studio
         self.company = company
+        self.catalog = catalog
 
 
 def serve_http(
@@ -287,6 +301,7 @@ def serve_http(
     port: int = 8080,
     serve_studio: bool = False,
     company: dict | None = None,
+    catalog: Mapping[str, dict] | None = None,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
@@ -294,5 +309,5 @@ def serve_http(
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
     """
     return FabriHTTPServer(
-        (host, port), service, serve_studio=serve_studio, company=company
+        (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog
     )

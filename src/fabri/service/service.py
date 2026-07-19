@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from threading import Lock
 
@@ -60,6 +60,8 @@ class FabriService:
             ferry workspace state. Defaults to a no-op.
         command_builder: optional override for the launch argv (tests / custom
             runtimes). ``None`` uses the standard ``fabri run`` command.
+        catalog: optional pre-installed roster entries keyed by their catalog
+            reference. A submit with ``catalog_ref`` selects that entry's config.
     """
 
     def __init__(
@@ -69,8 +71,10 @@ class FabriService:
         home_root: str | Path | None = None,
         sync_hook: FileSyncHook | None = None,
         command_builder: CommandBuilder | None = None,
+        catalog: Mapping[str, dict] | None = None,
     ) -> None:
         self.template_config = template_config
+        self.catalog = catalog
         try:
             self._slack_cfg = load_config(
                 str(self.template_config) if self.template_config else None
@@ -126,6 +130,7 @@ class FabriService:
         thread_id: str | None = None,
         fleet_id: str | None = None,
         label: str | None = None,
+        catalog_ref: str | None = None,
     ) -> str:
         """Bind a per-run config, launch the agent, return its ``session_id``.
 
@@ -133,16 +138,20 @@ class FabriService:
         one fan-out batch; ``label`` is a human name for this run within a fleet
         (e.g. an account name). All are opaque tags recorded in the index so
         ``list_sessions`` / fleet roll-ups can reconstruct the grouping; the agent
-        loop itself is unaware of them.
+        loop itself is unaware of them. When ``catalog_ref`` is supplied, its
+        pre-installed catalog config replaces ``self.template_config`` for this run.
         """
         session_id = str(uuid.uuid4())
         run_home = (self.home_root / session_id).resolve()
         run_home.mkdir(parents=True, exist_ok=True)
         self.sync_hook.sync_in(session_id, run_home)
 
-        config_path = bind_run_config(
-            self.template_config, overrides, run_home / "run.yaml"
-        )
+        template_config = self.template_config
+        if catalog_ref is not None:
+            if self.catalog is None or catalog_ref not in self.catalog:
+                raise KeyError(f"unknown catalog_ref {catalog_ref!r}")
+            template_config = self.catalog[catalog_ref]["config"]
+        config_path = bind_run_config(template_config, overrides, run_home / "run.yaml")
         command = None
         if self.command_builder is not None:
             command = self.command_builder(task, config_path, session_id, run_home)
