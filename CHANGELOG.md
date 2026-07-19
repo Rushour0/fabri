@@ -4,6 +4,17 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.16.4 — 2026-07-19
+
+### Studio
+
+- **UI polish pass — depth, blue accent, micro-motion.** Branded blue diamond
+  logo; the primary CTA is the blue accent with a soft glow + hover lift; the
+  composer input gets a blue focus ring; tabs get a hover fill + crisper active
+  state; the task bubble, cards, and list rows gain layered shadows and a hover
+  lift; the waiting "needs you" ask card breathes a slow blue glow. Honors
+  `prefers-reduced-motion` (entrance/loop animations + lifts disabled).
+
 ## 0.16.3 — 2026-07-19
 
 ### Studio
