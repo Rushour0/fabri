@@ -269,6 +269,36 @@ def test_rollup_total_none_falls_back_to_cost_usd():
     assert captured == [0.25]
 
 
+def _static_specialist_call(call_id="a1", name="triager"):
+    # A static tools.agents[] specialist is an ordinary tool call NOT named
+    # spawn_subagent; its subprocess returns the run envelope (session_id+usage).
+    return ToolCall(name=name, args={"task": "t"}, id=call_id)
+
+
+def test_rollup_counts_static_tools_agents_specialist():
+    # Regression: a static specialist returns the same envelope as spawn_subagent
+    # (session_id + usage), so its cost MUST roll into the parent — otherwise the
+    # parent's total_cost_usd undercounts its specialists (and companies' whole
+    # org trees, recursively).
+    captured = []
+    reg = _SpawnRegistry(usage={"total_cost_usd": 0.33, "cost_usd": 0.10})
+    had_failure = _dispatch(reg, [_static_specialist_call()], captured, "p-static")
+    assert had_failure is False
+    assert captured == [0.33]
+
+
+def test_plain_tool_without_run_envelope_is_not_counted():
+    # A plain tool's result has no session_id/usage — it must NOT be mistaken for
+    # an agent child (no cost rolled up).
+    class _PlainReg:
+        def invoke(self, name, args):
+            return {"ok": True, "result": {"data": 42}}
+
+    captured = []
+    _dispatch(_PlainReg(), [_static_specialist_call(name="fetch_url")], captured, "p-plain")
+    assert captured == []
+
+
 def test_multiple_spawns_each_roll_up():
     # Two spawn calls in one turn -> two callback invocations; the parent sums
     # them via its accumulator (here we just confirm both fire with the values).
