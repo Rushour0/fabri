@@ -1,0 +1,4 @@
+[agency]
+name = "bug-crew"
+title = "Bug Triage Crew"
+entry = "agent.openai.yaml"

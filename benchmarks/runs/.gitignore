@@ -1,0 +1,4 @@
+# Benchmark executions are reproducible but provisional. Publish only curated,
+# reviewed result summaries—not per-run state, traces, or model output.
+*
+!.gitignore

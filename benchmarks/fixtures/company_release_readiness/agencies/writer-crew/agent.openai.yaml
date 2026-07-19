@@ -1,0 +1,13 @@
+agent:
+  name: writer-manager
+tools:
+  sandbox_root: __AGENCY_ROOT__/workspace
+  enabled: [writer-specialist]
+  agents:
+    - name: writer-specialist
+      description: Draft customer-safe release notes from the evidence packet.
+      config: __AGENCY_ROOT__/specialist.yaml
+memory:
+  backend: sqlite
+  collection: __AGENCY_SLUG___manager
+  sqlite_path: __AGENCY_ROOT__/.fabri/__AGENCY_SLUG__.db

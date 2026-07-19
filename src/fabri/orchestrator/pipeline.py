@@ -145,6 +145,39 @@ def _deterministic_success_text(
     return f"On tasks like {t!r}: this plan worked (tools in order: {unique}); outcome={outcome}."
 
 
+def file_recovery_evidence(events: list[dict]) -> list[str]:
+    """Extract bounded recovery decisions without retaining user file paths."""
+    evidence: list[str] = []
+    for index, event in enumerate(events):
+        if event.get("name") != "read_file" or not is_tool_failure(event):
+            continue
+        failed_path = (event.get("args") or {}).get("path")
+        if not isinstance(failed_path, str) or "/" not in failed_path:
+            continue
+        parent = failed_path.rsplit("/", 1)[0]
+        later = events[index + 1 :]
+        listed_parent = any(
+            candidate.get("name") == "list_dir"
+            and (candidate.get("args") or {}).get("path") == parent
+            and (candidate.get("result") or {}).get("ok") is True
+            for candidate in later
+        )
+        read_alternative = any(
+            candidate.get("name") == "read_file"
+            and isinstance((candidate.get("args") or {}).get("path"), str)
+            and (candidate.get("args") or {}).get("path", "").startswith(parent + "/")
+            and (candidate.get("args") or {}).get("path") != failed_path
+            and (candidate.get("result") or {}).get("ok") is True
+            for candidate in later
+        )
+        if listed_parent and read_alternative:
+            evidence.append(
+                "Recovery observed: after an exact file read failed, listing its parent "
+                "and verifying an alternate file allowed the task to continue."
+            )
+    return list(dict.fromkeys(evidence))
+
+
 def is_discrepancy(event: dict) -> bool:
     return event.get("type") == EventType.DISCREPANCY.value
 
@@ -250,6 +283,9 @@ def process_trace(
                 f"Plan: tools used in order = {tool_names}\n"
                 f"Outcome: {final_event.get('outcome', 'success')}"
             )
+            recovery_evidence = file_recovery_evidence(events)
+            if recovery_evidence:
+                success_summary += "\n" + "\n".join(recovery_evidence)
             # B5: if the agent emitted a machine-readable memory block, fold its
             # self-reported facts into the summary the synthesizer sees. Guarded
             # on the marker being present, so a marker-free run is unaffected.

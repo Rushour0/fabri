@@ -1,5 +1,13 @@
 # fabri — backlog
 
+## Deferred model research
+
+- [ ] **Bedrock open-weight comparison.** Validate Qwen3 tool-call compatibility
+  with the current Bedrock backend, then run the same 10-replica memory and
+  company-roster study against Qwen3 Coder/Next and the account-visible Kimi
+  models. Do not compare results until model IDs, regions, pricing, and
+  tool-call capability are recorded beside the raw traces.
+
 Prioritized from a hard correctness/security audit (2026-06-19). Each item:
 `file:line — problem → fix`. P0 = ships broken; P1 = bites a real user; P2 =
 integrity/robustness; P3 = hardening/nits.
