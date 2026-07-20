@@ -57,6 +57,13 @@ cases:
 
   - id: reliability_labs_incident_release_gate
     company_source: companies/reliability-labs/company.toml
+    setup_probe:
+      replicas: 3
+      required_delegations: [incident_postmortem_crew, bug_triage_crew, qa_automation_crew]
+      candidates:
+        - id: baseline
+        - id: delegated_artifact_tokens_256
+          delegated_llm_max_tokens_floor: 256
     training_prompt: >-
       Delegate to the incident postmortem, bug triage, and QA crews. Produce a
       factual operational brief that distinguishes observed evidence, the
@@ -76,6 +83,13 @@ cases:
 
   - id: revenue_ops_evidence_backed_outreach
     company_source: companies/revenue-ops/company.toml
+    setup_probe:
+      replicas: 3
+      required_delegations: [sales_outreach_crew, market_research_brief, data_analysis_crew]
+      candidates:
+        - id: baseline
+        - id: delegated_artifact_tokens_256
+          delegated_llm_max_tokens_floor: 256
     training_prompt: >-
       Delegate to outreach, market-research, and data-analysis crews. Create
       an executive brief that keeps lead facts, market hypotheses, and numeric
