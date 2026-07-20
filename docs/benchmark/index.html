@@ -227,9 +227,8 @@
   <section>
     <h2><span class="num">5</span>Limitations</h2>
     <ul class="plain">
-      <li><b>No memory claim.</b> This measures setup reliability only. Whether Fabri's trace-backed
-        memory improves a company is a separate, controlled experiment (memory vs. control), reported
-        elsewhere.</li>
+      <li><b>Setup only.</b> This section measures setup reliability. Whether Fabri's trace-backed
+        memory improves a company is a separate controlled experiment, summarized in §6.</li>
       <li><b>Narrow scope.</b> Three companies, one workload each, modest replica counts. The results do
         not generalize to other tasks or configurations.</li>
       <li><b>As-shipped, not optimized.</b> Each company was evaluated as delivered; a single bounded
@@ -238,7 +237,39 @@
   </section>
 
   <section>
-    <h2><span class="num">6</span>Reproducibility</h2>
+    <h2><span class="num">6</span>Companion study: memory vs. control</h2>
+    <p>A separate controlled experiment asks whether Fabri's trace-backed memory earns its cost. The
+      company is <em>trained</em> on a related task — writing its learned guidelines to memory — then
+      given a fresh holdout task <em>twice</em>: once with that memory copied into a clean compile, once
+      with empty memory (the control). Across <b>ten replicas</b> of Support HQ, memory retrieved
+      <b>2 trained guidelines on every run</b> (control: <b>0</b>) — the mechanism fires reliably. Yet
+      the memory arm passed the holdout rubric only <b>7/10 (70%)</b>, against <b>9/10 (90%)</b> for
+      control: with memory the company was <b>20 points less reliable</b>, and merely $0.0014 cheaper. A
+      preliminary three-replica pilot had shown the <em>opposite</em> sign (memory 3/3 vs control 2/3);
+      the larger sample did not shrink that gain so much as reverse it — the same small-sample fragility
+      documented in §3. On this workload the self-improvement loop runs but does not pay: it retrieves
+      lessons, and the runs that received them did no better — indeed slightly worse.</p>
+    <figure class="tbl">
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>Condition</th><th>Holdout rubric</th><th>Guidelines retrieved</th><th>Mean cost</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="co">Memory</span></td><td class="no">7/10 (70%)</td><td>2.0</td><td>$0.0600</td></tr>
+            <tr><td><span class="co">Control</span></td><td>9/10 (90%)</td><td>0.0</td><td>$0.0614</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><b>Table 2.</b> Memory vs. control on a fresh Support HQ holdout, ten replicas. Memory
+        retrieves trained guidelines on every run but does <b>not</b> improve — and here slightly
+        reduces — rubric reliability. A 3-replica pilot showed the opposite sign, a direct illustration
+        of the small-sample fragility in §3.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">7</span>Reproducibility</h2>
     <div class="repro">
       <dl>
         <dt>Fabri version</dt><dd>0.18.5</dd>

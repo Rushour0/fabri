@@ -161,6 +161,43 @@ below). Read the reviewed result and lessons for each run:
 [Revenue Ops](benchmarks/results/revenue-ops-setup-qualification-2026-07-20.md)
 ([JSON](benchmarks/results/revenue-ops-setup-qualification-2026-07-20.json)).
 
+### Memory vs. control
+
+Isolated training/holdout study: train the company on a related task (it
+writes learned guidelines to memory), then run a fresh holdout task twice —
+once with that SQLite memory copied into a clean compile (memory arm), once
+with empty memory (control arm). This is the first live result that isolates
+memory's effect on outcome, distinct from setup qualification above.
+
+| date | company / task | replicas | guidelines retrieved (memory / control) | rubric (memory) | rubric (control) | rubric delta | mean cost delta | fabri |
+|---|---|---:|---|---:|---:|---:|---:|---|
+| 2026-07-20 | Support HQ / holdout task (3-replica pilot) | 3 | 2 / 0 | 3/3 (100%) | 2/3 (67%) | +33 pp | +$0.0009 (~1.5%) | 0.18.5 |
+| 2026-07-20 | Support HQ / holdout task (10-replica confirmation) | 10 | 2.0 / 0 | 7/10 (70%) | 9/10 (90%) | **−20 pp** | **−$0.0014** (mean $0.0600 vs $0.0614) | 0.18.5 |
+
+The control-is-empty sanity check held at both sample sizes: control retrieved
+**0** guidelines on every replica, while the memory arm retrieved the same
+**2** trained guidelines on every replica — the retrieval mechanism fires
+reliably. Completion was 10/10 in both arms at 10 replicas — the gap is in
+rubric quality, not task failure. Memory was marginally cheaper (mean $0.0600
+vs. $0.0614), but that saving does not offset the reliability loss.
+
+**Honest verdict: the 3-replica pilot was reversed, not confirmed.** The
+preliminary 3-replica pilot showed memory ahead by +33pp; the 10-replica
+confirmation did not merely shrink that gain, it flipped the sign — memory
+finished **20 percentage points behind control** (7/10 vs. 9/10). This is the
+same small-sample fragility the setup-qualification study above demonstrated
+(a 3/3 gate that fell to 9/10 at 10 replicas), now shown to bite in the
+opposite direction too: a small-sample "memory win" can just as easily be a
+small-sample fluke. On this workload, Fabri's trace-backed memory retrieves
+lessons reliably but does **not** improve holdout-task reliability — the
+larger sample says it slightly hurts. This covers one company on one
+related-task/holdout pair, not general memory effectiveness across companies
+or workload shapes.
+
+Full result:
+[Support HQ, memory vs. control](benchmarks/results/support-hq-memory-vs-control-2026-07-20.md)
+([JSON](benchmarks/results/support-hq-memory-vs-control-2026-07-20.json)).
+
 ### session-N+1 cost delta
 
 | date | task | runs | first $ | median-of-last-3 $ | delta | fabri |
@@ -283,9 +320,16 @@ Company setup qualification has now run live for all three companies, and
 Reliability Labs and Revenue Ops both failed their rubric outright (2/3 and
 0/3 respectively) on frozen prompts and assertions. This shows the 3-replica
 gate is statistically fragile, not that the harness is broken — a small
-sample overstates confidence. No company has a released memory/control result
-yet, and a passing (or fragile-passing) setup probe must not be reported as a
-memory win.
+sample overstates confidence. A passing (or fragile-passing) setup probe must
+not be reported as a memory win. The isolated memory-vs-control study
+([Memory vs. control](#memory-vs-control) above) — Support HQ — shows the
+same fragility biting in the other direction: a 3-replica pilot showed memory
++33pp ahead of control, but the 10-replica confirmation reversed it, with
+memory finishing 20pp behind control (7/10 vs. 9/10). The retrieval mechanism
+itself is proven reliable (2 guidelines fetched on every memory run, 0 on
+every control run), but on this workload memory does not improve — and may
+slightly hurt — holdout-task reliability. This covers one company on one
+related-task/holdout pair, not general memory effectiveness.
 
 When a benchmark gap closes, this paragraph shrinks.
 
