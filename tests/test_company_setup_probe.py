@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 import yaml
 
+import fabri.benchmarks.company_setup_probe as company_setup_probe
 from fabri.benchmarks.company_setup_probe import (
     CLAIM_BOUNDARY,
     MANIFEST_GIT_TIMEOUT_S,
@@ -18,6 +19,7 @@ from fabri.benchmarks.company_setup_probe import (
     apply_delegated_token_floor,
     build_preflight_manifest,
     load_probe_case,
+    main,
     render_markdown,
     run_probe,
     score_text,
@@ -641,3 +643,439 @@ def test_probe_degrades_when_a_later_git_command_fails(
     company_source_sha256 = cast(str, source["company_source_sha256"])
     assert len(company_source_sha256) == 64
     assert int(company_source_sha256, 16) >= 0
+
+
+def test_probe_marks_compile_failure_without_starting_model_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[0],))
+    run_attempted = False
+
+    def compile_failure_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal run_attempted
+        del cwd, env, timeout_s
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "compile failed")
+        run_attempted = True
+        raise AssertionError(f"run subprocess must not start after compile failure: {argv}")
+
+    result = run_probe(
+        case,
+        tmp_path / "results",
+        command_runner=compile_failure_runner,
+    )
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert run_attempted is False
+    assert run["attempt_status"] == "invalid_measurement"
+    assert run["failure_reasons"] == ["company_compile_failed"]
+    assert run["total_cost_usd"] is None
+
+
+def test_probe_marks_preflight_failure_as_invalid_measurement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[0],))
+
+    def malformed_preflight_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env, timeout_s
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" not in argv:
+            raise AssertionError(f"run subprocess must not start after preflight failure: {argv}")
+        destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+        destination.mkdir(parents=True)
+        (destination / "ceo.yaml").write_text("not: [valid\n", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "compiled", "")
+
+    result = run_probe(
+        case,
+        tmp_path / "results",
+        command_runner=malformed_preflight_runner,
+    )
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert run["attempt_status"] == "invalid_measurement"
+    assert run["failure_reasons"] == ["preflight_failed"]
+    assert run["total_cost_usd"] is None
+
+
+def test_probe_marks_root_process_timeout_as_operational_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[0],))
+
+    def timeout_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" in argv:
+            destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+            child = destination / "agencies" / "crew" / "agent.yaml"
+            child.parent.mkdir(parents=True)
+            child.write_text(
+                yaml.safe_dump(_agent_config("crew", max_tokens=60)), encoding="utf-8"
+            )
+            (destination / "ceo.yaml").write_text(
+                yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, "compiled", "")
+        raise subprocess.TimeoutExpired(argv, timeout=timeout_s)
+
+    result = run_probe(case, tmp_path / "results", command_runner=timeout_runner)
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert run["attempt_status"] == "operational_failure"
+    assert run["failure_reasons"] == ["root_process_timeout"]
+
+
+def test_probe_marks_malformed_run_json_as_invalid_measurement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[0],))
+
+    def malformed_json_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env, timeout_s
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" in argv:
+            destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+            child = destination / "agencies" / "crew" / "agent.yaml"
+            child.parent.mkdir(parents=True)
+            child.write_text(
+                yaml.safe_dump(_agent_config("crew", max_tokens=60)), encoding="utf-8"
+            )
+            (destination / "ceo.yaml").write_text(
+                yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, "compiled", "")
+        return subprocess.CompletedProcess(argv, 0, "not valid json", "")
+
+    result = run_probe(case, tmp_path / "results", command_runner=malformed_json_runner)
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert run["attempt_status"] == "invalid_measurement"
+    assert run["failure_reasons"] == ["unreadable_run_result"]
+
+
+def test_probe_marks_missing_trace_as_incomplete_operational_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(
+        loaded,
+        candidates=(loaded.candidates[0],),
+        required_delegations=(),
+    )
+
+    def missing_trace_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env, timeout_s
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" in argv:
+            destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+            child = destination / "agencies" / "crew" / "agent.yaml"
+            child.parent.mkdir(parents=True)
+            child.write_text(
+                yaml.safe_dump(_agent_config("crew", max_tokens=60)), encoding="utf-8"
+            )
+            (destination / "ceo.yaml").write_text(
+                yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, "compiled", "")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "session_id": "root",
+                    "success": True,
+                    "outcome": "success",
+                    "final_text": "Checkout update",
+                }
+            ),
+            "",
+        )
+
+    result = run_probe(case, tmp_path / "results", command_runner=missing_trace_runner)
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert run["attempt_status"] == "operational_failure"
+    assert run["rubric_passed"] is None
+    assert run["failure_reasons"] == ["missing_cost_usage", "missing_trace"]
+
+
+def test_probe_rejects_completed_run_over_company_cost_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(
+        loaded,
+        candidates=(loaded.candidates[0],),
+        company_max_cost_usd=0.01,
+        required_delegations=(),
+    )
+
+    def over_cost_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, timeout_s
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" in argv:
+            destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+            child = destination / "agencies" / "crew" / "agent.yaml"
+            child.parent.mkdir(parents=True)
+            child.write_text(
+                yaml.safe_dump(_agent_config("crew", max_tokens=60)), encoding="utf-8"
+            )
+            (destination / "ceo.yaml").write_text(
+                yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, "compiled", "")
+        traces = Path(env["FABRI_HOME"]) / ".fabri" / "traces"
+        traces.mkdir(parents=True)
+        (traces / "root.jsonl").write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in [
+                    {"type": "final", "outcome": "success"},
+                    {"type": "usage", "cost_usd": 0.02},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "session_id": "root",
+                    "success": True,
+                    "outcome": "success",
+                    "final_text": "Checkout update",
+                }
+            ),
+            "",
+        )
+
+    result = run_probe(case, tmp_path / "results", command_runner=over_cost_runner)
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert run["attempt_status"] == "complete"
+    assert run["failure_reasons"] == ["company_cost_limit_exceeded"]
+    assert run["within_cost_limit"] is False
+    assert run["end_to_end_passed"] is False
+
+
+def test_probe_reports_no_viable_setup_when_all_candidates_fail_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = load_probe_case(dataset, "support")
+    run_number = 0
+
+    def rubric_failure_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal run_number
+        del cwd, timeout_s
+        if argv[0] == "git":
+            raise FileNotFoundError("git")
+        if "compile" in argv:
+            destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+            child = destination / "agencies" / "crew" / "agent.yaml"
+            child.parent.mkdir(parents=True)
+            child.write_text(
+                yaml.safe_dump(_agent_config("crew", max_tokens=60)), encoding="utf-8"
+            )
+            (destination / "ceo.yaml").write_text(
+                yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, "compiled", "")
+        run_number += 1
+        traces = Path(env["FABRI_HOME"]) / ".fabri" / "traces"
+        traces.mkdir(parents=True)
+        session_id = f"root-{run_number}"
+        (traces / f"{session_id}.jsonl").write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in [
+                    {"type": "final", "outcome": "success"},
+                    {"type": "usage", "cost_usd": 0.01},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "success": True,
+                    "outcome": "success",
+                    "final_text": "No actionable response",
+                }
+            ),
+            "",
+        )
+
+    result = run_probe(
+        replace(case, required_delegations=()),
+        tmp_path / "results",
+        command_runner=rubric_failure_runner,
+    )
+
+    assert run_number == 2
+    assert result["status"] == "no_viable_setup"
+    assert result["recommendation"] is None
+    candidates = cast(list[dict[str, object]], result["candidates"])
+    assert all(candidate["end_to_end_pass_rate"] == 0 for candidate in candidates)
+
+
+def test_main_returns_status_exit_codes_and_rejects_invalid_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+
+    def fake_run_probe(
+        case: object,
+        output_dir: object,
+        *,
+        run_timeout_s: float,
+    ) -> dict[str, object]:
+        assert isinstance(case, company_setup_probe.ProbeCase)
+        assert output_dir == str(tmp_path / "results")
+        assert run_timeout_s == pytest.approx(1.5)
+        return {"status": "qualified", "recommendation": "baseline"}
+
+    monkeypatch.setattr(company_setup_probe, "run_probe", fake_run_probe)
+    assert (
+        main(
+            [
+                "--dataset",
+                str(dataset),
+                "--case",
+                "support",
+                "--output-dir",
+                str(tmp_path / "results"),
+                "--run-timeout-s",
+                "1.5",
+            ]
+        )
+        == 0
+    )
+
+    monkeypatch.setattr(
+        company_setup_probe,
+        "run_probe",
+        lambda case, output_dir, *, run_timeout_s: {
+            "status": "no_viable_setup",
+            "recommendation": None,
+        },
+    )
+    assert (
+        main(
+            [
+                "--dataset",
+                str(dataset),
+                "--case",
+                "support",
+                "--output-dir",
+                str(tmp_path / "results"),
+            ]
+        )
+        == 1
+    )
+
+    with pytest.raises(SystemExit) as invalid_timeout:
+        main(
+            [
+                "--dataset",
+                str(dataset),
+                "--case",
+                "support",
+                "--output-dir",
+                str(tmp_path / "results"),
+                "--run-timeout-s",
+                "0",
+            ]
+        )
+    assert invalid_timeout.value.code == 2
+
+    with pytest.raises(SystemExit) as missing_required_argument:
+        main(["--dataset", str(dataset)])
+    assert missing_required_argument.value.code == 2
