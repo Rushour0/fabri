@@ -75,6 +75,11 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
     assert bug_config["memory"]["collection"] == "acme_eng_bugs_manager"
     assert writer_config["memory"]["collection"] == "acme_eng_writer_manager"
     assert bug_config["memory"]["collection"] != writer_config["memory"]["collection"]
+    for specialist in (
+        root_config.parent / "agencies" / "bugs" / "specialist.yaml",
+        root_config.parent / "agencies" / "writer" / "specialist.yaml",
+    ):
+        assert load_config(str(specialist))["llm"]["provider"] == "openai"
 
 
 def test_compile_company_can_anchor_memory_outside_ephemeral_output(

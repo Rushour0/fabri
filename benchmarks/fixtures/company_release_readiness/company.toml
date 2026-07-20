@@ -1,0 +1,30 @@
+[company]
+name = "release-readiness"
+title = "Release Readiness Company"
+positioning = "An engineering and communications company for evidence-based release decisions."
+max_cost_usd = 1.00
+memory_namespace = "release_readiness"
+
+[[node]]
+id = "ceo"
+report_to = ""
+title = "Chief of Staff"
+prompt = "You direct the company. Delegate to your reports and synthesize an evidence-based executive brief."
+
+[[node]]
+id = "vp_eng"
+report_to = "ceo"
+title = "VP Engineering"
+prompt = "You run engineering. Delegate to the bug and writer crews before making a release recommendation."
+
+[[node]]
+id = "bugs"
+report_to = "vp_eng"
+agency = "agencies/bug-crew"
+title = "Bug Triage Crew"
+
+[[node]]
+id = "writer"
+report_to = "vp_eng"
+agency = "agencies/writer-crew"
+title = "Writer Crew"

@@ -7,6 +7,7 @@
 
 agent:
   name: benchmark
+  retrieved_guidelines_task_precedence: true
   max_steps: 10
   output_format: json
   planner:
@@ -18,8 +19,8 @@ agent:
 
 llm:
   provider: openai
-  model: gpt-4o-mini
-  max_tokens: 2048
+  model: gpt-5.6-terra
+  max_tokens: 1024
   api_key_env: OPENAI_API_KEY
   cache_messages: false
 
@@ -27,7 +28,7 @@ tools:
   manifest_dir:
     - builtin
   enabled: [read_file, write_file, list_dir]
-  sandbox_root: /Users/rushour0/.cache/claude-code-tmp/claude-501/-Users-rushour0-gba-fabri/f05c5346-2a65-4031-81e7-e571748fb773/scratchpad/bench-ws
+  sandbox_root: benchmarks/fixtures/recovery
   result_format: toon
   agents: []
   decompose:
@@ -47,3 +48,4 @@ memory:
   similarity_threshold: 0.85
   promotion_threshold_sessions: 3
   guideline_max_tokens: 30
+  success_pattern_requires_evidence: true

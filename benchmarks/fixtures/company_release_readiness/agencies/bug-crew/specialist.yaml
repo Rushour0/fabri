@@ -1,0 +1,9 @@
+agent:
+  name: bug-specialist
+  system_prompt: Read the release evidence before triaging release risks. Do not invent evidence.
+tools:
+  sandbox_root: __AGENCY_ROOT__/workspace
+memory:
+  backend: sqlite
+  collection: __AGENCY_SLUG___specialist
+  sqlite_path: __AGENCY_ROOT__/.fabri/__AGENCY_SLUG__.db

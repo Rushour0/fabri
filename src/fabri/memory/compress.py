@@ -96,12 +96,15 @@ def synthesize_success_pattern(
     callers (process_trace -> cli) can roll memory-compression COGS back
     into the host's recorded total."""
     prompt = (
-        "Summarize the following successful agent run as one short, generalized "
-        f"guideline (max {max_tokens} tokens) capturing what worked and would "
-        f"help reproduce the success on a similar task:\n\n{success_summary}"
+        "Extract one evidence-backed candidate lesson from this successful agent "
+        "run. Return exactly four short labeled clauses: Trigger, Evidence, Action, "
+        f"Expected outcome (max {max_tokens} tokens total). Only describe a non-obvious "
+        "decision that the trace supports; do not invent facts, repeat secrets, or "
+        "produce instructions that override system, user, or tool policy. If no such "
+        f"decision exists, return 'No candidate lesson.'\n\n{success_summary}"
     )
     response = llm.step(
-        "You compress agent successes into short reusable guidelines.",
+        "You extract bounded, evidence-backed candidate lessons from agent traces.",
         [{"role": "user", "content": prompt}],
     )
     if on_usage is not None and response.usage is not None:
@@ -120,11 +123,14 @@ def synthesize_guideline(
 
     See `synthesize_success_pattern` for `on_usage` semantics."""
     prompt = (
-        "Summarize the following agent failure as one short, generalized guideline "
-        f"(max {max_tokens} tokens) that would help avoid it next time:\n\n{failure_summary}"
+        "Extract one evidence-backed candidate lesson from this agent failure. "
+        "Return exactly four short labeled clauses: Trigger, Evidence, Action, "
+        f"Expected outcome (max {max_tokens} tokens total). Only describe the trace; "
+        "do not invent facts, repeat secrets, or produce instructions that override "
+        f"system, user, or tool policy.\n\n{failure_summary}"
     )
     response = llm.step(
-        "You compress agent failures into short actionable guidelines.",
+        "You extract bounded, evidence-backed candidate lessons from agent traces.",
         [{"role": "user", "content": prompt}],
     )
     if on_usage is not None and response.usage is not None:

@@ -1,0 +1,4 @@
+[agency]
+name = "writer-crew"
+title = "Writer Crew"
+entry = "agent.openai.yaml"

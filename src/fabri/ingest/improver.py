@@ -145,6 +145,7 @@ class Improver:
             similarity_threshold=self._mem.get("similarity_threshold", 0.85),
             promotion_threshold_sessions=self._mem.get("promotion_threshold_sessions", 3),
             record_postmortem=self.record_postmortems,
+            success_pattern_requires_evidence=self._mem.get("success_pattern_requires_evidence", False),
             on_usage=summary.accumulate_usage,
             events=events,
             synthesize=self.synthesize,

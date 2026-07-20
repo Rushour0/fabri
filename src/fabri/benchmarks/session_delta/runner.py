@@ -117,6 +117,9 @@ def run_benchmark(
             max_subquestions=decompose_cfg["max_subquestions"],
             system_prompt=config["agent"].get("system_prompt", ""),
             system_prompt_prefix=config["agent"].get("system_prompt_prefix", ""),
+            retrieved_guidelines_task_precedence=config["agent"].get(
+                "retrieved_guidelines_task_precedence", True
+            ),
             result_format=tools_cfg.get("result_format", "toon"),
             output_format=config["agent"].get("output_format", "json"),
             decompose_llm=build_decompose_llm(config),
@@ -130,6 +133,7 @@ def run_benchmark(
             guideline_max_tokens=mem_cfg["guideline_max_tokens"],
             similarity_threshold=mem_cfg["similarity_threshold"],
             promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
+            success_pattern_requires_evidence=mem_cfg.get("success_pattern_requires_evidence", False),
         )
         usage = result.get("usage", {}) or {}
         rr = RunResult(

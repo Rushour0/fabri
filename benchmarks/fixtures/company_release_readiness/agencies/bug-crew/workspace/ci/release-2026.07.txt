@@ -1,0 +1,6 @@
+Release candidate 2026.07
+Unit tests: 1,842 passed
+Integration tests: 216 passed
+Migration smoke test: FAILED
+Failure: upgrading the billing_events table from v14 to v15 exceeds the lock timeout on the production-sized fixture.
+Release gate: do not approve until the migration is remediated and the smoke test passes.

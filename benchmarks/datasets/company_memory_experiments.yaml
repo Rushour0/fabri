@@ -1,0 +1,94 @@
+version: 1
+name: roster-company-memory-experiments
+description: >-
+  Internal, rubric-scored experiments for whether Fabri's trace-backed memory
+  improves a fresh related company task. Company sources are resolved at run
+  time from FABRI_ROSTERS_ROOT; this dataset contains no company runtime code.
+
+defaults:
+  roster_root_env: FABRI_ROSTERS_ROOT
+  replicas: 10
+  model: gpt-5.6-terra
+  conditions: [memory, control]
+  control: >-
+    Compile into a separate run directory for the holdout so it has the same
+    company source but no SQLite memory from the training task.
+  memory: >-
+    Run training in one compiled company directory, compile a fresh holdout
+    directory, and copy only the company's learned SQLite database into it.
+    This preserves trace-backed lessons without carrying mutable workspace files.
+  scoring:
+    required: Every required concept must match at least one listed phrase in the final executive response.
+    forbidden: No forbidden term or phrase may appear in the final executive response.
+    retrieval: Record retrieved guideline count and the trace-backed candidate kinds.
+  publish: >-
+    Publish only aggregate, per-case metrics and rubric failures. Keep prompts,
+    compiled workspaces, traces, session ids, and raw model output private.
+
+cases:
+  - id: support_hq_safe_incident_response
+    company_source: companies/support-hq/company.toml
+    setup_probe:
+      replicas: 3
+      required_delegations: [support_macro_writer, incident_postmortem_crew]
+      candidates:
+        - id: baseline
+        - id: delegated_artifact_tokens_256
+          delegated_llm_max_tokens_floor: 256
+    training_prompt: >-
+      Delegate to the support macro and incident postmortem crews. Create an
+      executive brief that separates the customer response from the factual
+      incident summary. Use only evidence in the crew workspaces.
+    holdout_prompt: >-
+      Delegate to the support macro and incident postmortem crews. Return a
+      customer-safe executive update about the checkout incident: acknowledge
+      impact, state the rollback, and give a follow-up without exposing the
+      missing production environment variable.
+    expected:
+      required:
+        - [checkout]
+        - [rollback, rolled back]
+        - [follow-up, further update]
+      forbidden: [payment-provider environment variable, blame]
+    retrieval_expectations:
+      domains: [support, code]
+      tools: [read_file, write_file]
+      useful_lesson: Preserve evidence boundaries and customer-safe language.
+
+  - id: reliability_labs_incident_release_gate
+    company_source: companies/reliability-labs/company.toml
+    training_prompt: >-
+      Delegate to the incident postmortem, bug triage, and QA crews. Produce a
+      factual operational brief that distinguishes observed evidence, the
+      rollback, and unresolved verification work.
+    holdout_prompt: >-
+      Delegate to every crew and return a release-readiness recommendation for
+      the checkout change. Include the rollback evidence and the missing
+      production configuration as a verification item; do not claim a fix was
+      deployed unless a crew supplied that evidence.
+    expected:
+      required: [checkout, rollback, verification]
+      forbidden: [fix was deployed, resolved in production]
+    retrieval_expectations:
+      domains: [code, planning]
+      tools: [read_file, write_file]
+      useful_lesson: Do not turn an incident observation into an unverified release claim.
+
+  - id: revenue_ops_evidence_backed_outreach
+    company_source: companies/revenue-ops/company.toml
+    training_prompt: >-
+      Delegate to outreach, market-research, and data-analysis crews. Create
+      an executive brief that keeps lead facts, market hypotheses, and numeric
+      data findings distinct.
+    holdout_prompt: >-
+      Delegate to every crew and draft an evidence-backed outreach recommendation
+      for Maya Chen at Northstar Labs. Reference the onboarding problem and
+      avoid claiming any metric, customer result, or buying intent absent from
+      the source material.
+    expected:
+      required: [Maya Chen, onboarding, Northstar Labs]
+      forbidden: [guaranteed, customer result, buying intent]
+    retrieval_expectations:
+      domains: [search, generic]
+      tools: [read_file, write_file]
+      useful_lesson: Separate source-backed account facts from hypotheses and recommendations.

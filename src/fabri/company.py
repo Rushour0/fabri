@@ -34,6 +34,34 @@ Record only durable context that should help a later company run. Never store
 credentials, personal data, transient chatter, or unverified claims.
 """
 
+_COMPANY_LLM_DEFAULTS = {
+    "provider": "openai",
+    "model": "gpt-5.6-terra",
+    "max_tokens": 1024,
+    "api_key_env": "OPENAI_API_KEY",
+}
+
+
+def _apply_company_llm_defaults(agency_dir: Path) -> None:
+    """Make inherited agency roles use the company's runnable default LLM.
+
+    Agency templates commonly omit ``llm`` and therefore inherit Fabri's
+    general Gemini default. A compiled company already declares OpenAI for its
+    manager layers; leaving specialists on an unrelated provider makes a
+    partially configured company fail only after delegation. Explicit agency
+    settings always win.
+    """
+    for config_path in agency_dir.rglob("*.yaml"):
+        data = yaml.safe_load(config_path.read_text())
+        if not isinstance(data, dict) or "agent" not in data:
+            continue
+        llm = data.setdefault("llm", {})
+        if not isinstance(llm, dict):
+            continue
+        for key, value in _COMPANY_LLM_DEFAULTS.items():
+            llm.setdefault(key, value)
+        config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+
 
 def load_company(path: str | Path) -> dict:
     """Parse and validate a company TOML, returning its unchanged data."""
@@ -210,6 +238,7 @@ def compile_company(
             run_from=str(output_dir),
             slug=f"{namespace}_{node['id']}",
         )
+        _apply_company_llm_defaults(agency_dir)
         config_paths[node["id"]] = _entry_path(agency_dir, entry).resolve()
 
     root_id = next(node["id"] for node in nodes if node["report_to"] == "")
@@ -240,10 +269,7 @@ def compile_company(
         config = {
             "agent": agent,
             "llm": {
-                "provider": "openai",
-                "model": "gpt-5.6-terra",
-                "max_tokens": 1024,
-                "api_key_env": "OPENAI_API_KEY",
+                **_COMPANY_LLM_DEFAULTS,
             },
             "tools": {
                 "manifest_dir": ["builtin"],

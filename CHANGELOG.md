@@ -4,6 +4,43 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.18.5 — 2026-07-20
+
+### Added
+
+- **Bounded company setup qualification.** A new dynamic-roster probe resolves
+  companies through `FABRI_ROSTERS_ROOT`, recursively checks compiled
+  delegation configs, runs isolated fresh replicas, rejects ineffective
+  candidates before model spend, and publishes deterministic completion,
+  rubric, cost, and selection aggregates while keeping raw traces private.
+- **Reproducible company memory experiments.** Support HQ, Reliability Labs,
+  and Revenue Ops now have training and holdout prompts, required/forbidden
+  output assertions, retrieval expectations, and fresh compile/state isolation
+  built from the existing `fabri company compile` and `fabri run` commands.
+- **Guarded memory evaluation fixtures.** The recovery study records task
+  precedence and separates operational completion from scoreable output so
+  failed runs cannot be counted as benchmark failures or wins after the fact.
+
+### Changed
+
+- **The current task outranks retrieved memory.** Retrieved guidelines remain
+  advisory context and cannot override the user's present instructions, with
+  prompt construction and regression coverage enforcing that precedence.
+- **Memory holdouts isolate mutable workspaces.** Training and holdout use fresh
+  company compiles; only the learned SQLite database crosses into the memory
+  holdout, while the control receives no trained database.
+
+### Experiment result
+
+- **Support HQ baseline qualified 3/3.** All three fresh incident-response runs
+  completed their required delegation tree and passed the frozen deterministic
+  rubric. Median recursively accounted cost was $0.020200; the released gate
+  cost $0.060496. A proposed 256-token delegated-artifact floor was rejected as
+  a no-op before model spend. This qualifies the setup for a later
+  memory/control experiment; it is not a memory-benefit claim. Full method,
+  failed hypotheses, and total research spend are in
+  `benchmarks/results/support-hq-setup-qualification-2026-07-20.md`.
+
 ## 0.18.4 — 2026-07-20
 
 ### Changed

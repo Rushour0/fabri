@@ -5,6 +5,7 @@ from fabri.core.agent import (
     CODE_ACTION_POLICY,
     DELEGATION_POLICY,
     FRUGALITY_POLICY,
+    RETRIEVED_GUIDELINES_TASK_PRECEDENCE,
     build_system_prompt,
 )
 
@@ -36,3 +37,25 @@ def test_code_action_policy_gated_on_code_or_batch_tool():
     for desc in ("- python_exec: run code", "- batch: run many calls"):
         out = build_system_prompt(context_block="", tool_descriptions=desc)
         assert CODE_ACTION_POLICY in out
+
+
+def test_task_requirements_precedence_follows_retrieved_guidelines_by_default():
+    context = "<retrieved_guidelines>past hint</retrieved_guidelines>"
+
+    out = build_system_prompt(
+        context_block=context,
+        tool_descriptions="- read_file: read a file",
+    )
+
+    assert out.index(context) < out.index(RETRIEVED_GUIDELINES_TASK_PRECEDENCE)
+    assert out.rstrip().endswith(RETRIEVED_GUIDELINES_TASK_PRECEDENCE)
+
+
+def test_task_requirements_precedence_can_be_disabled_for_compatibility():
+    out = build_system_prompt(
+        context_block="<retrieved_guidelines>past hint</retrieved_guidelines>",
+        tool_descriptions="- read_file: read a file",
+        retrieved_guidelines_task_precedence=False,
+    )
+
+    assert RETRIEVED_GUIDELINES_TASK_PRECEDENCE not in out

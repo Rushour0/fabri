@@ -26,6 +26,9 @@ DEFAULT_CONFIG = {
         # whatever follows.
         "system_prompt": "",
         "system_prompt_prefix": "",
+        # Retrieved memory is always a fallible method hint; current task
+        # requirements and deliverables take precedence.
+        "retrieved_guidelines_task_precedence": True,
         # Format the model is asked to PRODUCE structured output in
         # (decompose). Native tool-call arguments are always provider JSON
         # regardless. "toon" is opt-in with json fallback.
@@ -173,6 +176,11 @@ DEFAULT_CONFIG = {
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "promotion_threshold_sessions": PROMOTION_THRESHOLD_SESSIONS,
         "guideline_max_tokens": DEFAULT_MAX_TOKENS,
+        # When enabled, only success traces with deterministic recovery
+        # evidence may create a reusable success pattern. This avoids paying
+        # retrieval/prompt cost for generic "the tools worked" summaries.
+        # Kept opt-in while existing deployments migrate their memories.
+        "success_pattern_requires_evidence": False,
         # M1: when true, every run (any outcome) also writes one deterministic
         # whole-run postmortem to memory — task + outcome + retry/cost signal —
         # retrieved by task similarity so a similar future task sees "last time
