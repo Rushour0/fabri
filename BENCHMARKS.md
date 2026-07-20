@@ -10,7 +10,7 @@ another.
 
 | benchmark | what it measures | status |
 |---|---|---|
-| **company setup qualification** | Whether a compiled roster completes its required delegation tree, satisfies a frozen deterministic rubric, and stays inside its company budget across fresh replicas. | Support HQ baseline qualified 3/3; Reliability Labs and Revenue Ops setup probes pending |
+| **company setup qualification** | Whether a compiled roster completes its required delegation tree, satisfies a frozen deterministic rubric, and stays inside its company budget across fresh replicas. | None of the three companies clear the 100% bar at adequate sample size. Support HQ passed the 3-replica gate 3/3 but only 9/10 (90%) at 10 replicas; Reliability Labs 2/3 (67%) rubric; Revenue Ops 0/3 (0%) rubric |
 | **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | first result landed (gpt-4o-mini, failure-recovery task): ↓7.8% cost, steps 5→4, reuse 0→67%; canonical sonnet number still pending |
 | **offline retrieval eval** | Whether retrieval finds hand-labeled relevant guidelines without spending model credits. | hybrid: recall@5 0.938, MRR 0.844; CI-gated |
 | **LongMemEval** | The "memory loop is real" claim — exact-match accuracy on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) public dataset. Apples-to-apples with Mastra (94.87%), Letta, Zep. | runner shipped, results pending |
@@ -126,19 +126,40 @@ explains *why* each strategic value was chosen.
 
 | date | company / task | completed | rubric given completion | end-to-end | median cost | decision | fabri |
 |---|---|---:|---:|---:|---:|---|---|
-| 2026-07-20 | Support HQ / safe incident response | 3/3 | 3/3 | 3/3 | $0.020200 | baseline qualified | 0.18.5 |
+| 2026-07-20 | Support HQ / safe incident response (3 replicas) | 3/3 | 3/3 | 3/3 | $0.020200 | small-sample pass — did **not** replicate at 10 replicas (see below) | 0.18.5 |
+| 2026-07-20 | Support HQ / safe incident response (10 replicas, confirmation) | 10/10 | 9/10 (90%) | 9/10 | $0.021100 | **does not qualify** — below the 100% bar; one run omitted the required follow-up/further-update commitment | 0.18.5 |
+| 2026-07-20 | Reliability Labs / setup qualification | 3/3 | 2/3 (67%) | 2/3 | — | **does not qualify** — one run over-claimed "fix was deployed" (forbidden unverified-release-claim phrase) | 0.18.5 |
+| 2026-07-20 | Revenue Ops / setup qualification | 2/3 | 0/3 (0%) | 0/3 | — | **does not qualify** — one run truncated operationally; both completed runs over-claimed forbidden phrases ("customer result", "buying intent") | 0.18.5 |
 
-The released three-run gate cost **$0.060496**. A proposed 256-token floor for
-delegated artifact roles received three fresh preflights but **zero model
-runs**: every applicable role already met the floor, so the candidate was
-rejected as `candidate_noop`. Earlier pilots and classifier validation brought
-total research spend to **$0.272837**.
+**Honest takeaway:** at adequate sample size, **none** of the three companies
+clear the 100% qualification bar. Support HQ's 3-replica gate passed 3/3, but
+that was a statistically fragile small-sample result — a 10-replica
+confirmation came back 9/10 (90%), below the bar. This is the harness working
+as intended, not a regression: a 3-replica gate is not enough evidence to call
+a company "qualified," and going forward none of these companies should be
+described that way except to note the 3-replica Support HQ result as a
+small-sample pass later overturned by a larger sample.
 
-This result qualifies the existing Support HQ setup; it does **not** establish
-that memory improves it. The isolated training/holdout versus fresh-control
-study remains pending. Read the reviewed
-[result and lessons](benchmarks/results/support-hq-setup-qualification-2026-07-20.md)
-or the [machine-readable aggregate](benchmarks/results/support-hq-setup-qualification-2026-07-20.json).
+The original 3-replica Support HQ gate cost **$0.060496**; the 10-replica
+confirmation, Reliability Labs, and Revenue Ops probes brought total live
+spend across the 2026-07-20 matrix to **~$0.70** (plus a ~$0.06 validation
+run). A proposed 256-token floor for delegated artifact roles received three
+fresh preflights but **zero model runs**: every applicable role already met
+the floor, so the candidate was rejected as `candidate_noop`. Earlier pilots
+and classifier validation brought total research spend to **$0.272837**.
+
+None of these results establish that memory improves setup outcomes — the
+isolated training/holdout versus fresh-control study remains pending, and
+"setup qualification" is not "memory win" (see [Honest gaps](#honest-gaps)
+below). Read the reviewed result and lessons for each run:
+[Support HQ, 3-replica](benchmarks/results/support-hq-setup-qualification-2026-07-20.md)
+([JSON](benchmarks/results/support-hq-setup-qualification-2026-07-20.json)),
+[Support HQ, 10-replica](benchmarks/results/support-hq-setup-qualification-10replica-2026-07-20.md)
+([JSON](benchmarks/results/support-hq-setup-qualification-10replica-2026-07-20.json)),
+[Reliability Labs](benchmarks/results/reliability-labs-setup-qualification-2026-07-20.md)
+([JSON](benchmarks/results/reliability-labs-setup-qualification-2026-07-20.json)),
+[Revenue Ops](benchmarks/results/revenue-ops-setup-qualification-2026-07-20.md)
+([JSON](benchmarks/results/revenue-ops-setup-qualification-2026-07-20.json)).
 
 ### session-N+1 cost delta
 
@@ -256,9 +277,14 @@ The biggest open question Fabri has not answered yet:
 > Research, classification, long-form writing, and multi-modal tasks are
 > not yet covered.
 
-Company setup qualification is also complete only for Support HQ. Reliability
-Labs and Revenue Ops have frozen prompts and assertions, but no released setup
-or memory/control result yet. A passing setup probe must not be reported as a
+Company setup qualification has now run live for all three companies, and
+**none qualify at adequate sample size.** Support HQ's 3-replica gate passed
+3/3 but a 10-replica confirmation came back 9/10 (90%) — below the 100% bar.
+Reliability Labs and Revenue Ops both failed their rubric outright (2/3 and
+0/3 respectively) on frozen prompts and assertions. This shows the 3-replica
+gate is statistically fragile, not that the harness is broken — a small
+sample overstates confidence. No company has a released memory/control result
+yet, and a passing (or fragile-passing) setup probe must not be reported as a
 memory win.
 
 When a benchmark gap closes, this paragraph shrinks.

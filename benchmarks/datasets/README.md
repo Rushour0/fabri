@@ -88,9 +88,20 @@ model output and operational source material.
 
 | Case | Setup status | Memory/control status |
 |---|---|---|
-| `support_hq_safe_incident_response` | Baseline qualified 3/3 | Pending |
-| `reliability_labs_incident_release_gate` | Pending | Pending |
-| `revenue_ops_evidence_backed_outreach` | Pending | Pending |
+| `support_hq_safe_incident_response` | 3/3 gate; 9/10 at 10 replicas — does not clear 100% bar | Pending |
+| `reliability_labs_incident_release_gate` | Not qualified — 2/3 rubric | Pending |
+| `revenue_ops_evidence_backed_outreach` | Not qualified — 0/3 rubric | Pending |
 
-The Support HQ aggregate is published in
-[`../results/support-hq-setup-qualification-2026-07-20.md`](../results/support-hq-setup-qualification-2026-07-20.md).
+At adequate sample size, none of the three companies clear the 100% bar; the
+3-replica gate alone is statistically fragile. The Support HQ aggregates are
+published in
+[`../results/support-hq-setup-qualification-2026-07-20.md`](../results/support-hq-setup-qualification-2026-07-20.md)
+(3-replica gate) and
+[`../results/support-hq-setup-qualification-10replica-2026-07-20.md`](../results/support-hq-setup-qualification-10replica-2026-07-20.md)
+(10-replica confirmation). The Reliability Labs aggregate is published in
+[`../results/reliability-labs-setup-qualification-2026-07-20.md`](../results/reliability-labs-setup-qualification-2026-07-20.md),
+which reports a completion of 3/3 with a rubric pass rate of 2/3 and flags an
+over-claim that a fix was deployed. The Revenue Ops aggregate is published in
+[`../results/revenue-ops-setup-qualification-2026-07-20.md`](../results/revenue-ops-setup-qualification-2026-07-20.md),
+which reports a completion of 2/3 (one truncation failure) with a rubric pass
+rate of 0/3 and flags over-claims of customer result and buying intent.

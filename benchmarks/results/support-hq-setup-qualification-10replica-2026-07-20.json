@@ -1,0 +1,289 @@
+{
+  "study": "company-setup-qualification",
+  "generated_at": "2026-07-20T13:50:18.966059+00:00",
+  "case_id": "support_hq_safe_incident_response",
+  "company": "support-hq",
+  "fabri_version": "0.18.5",
+  "source": {
+    "path": "companies/support-hq/company.toml",
+    "roster_revision": "533f4f23081625ec1a92c4e562b6489f167561b7",
+    "roster_worktree_clean": true,
+    "company_source_sha256": "1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0"
+  },
+  "replicas_per_candidate": 10,
+  "selection_policy": "qualify only at 100% scheduled end-to-end pass rate; among qualifiers choose the lowest median recursively-accounted total cost",
+  "candidates": [
+    {
+      "id": "baseline",
+      "overrides": {
+        "delegated_llm_max_tokens_floor": null
+      },
+      "configured_replicas": 10,
+      "scheduled_replicas": 10,
+      "preflights": 10,
+      "model_runs": 10,
+      "completion_rate": 1.0,
+      "conditional_rubric_pass_rate": 0.9,
+      "end_to_end_pass_rate": 0.9,
+      "median_total_cost_usd": 0.0211355,
+      "qualifies": false,
+      "runs": [
+        {
+          "replica": 1,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.018561,
+          "wall_time_s": 38.046,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 2,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.031571,
+          "wall_time_s": 86.189,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 3,
+          "attempt_status": "complete",
+          "rubric_passed": false,
+          "missing_required": [
+            "follow-up | further update"
+          ],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": false,
+          "failure_reasons": [],
+          "total_cost_usd": 0.026874,
+          "wall_time_s": 73.265,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 4,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.020154,
+          "wall_time_s": 49.697,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 5,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.019582,
+          "wall_time_s": 37.908,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 6,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.021448,
+          "wall_time_s": 67.769,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 7,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.023318,
+          "wall_time_s": 55.764,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 8,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.020485,
+          "wall_time_s": 49.157,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 9,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.020823,
+          "wall_time_s": 54.861,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 10,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.02623,
+          "wall_time_s": 68.443,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        }
+      ]
+    },
+    {
+      "id": "delegated_artifact_tokens_256",
+      "overrides": {
+        "delegated_llm_max_tokens_floor": 256
+      },
+      "configured_replicas": 10,
+      "scheduled_replicas": 10,
+      "preflights": 10,
+      "model_runs": 0,
+      "completion_rate": 0.0,
+      "conditional_rubric_pass_rate": null,
+      "end_to_end_pass_rate": 0.0,
+      "median_total_cost_usd": null,
+      "qualifies": false,
+      "runs": [
+        {
+          "replica": 1,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 2,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 3,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 4,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 5,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 6,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 7,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 8,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 9,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 10,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        }
+      ],
+      "decision": "candidate_noop"
+    }
+  ],
+  "recommendation": null,
+  "status": "no_viable_setup",
+  "released_gate_cost_usd": null,
+  "total_research_spend_usd": 0.229046,
+  "claim_boundary": "setup qualification only; memory/control result pending"
+}

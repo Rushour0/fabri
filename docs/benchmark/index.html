@@ -112,6 +112,8 @@
   .mark { font-weight: 600; }
   .mark.ok { color: var(--accent); }
   .mark.no { color: var(--rust); }
+  td.brk { text-align: left; font-family: var(--sans); font-size: 13px; color: var(--ink-soft);
+    font-variant-numeric: normal; max-width: 22ch; line-height: 1.35; }
   .ledger figcaption { font-family: var(--sans); font-size: 14px; color: var(--ink-soft);
     max-width: var(--measure); margin-top: 18px; line-height: 1.55; }
   .ledger figcaption b { color: var(--ink); font-weight: 600; }
@@ -172,55 +174,65 @@
     <span class="stamp">Study 01 · 20 July 2026</span>
   </header>
 
-  <h1 class="reveal">Support HQ did the job — <span class="q">three times out of three.</span></h1>
-  <p class="dek reveal">Before asking whether a company of AI agents is <em>clever</em>, Fabri asks
-    whether it is <em>dependable</em>: can this org run a real workload end to end, at a cost you can
-    name, every single time — starting from clean, isolated state on each attempt?</p>
+  <h1 class="reveal">Support HQ passed three times. <span class="q">Then ten runs said ninety percent.</span></h1>
+  <p class="dek reveal">Fabri asks a strict question: does a company of AI agents finish a real task
+    <em>correctly, every single time</em> — from clean, isolated state? A three-run gate said Support HQ
+    did. A ten-run confirmation said 90%. The other two companies never came close. Here is the honest
+    scorecard.</p>
   <p class="byline reveal">
-    <span>Workload: <b>safe incident response</b></span>
-    <span>Setup: <b>as shipped (baseline)</b></span>
+    <span>Three companies</span>
+    <span>One strict, 100% bar</span>
     <span>Fabri <b>v0.18.5</b></span>
   </p>
 
   <section aria-label="Headline result">
     <div class="figures">
-      <div class="fig pass"><div class="n">3<span class="slash">/3</span></div><div class="l">replicas passed, end to end</div></div>
-      <div class="fig"><div class="n">100<span class="slash">%</span></div><div class="l">rubric checks met</div></div>
-      <div class="fig money"><div class="n"><span class="cur">$</span>0.020200</div><div class="l">median cost per run</div></div>
-      <div class="fig money"><div class="n"><span class="cur">$</span>0.060496</div><div class="l">to clear the whole gate</div></div>
+      <div class="fig"><div class="n">0<span class="slash">/3</span></div><div class="l">companies cleared the 100% bar</div></div>
+      <div class="fig"><div class="n">9<span class="slash">/10</span></div><div class="l">Support HQ's best, at ten replicas</div></div>
+      <div class="fig money"><div class="n"><span class="cur">$</span>0.0202</div><div class="l">median cost per Support HQ run</div></div>
+      <div class="fig money"><div class="n"><span class="cur">$</span>0.82</div><div class="l">total spent, all runs</div></div>
     </div>
-    <p class="verdict">Verdict — <b>Qualified.</b> Every figure above counts the full org tree: each
-      delegated crew's spend rolls up into the parent, so nothing hides in a child call.</p>
+    <p class="verdict">The three-run gate is what fooled us. Support HQ cleared it 3/3 — a small sample.
+      Ten runs of the same setup dropped it to <b>9/10</b>, and the gate demands 100%. The larger sample
+      didn't refine the claim; it overturned it.</p>
   </section>
 
-  <section class="ledger" aria-label="Candidates evaluated">
-    <p class="sec-label">What was tested</p>
+  <section class="ledger" aria-label="The three companies">
+    <p class="sec-label">The three companies</p>
     <div class="scroll">
       <table>
         <thead>
-          <tr><th>Candidate</th><th>Runs</th><th>Rubric</th><th>End&#8209;to&#8209;end</th><th>Median</th><th>Verdict</th></tr>
+          <tr><th>Company</th><th>Sample</th><th>Completion</th><th>Rubric</th><th>Clears bar?</th><th>Where it broke</th></tr>
         </thead>
         <tbody>
           <tr>
-            <td><span class="cand">baseline<small>the setup as shipped</small></span></td>
-            <td>3</td><td>3&#8202;/&#8202;3</td><td>3&#8202;/&#8202;3</td><td>$0.020200</td>
-            <td><span class="mark ok">Qualified</span></td>
+            <td><span class="cand">Support HQ<small>incident response</small></span></td>
+            <td>10</td><td>10&#8202;/&#8202;10</td><td>9&#8202;/&#8202;10</td>
+            <td><span class="mark no">No</span></td>
+            <td class="brk">omitted the follow&#8209;up (1 run)</td>
           </tr>
           <tr>
-            <td><span class="cand">delegated_artifact_tokens_256<small>raise the delegated token floor to 256</small></span></td>
-            <td>0</td><td>—</td><td>—</td><td>$0.00</td>
-            <td><span class="mark no">Rejected</span></td>
+            <td><span class="cand">Reliability Labs<small>incident release gate</small></span></td>
+            <td>3</td><td>3&#8202;/&#8202;3</td><td>2&#8202;/&#8202;3</td>
+            <td><span class="mark no">No</span></td>
+            <td class="brk">claimed "fix was deployed"</td>
+          </tr>
+          <tr>
+            <td><span class="cand">Revenue Ops<small>evidence-backed outreach</small></span></td>
+            <td>3</td><td>2&#8202;/&#8202;3</td><td>0&#8202;/&#8202;3</td>
+            <td><span class="mark no">No</span></td>
+            <td class="brk">claimed unsourced results; 1 truncated</td>
           </tr>
         </tbody>
       </table>
     </div>
-    <figcaption>The second candidate wanted to raise a token floor. Preflight found the compiled setup
-      already cleared it, so the change would do nothing — and the harness threw it out <b>before spending
-      a single model call.</b> A no-op costs zero, not a rounding error.</figcaption>
+    <figcaption>Two of the three failed the same way: <b>over-claiming</b> — asserting a fix was
+      deployed, or a customer result that wasn't in the evidence. That is the exact failure these
+      workloads exist to catch, and the rubric caught it.</figcaption>
   </section>
 
-  <section aria-label="Why the number is trustworthy">
-    <p class="sec-label">Why the number can be trusted</p>
+  <section aria-label="Why the numbers can be trusted">
+    <p class="sec-label">Why the numbers can be trusted</p>
     <ul class="rules">
       <li><b>An unfinished run earns no score.</b> Whether the work completed and whether it was any good
         are measured apart, and never quietly averaged together.</li>
@@ -231,27 +243,29 @@
     </ul>
   </section>
 
-  <section aria-label="What this proves and does not prove">
+  <section aria-label="What this establishes and does not">
     <p class="sec-label">The honest part</p>
     <div class="claims">
       <div class="est">
         <h3>What this establishes</h3>
         <ul>
-          <li>Support HQ, as shipped, reliably completes this incident-response workload.
-            <span class="why">Three of three replicas, end to end, from isolated state.</span></li>
-          <li>It does so at a cost you can quote and reproduce.
-            <span class="why">$0.020200 median per run, counted down the whole tree.</span></li>
+          <li>The harness catches real over-claims.
+            <span class="why">Two of three failed by asserting things absent from the evidence — and the rubric flagged each one.</span></li>
+          <li>A three-run gate is statistically fragile.
+            <span class="why">Support HQ's 3/3 fell to 9/10 once we ran it ten times.</span></li>
+          <li>The cost is known, recursive, and small.
+            <span class="why">~$0.02 per run; the whole three-company study cost $0.82.</span></li>
         </ul>
       </div>
       <div class="not">
-        <h3>What it does not — yet</h3>
+        <h3>What it does not</h3>
         <ul>
-          <li>That memory makes the company better.
-            <span class="why">The memory-vs-control study is the next experiment, not this one.</span></li>
-          <li>That the result holds for other companies or other tasks.
-            <span class="why">One company, one workload, three replicas. Nothing more is claimed.</span></li>
-          <li>That the setup is optimal.
-            <span class="why">Exactly one bounded hypothesis has been tried so far.</span></li>
+          <li>That any of these setups is trustworthy at the 100% bar.
+            <span class="why">None cleared it. That's the finding, not a footnote.</span></li>
+          <li>That memory makes a company better.
+            <span class="why">The memory-vs-control study is the next experiment.</span></li>
+          <li>That the setups can't improve.
+            <span class="why">These are as-shipped. The point is to measure honestly first, then fix.</span></li>
         </ul>
       </div>
     </div>
@@ -262,32 +276,32 @@
     <div class="colophon">
       <dl>
         <dt>Fabri version</dt><dd>0.18.5</dd>
-        <dt>Case</dt><dd>support_hq_safe_incident_response</dd>
         <dt>Roster revision</dt><dd>533f4f23081625ec1a92c4e562b6489f167561b7</dd>
-        <dt>Worktree clean</dt><dd>true</dd>
-        <dt>Company source SHA&#8209;256</dt><dd>1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0</dd>
-        <dt>Replicas / candidate</dt><dd>3</dd>
-        <dt>Total research spend</dt><dd>$0.272837</dd>
+        <dt>Companies evaluated</dt><dd>3</dd>
+        <dt>Support HQ samples</dt><dd>3 (gate) + 10 (confirm)</dd>
+        <dt>Reliability Labs / Revenue Ops</dt><dd>3 each</dd>
+        <dt>Total live spend</dt><dd>$0.82</dd>
         <dt>Claim boundary</dt><dd>setup qualification only</dd>
       </dl>
     </div>
-    <p class="byline" style="margin-top:16px">Prompts, traces, session IDs and raw model output stay
-      private; only aggregate metrics and rubric outcomes are published.</p>
+    <p class="byline" style="margin-top:16px">Every published result carries its own roster revision,
+      source hash and Fabri version. Prompts, traces, session IDs and raw model output stay private;
+      only aggregate metrics and rubric outcomes are published.</p>
   </section>
 
   <section aria-label="Also on the bench">
     <p class="sec-label">Also on the bench</p>
     <ul class="bench">
-      <li><span class="t">Support HQ<small>Setup qualification — incident response</small></span><span class="s done">Published</span></li>
-      <li><span class="t">Reliability Labs<small>Setup qualification — incident release gate</small></span><span class="s wait">In progress</span></li>
-      <li><span class="t">Revenue Ops<small>Setup qualification — evidence-backed outreach</small></span><span class="s wait">In progress</span></li>
+      <li><span class="t">Support HQ<small>9/10 at ten replicas</small></span><span class="s wait">Does not clear the bar</span></li>
+      <li><span class="t">Reliability Labs<small>2/3 rubric — over-claimed a fix</small></span><span class="s wait">Not qualified</span></li>
+      <li><span class="t">Revenue Ops<small>0/3 rubric — unsourced claims</small></span><span class="s wait">Not qualified</span></li>
       <li><span class="t">Memory vs. control<small>Does trace-backed memory earn its cost?</small></span><span class="s wait">Next</span></li>
     </ul>
   </section>
 
   <footer class="foot">
     <div class="links">
-      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-setup-qualification-2026-07-20.md">Read the full result</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/BENCHMARKS.md">Read the full results</a>
       <a href="https://github.com/Rushour0/fabri">Fabri on GitHub</a>
     </div>
     <div class="colo">Fabri · self-improving companies of AI agents</div>

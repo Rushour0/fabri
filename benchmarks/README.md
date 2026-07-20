@@ -8,15 +8,35 @@ and methodology live in [`../BENCHMARKS.md`](../BENCHMARKS.md).
 
 | Company / workload | Completion | Conditional rubric | End-to-end | Median cost | Decision |
 |---|---:|---:|---:|---:|---|
-| Support HQ / safe incident response | 3/3 | 3/3 | 3/3 | $0.020200 | Baseline qualified |
+| Support HQ / safe incident response (3-replica gate) | 3/3 | 3/3 | 3/3 | $0.020200 | Release gate cleared |
+| Support HQ / safe incident response (10-replica confirmation) | 10/10 | 9/10 | 9/10 | — | Does not clear the 100% bar |
+| Reliability Labs / incident release gate | 3/3 | 2/3 | 2/3 | — | Not qualified |
+| Revenue Ops / evidence-backed outreach | 2/3 | 0/3 | 0/3 | — | Not qualified |
 
-The released gate cost $0.060496. The proposed 256-token artifact floor was
+The 3-replica gate cost $0.060496. The proposed 256-token artifact floor was
 rejected after three preflights as `candidate_noop`, so it received zero model
-runs and spent $0. Read the reviewed [narrative result](results/support-hq-setup-qualification-2026-07-20.md)
-or [machine-readable aggregate](results/support-hq-setup-qualification-2026-07-20.json).
+runs and spent $0. Read the reviewed narrative results
+([3-replica gate](results/support-hq-setup-qualification-2026-07-20.md),
+[10-replica confirmation](results/support-hq-setup-qualification-10replica-2026-07-20.md))
+or the machine-readable aggregates
+([3-replica gate](results/support-hq-setup-qualification-2026-07-20.json),
+[10-replica confirmation](results/support-hq-setup-qualification-10replica-2026-07-20.json)).
 
-Reliability Labs and Revenue Ops have dataset cases but no released setup or
-memory/control result. Do not infer a score from their presence in the dataset.
+At a 10-replica sample, Support HQ's 3/3 release gate did not hold: one run
+omitted the follow-up commitment, dropping the rubric to 9/10 (~90%). Reliability
+Labs (3/3 completion, 2/3 rubric; over-claimed a deployed fix) and Revenue Ops
+(2/3 completion with a truncation failure, 0/3 rubric; over-claimed customer
+result and buying intent) were also run live and neither qualified. Read the
+reviewed narrative results
+([Reliability Labs](results/reliability-labs-setup-qualification-2026-07-20.md),
+[Revenue Ops](results/revenue-ops-setup-qualification-2026-07-20.md)) or the
+machine-readable aggregates
+([Reliability Labs](results/reliability-labs-setup-qualification-2026-07-20.json),
+[Revenue Ops](results/revenue-ops-setup-qualification-2026-07-20.json)).
+
+Takeaway: at adequate sample size, none of the three companies clear the 100%
+bar. The 3-replica release gate is statistically fragile and should not be
+read as a qualification guarantee.
 
 ## Artifact map
 
