@@ -15,6 +15,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
 import statistics
@@ -35,6 +37,8 @@ SUCCESS_OUTCOMES = {"success", "success_with_recovery"}
 MIN_TOKEN_FLOOR = 64
 MAX_TOKEN_FLOOR = 4096
 DEFAULT_RUN_TIMEOUT_S = 600.0
+MANIFEST_GIT_TIMEOUT_S = 15.0
+CLAIM_BOUNDARY = "setup qualification only; memory/control result pending"
 
 CommandRunner = Callable[
     [list[str], Path, Mapping[str, str], float], subprocess.CompletedProcess[str]
@@ -557,6 +561,181 @@ def _run_command(
     )
 
 
+def build_source_manifest(
+    case: ProbeCase,
+    command_runner: CommandRunner,
+    cwd: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str | bool | None]:
+    """Return reproducibility metadata without requiring the roster to be a Git repo."""
+    git_environment = dict(os.environ) if environment is None else environment
+    source_parent = case.company_source.parent
+    source_path = str(case.company_source)
+    manifest_path = source_path
+    company_source_sha256 = hashlib.sha256(case.company_source.read_bytes()).hexdigest()
+
+    def without_git_metadata() -> dict[str, str | bool | None]:
+        return {
+            "path": source_path,
+            "roster_revision": None,
+            "roster_worktree_clean": None,
+            "company_source_sha256": company_source_sha256,
+        }
+
+    try:
+        top_level = command_runner(
+            ["git", "-C", str(source_parent), "rev-parse", "--show-toplevel"],
+            cwd,
+            git_environment,
+            MANIFEST_GIT_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return without_git_metadata()
+    if top_level.returncode != 0:
+        return without_git_metadata()
+
+    try:
+        manifest_path = str(case.company_source.relative_to(top_level.stdout.strip()))
+    except ValueError:
+        pass
+
+    try:
+        revision = command_runner(
+            ["git", "-C", str(source_parent), "rev-parse", "HEAD"],
+            cwd,
+            git_environment,
+            MANIFEST_GIT_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return without_git_metadata()
+    if revision.returncode != 0:
+        roster_revision: str | None = None
+        roster_worktree_clean: bool | None = None
+    else:
+        try:
+            worktree_status = command_runner(
+                ["git", "-C", str(source_parent), "status", "--short"],
+                cwd,
+                git_environment,
+                MANIFEST_GIT_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return without_git_metadata()
+        if worktree_status.returncode != 0:
+            roster_revision = None
+            roster_worktree_clean = None
+        else:
+            roster_revision = revision.stdout.strip()
+            roster_worktree_clean = not worktree_status.stdout.strip()
+
+    return {
+        "path": manifest_path,
+        "roster_revision": roster_revision,
+        "roster_worktree_clean": roster_worktree_clean,
+        "company_source_sha256": company_source_sha256,
+    }
+
+
+def validate_publication_payload(payload: dict[str, object]) -> None:
+    """Validate the stable public results schema before publishing it."""
+    required_top_level: dict[str, tuple[type[object], ...]] = {
+        "study": (str,),
+        "generated_at": (str,),
+        "case_id": (str,),
+        "company": (str,),
+        "fabri_version": (str, type(None)),
+        "source": (dict,),
+        "replicas_per_candidate": (int,),
+        "selection_policy": (str,),
+        "candidates": (list,),
+        "recommendation": (str, type(None)),
+        "status": (str,),
+        "claim_boundary": (str,),
+        "released_gate_cost_usd": (int, float, type(None)),
+        "total_research_spend_usd": (int, float, type(None)),
+    }
+    for key, expected_types in required_top_level.items():
+        if key not in payload:
+            raise ProbeError(f"publication payload missing required key: {key}")
+        value = payload[key]
+        if not isinstance(value, expected_types) or (
+            key
+            in {
+                "replicas_per_candidate",
+                "released_gate_cost_usd",
+                "total_research_spend_usd",
+            }
+            and isinstance(value, bool)
+        ):
+            raise ProbeError(f"publication payload field {key!r} has an invalid type")
+
+    source = payload["source"]
+    if not isinstance(source, dict):  # Kept for type narrowing after validation above.
+        raise ProbeError("publication payload field 'source' has an invalid type")
+    required_source: dict[str, tuple[type[object], ...]] = {
+        "path": (str,),
+        "roster_revision": (str, type(None)),
+        "roster_worktree_clean": (bool, type(None)),
+        "company_source_sha256": (str,),
+    }
+    for key, expected_types in required_source.items():
+        if key not in source:
+            raise ProbeError(f"publication payload source missing required key: {key}")
+        if not isinstance(source[key], expected_types):
+            raise ProbeError(f"publication payload source field {key!r} has an invalid type")
+
+    candidates = payload["candidates"]
+    if not isinstance(candidates, list):  # Kept for type narrowing after validation above.
+        raise ProbeError("publication payload field 'candidates' has an invalid type")
+    required_candidate: dict[str, tuple[type[object], ...]] = {
+        "id": (str,),
+        "overrides": (dict,),
+        "configured_replicas": (int,),
+        "scheduled_replicas": (int,),
+        "preflights": (int,),
+        "model_runs": (int,),
+        "completion_rate": (int, float),
+        "conditional_rubric_pass_rate": (int, float, type(None)),
+        "end_to_end_pass_rate": (int, float),
+        "median_total_cost_usd": (int, float, type(None)),
+        "qualifies": (bool,),
+        "runs": (list,),
+    }
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            raise ProbeError(f"publication payload candidate {index} must be a mapping")
+        for key, expected_types in required_candidate.items():
+            if key not in candidate:
+                raise ProbeError(
+                    f"publication payload candidate {index} missing required key: {key}"
+                )
+            value = candidate[key]
+            if not isinstance(value, expected_types) or (
+                key
+                in {
+                    "configured_replicas",
+                    "scheduled_replicas",
+                    "preflights",
+                    "model_runs",
+                    "completion_rate",
+                    "conditional_rubric_pass_rate",
+                    "end_to_end_pass_rate",
+                    "median_total_cost_usd",
+                }
+                and isinstance(value, bool)
+            ):
+                raise ProbeError(
+                    f"publication payload candidate {index} field {key!r} has an invalid type"
+                )
+        if "decision" in candidate and not isinstance(
+            candidate["decision"], (str, type(None))
+        ):
+            raise ProbeError(
+                f"publication payload candidate {index} field 'decision' has an invalid type"
+            )
+
+
 def _write_private_attempt(
     attempt_root: Path,
     *,
@@ -596,6 +775,12 @@ def run_probe(
     work_root.mkdir(parents=True, exist_ok=True)
     command_cwd = Path.cwd() if cwd is None else cwd
     environment = dict(os.environ)
+    source_manifest = build_source_manifest(
+        case,
+        command_runner,
+        command_cwd,
+        environment=environment,
+    )
     public_candidates: list[dict[str, object]] = []
 
     for candidate in case.candidates:
@@ -801,12 +986,23 @@ def run_probe(
             if isinstance(run.get("total_cost_usd"), (int, float))
         ]
         qualifies = len(passed) == case.replicas
-        public_candidates.append({
+        preflights = sum(
+            run.get("failure_reasons") != ["company_compile_failed"]
+            for run in public_runs
+        )
+        model_runs = sum(
+            run.get("attempt_status") in {"complete", "operational_failure"}
+            for run in public_runs
+        )
+        candidate_result: dict[str, object] = {
             "id": candidate.candidate_id,
             "overrides": {
                 "delegated_llm_max_tokens_floor": candidate.delegated_llm_max_tokens_floor,
             },
+            "configured_replicas": case.replicas,
             "scheduled_replicas": case.replicas,
+            "preflights": preflights,
+            "model_runs": model_runs,
             "completion_rate": len(completed) / case.replicas,
             "conditional_rubric_pass_rate": (
                 sum(run.get("rubric_passed") is True for run in completed) / len(completed)
@@ -816,7 +1012,19 @@ def run_probe(
             "median_total_cost_usd": statistics.median(costs) if costs else None,
             "qualifies": qualifies,
             "runs": public_runs,
-        })
+        }
+        if model_runs == 0 and public_runs:
+            first_failure_reasons = public_runs[0].get("failure_reasons")
+            if (
+                isinstance(first_failure_reasons, list)
+                and len(first_failure_reasons) == 1
+                and all(
+                    run.get("failure_reasons") == first_failure_reasons
+                    for run in public_runs
+                )
+            ):
+                candidate_result["decision"] = first_failure_reasons[0]
+        public_candidates.append(candidate_result)
 
     qualified = [candidate for candidate in public_candidates if candidate["qualifies"]]
     qualified.sort(
@@ -826,11 +1034,27 @@ def run_probe(
         )
     )
     winner = qualified[0] if qualified else None
+
+    def sum_costs(candidates: list[dict[str, object]]) -> float:
+        return sum(
+            float(run["total_cost_usd"])
+            for candidate in candidates
+            for run in candidate["runs"]
+            if isinstance(run, dict)
+            and isinstance(run.get("total_cost_usd"), (int, float))
+        )
+
+    try:
+        fabri_version: str | None = importlib.metadata.version("fabri")
+    except importlib.metadata.PackageNotFoundError:
+        fabri_version = None
     payload = {
         "study": "company-setup-qualification",
         "generated_at": datetime.now(UTC).isoformat(),
         "case_id": case.case_id,
         "company": case.company_name,
+        "fabri_version": fabri_version,
+        "source": source_manifest,
         "replicas_per_candidate": case.replicas,
         "selection_policy": (
             "qualify only at 100% scheduled end-to-end pass rate; among qualifiers "
@@ -839,7 +1063,13 @@ def run_probe(
         "candidates": public_candidates,
         "recommendation": winner["id"] if winner else None,
         "status": "qualified" if winner else "no_viable_setup",
+        "released_gate_cost_usd": sum_costs([winner]) if winner else None,
+        # This is this invocation's spend only; the historical published value
+        # also aggregated throwaway pilot runs by hand and is not reproduced here.
+        "total_research_spend_usd": sum_costs(public_candidates),
+        "claim_boundary": CLAIM_BOUNDARY,
     }
+    validate_publication_payload(payload)
     (output / "results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output / "results.md").write_text(render_markdown(payload), encoding="utf-8")
     if winner is not None:
@@ -861,6 +1091,21 @@ def run_probe(
 
 
 def render_markdown(payload: dict[str, object]) -> str:
+    source = payload.get("source", {})
+    if not isinstance(source, dict):
+        source = {}
+    released_gate_cost = payload.get("released_gate_cost_usd")
+    released_gate_cost_display = (
+        "—"
+        if released_gate_cost is None
+        else f"${float(released_gate_cost):.6f}"
+    )
+    total_research_spend = payload.get("total_research_spend_usd")
+    total_research_spend_display = (
+        "—"
+        if total_research_spend is None
+        else f"${float(total_research_spend):.6f}"
+    )
     lines = [
         "# Company setup qualification",
         "",
@@ -868,9 +1113,17 @@ def render_markdown(payload: dict[str, object]) -> str:
         f"- Company: `{payload['company']}`",
         f"- Status: **{payload['status']}**",
         f"- Recommendation: `{payload['recommendation'] or 'none'}`",
+        f"- Fabri version: `{payload.get('fabri_version') or 'unavailable'}`",
+        f"- Roster revision: `{source.get('roster_revision') or 'unavailable'}`",
+        f"- Roster worktree clean: `{source.get('roster_worktree_clean')}`",
+        f"- Company source SHA-256: `{source.get('company_source_sha256')}`",
+        f"- Company source path: `{source.get('path')}`",
+        f"- Released gate cost: {released_gate_cost_display}",
+        f"- Total research spend: {total_research_spend_display}",
+        f"- Claim boundary: {payload.get('claim_boundary')}",
         "",
-        "| Candidate | Completion | Conditional rubric | End-to-end | Median cost | Qualifies |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Candidate | Model runs | Decision | Completion | Conditional rubric | End-to-end | Median cost | Qualifies |",
+        "|---|---:|---|---:|---:|---:|---:|---:|",
     ]
     candidates = payload.get("candidates", [])
     if isinstance(candidates, list):
@@ -880,7 +1133,9 @@ def render_markdown(payload: dict[str, object]) -> str:
             conditional = candidate.get("conditional_rubric_pass_rate")
             cost = candidate.get("median_total_cost_usd")
             lines.append(
-                f"| {candidate.get('id')} | {float(candidate.get('completion_rate', 0)):.0%} | "
+                f"| {candidate.get('id')} | {candidate.get('model_runs')} | "
+                f"{candidate.get('decision', '—')} | "
+                f"{float(candidate.get('completion_rate', 0)):.0%} | "
                 f"{('—' if conditional is None else f'{float(conditional):.0%}')} | "
                 f"{float(candidate.get('end_to_end_pass_rate', 0)):.0%} | "
                 f"{('—' if cost is None else f'${float(cost):.4f}')} | "

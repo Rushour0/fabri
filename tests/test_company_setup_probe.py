@@ -11,13 +11,17 @@ import pytest
 import yaml
 
 from fabri.benchmarks.company_setup_probe import (
+    CLAIM_BOUNDARY,
+    MANIFEST_GIT_TIMEOUT_S,
     ProbeError,
     analyze_run,
     apply_delegated_token_floor,
     build_preflight_manifest,
     load_probe_case,
+    render_markdown,
     run_probe,
     score_text,
+    validate_publication_payload,
 )
 
 pytestmark = pytest.mark.integration
@@ -249,6 +253,14 @@ def test_probe_skips_noop_candidate_without_model_run(
         timeout_s: float,
     ) -> subprocess.CompletedProcess[str]:
         del cwd, env, timeout_s
+        if argv[0] == "git":
+            if "--show-toplevel" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{roster_root}\n", "")
+            if "HEAD" in argv:
+                return subprocess.CompletedProcess(argv, 0, "test-roster-sha\n", "")
+            if "status" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError(f"unexpected git command: {argv}")
         if "compile" not in argv:
             raise AssertionError("a no-op candidate must not start a model run")
         destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
@@ -273,6 +285,23 @@ def test_probe_skips_noop_candidate_without_model_run(
     assert run["attempt_status"] == "invalid_measurement"
     assert run["failure_reasons"] == ["candidate_noop"]
     assert run["total_cost_usd"] is None
+    assert candidate["configured_replicas"] == 1
+    assert candidate["preflights"] == 1
+    assert candidate["model_runs"] == 0
+    assert candidate["decision"] == "candidate_noop"
+    assert isinstance(result["fabri_version"], str)
+    source = cast(dict[str, object], result["source"])
+    assert source["roster_revision"] == "test-roster-sha"
+    assert source["roster_worktree_clean"] is True
+    company_source_sha256 = cast(str, source["company_source_sha256"])
+    assert len(company_source_sha256) == 64
+    assert int(company_source_sha256, 16) >= 0
+    assert result["claim_boundary"] == CLAIM_BOUNDARY
+    assert "released_gate_cost_usd" in result
+    assert "total_research_spend_usd" in result
+    markdown = render_markdown(result)
+    assert "test-roster-sha" in markdown
+    assert CLAIM_BOUNDARY in markdown
 
 
 def test_probe_rejects_root_recovery_after_child_failure_and_selects_floor(
@@ -293,6 +322,14 @@ def test_probe_rejects_root_recovery_after_child_failure_and_selects_floor(
     ) -> subprocess.CompletedProcess[str]:
         nonlocal run_number
         del cwd, timeout_s
+        if argv[0] == "git":
+            if "--show-toplevel" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{roster_root}\n", "")
+            if "HEAD" in argv:
+                return subprocess.CompletedProcess(argv, 0, "test-roster-sha\n", "")
+            if "status" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError(f"unexpected git command: {argv}")
         if "compile" in argv:
             destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
             child = destination / "agencies" / "crew" / "agent.yaml"
@@ -400,3 +437,207 @@ def test_probe_rejects_root_recovery_after_child_failure_and_selects_floor(
     profile = yaml.safe_load((output / "recommended-profile.yaml").read_text(encoding="utf-8"))
     assert profile["overrides"]["delegated_llm_max_tokens_floor"] == 256
     assert (output / "private-attempts" / "baseline" / "replica-01" / "private" / "run.stdout").is_file()
+
+
+def _valid_publication_payload() -> dict[str, object]:
+    return {
+        "study": "company-setup-qualification",
+        "generated_at": "2026-07-20T00:00:00+00:00",
+        "case_id": "support",
+        "company": "support-hq",
+        "fabri_version": "0.18.5",
+        "source": {
+            "path": "companies/support-hq/company.toml",
+            "roster_revision": "test-roster-sha",
+            "roster_worktree_clean": True,
+            "company_source_sha256": "a" * 64,
+        },
+        "replicas_per_candidate": 1,
+        "selection_policy": "test policy",
+        "candidates": [
+            {
+                "id": "baseline",
+                "overrides": {},
+                "configured_replicas": 1,
+                "scheduled_replicas": 1,
+                "preflights": 1,
+                "model_runs": 1,
+                "completion_rate": 1.0,
+                "conditional_rubric_pass_rate": 1.0,
+                "end_to_end_pass_rate": 1.0,
+                "median_total_cost_usd": 0.01,
+                "qualifies": True,
+                "runs": [],
+            }
+        ],
+        "recommendation": "baseline",
+        "status": "qualified",
+        "released_gate_cost_usd": 0.01,
+        "total_research_spend_usd": 0.01,
+        "claim_boundary": CLAIM_BOUNDARY,
+    }
+
+
+def test_validate_publication_payload_rejects_missing_and_wrong_typed_fields() -> None:
+    missing = _valid_publication_payload()
+    del missing["source"]
+    with pytest.raises(ProbeError, match="missing required key: source"):
+        validate_publication_payload(missing)
+
+    wrong_typed = _valid_publication_payload()
+    wrong_typed["replicas_per_candidate"] = "one"
+    with pytest.raises(ProbeError, match="replicas_per_candidate.*invalid type"):
+        validate_publication_payload(wrong_typed)
+
+    top_level_bool = _valid_publication_payload()
+    top_level_bool["replicas_per_candidate"] = True
+    with pytest.raises(ProbeError, match="replicas_per_candidate.*invalid type"):
+        validate_publication_payload(top_level_bool)
+
+    candidate_bool = _valid_publication_payload()
+    candidate_bool_candidates = cast(list[dict[str, object]], candidate_bool["candidates"])
+    candidate_bool_candidates[0]["model_runs"] = True
+    with pytest.raises(ProbeError, match="model_runs.*invalid type"):
+        validate_publication_payload(candidate_bool)
+
+    legitimate_bools = _valid_publication_payload()
+    legitimate_bools_source = cast(dict[str, object], legitimate_bools["source"])
+    legitimate_bools_candidates = cast(
+        list[dict[str, object]], legitimate_bools["candidates"]
+    )
+    legitimate_bools_source["roster_worktree_clean"] = True
+    legitimate_bools_candidates[0]["qualifies"] = True
+    validate_publication_payload(legitimate_bools)
+
+
+def test_published_setup_qualification_payload_matches_publication_schema() -> None:
+    published_result = (
+        Path(__file__).resolve().parents[1]
+        / "benchmarks/results/support-hq-setup-qualification-2026-07-20.json"
+    )
+
+    with published_result.open(encoding="utf-8") as result_file:
+        payload = json.load(result_file)
+
+    validate_publication_payload(payload)
+
+
+def test_render_markdown_reads_manifest_and_claim_boundary_from_payload() -> None:
+    payload = _valid_publication_payload()
+
+    markdown = render_markdown(payload)
+
+    assert "test-roster-sha" in markdown
+    assert CLAIM_BOUNDARY in markdown
+
+
+def test_probe_continues_when_roster_git_commands_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[1],))
+
+    def git_absent_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        if argv[0] == "git":
+            assert timeout_s == MANIFEST_GIT_TIMEOUT_S
+            raise FileNotFoundError("git")
+        if "compile" not in argv:
+            raise AssertionError("a no-op candidate must not start a model run")
+        destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+        child = destination / "agencies" / "crew" / "agent.yaml"
+        child.parent.mkdir(parents=True)
+        child.write_text(
+            yaml.safe_dump(_agent_config("crew", max_tokens=256)),
+            encoding="utf-8",
+        )
+        (destination / "ceo.yaml").write_text(
+            yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "compiled", "")
+
+    output = tmp_path / "results"
+    result = run_probe(case, output, command_runner=git_absent_runner)
+
+    source = cast(dict[str, object], result["source"])
+    assert source["roster_revision"] is None
+    assert source["roster_worktree_clean"] is None
+    company_source_sha256 = cast(str, source["company_source_sha256"])
+    assert len(company_source_sha256) == 64
+    assert int(company_source_sha256, 16) >= 0
+    assert (output / "results.json").is_file()
+
+
+@pytest.mark.parametrize("failed_command", ["HEAD", "status"])
+def test_probe_degrades_when_a_later_git_command_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_command: str,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[1],))
+
+    def partial_git_failure_runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        if argv[0] == "git":
+            assert timeout_s == MANIFEST_GIT_TIMEOUT_S
+            if "--show-toplevel" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{roster_root}\n", "")
+            if "HEAD" in argv:
+                return subprocess.CompletedProcess(
+                    argv,
+                    128 if failed_command == "HEAD" else 0,
+                    "" if failed_command == "HEAD" else "test-roster-sha\n",
+                    "git failure" if failed_command == "HEAD" else "",
+                )
+            if "status" in argv:
+                return subprocess.CompletedProcess(
+                    argv,
+                    128 if failed_command == "status" else 0,
+                    "",
+                    "git failure" if failed_command == "status" else "",
+                )
+            raise AssertionError(f"unexpected git command: {argv}")
+        if "compile" not in argv:
+            raise AssertionError("a no-op candidate must not start a model run")
+        destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+        child = destination / "agencies" / "crew" / "agent.yaml"
+        child.parent.mkdir(parents=True)
+        child.write_text(
+            yaml.safe_dump(_agent_config("crew", max_tokens=256)),
+            encoding="utf-8",
+        )
+        (destination / "ceo.yaml").write_text(
+            yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "compiled", "")
+
+    result = run_probe(
+        case,
+        tmp_path / f"results-{failed_command}",
+        command_runner=partial_git_failure_runner,
+    )
+
+    source = cast(dict[str, object], result["source"])
+    assert source["roster_revision"] is None
+    assert source["roster_worktree_clean"] is None
+    company_source_sha256 = cast(str, source["company_source_sha256"])
+    assert len(company_source_sha256) == 64
+    assert int(company_source_sha256, 16) >= 0
