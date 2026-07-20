@@ -21,6 +21,8 @@
         "delegated_llm_max_tokens_floor": null
       },
       "configured_replicas": 3,
+      "scheduled_replicas": 3,
+      "preflights": 3,
       "model_runs": 3,
       "completion_rate": 1.0,
       "conditional_rubric_pass_rate": 1.0,
@@ -72,11 +74,38 @@
         "delegated_llm_max_tokens_floor": 256
       },
       "configured_replicas": 3,
+      "scheduled_replicas": 3,
       "preflights": 3,
       "model_runs": 0,
+      "completion_rate": 0.0,
+      "conditional_rubric_pass_rate": null,
+      "end_to_end_pass_rate": 0.0,
+      "median_total_cost_usd": null,
       "qualifies": false,
       "decision": "candidate_noop",
-      "total_cost_usd": 0.0
+      "runs": [
+        {
+          "replica": 1,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": ["candidate_noop"],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 2,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": ["candidate_noop"],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 3,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": ["candidate_noop"],
+          "total_cost_usd": null
+        }
+      ]
     }
   ],
   "recommendation": "baseline",

@@ -37,6 +37,7 @@ SUCCESS_OUTCOMES = {"success", "success_with_recovery"}
 MIN_TOKEN_FLOOR = 64
 MAX_TOKEN_FLOOR = 4096
 DEFAULT_RUN_TIMEOUT_S = 600.0
+MANIFEST_GIT_TIMEOUT_S = 15.0
 CLAIM_BOUNDARY = "setup qualification only; memory/control result pending"
 
 CommandRunner = Callable[
@@ -566,50 +567,61 @@ def build_source_manifest(
     cwd: Path,
     *,
     environment: Mapping[str, str] | None = None,
-    timeout_s: float = DEFAULT_RUN_TIMEOUT_S,
 ) -> dict[str, str | bool | None]:
     """Return reproducibility metadata without requiring the roster to be a Git repo."""
     git_environment = dict(os.environ) if environment is None else environment
     source_parent = case.company_source.parent
     source_path = str(case.company_source)
+    manifest_path = source_path
+    company_source_sha256 = hashlib.sha256(case.company_source.read_bytes()).hexdigest()
 
-    top_level = command_runner(
-        ["git", "-C", str(source_parent), "rev-parse", "--show-toplevel"],
-        cwd,
-        git_environment,
-        timeout_s,
-    )
-    if top_level.returncode != 0:
+    def without_git_metadata() -> dict[str, str | bool | None]:
         return {
             "path": source_path,
             "roster_revision": None,
             "roster_worktree_clean": None,
-            "company_source_sha256": hashlib.sha256(
-                case.company_source.read_bytes()
-            ).hexdigest(),
+            "company_source_sha256": company_source_sha256,
         }
 
     try:
-        source_path = str(case.company_source.relative_to(top_level.stdout.strip()))
+        top_level = command_runner(
+            ["git", "-C", str(source_parent), "rev-parse", "--show-toplevel"],
+            cwd,
+            git_environment,
+            MANIFEST_GIT_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return without_git_metadata()
+    if top_level.returncode != 0:
+        return without_git_metadata()
+
+    try:
+        manifest_path = str(case.company_source.relative_to(top_level.stdout.strip()))
     except ValueError:
         pass
 
-    revision = command_runner(
-        ["git", "-C", str(source_parent), "rev-parse", "HEAD"],
-        cwd,
-        git_environment,
-        timeout_s,
-    )
+    try:
+        revision = command_runner(
+            ["git", "-C", str(source_parent), "rev-parse", "HEAD"],
+            cwd,
+            git_environment,
+            MANIFEST_GIT_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return without_git_metadata()
     if revision.returncode != 0:
         roster_revision: str | None = None
         roster_worktree_clean: bool | None = None
     else:
-        worktree_status = command_runner(
-            ["git", "-C", str(source_parent), "status", "--short"],
-            cwd,
-            git_environment,
-            timeout_s,
-        )
+        try:
+            worktree_status = command_runner(
+                ["git", "-C", str(source_parent), "status", "--short"],
+                cwd,
+                git_environment,
+                MANIFEST_GIT_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return without_git_metadata()
         if worktree_status.returncode != 0:
             roster_revision = None
             roster_worktree_clean = None
@@ -618,10 +630,10 @@ def build_source_manifest(
             roster_worktree_clean = not worktree_status.stdout.strip()
 
     return {
-        "path": source_path,
+        "path": manifest_path,
         "roster_revision": roster_revision,
         "roster_worktree_clean": roster_worktree_clean,
-        "company_source_sha256": hashlib.sha256(case.company_source.read_bytes()).hexdigest(),
+        "company_source_sha256": company_source_sha256,
     }
 
 
@@ -768,7 +780,6 @@ def run_probe(
         command_runner,
         command_cwd,
         environment=environment,
-        timeout_s=run_timeout_s,
     )
     public_candidates: list[dict[str, object]] = []
 
