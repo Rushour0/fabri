@@ -5,10 +5,10 @@ Two canonical configs ship in this directory:
 | file | purpose | guarantees |
 |---|---|---|
 | `example.yaml` | A runnable starter for a fresh checkout. Tweak freely. | None — allowed to drift between releases. |
-| `benchmark.yaml` | The exact config every published fabri benchmark uses. | Locked. Any value change requires a minor version bump AND a [BENCHMARKS.md](../BENCHMARKS.md) note. |
+| `benchmark.yaml` | The locked config for `session_delta`, LongMemEval, and related agent-memory measurements. Dynamic roster experiments use their dataset and pinned roster revision instead. | Any value change requires a minor version bump AND a [BENCHMARKS.md](../BENCHMARKS.md) note. |
 
-If a published chart or number doesn't say which config it used, assume
-`benchmark.yaml` from the same fabri version as the chart.
+Every published chart or number must name its config or dataset. Do not assume
+`benchmark.yaml` for a dynamic roster-company result.
 
 ## Quickstart
 

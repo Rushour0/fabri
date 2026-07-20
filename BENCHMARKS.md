@@ -4,17 +4,22 @@ The honest-numbers story for fabri's strategic claim:
 *"The self-improving agent runtime with honest COGS."*
 
 A claim is only worth as much as the experiment you'd run to falsify it.
-Two benchmarks back the claim — one fabri-specific, one industry-standard.
+Fabri keeps setup qualification, retrieval quality, live memory behavior, and
+public memory accuracy as separate evidence tracks so one cannot stand in for
+another.
 
 | benchmark | what it measures | status |
 |---|---|---|
+| **company setup qualification** | Whether a compiled roster completes its required delegation tree, satisfies a frozen deterministic rubric, and stays inside its company budget across fresh replicas. | Support HQ baseline qualified 3/3; Reliability Labs and Revenue Ops setup probes pending |
 | **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | first result landed (gpt-4o-mini, failure-recovery task): ↓7.8% cost, steps 5→4, reuse 0→67%; canonical sonnet number still pending |
+| **offline retrieval eval** | Whether retrieval finds hand-labeled relevant guidelines without spending model credits. | hybrid: recall@5 0.938, MRR 0.844; CI-gated |
 | **LongMemEval** | The "memory loop is real" claim — exact-match accuracy on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) public dataset. Apples-to-apples with Mastra (94.87%), Letta, Zep. | runner shipped, results pending |
 
-If you re-run any benchmark and get a different number, **the
-[`configs/benchmark.yaml`](configs/benchmark.yaml) file** is the
-single source of truth. Any change to that file requires a fabri
-minor-version bump *and* a results entry below.
+The memory runners use [`configs/benchmark.yaml`](configs/benchmark.yaml) as
+their locked source of truth. Dynamic company experiments instead use
+[`benchmarks/datasets/company_memory_experiments.yaml`](benchmarks/datasets/company_memory_experiments.yaml)
+plus a pinned `FABRI_ROSTERS_ROOT` revision. Every published result must name
+the applicable config or dataset, Fabri version, and external roster revision.
 
 ## Reproducing
 
@@ -26,6 +31,24 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Then pick a benchmark:
+
+### Company setup qualification
+
+Qualify a roster before spending on its memory/control study. The probe compiles
+a fresh company and isolates `FABRI_HOME` for every replica; raw prompts, traces,
+and model output stay private while reviewed aggregates can be published.
+
+```bash
+export FABRI_ROSTERS_ROOT=/path/to/fabri-rosters
+python -m fabri.benchmarks.company_setup_probe \
+  --dataset benchmarks/datasets/company_memory_experiments.yaml \
+  --case support_hq_safe_incident_response \
+  --output-dir benchmarks/runs/support-hq-setup-probe
+```
+
+Pin and report the roster Git revision before running. See the
+[dataset protocol](benchmarks/datasets/README.md) for isolation and scoring
+rules.
 
 ### session-N+1 cost delta
 
@@ -98,6 +121,24 @@ explains *why* each strategic value was chosen.
   expect cross-provider numbers to track within 10%.
 
 ## Results
+
+### Company setup qualification
+
+| date | company / task | completed | rubric given completion | end-to-end | median cost | decision | fabri |
+|---|---|---:|---:|---:|---:|---|---|
+| 2026-07-20 | Support HQ / safe incident response | 3/3 | 3/3 | 3/3 | $0.020200 | baseline qualified | 0.18.5 |
+
+The released three-run gate cost **$0.060496**. A proposed 256-token floor for
+delegated artifact roles received three fresh preflights but **zero model
+runs**: every applicable role already met the floor, so the candidate was
+rejected as `candidate_noop`. Earlier pilots and classifier validation brought
+total research spend to **$0.272837**.
+
+This result qualifies the existing Support HQ setup; it does **not** establish
+that memory improves it. The isolated training/holdout versus fresh-control
+study remains pending. Read the reviewed
+[result and lessons](benchmarks/results/support-hq-setup-qualification-2026-07-20.md)
+or the [machine-readable aggregate](benchmarks/results/support-hq-setup-qualification-2026-07-20.json).
 
 ### session-N+1 cost delta
 
@@ -207,7 +248,7 @@ these knobs on your own corpus._
 
 ## Honest gaps
 
-The single biggest open question fabri hasn't answered yet:
+The biggest open question Fabri has not answered yet:
 
 > Does the memory loop generalize across workload shapes?
 >
@@ -215,11 +256,22 @@ The single biggest open question fabri hasn't answered yet:
 > Research, classification, long-form writing, and multi-modal tasks are
 > not yet covered.
 
+Company setup qualification is also complete only for Support HQ. Reliability
+Labs and Revenue Ops have frozen prompts and assertions, but no released setup
+or memory/control result yet. A passing setup probe must not be reported as a
+memory win.
+
 When a benchmark gap closes, this paragraph shrinks.
 
 ## See also
 
 - [`configs/benchmark.yaml`](configs/benchmark.yaml) — the locked config.
+- [`benchmarks/README.md`](benchmarks/README.md) — benchmark artifact map and
+  focused test commands.
+- [`benchmarks/datasets/company_memory_experiments.yaml`](benchmarks/datasets/company_memory_experiments.yaml)
+  — dynamic roster experiment definitions.
+- [`benchmarks/results/`](benchmarks/results/) — reviewed, publishable
+  aggregates; private runs are intentionally excluded.
 - [`src/fabri/benchmarks/`](src/fabri/benchmarks/) — runner source.
 - [`decks/internal/code-gaps.md`](decks/internal/code-gaps.md) — the
   internal strategic-claim ↔ codebase gap analysis (gitignored).

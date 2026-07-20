@@ -10,6 +10,21 @@ traces into memory, so they stop repeating their mistakes — measurably fewer
 steps and lower cost on tasks they can learn from
 ([benchmarks](https://github.com/Rushour0/fabri/blob/main/BENCHMARKS.md)).
 
+## Evidence snapshot
+
+Fabri publishes completed measurements and leaves pending work visibly pending:
+
+| Evidence | Result | Scope |
+|---|---|---|
+| Company setup qualification | Support HQ baseline completed and passed **3/3** fresh replicas; median recursively accounted cost **$0.020200** | Qualifies this company setup for a later memory/control study; it is not a memory-benefit result |
+| Offline retrieval evaluation | Shipped hybrid retrieval reached **0.938 recall@5** and **0.844 MRR**, versus dense at 0.792 and 0.790 | Deterministic, labeled retrieval fixture; no live model |
+| Session-N+1 recovery pilot | Steps **5 → 4**, guideline reuse **0% → 67%**, cost **↓7.8%** | Six-run constructed task on gpt-4o-mini; not a general workload claim |
+| LongMemEval | Runner shipped; result pending | No score claimed yet |
+
+See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, and
+the reviewed [Support HQ result](benchmarks/results/support-hq-setup-qualification-2026-07-20.md)
+for per-replica costs, failed hypotheses, and the release decision.
+
 fabri is split into two layers: an **engine** (a frugal agent loop, per-role
 LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
 own traces) and a **builder** that turns intent into a running agent fast.

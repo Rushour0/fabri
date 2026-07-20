@@ -2,8 +2,9 @@
 #
 # THIS FILE IS LOAD-BEARING for reproducibility.
 #
-# Every fabri-published benchmark number (session_delta, LongMemEval, etc.)
-# is produced against this exact config. Changes here change the published
+# Every canonical session_delta and LongMemEval number is produced against this
+# exact config. Dynamic roster-company experiments use their published dataset
+# and pinned roster revision instead. Changes here change the memory-benchmark
 # numbers — bump fabri's minor version (0.7.x → 0.8.0) when you do, so
 # anyone re-running a chart with a fabri version >= the chart's version
 # gets the same number ±LLM jitter.

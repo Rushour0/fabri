@@ -9,6 +9,14 @@ Set the roster checkout once:
 export FABRI_ROSTERS_ROOT=/path/to/fabri-rosters
 ```
 
+Pin and record the roster revision before running. A mutable source path alone
+is not enough to reproduce a company result:
+
+```sh
+git -C "$FABRI_ROSTERS_ROOT" rev-parse HEAD
+git -C "$FABRI_ROSTERS_ROOT" status --short
+```
+
 ## Qualify the company setup first
 
 Before spending on the memory/control experiment, run the bounded setup probe:
@@ -28,11 +36,12 @@ limit. Incomplete runs receive no rubric verdict. Public aggregate results and
 the recommended declarative profile are written at the output root; prompts,
 traces, session ids, and raw model output stay under `private-attempts/`.
 
-The Support HQ probe changes only a low delegated artifact-producing `main`
-role's token ceiling. It does not change narration, prompts, tools, security
-policy, roster source, or Fabri runtime behavior. A candidate that changes no
-effective delegated role is recorded as `candidate_noop` and is not run, so an
-obsolete hypothesis does not spend model credits.
+The only currently allowlisted override can raise low delegated
+artifact-producing `main` roles to a bounded token floor. It cannot change
+narration, prompts, tools, security policy, roster source, or Fabri runtime
+behavior. On the released Support HQ roster, the 256-token proposal changed no
+effective role and was recorded as `candidate_noop`; it received no model run
+and spent no credits.
 
 Only after a profile qualifies should it enter the full memory/control study
 below.
@@ -74,3 +83,14 @@ cost, step count, and retrieved-guideline count. A failed training run
 invalidates its train/holdout pair because failure lessons are still mined.
 Publish curated aggregates only; the raw workspaces and traces can contain
 model output and operational source material.
+
+## Released status
+
+| Case | Setup status | Memory/control status |
+|---|---|---|
+| `support_hq_safe_incident_response` | Baseline qualified 3/3 | Pending |
+| `reliability_labs_incident_release_gate` | Pending | Pending |
+| `revenue_ops_evidence_backed_outreach` | Pending | Pending |
+
+The Support HQ aggregate is published in
+[`../results/support-hq-setup-qualification-2026-07-20.md`](../results/support-hq-setup-qualification-2026-07-20.md).

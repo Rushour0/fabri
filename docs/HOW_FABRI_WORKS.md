@@ -336,9 +336,9 @@ class Outcome(StrEnum):
 Every `llm.step` call returns `LLMUsage(input, output, cache_creation,
 cache_read, model)`. Usage accumulates per-model so `cost_for(bucket)` prices
 a mixed-model run (Sonnet orchestrator + Haiku decompose) at each model's own
-rate. Sub-agent costs bubble up via the `spawn_subagent` result's `usage`
-field; `total_cost_usd = own_cost + subagent_cost_total` is the true
-end-to-end COGS.
+rate. Delegated child costs bubble up through both static agent-tool and
+`spawn_subagent` result usage; `total_cost_usd = own_cost +
+subagent_cost_total` is the true end-to-end COGS.
 
 ---
 

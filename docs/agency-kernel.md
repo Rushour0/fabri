@@ -29,8 +29,8 @@ The labels are an operating procedure, not new API calls:
   its own trace and step budget (`agent.subagent.max_steps` bounds
   `spawn_subagent`, not these static entries — each child uses its own
   config's `agent.max_steps`). The parent sees a concise tool result, not the
-  child's whole conversation, and does not currently roll the child's cost
-  into its own reported total — see "Observe a run" below.
+  child's whole conversation. The result includes child usage, and recursive
+  child cost rolls into the parent's `subagent_cost_usd` and `total_cost_usd`.
 - **Execute** means a specialist calls built-in or custom tools. Custom tools
   are a JSON manifest and an executable: stdin receives JSON arguments and
   stdout returns JSON. File-touching tools must honor `FABRI_SANDBOX_ROOT`.
@@ -44,19 +44,12 @@ The labels are an operating procedure, not new API calls:
   know whether the deliverable is actually good — do not treat CLI success as
   proof. A human approval gate remains outside the engine and must be named in
   the agency contract.
-- **Outcome and narration are each independently unreliable.** Two live-run
-  findings show this concretely, not abstractly: one run reported
-  `outcome: "success_with_recovery"` while 13/13 tool calls failed and no
-  deliverable was created (`session-notes/live-test-run.log:106,132`);
-  another reported `outcome: "success"` with 0/14 tool-call failures while
-  the model's own final text narrated ongoing verification failure
-  (`session-notes/live-test-run-2.log:70,72,98`). fabri's `outcome` field and
-  the model's free-text summary each diverged from ground truth, in opposite
-  directions, on the same worked example. Neither is evidence alone. The
-  only trustworthy signal today is the deterministic verifier's own machine
-  output plus the trace's raw tool-call results -- read those, not either
-  summary layer. See "Deliver" below for what this means for the delivered
-  message.
+- **Outcome and output quality are separate signals.** `success` and
+  `success_with_recovery` say that execution completed; they do not prove that
+  the artifact meets its task rubric. Check the deterministic verifier or
+  frozen assertion rubric, required child outcomes, and trace failure signals.
+  The company setup benchmark enforces this separation: an incomplete run gets
+  no rubric verdict, while a complete run can still fail its output rubric.
 - **Deliver** is the verified file plus its path, verdict, and trace/session
   identifier. Do not equate a polished final message with verification.
 - **Learn** is fabri's existing post-run memory loop: relevant guidelines are
@@ -104,7 +97,7 @@ artifact it judges.
 | Project action | Built-ins plus manifest-backed executables | Use schemas and small JSON results; tools may be polyglot. |
 | Filesystem boundary | `tools.sandbox_root` and `FABRI_SANDBOX_ROOT` | Constrain file tools to the project/agency boundary. |
 | Acceptance/retry | `agent.repair` and a host verifier command | Verification is repeatable and bounded, not a model promise. |
-| Cost boundary | Parent and per-specialist config step/cost budgets | Only `spawn_subagent` fan-out rolls child cost into the parent's total today; static `tools.agents[]` specialists report their own cost separately — set each config's bounds deliberately and read `fabri report` per session, not just the parent's. |
+| Cost boundary | Parent and per-specialist config step/cost budgets | Static `tools.agents[]` and `spawn_subagent` results roll recursive child usage into the parent's `subagent_cost_usd` and `total_cost_usd`; still set each child config's own bounds deliberately. |
 | Learning | SQLite/Qdrant memory retrieval and trace processing | Keep collection names stable across related deliveries. |
 
 This mapping follows `docs/HOW_FABRI_WORKS.md`, `docs/creating-an-agent.md`,
