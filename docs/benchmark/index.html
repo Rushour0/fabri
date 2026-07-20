@@ -1,309 +1,266 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="A Fabri qualification study: the Support HQ agent company completed an incident-response workload 3 of 3 times, end to end, at $0.020200 median per run — with an honest account of what that does and does not prove.">
-<title>Support HQ — A Fabri Qualification Study</title>
+<meta name="description" content="A Fabri setup-qualification study of three AI-agent companies. Under a strict 100%-reliability gate, none of the three qualifies; the 3-replica gate is shown to be statistically fragile, and two companies fail by over-claiming. Median recursive cost $0.020200/run; total study cost $0.82.">
+<title>Do AI-Agent Companies Do the Job Reliably? — A Fabri Study</title>
 <style>
   :root {
-    --paper: #f4f5f0;
-    --leaf: #ffffff;
-    --ink: #17201b;
-    --ink-soft: #4c554e;
-    --faint: #878e84;
-    --rule: #dcded5;
-    --rule-strong: #c4c8bc;
-    --accent: #1c6a4c;
-    --accent-quiet: #2f7d5f;
-    --rust: #9d4a2c;
-    --measure: 62ch;
-    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Hoefler Text", "Georgia", serif;
+    --paper: #f5f5f1;
+    --leaf: #fbfbf8;
+    --ink: #16191c;
+    --ink-soft: #454b50;
+    --faint: #838a8f;
+    --rule: #d9dbd4;
+    --rule-strong: #b7bab1;
+    --accent: #1d5f7a;
+    --rust: #9a4526;
+    --measure: 68ch;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Hoefler Text", Georgia, "Times New Roman", serif;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --paper: #121614;
-      --leaf: #182020;
-      --ink: #e9ece4;
-      --ink-soft: #aab2a9;
-      --faint: #727a72;
-      --rule: #26302c;
-      --rule-strong: #33403a;
-      --accent: #63c295;
-      --accent-quiet: #4fae82;
-      --rust: #d18a6d;
+      --paper: #101315; --leaf: #171b1e; --ink: #e7eaec; --ink-soft: #a7aeb2; --faint: #6f767b;
+      --rule: #262b2f; --rule-strong: #363d42; --accent: #6bb6d4; --rust: #d18a6d;
     }
   }
   :root[data-theme="light"] {
-    --paper: #f4f5f0; --leaf: #ffffff; --ink: #17201b; --ink-soft: #4c554e; --faint: #878e84;
-    --rule: #dcded5; --rule-strong: #c4c8bc; --accent: #1c6a4c; --accent-quiet: #2f7d5f; --rust: #9d4a2c;
+    --paper: #f5f5f1; --leaf: #fbfbf8; --ink: #16191c; --ink-soft: #454b50; --faint: #838a8f;
+    --rule: #d9dbd4; --rule-strong: #b7bab1; --accent: #1d5f7a; --rust: #9a4526;
   }
   :root[data-theme="dark"] {
-    --paper: #121614; --leaf: #182020; --ink: #e9ece4; --ink-soft: #aab2a9; --faint: #727a72;
-    --rule: #26302c; --rule-strong: #33403a; --accent: #63c295; --accent-quiet: #4fae82; --rust: #d18a6d;
+    --paper: #101315; --leaf: #171b1e; --ink: #e7eaec; --ink-soft: #a7aeb2; --faint: #6f767b;
+    --rule: #262b2f; --rule-strong: #363d42; --accent: #6bb6d4; --rust: #d18a6d;
   }
 
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0; background: var(--paper); color: var(--ink);
-    font-family: var(--serif); font-size: 19px; line-height: 1.62;
-    overflow-x: hidden;
+    font-family: var(--serif); font-size: 18px; line-height: 1.6; overflow-x: hidden;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  .page { max-width: 760px; margin: 0 auto; padding: clamp(28px, 6vw, 72px) clamp(20px, 6vw, 40px) 96px; }
+  .paper { max-width: 720px; margin: 0 auto; padding: clamp(32px, 6vw, 76px) clamp(20px, 6vw, 40px) 96px; }
 
-  /* masthead */
-  .mast { display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
-    padding-bottom: 14px; border-bottom: 1px solid var(--rule-strong); }
-  .mast .brand { font-family: var(--sans); font-weight: 620; letter-spacing: -.01em; font-size: 15px; }
-  .mast .brand b { color: var(--accent); font-weight: 620; }
-  .mast .stamp { font-family: var(--sans); font-size: 12px; letter-spacing: .04em; color: var(--faint); }
+  /* title block — centered, formal */
+  .head { text-align: center; padding-bottom: 26px; border-bottom: 1px solid var(--rule); }
+  .venue { font-family: var(--sans); font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--faint); margin: 0 0 18px; }
+  h1 { font-family: var(--serif); font-weight: 600; font-size: clamp(25px, 4.4vw, 37px); line-height: 1.14;
+    letter-spacing: -.01em; margin: 0 auto; max-width: 20ch; text-wrap: balance; }
+  .authors { font-family: var(--serif); font-size: 16px; color: var(--ink-soft); margin: 18px 0 4px; }
+  .affil { font-family: var(--sans); font-size: 13px; color: var(--faint); }
 
-  h1 {
-    font-family: var(--serif); font-weight: 600; letter-spacing: -.015em;
-    font-size: clamp(34px, 6.6vw, 58px); line-height: 1.04; text-wrap: balance;
-    margin: clamp(30px, 6vw, 52px) 0 0; max-width: 15ch;
-  }
-  h1 .q { color: var(--accent); font-style: italic; }
-  .dek { font-size: clamp(19px, 2.5vw, 22px); color: var(--ink-soft); max-width: var(--measure);
-    margin: 22px 0 0; line-height: 1.5; }
-  .dek em { font-style: italic; color: var(--ink); }
+  /* abstract */
+  .abstract { margin: 30px auto 0; max-width: var(--measure); }
+  .abstract .lbl { font-family: var(--sans); font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 640; color: var(--ink-soft); text-align: center; margin: 0 0 12px; }
+  .abstract p { margin: 0; font-size: 16.5px; line-height: 1.62; text-align: justify; hyphens: auto; }
+  .kw { font-family: var(--sans); font-size: 13px; color: var(--faint); text-align: center; margin: 18px 0 0; }
+  .kw b { color: var(--ink-soft); font-weight: 600; }
 
-  .byline { font-family: var(--sans); font-size: 13.5px; color: var(--faint); margin-top: 26px;
-    display: flex; flex-wrap: wrap; gap: 6px 18px; }
-  .byline b { color: var(--ink-soft); font-weight: 600; }
+  section { margin-top: 44px; max-width: var(--measure); margin-left: auto; margin-right: auto; }
+  h2 { font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -.01em;
+    margin: 0 0 14px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+  p { margin: 0 0 15px; }
+  p:last-child { margin-bottom: 0; }
+  section p { text-align: justify; hyphens: auto; }
+  .lead { font-variant: normal; }
+  b, strong { font-weight: 640; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--rule-strong); }
+  a:hover { border-bottom-color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 
-  section { margin-top: clamp(40px, 7vw, 68px); }
-  .sec-label { font-family: var(--sans); font-size: 13px; font-weight: 640; letter-spacing: .02em;
-    color: var(--accent); margin: 0 0 20px; }
-  .prose { max-width: var(--measure); }
-  .prose p { margin: 0 0 18px; }
-  .prose p:last-child { margin-bottom: 0; }
+  ol.method, ul.plain { margin: 0 0 4px; padding-left: 1.3em; }
+  ol.method li, ul.plain li { margin: 0 0 9px; }
+  ol.method li b, ul.plain li b { font-weight: 640; }
 
-  /* the result — a typographic figure line, not tiles */
-  .figures { display: grid; grid-template-columns: repeat(4, auto); gap: clamp(20px, 5vw, 46px);
-    align-items: end; padding: 4px 0 22px; border-bottom: 1px solid var(--rule); }
-  .fig .n { font-family: var(--serif); font-variant-numeric: tabular-nums; font-weight: 600;
-    font-size: clamp(30px, 5.6vw, 46px); line-height: .95; letter-spacing: -.02em; white-space: nowrap; }
-  .fig.money .n { font-size: clamp(23px, 3.6vw, 31px); letter-spacing: -.01em; }
-  .fig .n .slash { color: var(--faint); font-weight: 500; }
-  .fig .n .cur { font-size: .58em; color: var(--ink-soft); vertical-align: .1em; margin-right: 1px; }
-  .fig .l { font-family: var(--sans); font-size: 12.5px; color: var(--ink-soft); margin-top: 12px; line-height: 1.3; max-width: 15ch; }
-  .fig.pass .n { color: var(--accent); }
-  @media (max-width: 560px) { .figures { grid-template-columns: 1fr 1fr; gap: 28px 22px; } }
-
-  .verdict { margin: 26px 0 0; font-family: var(--sans); font-size: 14px; color: var(--ink-soft); max-width: var(--measure); line-height: 1.55; }
-  .verdict b { font-family: var(--serif); font-style: italic; font-size: 17px; color: var(--accent); font-weight: 600; }
-
-  /* candidates: a plain ledger table */
-  .ledger .scroll { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; min-width: 480px; font-family: var(--sans); }
-  thead th { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint);
-    font-weight: 600; text-align: right; padding: 0 0 10px; border-bottom: 1px solid var(--rule-strong); }
+  /* booktabs table */
+  figure.tbl { margin: 22px 0 6px; }
+  .tbl .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 520px; font-family: var(--sans); font-size: 14px; }
+  thead th { text-align: right; font-weight: 600; color: var(--ink); font-size: 12.5px;
+    padding: 0 0 8px; border-top: 2px solid var(--ink); border-bottom: 1px solid var(--rule-strong);
+    padding-top: 9px; }
   thead th:first-child { text-align: left; }
-  tbody td { padding: 15px 0; border-bottom: 1px solid var(--rule); text-align: right;
-    font-variant-numeric: tabular-nums; font-size: 15px; }
-  tbody td:first-child { text-align: left; }
-  tbody tr:last-child td { border-bottom: none; }
+  tbody td { text-align: right; padding: 10px 0; font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+  tbody td:first-child { text-align: left; color: var(--ink); }
+  tbody tr:last-child td { border-bottom: 2px solid var(--ink); }
   td + td, th + th { padding-left: 16px; }
-  tbody td:first-child { padding-right: 8px; }
-  .cand { font-family: var(--mono); font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
-  .cand small { display: block; font-family: var(--sans); font-size: 12.5px; color: var(--faint); margin-top: 3px; letter-spacing: 0; text-transform: none; }
-  .mark { font-weight: 600; }
-  .mark.ok { color: var(--accent); }
-  .mark.no { color: var(--rust); }
-  td.brk { text-align: left; font-family: var(--sans); font-size: 13px; color: var(--ink-soft);
-    font-variant-numeric: normal; max-width: 22ch; line-height: 1.35; }
-  .ledger figcaption { font-family: var(--sans); font-size: 14px; color: var(--ink-soft);
-    max-width: var(--measure); margin-top: 18px; line-height: 1.55; }
-  .ledger figcaption b { color: var(--ink); font-weight: 600; }
+  .co { font-family: var(--serif); font-size: 15px; }
+  .co small { display: block; font-family: var(--sans); font-size: 12px; color: var(--faint); margin-top: 1px; }
+  .no { color: var(--rust); font-weight: 600; }
+  td.brk { text-align: left; font-family: var(--sans); font-size: 12.5px; color: var(--ink-soft);
+    font-variant-numeric: normal; max-width: 20ch; line-height: 1.35; }
+  figcaption { font-family: var(--sans); font-size: 13px; color: var(--faint); margin-top: 12px; line-height: 1.5; }
+  figcaption b { color: var(--ink-soft); font-weight: 600; }
 
-  /* the rules — a hanging list, no numbered cards */
-  .rules { list-style: none; margin: 0; padding: 0; max-width: var(--measure); }
-  .rules li { padding: 16px 0; border-top: 1px solid var(--rule); font-size: 17px; color: var(--ink-soft); }
-  .rules li:first-child { border-top: none; padding-top: 0; }
-  .rules li b { color: var(--ink); font-weight: 600; }
+  /* results inline stat strip — modest, not a hero */
+  .glance { display: flex; flex-wrap: wrap; gap: 6px 30px; margin: 0 0 16px; padding: 14px 0;
+    border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-family: var(--sans); }
+  .glance div { font-size: 13px; color: var(--faint); }
+  .glance b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600;
+    color: var(--ink); display: block; letter-spacing: -.01em; }
 
-  /* honesty — the centerpiece, two ledgers */
-  .claims { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(24px, 5vw, 48px); }
-  @media (max-width: 620px) { .claims { grid-template-columns: 1fr; gap: 34px; } }
-  .claims h3 { font-family: var(--serif); font-style: italic; font-weight: 600; font-size: 22px; margin: 0; }
-  .claims .est h3 { color: var(--accent); }
-  .claims .not h3 { color: var(--ink); }
-  .claims ul { list-style: none; margin: 14px 0 0; padding: 0; }
-  .claims li { padding: 14px 0; border-top: 1px solid var(--rule); font-size: 16.5px; line-height: 1.5; }
-  .claims li .why { display: block; font-family: var(--sans); font-size: 13.5px; color: var(--faint); margin-top: 4px; }
-
-  /* provenance colophon */
-  .colophon { font-family: var(--mono); font-size: 12.5px; background: var(--leaf);
-    border: 1px solid var(--rule); border-radius: 3px; }
-  .colophon dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; }
-  .colophon dt { color: var(--faint); padding: 12px 16px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
-  .colophon dd { margin: 0; color: var(--ink); padding: 12px 16px; border-bottom: 1px solid var(--rule);
+  /* reproducibility appendix */
+  .repro { font-family: var(--mono); font-size: 12.5px; background: var(--leaf); border: 1px solid var(--rule);
+    border-radius: 3px; margin-top: 6px; }
+  .repro dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; }
+  .repro dt { color: var(--faint); padding: 10px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  .repro dd { margin: 0; color: var(--ink); padding: 10px 14px; border-bottom: 1px solid var(--rule);
     text-align: right; word-break: break-all; }
-  .colophon dl > :nth-last-child(-n+2) { border-bottom: none; }
+  .repro dl > :nth-last-child(-n+2) { border-bottom: none; }
 
-  /* roadmap ledger */
-  .bench { list-style: none; margin: 0; padding: 0; max-width: var(--measure); }
-  .bench li { display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
-    padding: 16px 0; border-top: 1px solid var(--rule); }
-  .bench li:first-child { border-top: none; }
-  .bench .t { font-size: 18px; }
-  .bench .t small { display: block; font-family: var(--sans); font-size: 13px; color: var(--faint); margin-top: 2px; }
-  .bench .s { font-family: var(--sans); font-size: 12.5px; letter-spacing: .02em; white-space: nowrap; }
-  .bench .s.done { color: var(--accent); }
-  .bench .s.wait { color: var(--faint); }
-
-  .foot { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--rule-strong);
-    display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: baseline; justify-content: space-between; }
-  .links { display: flex; flex-wrap: wrap; gap: 22px; font-family: var(--sans); font-size: 15px; }
-  .links a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--rule-strong); padding-bottom: 2px; }
-  .links a:hover { border-bottom-color: var(--accent); }
-  .colo { font-family: var(--sans); font-size: 12.5px; color: var(--faint); }
-  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+  footer { max-width: var(--measure); margin: 48px auto 0; padding-top: 20px; border-top: 1px solid var(--rule);
+    font-family: var(--sans); font-size: 13px; color: var(--faint);
+    display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between; }
+  footer .refs a { margin-right: 18px; }
 
   @media (prefers-reduced-motion: no-preference) {
-    .reveal { animation: rise .6s cubic-bezier(.2,.7,.2,1) both; }
-    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    .reveal { animation: fade .5s ease both; }
+    @keyframes fade { from { opacity: 0 } to { opacity: 1 } }
   }
 </style>
 
-<article class="page">
-  <header class="mast reveal">
-    <span class="brand"><b>Fabri</b> — company evaluation</span>
-    <span class="stamp">Study 01 · 20 July 2026</span>
+<article class="paper">
+  <header class="head reveal">
+    <p class="venue">Fabri · Company Evaluation · Study 01</p>
+    <h1>Do AI-agent companies do the job reliably? A setup-qualification study of three Fabri companies</h1>
+    <p class="authors">Fabri Company Evaluation</p>
+    <p class="affil">Fabri v0.18.5 · 20 July 2026 · openai / gpt-5.6-terra + gpt-4o-mini</p>
   </header>
 
-  <h1 class="reveal">Support HQ passed three times. <span class="q">Then ten runs said ninety percent.</span></h1>
-  <p class="dek reveal">Fabri asks a strict question: does a company of AI agents finish a real task
-    <em>correctly, every single time</em> — from clean, isolated state? A three-run gate said Support HQ
-    did. A ten-run confirmation said 90%. The other two companies never came close. Here is the honest
-    scorecard.</p>
-  <p class="byline reveal">
-    <span>Three companies</span>
-    <span>One strict, 100% bar</span>
-    <span>Fabri <b>v0.18.5</b></span>
-  </p>
+  <div class="abstract reveal">
+    <p class="lbl">Abstract</p>
+    <p>We evaluate whether three multi-agent "companies" built on Fabri can complete a real workload
+      <em>correctly on every attempt</em>, each from clean, isolated state. Under a strict
+      100%-reliability gate across independent replicas, <b>none of the three companies qualifies.</b>
+      Support HQ passes a 3-replica release gate (3/3) but falls to 9/10 (≈90%) under a 10-replica
+      confirmation, demonstrating that the small-sample gate is statistically fragile. Reliability Labs
+      (2/3 rubric) and Revenue Ops (0/3 rubric) fail chiefly by <b>over-claiming</b> — asserting
+      outcomes absent from the supplied evidence — the exact failure mode the rubrics target. Cost is
+      recursively accounted across each company's full delegation tree: median $0.020200 per Support HQ
+      run; the complete study cost $0.82. Every result carries a self-generated reproducibility
+      manifest; prompts, traces, and raw output are withheld.</p>
+    <p class="kw">Keywords: <b>agent evaluation</b> · <b>reliability</b> · <b>reproducibility</b> · <b>over-claiming</b> · <b>recursive cost accounting</b></p>
+  </div>
 
-  <section aria-label="Headline result">
-    <div class="figures">
-      <div class="fig"><div class="n">0<span class="slash">/3</span></div><div class="l">companies cleared the 100% bar</div></div>
-      <div class="fig"><div class="n">9<span class="slash">/10</span></div><div class="l">Support HQ's best, at ten replicas</div></div>
-      <div class="fig money"><div class="n"><span class="cur">$</span>0.0202</div><div class="l">median cost per Support HQ run</div></div>
-      <div class="fig money"><div class="n"><span class="cur">$</span>0.82</div><div class="l">total spent, all runs</div></div>
-    </div>
-    <p class="verdict">The three-run gate is what fooled us. Support HQ cleared it 3/3 — a small sample.
-      Ten runs of the same setup dropped it to <b>9/10</b>, and the gate demands 100%. The larger sample
-      didn't refine the claim; it overturned it.</p>
+  <section>
+    <h2><span class="num">1</span>The question</h2>
+    <p>Before asking whether a company of agents is <em>capable</em>, we ask whether it is
+      <em>dependable</em>: given the same task and a fresh, isolated environment, does it finish the
+      work — and finish it <em>correctly</em> — on every attempt? We hold each company to a strict bar:
+      to qualify, a setup must pass end-to-end on <em>100%</em> of its scheduled replicas. Anything less
+      is not a qualification.</p>
   </section>
 
-  <section class="ledger" aria-label="The three companies">
-    <p class="sec-label">The three companies</p>
-    <div class="scroll">
-      <table>
-        <thead>
-          <tr><th>Company</th><th>Sample</th><th>Completion</th><th>Rubric</th><th>Clears bar?</th><th>Where it broke</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><span class="cand">Support HQ<small>incident response</small></span></td>
-            <td>10</td><td>10&#8202;/&#8202;10</td><td>9&#8202;/&#8202;10</td>
-            <td><span class="mark no">No</span></td>
-            <td class="brk">omitted the follow&#8209;up (1 run)</td>
-          </tr>
-          <tr>
-            <td><span class="cand">Reliability Labs<small>incident release gate</small></span></td>
-            <td>3</td><td>3&#8202;/&#8202;3</td><td>2&#8202;/&#8202;3</td>
-            <td><span class="mark no">No</span></td>
-            <td class="brk">claimed "fix was deployed"</td>
-          </tr>
-          <tr>
-            <td><span class="cand">Revenue Ops<small>evidence-backed outreach</small></span></td>
-            <td>3</td><td>2&#8202;/&#8202;3</td><td>0&#8202;/&#8202;3</td>
-            <td><span class="mark no">No</span></td>
-            <td class="brk">claimed unsourced results; 1 truncated</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <figcaption>Two of the three failed the same way: <b>over-claiming</b> — asserting a fix was
-      deployed, or a customer result that wasn't in the evidence. That is the exact failure these
-      workloads exist to catch, and the rubric caught it.</figcaption>
+  <section>
+    <h2><span class="num">2</span>Method</h2>
+    <ol class="method">
+      <li><b>Isolation.</b> Every replica gets a fresh compile of the company and its own disposable
+        home directory, so no state leaks between runs.</li>
+      <li><b>Two separate measurements.</b> <em>Completion</em> (did the run finish and produce output)
+        and <em>rubric</em> (was the output correct and safe) are scored independently and never
+        averaged together; an incomplete run receives no rubric verdict.</li>
+      <li><b>Deterministic rubric.</b> The output is checked for required concepts and forbidden phrases
+        fixed in advance — e.g. an incident update must mention a rollback and a follow-up, and must not
+        claim a fix was deployed without evidence.</li>
+      <li><b>Recursive cost.</b> Every delegated sub-agent's spend rolls up into the parent, so a
+        reported cost is the whole company's tree, not just the top.</li>
+      <li><b>Bounded candidate search with no-op rejection.</b> A proposed configuration change that
+        preflight shows would do nothing is rejected before any model call — a no-op costs nothing.</li>
+    </ol>
   </section>
 
-  <section aria-label="Why the numbers can be trusted">
-    <p class="sec-label">Why the numbers can be trusted</p>
-    <ul class="rules">
-      <li><b>An unfinished run earns no score.</b> Whether the work completed and whether it was any good
-        are measured apart, and never quietly averaged together.</li>
-      <li><b>A change that does nothing spends nothing.</b> Candidate tweaks are bounded and rejected at
-        preflight, so the search can't run up a bill chasing non-differences.</li>
-      <li><b>Every sub-agent's cost is counted.</b> Static specialists and spawned children alike roll up
-        into one total — the whole company's tree, not just the top.</li>
+  <section>
+    <h2><span class="num">3</span>Results</h2>
+    <div class="glance" aria-label="Results at a glance">
+      <div><b>0 / 3</b>companies cleared the bar</div>
+      <div><b>9 / 10</b>Support HQ, ten replicas</div>
+      <div><b>$0.0202</b>median cost / run</div>
+      <div><b>$0.82</b>total study cost</div>
+    </div>
+    <figure class="tbl">
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>Company</th><th>Replicas</th><th>Completion</th><th>Rubric</th><th>Qualifies</th><th>Primary failure</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="co">Support HQ<small>incident response</small></span></td>
+              <td>3 → 10</td><td>10/10</td><td>9/10</td><td class="no">No</td>
+              <td class="brk">3/3 gate did not replicate; 1 run omitted the follow-up</td>
+            </tr>
+            <tr>
+              <td><span class="co">Reliability Labs<small>incident release gate</small></span></td>
+              <td>3</td><td>3/3</td><td>2/3</td><td class="no">No</td>
+              <td class="brk">claimed "fix was deployed" (unverified)</td>
+            </tr>
+            <tr>
+              <td><span class="co">Revenue Ops<small>evidence-backed outreach</small></span></td>
+              <td>3</td><td>2/3</td><td>0/3</td><td class="no">No</td>
+              <td class="brk">claimed unsourced results; 1 truncation</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><b>Table 1.</b> Setup-qualification outcomes. Completion is near-total everywhere; the
+        gap is entirely in the rubric — i.e. in output correctness, not in whether the run finished.
+        Support HQ's small-sample 3/3 gate is shown alongside its 10-replica confirmation.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">4</span>Discussion</h2>
+    <p><b>Small samples overstate reliability.</b> Support HQ's 3/3 release gate read as flawless, yet
+      ten runs of the identical setup produced 9/10. The additional replicas did not refine the estimate
+      so much as overturn it: the true rubric reliability is near 90%, and the 100% gate is not met.</p>
+    <p><b>The dominant failure is over-claiming.</b> Two of three companies failed by asserting facts the
+      evidence did not support — a deployed fix, a customer result, buying intent. These are precisely
+      the errors the rubrics forbid, and the harness caught each one. That completion was near-total
+      throughout underscores the central point: <em>a run finishing cleanly is not evidence that its
+      output is correct.</em></p>
+  </section>
+
+  <section>
+    <h2><span class="num">5</span>Limitations</h2>
+    <ul class="plain">
+      <li><b>No memory claim.</b> This measures setup reliability only. Whether Fabri's trace-backed
+        memory improves a company is a separate, controlled experiment (memory vs. control), reported
+        elsewhere.</li>
+      <li><b>Narrow scope.</b> Three companies, one workload each, modest replica counts. The results do
+        not generalize to other tasks or configurations.</li>
+      <li><b>As-shipped, not optimized.</b> Each company was evaluated as delivered; a single bounded
+        configuration hypothesis was tested. The point is to measure honestly first, then improve.</li>
     </ul>
   </section>
 
-  <section aria-label="What this establishes and does not">
-    <p class="sec-label">The honest part</p>
-    <div class="claims">
-      <div class="est">
-        <h3>What this establishes</h3>
-        <ul>
-          <li>The harness catches real over-claims.
-            <span class="why">Two of three failed by asserting things absent from the evidence — and the rubric flagged each one.</span></li>
-          <li>A three-run gate is statistically fragile.
-            <span class="why">Support HQ's 3/3 fell to 9/10 once we ran it ten times.</span></li>
-          <li>The cost is known, recursive, and small.
-            <span class="why">~$0.02 per run; the whole three-company study cost $0.82.</span></li>
-        </ul>
-      </div>
-      <div class="not">
-        <h3>What it does not</h3>
-        <ul>
-          <li>That any of these setups is trustworthy at the 100% bar.
-            <span class="why">None cleared it. That's the finding, not a footnote.</span></li>
-          <li>That memory makes a company better.
-            <span class="why">The memory-vs-control study is the next experiment.</span></li>
-          <li>That the setups can't improve.
-            <span class="why">These are as-shipped. The point is to measure honestly first, then fix.</span></li>
-        </ul>
-      </div>
-    </div>
-  </section>
-
-  <section aria-label="Provenance">
-    <p class="sec-label">Provenance</p>
-    <div class="colophon">
+  <section>
+    <h2><span class="num">6</span>Reproducibility</h2>
+    <div class="repro">
       <dl>
         <dt>Fabri version</dt><dd>0.18.5</dd>
         <dt>Roster revision</dt><dd>533f4f23081625ec1a92c4e562b6489f167561b7</dd>
         <dt>Companies evaluated</dt><dd>3</dd>
-        <dt>Support HQ samples</dt><dd>3 (gate) + 10 (confirm)</dd>
-        <dt>Reliability Labs / Revenue Ops</dt><dd>3 each</dd>
+        <dt>Support HQ samples</dt><dd>3 (gate) + 10 (confirmation)</dd>
+        <dt>Reliability Labs / Revenue Ops</dt><dd>3 replicas each</dd>
         <dt>Total live spend</dt><dd>$0.82</dd>
         <dt>Claim boundary</dt><dd>setup qualification only</dd>
       </dl>
     </div>
-    <p class="byline" style="margin-top:16px">Every published result carries its own roster revision,
-      source hash and Fabri version. Prompts, traces, session IDs and raw model output stay private;
-      only aggregate metrics and rubric outcomes are published.</p>
+    <p style="font-family:var(--sans);font-size:13px;color:var(--faint);margin-top:14px;text-align:left">
+      Each published result records its own roster revision, company-source SHA-256, and Fabri version.
+      Prompts, traces, session IDs, and raw model output are withheld; only aggregate metrics and rubric
+      outcomes are released.</p>
   </section>
 
-  <section aria-label="Also on the bench">
-    <p class="sec-label">Also on the bench</p>
-    <ul class="bench">
-      <li><span class="t">Support HQ<small>9/10 at ten replicas</small></span><span class="s wait">Does not clear the bar</span></li>
-      <li><span class="t">Reliability Labs<small>2/3 rubric — over-claimed a fix</small></span><span class="s wait">Not qualified</span></li>
-      <li><span class="t">Revenue Ops<small>0/3 rubric — unsourced claims</small></span><span class="s wait">Not qualified</span></li>
-      <li><span class="t">Memory vs. control<small>Does trace-backed memory earn its cost?</small></span><span class="s wait">Next</span></li>
-    </ul>
-  </section>
-
-  <footer class="foot">
-    <div class="links">
-      <a href="https://github.com/Rushour0/fabri/blob/main/BENCHMARKS.md">Read the full results</a>
-      <a href="https://github.com/Rushour0/fabri">Fabri on GitHub</a>
+  <footer>
+    <div class="refs">
+      <a href="https://github.com/Rushour0/fabri/blob/main/BENCHMARKS.md">Full results &amp; methodology</a>
+      <a href="https://github.com/Rushour0/fabri">Fabri source</a>
     </div>
-    <div class="colo">Fabri · self-improving companies of AI agents</div>
+    <div>Fabri · self-improving companies of AI agents</div>
   </footer>
 </article>
