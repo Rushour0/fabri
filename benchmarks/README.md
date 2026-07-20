@@ -11,6 +11,12 @@ agent memory and company orchestration work.
   experiments using the existing `fabri company compile` and `fabri run`
   commands; it stores prompts and deterministic expected-output assertions,
   not company runtime code.
+- `python -m fabri.benchmarks.company_setup_probe` qualifies one dataset case
+  before the memory/control study by recursively checking delegated configs and
+  requiring every fresh replica to complete and pass its deterministic rubric.
+- `results/support-hq-setup-qualification-2026-07-20.md` is the first reviewed
+  aggregate release from that probe, including the failed hypotheses and claim
+  boundaries rather than only the passing score.
 - `runs/` is intentionally ignored. It can contain provisional traces,
   workspace state, and model output. Only validated, reviewed aggregate
   results should be published separately.

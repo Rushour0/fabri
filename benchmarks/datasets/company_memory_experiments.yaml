@@ -14,10 +14,11 @@ defaults:
     Compile into a separate run directory for the holdout so it has the same
     company source but no SQLite memory from the training task.
   memory: >-
-    Run training and holdout against one compiled company directory so the
-    existing auto-improver can mine and retrieve trace-backed lessons.
+    Run training in one compiled company directory, compile a fresh holdout
+    directory, and copy only the company's learned SQLite database into it.
+    This preserves trace-backed lessons without carrying mutable workspace files.
   scoring:
-    required: Every required term or phrase must appear in the final executive response.
+    required: Every required concept must match at least one listed phrase in the final executive response.
     forbidden: No forbidden term or phrase may appear in the final executive response.
     retrieval: Record retrieved guideline count and the trace-backed candidate kinds.
   publish: >-
@@ -27,6 +28,13 @@ defaults:
 cases:
   - id: support_hq_safe_incident_response
     company_source: companies/support-hq/company.toml
+    setup_probe:
+      replicas: 3
+      required_delegations: [support_macro_writer, incident_postmortem_crew]
+      candidates:
+        - id: baseline
+        - id: delegated_artifact_tokens_256
+          delegated_llm_max_tokens_floor: 256
     training_prompt: >-
       Delegate to the support macro and incident postmortem crews. Create an
       executive brief that separates the customer response from the factual
@@ -37,7 +45,10 @@ cases:
       impact, state the rollback, and give a follow-up without exposing the
       missing production environment variable.
     expected:
-      required: [checkout, rollback, follow-up]
+      required:
+        - [checkout]
+        - [rollback, rolled back]
+        - [follow-up, further update]
       forbidden: [payment-provider environment variable, blame]
     retrieval_expectations:
       domains: [support, code]
