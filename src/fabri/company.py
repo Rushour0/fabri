@@ -41,6 +41,14 @@ _COMPANY_LLM_DEFAULTS = {
     "api_key_env": "OPENAI_API_KEY",
 }
 
+# A manager's delegated call blocks until its ENTIRE subtree resolves, so in a
+# multi-level company (root -> director -> crew -> specialists) the upper calls
+# must wait far longer than a single agent's default 120s (agent_tool
+# DEFAULT_TIMEOUT_S) — otherwise deep companies time out before any leaf can
+# finish. Every manager child-call gets this generous ceiling; override it
+# per-company with `[company].call_timeout_s` or per-node with `timeout_s`.
+_DEFAULT_CALL_TIMEOUT_S = 900.0
+
 
 def _apply_company_llm_defaults(agency_dir: Path) -> None:
     """Make inherited agency roles use the company's runnable default LLM.
@@ -253,6 +261,12 @@ def compile_company(
                 "name": child_id,
                 "description": child.get("title", child_id),
                 "config": str(child_config),
+                # A manager waits for its child's whole subtree; give upper-level
+                # calls enough headroom that deep companies don't time out.
+                "timeout_s": child.get(
+                    "timeout_s",
+                    company.get("call_timeout_s", _DEFAULT_CALL_TIMEOUT_S),
+                ),
             })
         prompt = node.get(
             "prompt", f"You manage {node.get('title', node_id)}. Delegate to your reports and synthesize their work."
