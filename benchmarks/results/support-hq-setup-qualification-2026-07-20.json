@@ -1,0 +1,85 @@
+{
+  "study": "company-setup-qualification",
+  "generated_at": "2026-07-20T05:00:01.004505+00:00",
+  "fabri_version": "0.18.5",
+  "case_id": "support_hq_safe_incident_response",
+  "company": "support-hq",
+  "source": {
+    "path": "companies/support-hq/company.toml",
+    "roster_revision": "533f4f23081625ec1a92c4e562b6489f167561b7",
+    "roster_worktree_clean": true,
+    "company_source_sha256": "1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0"
+  },
+  "replicas_per_candidate": 3,
+  "selection_policy": "qualify only at 100% scheduled end-to-end pass rate; among qualifiers choose the lowest median recursively-accounted total cost",
+  "released_gate_cost_usd": 0.060496,
+  "total_research_spend_usd": 0.272837,
+  "candidates": [
+    {
+      "id": "baseline",
+      "overrides": {
+        "delegated_llm_max_tokens_floor": null
+      },
+      "configured_replicas": 3,
+      "model_runs": 3,
+      "completion_rate": 1.0,
+      "conditional_rubric_pass_rate": 1.0,
+      "end_to_end_pass_rate": 1.0,
+      "median_total_cost_usd": 0.0202,
+      "qualifies": true,
+      "runs": [
+        {
+          "replica": 1,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.019853,
+          "wall_time_s": 51.258,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 2,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.020443,
+          "wall_time_s": 44.205,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 3,
+          "attempt_status": "complete",
+          "rubric_passed": true,
+          "within_cost_limit": true,
+          "end_to_end_passed": true,
+          "failure_reasons": [],
+          "total_cost_usd": 0.0202,
+          "wall_time_s": 42.546,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        }
+      ]
+    },
+    {
+      "id": "delegated_artifact_tokens_256",
+      "overrides": {
+        "delegated_llm_max_tokens_floor": 256
+      },
+      "configured_replicas": 3,
+      "preflights": 3,
+      "model_runs": 0,
+      "qualifies": false,
+      "decision": "candidate_noop",
+      "total_cost_usd": 0.0
+    }
+  ],
+  "recommendation": "baseline",
+  "status": "qualified",
+  "claim_boundary": "setup qualification only; memory/control result pending"
+}

@@ -1547,8 +1547,9 @@ in `fabri report` — not just instrumented under the hood.
 later release is BSL-licensed; free for individuals and for organizations with
 ≤ US $1M annual gross revenue, with a commercial license required above that
 or when embedding fabri into a hosted/distributed product. Every BSL version
-auto-converts to Apache 2.0 on **2030-06-23** (the Change Date). See
-[COMMERCIAL.md](COMMERCIAL.md) for who needs a license and how to get one.
+auto-converts to Apache 2.0 on **2030-06-23** (the Change Date). The historical
+`COMMERCIAL.md` described that policy; it was removed when v0.12.0 restored
+Apache-2.0 licensing retroactively.
 Versions ≤ 0.4.6 remain Apache-2.0. v0.5.0 and v0.5.1 were withdrawn from
 PyPI prior to general availability and are not supported; their functionality
 is rolled into this release.

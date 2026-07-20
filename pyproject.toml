@@ -130,5 +130,6 @@ include = ["fabri*"]
 
 [tool.pytest.ini_options]
 markers = [
+    "unit: fast tests with no external services or credentials",
     "integration: exercises multiple fabri components without external credentials",
 ]

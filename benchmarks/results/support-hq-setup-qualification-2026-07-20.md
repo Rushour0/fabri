@@ -16,6 +16,11 @@ that Support HQ needs a company-specific runtime change.
 ## Method
 
 - Source: `FABRI_ROSTERS_ROOT/companies/support-hq/company.toml`
+- Roster revision: `533f4f23081625ec1a92c4e562b6489f167561b7`
+  (`feat: add company memory and prompt improvement`), clean worktree
+- Company source SHA-256:
+  `1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0`
+- Fabri version: `0.18.5`
 - Workload: `support_hq_safe_incident_response`
 - Replicas: 3, each with a fresh company compile and isolated `FABRI_HOME`
 - Required delegations: `support_macro_writer` and
@@ -38,11 +43,14 @@ remain operational failures.
 | Candidate | Completion | Rubric given completion | End-to-end | Median cost | Decision |
 |---|---:|---:|---:|---:|---|
 | Baseline | 3/3 | 3/3 | 3/3 | $0.020200 | Qualified and recommended |
-| Delegated artifact floor: 256 tokens | 0 scheduled | Not measured | Not measured | $0 | Rejected as a no-op |
+| Delegated artifact floor: 256 tokens | 0 model runs; 3 preflights | Not measured | Not measured | $0 | Rejected as a no-op |
 
 The three released baseline runs cost $0.019853, $0.020443, and $0.020200, or
 $0.060496 total. Earlier pilot and classifier-validation runs cost $0.212341.
 Total live-model research spend for this qualification was $0.272837.
+
+The reviewed per-replica aggregate is also available as
+[`support-hq-setup-qualification-2026-07-20.json`](support-hq-setup-qualification-2026-07-20.json).
 
 The no-op candidate was not sent to a model: every relevant delegated artifact
 role in the compiled company already met or exceeded its proposed 256-token

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -11,6 +12,7 @@ import yaml
 
 from fabri.benchmarks.company_setup_probe import (
     ProbeError,
+    analyze_run,
     apply_delegated_token_floor,
     build_preflight_manifest,
     load_probe_case,
@@ -173,7 +175,104 @@ def test_score_text_is_case_insensitive_and_deterministic() -> None:
         "missing": ["rollback | rolled back"],
         "forbidden": ["blame"],
     }
-    assert score_text("We will follow up", (("follow-up",),), ()) ["passed"] is True
+    assert score_text("We will follow up", (("follow-up",),), ())["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("events", "expected_failure"),
+    [
+        pytest.param(
+            [
+                {"type": "cost_unaccounted", "reason": "provider usage missing"},
+                {"type": "usage", "cost_usd": 0.01},
+            ],
+            "cost_unaccounted",
+            id="unaccounted-cost",
+        ),
+        pytest.param(
+            [
+                {"type": "failed", "reason": "response truncated at max_tokens"},
+                {"type": "usage", "cost_usd": 0.01},
+            ],
+            "truncation",
+            id="truncated-terminal-event",
+        ),
+        pytest.param(
+            [
+                {"type": "error", "reason": "delegated tool timeout"},
+                {"type": "usage", "cost_usd": 0.01},
+            ],
+            "timeout",
+            id="timeout-terminal-event",
+        ),
+    ],
+)
+def test_analyze_run_rejects_hard_operational_signals(
+    tmp_path: Path,
+    events: list[dict[str, object]],
+    expected_failure: str,
+) -> None:
+    traces = tmp_path / ".fabri" / "traces"
+    traces.mkdir(parents=True)
+    (traces / "root.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    result = analyze_run(
+        {
+            "session_id": "root",
+            "outcome": "success",
+            "final_text": "scoreable artifact",
+        },
+        tmp_path,
+        (),
+    )
+
+    assert result["complete"] is False
+    assert expected_failure in result["failures"]
+
+
+def test_probe_skips_noop_candidate_without_model_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[1],))
+
+    def compile_only(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env, timeout_s
+        if "compile" not in argv:
+            raise AssertionError("a no-op candidate must not start a model run")
+        destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+        child = destination / "agencies" / "crew" / "agent.yaml"
+        child.parent.mkdir(parents=True)
+        child.write_text(
+            yaml.safe_dump(_agent_config("crew", max_tokens=256)),
+            encoding="utf-8",
+        )
+        root = destination / "ceo.yaml"
+        root.write_text(
+            yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, "compiled", "")
+
+    result = run_probe(case, tmp_path / "results", command_runner=compile_only)
+
+    candidate = cast(list[dict[str, object]], result["candidates"])[0]
+    run = cast(list[dict[str, object]], candidate["runs"])[0]
+    assert result["status"] == "no_viable_setup"
+    assert run["attempt_status"] == "invalid_measurement"
+    assert run["failure_reasons"] == ["candidate_noop"]
+    assert run["total_cost_usd"] is None
 
 
 def test_probe_rejects_root_recovery_after_child_failure_and_selects_floor(

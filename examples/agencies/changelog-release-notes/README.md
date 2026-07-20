@@ -88,6 +88,5 @@ in the parent trace's tool-call result). `fabri traces show <session_id>` on
 the *parent* ID shows what each specialist was called with and returned, not
 the specialist's own internal step-by-step reasoning — show each child's own
 session ID separately if you need that level of detail. Parent-reported cost
-also does not currently include static specialist child cost (only
-`spawn_subagent` fan-out rolls up automatically) — treat `fabri report`'s
-number for this agency as the parent's cost floor, not the full run cost.
+includes the recursively reported static-specialist subtree in
+`usage.total_cost_usd`; `usage.cost_usd` remains the parent's own model cost.

@@ -1,26 +1,64 @@
 # Benchmarks
 
-This directory contains reproducible benchmark inputs and runners for Fabri's
-agent memory and company orchestration work.
+This directory holds reproducible inputs and reviewed outputs for Fabri's agent
+memory and company-orchestration evidence. The canonical cross-benchmark status
+and methodology live in [`../BENCHMARKS.md`](../BENCHMARKS.md).
 
+## Current company result
+
+| Company / workload | Completion | Conditional rubric | End-to-end | Median cost | Decision |
+|---|---:|---:|---:|---:|---|
+| Support HQ / safe incident response | 3/3 | 3/3 | 3/3 | $0.020200 | Baseline qualified |
+
+The released gate cost $0.060496. The proposed 256-token artifact floor was
+rejected after three preflights as `candidate_noop`, so it received zero model
+runs and spent $0. Read the reviewed [narrative result](results/support-hq-setup-qualification-2026-07-20.md)
+or [machine-readable aggregate](results/support-hq-setup-qualification-2026-07-20.json).
+
+Reliability Labs and Revenue Ops have dataset cases but no released setup or
+memory/control result. Do not infer a score from their presence in the dataset.
+
+## Artifact map
+
+- [`datasets/company_memory_experiments.yaml`](datasets/company_memory_experiments.yaml)
+  defines three dynamic roster experiments using existing `fabri company
+  compile` and `fabri run` commands. It contains prompts and assertions, not
+  company runtime code.
+- [`datasets/README.md`](datasets/README.md) defines setup qualification,
+  train/holdout isolation, scoring, and publication rules.
 - `fixtures/recovery/` is the file-recovery task used by the OpenAI replica
   study.
-- `fixtures/company_release_readiness/` is a seeded, multi-role release
-  readiness company fixture for fresh-company replica runs.
-- `datasets/company_memory_experiments.yaml` defines dynamic roster-company
-  experiments using the existing `fabri company compile` and `fabri run`
-  commands; it stores prompts and deterministic expected-output assertions,
-  not company runtime code.
-- `python -m fabri.benchmarks.company_setup_probe` qualifies one dataset case
-  before the memory/control study by recursively checking delegated configs and
-  requiring every fresh replica to complete and pass its deterministic rubric.
-- `results/support-hq-setup-qualification-2026-07-20.md` is the first reviewed
-  aggregate release from that probe, including the failed hypotheses and claim
-  boundaries rather than only the passing score.
-- `runs/` is intentionally ignored. It can contain provisional traces,
-  workspace state, and model output. Only validated, reviewed aggregate
-  results should be published separately.
+- `fixtures/company_release_readiness/` is a seeded multi-role fixture for
+  fresh-company replica runs.
+- `results/` contains reviewed public aggregates only.
+- `runs/` is ignored because provisional traces, workspaces, prompts, session
+  IDs, and raw model output can be private or misleading before review.
 
-Run the recovery study with `fabri benchmark openai-recovery-study` (or the
-module entry point in `src/fabri/benchmarks/openai_recovery_study.py`). Use a
-fresh state directory for each replica when measuring reproducibility.
+## Runners
+
+```sh
+# Dynamic roster setup qualification
+python -m fabri.benchmarks.company_setup_probe --help
+
+# Recovery study
+fabri benchmark openai-recovery-study --help
+```
+
+Use a fresh compile and state directory per replica. The company setup probe
+does this automatically.
+
+## Tests
+
+The benchmark runners have dedicated, offline pytest coverage:
+
+```sh
+pytest -q tests/test_company_setup_probe.py tests/test_openai_recovery_study.py
+```
+
+The setup tests cover roster-source resolution, candidate allowlisting,
+recursive preflight and role classification, bounded token-floor changes,
+deterministic required/forbidden scoring, isolated state roots, recursive cost
+accounting, child outcome handling, private/public artifact separation, and
+profile selection. The recovery-runner tests cover training/holdout task
+selection, rubric completeness, recovery evidence, and cost summaries. Live
+model calls are experiments, not CI tests.

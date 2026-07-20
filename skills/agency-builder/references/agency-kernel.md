@@ -31,8 +31,8 @@ stable SQLite or Qdrant collection.
 Static `tools.agents[]` specialists each run as a separate child session with
 their own step budget (`agent.max_steps` in the child's own config, not the
 parent's `agent.subagent.max_steps`, which only bounds `spawn_subagent`). Child
-cost does not currently roll into the parent's reported total either —
-`fabri report` on the parent session undercounts the full run.
+usage rolls recursively into the parent's `subagent_cost_usd` and
+`total_cost_usd`; each child still keeps its own trace and budget.
 
 Per-agency decisions are the persona, deliverable, roles and prompts, tools,
 artifact paths, policy, verifier, provider, budgets, and memory collection.
