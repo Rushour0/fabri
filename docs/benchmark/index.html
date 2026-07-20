@@ -1,335 +1,295 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Fabri benchmark report: Support HQ company setup qualification — 3/3 replicas end-to-end, $0.020200 median cost per run, recursively accounted. Setup qualification only; memory result pending.">
-<title>Fabri Benchmark — Support HQ Setup Qualification</title>
+<meta name="description" content="A Fabri qualification study: the Support HQ agent company completed an incident-response workload 3 of 3 times, end to end, at $0.020200 median per run — with an honest account of what that does and does not prove.">
+<title>Support HQ — A Fabri Qualification Study</title>
 <style>
   :root {
-    --bg: #14110c;
-    --panel: #1d1811;
-    --panel-2: #241e15;
-    --line: #322a1f;
-    --ink: #ece4d5;
-    --muted: #9c9080;
-    --faint: #6f6555;
-    --accent: #e0b155;
-    --accent-dim: #b8893a;
-    --pass: #7fb488;
-    --pass-bg: #1c2a1e;
-    --pending: #8b96ac;
-    --pending-bg: #1e2530;
-    --reject: #c68064;
-    --reject-bg: #2c1f18;
-    --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.7);
-    --radius: 10px;
+    --paper: #f4f5f0;
+    --leaf: #ffffff;
+    --ink: #17201b;
+    --ink-soft: #4c554e;
+    --faint: #878e84;
+    --rule: #dcded5;
+    --rule-strong: #c4c8bc;
+    --accent: #1c6a4c;
+    --accent-quiet: #2f7d5f;
+    --rust: #9d4a2c;
+    --measure: 62ch;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Hoefler Text", "Georgia", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   }
-  @media (prefers-color-scheme: light) {
+  @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #efeae0;
-      --panel: #f7f3ea;
-      --panel-2: #f1ebdd;
-      --line: #ddd4c2;
-      --ink: #2a2318;
-      --muted: #6c6350;
-      --faint: #9a8f79;
-      --accent: #b07d1c;
-      --accent-dim: #916417;
-      --pass: #3f7a48;
-      --pass-bg: #e4eede;
-      --pending: #4d5c78;
-      --pending-bg: #e2e7ef;
-      --reject: #a2542f;
-      --reject-bg: #f1e2d8;
-      --shadow: 0 1px 0 rgba(255,255,255,.6) inset, 0 16px 34px -26px rgba(80,60,20,.45);
+      --paper: #121614;
+      --leaf: #182020;
+      --ink: #e9ece4;
+      --ink-soft: #aab2a9;
+      --faint: #727a72;
+      --rule: #26302c;
+      --rule-strong: #33403a;
+      --accent: #63c295;
+      --accent-quiet: #4fae82;
+      --rust: #d18a6d;
     }
   }
-  :root[data-theme="dark"] {
-    --bg: #14110c; --panel: #1d1811; --panel-2: #241e15; --line: #322a1f;
-    --ink: #ece4d5; --muted: #9c9080; --faint: #6f6555;
-    --accent: #e0b155; --accent-dim: #b8893a;
-    --pass: #7fb488; --pass-bg: #1c2a1e; --pending: #8b96ac; --pending-bg: #1e2530;
-    --reject: #c68064; --reject-bg: #2c1f18;
-    --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.7);
-  }
   :root[data-theme="light"] {
-    --bg: #efeae0; --panel: #f7f3ea; --panel-2: #f1ebdd; --line: #ddd4c2;
-    --ink: #2a2318; --muted: #6c6350; --faint: #9a8f79;
-    --accent: #b07d1c; --accent-dim: #916417;
-    --pass: #3f7a48; --pass-bg: #e4eede; --pending: #4d5c78; --pending-bg: #e2e7ef;
-    --reject: #a2542f; --reject-bg: #f1e2d8;
-    --shadow: 0 1px 0 rgba(255,255,255,.6) inset, 0 16px 34px -26px rgba(80,60,20,.45);
+    --paper: #f4f5f0; --leaf: #ffffff; --ink: #17201b; --ink-soft: #4c554e; --faint: #878e84;
+    --rule: #dcded5; --rule-strong: #c4c8bc; --accent: #1c6a4c; --accent-quiet: #2f7d5f; --rust: #9d4a2c;
+  }
+  :root[data-theme="dark"] {
+    --paper: #121614; --leaf: #182020; --ink: #e9ece4; --ink-soft: #aab2a9; --faint: #727a72;
+    --rule: #26302c; --rule-strong: #33403a; --accent: #63c295; --accent-quiet: #4fae82; --rust: #d18a6d;
   }
 
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--ink);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    line-height: 1.6;
-    font-size: 16px;
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--serif); font-size: 19px; line-height: 1.62;
     overflow-x: hidden;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
-  .wrap { max-width: 860px; margin: 0 auto; padding: clamp(20px, 5vw, 56px) clamp(16px, 4vw, 40px) 72px; }
+  .page { max-width: 760px; margin: 0 auto; padding: clamp(28px, 6vw, 72px) clamp(20px, 6vw, 40px) 96px; }
 
-  .eyebrow {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 12px; letter-spacing: .22em; text-transform: uppercase;
-    color: var(--accent); margin: 0 0 18px;
-    display: flex; align-items: center; gap: 10px;
-  }
-  .eyebrow::before { content: ""; width: 26px; height: 1px; background: var(--accent-dim); display: inline-block; }
+  /* masthead */
+  .mast { display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    padding-bottom: 14px; border-bottom: 1px solid var(--rule-strong); }
+  .mast .brand { font-family: var(--sans); font-weight: 620; letter-spacing: -.01em; font-size: 15px; }
+  .mast .brand b { color: var(--accent); font-weight: 620; }
+  .mast .stamp { font-family: var(--sans); font-size: 12px; letter-spacing: .04em; color: var(--faint); }
 
   h1 {
-    font-size: clamp(28px, 5.4vw, 44px); line-height: 1.08; margin: 0 0 14px;
-    font-weight: 660; letter-spacing: -.02em; text-wrap: balance;
+    font-family: var(--serif); font-weight: 600; letter-spacing: -.015em;
+    font-size: clamp(34px, 6.6vw, 58px); line-height: 1.04; text-wrap: balance;
+    margin: clamp(30px, 6vw, 52px) 0 0; max-width: 15ch;
   }
-  .lede { color: var(--muted); font-size: clamp(16px, 2.2vw, 18px); max-width: 60ch; margin: 0 0 30px; }
+  h1 .q { color: var(--accent); font-style: italic; }
+  .dek { font-size: clamp(19px, 2.5vw, 22px); color: var(--ink-soft); max-width: var(--measure);
+    margin: 22px 0 0; line-height: 1.5; }
+  .dek em { font-style: italic; color: var(--ink); }
 
-  .stamp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 40px; }
-  .stamp {
-    font-family: ui-monospace, Menlo, monospace; font-weight: 600;
-    letter-spacing: .16em; text-transform: uppercase; font-size: 14px;
-    color: var(--accent); border: 1.5px solid var(--accent-dim);
-    padding: 9px 16px; border-radius: 6px; position: relative;
-    background: linear-gradient(0deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
-  }
-  .stamp small { display:block; font-size: 10px; letter-spacing:.14em; color: var(--faint); font-weight: 500; margin-top: 2px; }
-  .stamp-meta { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: var(--faint); }
-  .stamp-meta b { color: var(--muted); font-weight: 600; }
+  .byline { font-family: var(--sans); font-size: 13.5px; color: var(--faint); margin-top: 26px;
+    display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .byline b { color: var(--ink-soft); font-weight: 600; }
 
-  section { margin-top: 46px; }
-  .kicker {
-    font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; letter-spacing: .2em;
-    text-transform: uppercase; color: var(--faint); margin: 0 0 16px;
-    display: flex; align-items: baseline; gap: 10px;
-  }
-  .kicker::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  section { margin-top: clamp(40px, 7vw, 68px); }
+  .sec-label { font-family: var(--sans); font-size: 13px; font-weight: 640; letter-spacing: .02em;
+    color: var(--accent); margin: 0 0 20px; }
+  .prose { max-width: var(--measure); }
+  .prose p { margin: 0 0 18px; }
+  .prose p:last-child { margin-bottom: 0; }
 
-  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  @media (max-width: 620px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 460px) { .tiles { grid-template-columns: 1fr; } }
-  .tile {
-    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 16px 16px 14px; box-shadow: var(--shadow); min-width: 0;
-  }
-  .tile .v {
-    font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
-    font-size: clamp(21px, 4.2vw, 29px); font-weight: 600; letter-spacing: -.02em; color: var(--ink);
-    line-height: 1.05; white-space: nowrap;
-  }
-  .tile .v .u { font-size: 14px; color: var(--muted); font-weight: 500; }
-  .tile .k { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
-  .tile .v.good { color: var(--pass); }
+  /* the result — a typographic figure line, not tiles */
+  .figures { display: grid; grid-template-columns: repeat(4, auto); gap: clamp(20px, 5vw, 46px);
+    align-items: end; padding: 4px 0 22px; border-bottom: 1px solid var(--rule); }
+  .fig .n { font-family: var(--serif); font-variant-numeric: tabular-nums; font-weight: 600;
+    font-size: clamp(30px, 5.6vw, 46px); line-height: .95; letter-spacing: -.02em; white-space: nowrap; }
+  .fig.money .n { font-size: clamp(23px, 3.6vw, 31px); letter-spacing: -.01em; }
+  .fig .n .slash { color: var(--faint); font-weight: 500; }
+  .fig .n .cur { font-size: .58em; color: var(--ink-soft); vertical-align: .1em; margin-right: 1px; }
+  .fig .l { font-family: var(--sans); font-size: 12.5px; color: var(--ink-soft); margin-top: 12px; line-height: 1.3; max-width: 15ch; }
+  .fig.pass .n { color: var(--accent); }
+  @media (max-width: 560px) { .figures { grid-template-columns: 1fr 1fr; gap: 28px 22px; } }
 
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    box-shadow: var(--shadow); overflow: hidden;
-  }
-  .table-scroll { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; min-width: 560px; }
-  th, td {
-    text-align: right; padding: 11px 13px; border-bottom: 1px solid var(--line);
-    font-variant-numeric: tabular-nums; font-size: 13.5px;
-    font-family: ui-monospace, Menlo, monospace;
-  }
-  th { color: var(--faint); font-weight: 600; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; }
-  td:first-child, th:first-child { text-align: left; font-family: system-ui, sans-serif; }
+  .verdict { margin: 26px 0 0; font-family: var(--sans); font-size: 14px; color: var(--ink-soft); max-width: var(--measure); line-height: 1.55; }
+  .verdict b { font-family: var(--serif); font-style: italic; font-size: 17px; color: var(--accent); font-weight: 600; }
+
+  /* candidates: a plain ledger table */
+  .ledger .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 480px; font-family: var(--sans); }
+  thead th { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint);
+    font-weight: 600; text-align: right; padding: 0 0 10px; border-bottom: 1px solid var(--rule-strong); }
+  thead th:first-child { text-align: left; }
+  tbody td { padding: 15px 0; border-bottom: 1px solid var(--rule); text-align: right;
+    font-variant-numeric: tabular-nums; font-size: 15px; }
+  tbody td:first-child { text-align: left; }
   tbody tr:last-child td { border-bottom: none; }
-  td .cid { font-weight: 600; }
-  td .sub { display:block; color: var(--faint); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  td + td, th + th { padding-left: 16px; }
+  tbody td:first-child { padding-right: 8px; }
+  .cand { font-family: var(--mono); font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+  .cand small { display: block; font-family: var(--sans); font-size: 12.5px; color: var(--faint); margin-top: 3px; letter-spacing: 0; text-transform: none; }
+  .mark { font-weight: 600; }
+  .mark.ok { color: var(--accent); }
+  .mark.no { color: var(--rust); }
+  .ledger figcaption { font-family: var(--sans); font-size: 14px; color: var(--ink-soft);
+    max-width: var(--measure); margin-top: 18px; line-height: 1.55; }
+  .ledger figcaption b { color: var(--ink); font-weight: 600; }
 
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px; font-family: ui-monospace, Menlo, monospace;
-    font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600;
-    padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+  /* the rules — a hanging list, no numbered cards */
+  .rules { list-style: none; margin: 0; padding: 0; max-width: var(--measure); }
+  .rules li { padding: 16px 0; border-top: 1px solid var(--rule); font-size: 17px; color: var(--ink-soft); }
+  .rules li:first-child { border-top: none; padding-top: 0; }
+  .rules li b { color: var(--ink); font-weight: 600; }
+
+  /* honesty — the centerpiece, two ledgers */
+  .claims { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(24px, 5vw, 48px); }
+  @media (max-width: 620px) { .claims { grid-template-columns: 1fr; gap: 34px; } }
+  .claims h3 { font-family: var(--serif); font-style: italic; font-weight: 600; font-size: 22px; margin: 0; }
+  .claims .est h3 { color: var(--accent); }
+  .claims .not h3 { color: var(--ink); }
+  .claims ul { list-style: none; margin: 14px 0 0; padding: 0; }
+  .claims li { padding: 14px 0; border-top: 1px solid var(--rule); font-size: 16.5px; line-height: 1.5; }
+  .claims li .why { display: block; font-family: var(--sans); font-size: 13.5px; color: var(--faint); margin-top: 4px; }
+
+  /* provenance colophon */
+  .colophon { font-family: var(--mono); font-size: 12.5px; background: var(--leaf);
+    border: 1px solid var(--rule); border-radius: 3px; }
+  .colophon dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; }
+  .colophon dt { color: var(--faint); padding: 12px 16px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  .colophon dd { margin: 0; color: var(--ink); padding: 12px 16px; border-bottom: 1px solid var(--rule);
+    text-align: right; word-break: break-all; }
+  .colophon dl > :nth-last-child(-n+2) { border-bottom: none; }
+
+  /* roadmap ledger */
+  .bench { list-style: none; margin: 0; padding: 0; max-width: var(--measure); }
+  .bench li { display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    padding: 16px 0; border-top: 1px solid var(--rule); }
+  .bench li:first-child { border-top: none; }
+  .bench .t { font-size: 18px; }
+  .bench .t small { display: block; font-family: var(--sans); font-size: 13px; color: var(--faint); margin-top: 2px; }
+  .bench .s { font-family: var(--sans); font-size: 12.5px; letter-spacing: .02em; white-space: nowrap; }
+  .bench .s.done { color: var(--accent); }
+  .bench .s.wait { color: var(--faint); }
+
+  .foot { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--rule-strong);
+    display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: baseline; justify-content: space-between; }
+  .links { display: flex; flex-wrap: wrap; gap: 22px; font-family: var(--sans); font-size: 15px; }
+  .links a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--rule-strong); padding-bottom: 2px; }
+  .links a:hover { border-bottom-color: var(--accent); }
+  .colo { font-family: var(--sans); font-size: 12.5px; color: var(--faint); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { animation: rise .6s cubic-bezier(.2,.7,.2,1) both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   }
-  .pill.pass { color: var(--pass); background: var(--pass-bg); }
-  .pill.reject { color: var(--reject); background: var(--reject-bg); }
-  .pill.pending { color: var(--pending); background: var(--pending-bg); }
-  .pill::before { content:""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-
-  .prove { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  @media (max-width: 620px) { .prove { grid-template-columns: 1fr; } }
-  .prove .col { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
-  .prove .col.yes { border-left: 3px solid var(--pass); }
-  .prove .col.no { border-left: 3px solid var(--reject); }
-  .prove h3 { margin: 0 0 12px; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; font-family: ui-monospace, Menlo, monospace; }
-  .prove .yes h3 { color: var(--pass); }
-  .prove .no h3 { color: var(--reject); }
-  .prove ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 11px; }
-  .prove li { padding-left: 22px; position: relative; font-size: 14.5px; color: var(--ink); }
-  .prove li .why { display:block; color: var(--muted); font-size: 13px; margin-top: 2px; }
-  .prove .yes li::before { content: "✓"; position: absolute; left: 0; color: var(--pass); font-weight: 700; }
-  .prove .no li::before { content: "✕"; position: absolute; left: 0; color: var(--reject); font-weight: 700; }
-
-  .discipline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-  @media (max-width: 700px) { .discipline { grid-template-columns: 1fr; } }
-  .disc { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
-  .disc .n { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-size: 12px; letter-spacing: .12em; }
-  .disc p { margin: 8px 0 0; font-size: 14px; color: var(--muted); }
-  .disc b { color: var(--ink); font-weight: 600; }
-
-  .manifest { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 4px; }
-  .manifest dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; }
-  .manifest dt { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--faint); padding: 11px 16px; border-bottom: 1px solid var(--line); letter-spacing: .04em; }
-  .manifest dd { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: var(--ink); padding: 11px 16px; border-bottom: 1px solid var(--line); word-break: break-all; text-align: right; }
-  .manifest dl > :nth-last-child(1), .manifest dl > :nth-last-child(2) { border-bottom: none; }
-
-  .roadmap { display: flex; flex-direction: column; gap: 8px; }
-  .rrow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  .rrow .rl { display: flex; flex-direction: column; gap: 2px; }
-  .rrow .rt { font-weight: 600; font-size: 14.5px; }
-  .rrow .rd { color: var(--muted); font-size: 13px; }
-
-  .cta { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-  a.btn {
-    font-family: ui-monospace, Menlo, monospace; font-size: 13.5px; text-decoration: none;
-    color: var(--bg); background: var(--accent); padding: 11px 18px; border-radius: 7px; font-weight: 600;
-    letter-spacing: .02em; transition: filter .15s ease;
-  }
-  a.btn:hover { filter: brightness(1.08); }
-  a.btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent-dim); }
-  a:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 7px; }
-
-  footer { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between; }
-  .note { color: var(--muted); font-size: 13.5px; margin: 14px 0 0; }
 </style>
 
-<div class="wrap">
-  <p class="eyebrow">Fabri · Benchmark Report</p>
-  <h1>Support HQ — Company Setup Qualification</h1>
-  <p class="lede">Before asking whether an AI-agent company is <em>smart</em>, Fabri asks whether its
-    setup is <em>reliable</em>: can this org complete a real workload, end to end, at a known cost —
-    every time, with fresh isolated state per run?</p>
+<article class="page">
+  <header class="mast reveal">
+    <span class="brand"><b>Fabri</b> — company evaluation</span>
+    <span class="stamp">Study 01 · 20 July 2026</span>
+  </header>
 
-  <div class="stamp-row">
-    <div class="stamp">Qualified<small>3 / 3 replicas · frozen gate</small></div>
-    <div class="stamp-meta">
-      Workload: <b>safe incident response</b> &nbsp;·&nbsp; Recommendation: <b>baseline</b> &nbsp;·&nbsp; Fabri <b>v0.18.5</b>
-    </div>
-  </div>
+  <h1 class="reveal">Support HQ did the job — <span class="q">three times out of three.</span></h1>
+  <p class="dek reveal">Before asking whether a company of AI agents is <em>clever</em>, Fabri asks
+    whether it is <em>dependable</em>: can this org run a real workload end to end, at a cost you can
+    name, every single time — starting from clean, isolated state on each attempt?</p>
+  <p class="byline reveal">
+    <span>Workload: <b>safe incident response</b></span>
+    <span>Setup: <b>as shipped (baseline)</b></span>
+    <span>Fabri <b>v0.18.5</b></span>
+  </p>
 
-  <section>
-    <p class="kicker">Result at a glance</p>
-    <div class="tiles">
-      <div class="tile"><div class="v good">3<span class="u">/3</span></div><div class="k">Replicas passed end-to-end</div></div>
-      <div class="tile"><div class="v good">100<span class="u">%</span></div><div class="k">Conditional rubric pass</div></div>
-      <div class="tile"><div class="v"><span class="u">$</span>0.020200</div><div class="k">Median cost / run</div></div>
-      <div class="tile"><div class="v"><span class="u">$</span>0.060496</div><div class="k">Released gate cost</div></div>
+  <section aria-label="Headline result">
+    <div class="figures">
+      <div class="fig pass"><div class="n">3<span class="slash">/3</span></div><div class="l">replicas passed, end to end</div></div>
+      <div class="fig"><div class="n">100<span class="slash">%</span></div><div class="l">rubric checks met</div></div>
+      <div class="fig money"><div class="n"><span class="cur">$</span>0.020200</div><div class="l">median cost per run</div></div>
+      <div class="fig money"><div class="n"><span class="cur">$</span>0.060496</div><div class="l">to clear the whole gate</div></div>
     </div>
-    <p class="note">Cost is recursively accounted — every delegated sub-agent's spend, down the whole
-      org tree, rolls into the number above. Nothing is hidden in a child call.</p>
+    <p class="verdict">Verdict — <b>Qualified.</b> Every figure above counts the full org tree: each
+      delegated crew's spend rolls up into the parent, so nothing hides in a child call.</p>
   </section>
 
-  <section>
-    <p class="kicker">Candidates evaluated</p>
-    <div class="card table-scroll">
+  <section class="ledger" aria-label="Candidates evaluated">
+    <p class="sec-label">What was tested</p>
+    <div class="scroll">
       <table>
         <thead>
-          <tr><th>Candidate</th><th>Runs</th><th>Completion</th><th>Rubric</th><th>E2E</th><th>Cost</th><th>Verdict</th></tr>
+          <tr><th>Candidate</th><th>Runs</th><th>Rubric</th><th>End&#8209;to&#8209;end</th><th>Median</th><th>Verdict</th></tr>
         </thead>
         <tbody>
           <tr>
-            <td><span class="cid">baseline</span><span class="sub">as-shipped setup</span></td>
-            <td>3</td><td>100%</td><td>3/3</td><td>3/3</td><td>$0.020200</td>
-            <td><span class="pill pass">Qualified</span></td>
+            <td><span class="cand">baseline<small>the setup as shipped</small></span></td>
+            <td>3</td><td>3&#8202;/&#8202;3</td><td>3&#8202;/&#8202;3</td><td>$0.020200</td>
+            <td><span class="mark ok">Qualified</span></td>
           </tr>
           <tr>
-            <td><span class="cid">delegated_artifact_tokens_256</span><span class="sub">raise delegated token floor → 256</span></td>
-            <td>0</td><td>—</td><td>—</td><td>—</td><td>$0.00</td>
-            <td><span class="pill reject">Rejected</span></td>
+            <td><span class="cand">delegated_artifact_tokens_256<small>raise the delegated token floor to 256</small></span></td>
+            <td>0</td><td>—</td><td>—</td><td>$0.00</td>
+            <td><span class="mark no">Rejected</span></td>
           </tr>
         </tbody>
       </table>
     </div>
-    <p class="note">The second candidate proposed raising a delegated token floor. Preflight found the
-      compiled setup already met it, so it would change nothing — the harness rejected it before
-      spending a single model call. A no-op costs <b>$0</b>, not a rounding error.</p>
+    <figcaption>The second candidate wanted to raise a token floor. Preflight found the compiled setup
+      already cleared it, so the change would do nothing — and the harness threw it out <b>before spending
+      a single model call.</b> A no-op costs zero, not a rounding error.</figcaption>
   </section>
 
-  <section>
-    <p class="kicker">The discipline</p>
-    <div class="discipline">
-      <div class="disc"><div class="n">01 · Completion gate</div><p>An <b>incomplete run cannot earn a rubric score.</b> Operational failure and output quality are measured separately, never conflated.</p></div>
-      <div class="disc"><div class="n">02 · No-op rejection</div><p>A config change that provably does nothing <b>spends nothing.</b> Candidates are bounded and rejected at preflight.</p></div>
-      <div class="disc"><div class="n">03 · Recursive cost</div><p>Every sub-agent's cost is <b>counted into the total</b> — static specialists and spawned children alike, all the way down.</p></div>
+  <section aria-label="Why the number is trustworthy">
+    <p class="sec-label">Why the number can be trusted</p>
+    <ul class="rules">
+      <li><b>An unfinished run earns no score.</b> Whether the work completed and whether it was any good
+        are measured apart, and never quietly averaged together.</li>
+      <li><b>A change that does nothing spends nothing.</b> Candidate tweaks are bounded and rejected at
+        preflight, so the search can't run up a bill chasing non-differences.</li>
+      <li><b>Every sub-agent's cost is counted.</b> Static specialists and spawned children alike roll up
+        into one total — the whole company's tree, not just the top.</li>
+    </ul>
+  </section>
+
+  <section aria-label="What this proves and does not prove">
+    <p class="sec-label">The honest part</p>
+    <div class="claims">
+      <div class="est">
+        <h3>What this establishes</h3>
+        <ul>
+          <li>Support HQ, as shipped, reliably completes this incident-response workload.
+            <span class="why">Three of three replicas, end to end, from isolated state.</span></li>
+          <li>It does so at a cost you can quote and reproduce.
+            <span class="why">$0.020200 median per run, counted down the whole tree.</span></li>
+        </ul>
+      </div>
+      <div class="not">
+        <h3>What it does not — yet</h3>
+        <ul>
+          <li>That memory makes the company better.
+            <span class="why">The memory-vs-control study is the next experiment, not this one.</span></li>
+          <li>That the result holds for other companies or other tasks.
+            <span class="why">One company, one workload, three replicas. Nothing more is claimed.</span></li>
+          <li>That the setup is optimal.
+            <span class="why">Exactly one bounded hypothesis has been tried so far.</span></li>
+        </ul>
+      </div>
     </div>
   </section>
 
-  <section>
-    <p class="kicker">What this does &amp; doesn't prove</p>
-    <div class="prove">
-      <div class="col yes">
-        <h3>Proven</h3>
-        <ul>
-          <li>The current Support HQ setup reliably completes this incident-response workload.
-            <span class="why">3/3 replicas, end-to-end, isolated state per run.</span></li>
-          <li>It does so at a known, recursively-accounted cost.
-            <span class="why">~$0.02 per run, median across replicas.</span></li>
-        </ul>
-      </div>
-      <div class="col no">
-        <h3>Not proven — yet</h3>
-        <ul>
-          <li>That memory improves company performance.
-            <span class="why">The memory-vs-control study is the next experiment.</span></li>
-          <li>That it holds across other companies or task types.
-            <span class="why">One company, one workload, three replicas.</span></li>
-          <li>That the setup search finds an optimal configuration.
-            <span class="why">Only one bounded token-floor hypothesis has been tested.</span></li>
-        </ul>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <p class="kicker">Reproducibility manifest</p>
-    <div class="manifest">
+  <section aria-label="Provenance">
+    <p class="sec-label">Provenance</p>
+    <div class="colophon">
       <dl>
         <dt>Fabri version</dt><dd>0.18.5</dd>
         <dt>Case</dt><dd>support_hq_safe_incident_response</dd>
         <dt>Roster revision</dt><dd>533f4f23081625ec1a92c4e562b6489f167561b7</dd>
         <dt>Worktree clean</dt><dd>true</dd>
-        <dt>Company source SHA-256</dt><dd>1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0</dd>
+        <dt>Company source SHA&#8209;256</dt><dd>1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0</dd>
         <dt>Replicas / candidate</dt><dd>3</dd>
         <dt>Total research spend</dt><dd>$0.272837</dd>
         <dt>Claim boundary</dt><dd>setup qualification only</dd>
       </dl>
     </div>
-    <p class="note">Prompts, traces, session IDs, and raw model output stay private; only aggregate
-      metrics and rubric outcomes are published.</p>
+    <p class="byline" style="margin-top:16px">Prompts, traces, session IDs and raw model output stay
+      private; only aggregate metrics and rubric outcomes are published.</p>
   </section>
 
-  <section>
-    <p class="kicker">On the bench next</p>
-    <div class="roadmap">
-      <div class="rrow"><div class="rl"><span class="rt">Support HQ</span><span class="rd">Setup qualification — incident response</span></div><span class="pill pass">Published</span></div>
-      <div class="rrow"><div class="rl"><span class="rt">Reliability Labs</span><span class="rd">Setup qualification — incident release gate</span></div><span class="pill pending">Pending</span></div>
-      <div class="rrow"><div class="rl"><span class="rt">Revenue Ops</span><span class="rd">Setup qualification — evidence-backed outreach</span></div><span class="pill pending">Pending</span></div>
-      <div class="rrow"><div class="rl"><span class="rt">Memory vs. control</span><span class="rd">Does trace-backed memory earn its cost?</span></div><span class="pill pending">Pending</span></div>
+  <section aria-label="Also on the bench">
+    <p class="sec-label">Also on the bench</p>
+    <ul class="bench">
+      <li><span class="t">Support HQ<small>Setup qualification — incident response</small></span><span class="s done">Published</span></li>
+      <li><span class="t">Reliability Labs<small>Setup qualification — incident release gate</small></span><span class="s wait">In progress</span></li>
+      <li><span class="t">Revenue Ops<small>Setup qualification — evidence-backed outreach</small></span><span class="s wait">In progress</span></li>
+      <li><span class="t">Memory vs. control<small>Does trace-backed memory earn its cost?</small></span><span class="s wait">Next</span></li>
+    </ul>
+  </section>
+
+  <footer class="foot">
+    <div class="links">
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-setup-qualification-2026-07-20.md">Read the full result</a>
+      <a href="https://github.com/Rushour0/fabri">Fabri on GitHub</a>
     </div>
-  </section>
-
-  <div class="cta">
-    <a class="btn" href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-setup-qualification-2026-07-20.md">Read the full result →</a>
-    <a class="btn ghost" href="https://github.com/Rushour0/fabri">Fabri on GitHub</a>
-  </div>
-
-  <footer>
-    <span>Fabri · self-improving companies of AI agents</span>
-    <span>Report generated 2026-07-20 · setup qualification, not a memory result</span>
+    <div class="colo">Fabri · self-improving companies of AI agents</div>
   </footer>
-</div>
-
-<script>
-  (function () {
-    try {
-      var m = document.querySelector('.stamp');
-      if (m && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        m.animate([{opacity:0, transform:'translateY(4px)'},{opacity:1, transform:'none'}], {duration:420, easing:'ease-out'});
-      }
-    } catch (e) {}
-  })();
-</script>
+</article>
