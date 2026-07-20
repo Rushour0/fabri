@@ -1,3 +1,6 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Fabri benchmark report: Support HQ company setup qualification — 3/3 replicas end-to-end, $0.020200 median cost per run, recursively accounted. Setup qualification only; memory result pending.">
 <title>Fabri Benchmark — Support HQ Setup Qualification</title>
 <style>
   :root {
@@ -65,6 +68,7 @@
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     line-height: 1.6;
     font-size: 16px;
+    overflow-x: hidden;
   }
   .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
   .wrap { max-width: 860px; margin: 0 auto; padding: clamp(20px, 5vw, 56px) clamp(16px, 4vw, 40px) 72px; }
@@ -105,14 +109,15 @@
 
   .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
   @media (max-width: 620px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 460px) { .tiles { grid-template-columns: 1fr; } }
   .tile {
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 16px 16px 14px; box-shadow: var(--shadow);
+    padding: 16px 16px 14px; box-shadow: var(--shadow); min-width: 0;
   }
   .tile .v {
     font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
-    font-size: clamp(22px, 4.4vw, 30px); font-weight: 600; letter-spacing: -.01em; color: var(--ink);
-    line-height: 1.05;
+    font-size: clamp(21px, 4.2vw, 29px); font-weight: 600; letter-spacing: -.02em; color: var(--ink);
+    line-height: 1.05; white-space: nowrap;
   }
   .tile .v .u { font-size: 14px; color: var(--muted); font-weight: 500; }
   .tile .k { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
@@ -211,8 +216,8 @@
     <div class="tiles">
       <div class="tile"><div class="v good">3<span class="u">/3</span></div><div class="k">Replicas passed end-to-end</div></div>
       <div class="tile"><div class="v good">100<span class="u">%</span></div><div class="k">Conditional rubric pass</div></div>
-      <div class="tile"><div class="v"><span class="u">$</span>0.0202</div><div class="k">Median cost / run</div></div>
-      <div class="tile"><div class="v"><span class="u">$</span>0.0605</div><div class="k">Released gate cost</div></div>
+      <div class="tile"><div class="v"><span class="u">$</span>0.020200</div><div class="k">Median cost / run</div></div>
+      <div class="tile"><div class="v"><span class="u">$</span>0.060496</div><div class="k">Released gate cost</div></div>
     </div>
     <p class="note">Cost is recursively accounted — every delegated sub-agent's spend, down the whole
       org tree, rolls into the number above. Nothing is hidden in a child call.</p>
@@ -228,7 +233,7 @@
         <tbody>
           <tr>
             <td><span class="cid">baseline</span><span class="sub">as-shipped setup</span></td>
-            <td>3</td><td>100%</td><td>3/3</td><td>3/3</td><td>$0.0202</td>
+            <td>3</td><td>100%</td><td>3/3</td><td>3/3</td><td>$0.020200</td>
             <td><span class="pill pass">Qualified</span></td>
           </tr>
           <tr>
