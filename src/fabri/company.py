@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from pathlib import Path
 
@@ -71,6 +72,17 @@ def _apply_company_llm_defaults(agency_dir: Path) -> None:
         config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
+def _require_positive_number(value: object, label: str) -> None:
+    """A call timeout must be a positive, finite number (never a bool, which is
+    an int subclass and would silently pass an isinstance check). An invalid
+    value here would otherwise serialize into the compiled YAML and only blow up
+    at delegation time inside subprocess.communicate(timeout=...)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CompanyError(f"{label} must be a number")
+    if not math.isfinite(value) or value <= 0:
+        raise CompanyError(f"{label} must be a positive, finite number")
+
+
 def load_company(path: str | Path) -> dict:
     """Parse and validate a company TOML, returning its unchanged data."""
     company_path = Path(path)
@@ -91,6 +103,8 @@ def load_company(path: str | Path) -> dict:
         raise CompanyError("company.memory_namespace must be a non-empty string")
     if "max_cost_usd" in company and not isinstance(company["max_cost_usd"], (int, float)):
         raise CompanyError("company.max_cost_usd must be a number")
+    if "call_timeout_s" in company:
+        _require_positive_number(company["call_timeout_s"], "company.call_timeout_s")
     if not isinstance(nodes, list) or not nodes:
         raise CompanyError("company.toml must contain at least one [[node]]")
 
@@ -112,6 +126,8 @@ def load_company(path: str | Path) -> dict:
             raise CompanyError(f"node {node_id!r}.prompt must be a string")
         if "title" in node and not isinstance(node["title"], str):
             raise CompanyError(f"node {node_id!r}.title must be a string")
+        if "timeout_s" in node:
+            _require_positive_number(node["timeout_s"], f"node {node_id!r}.timeout_s")
         by_id[node_id] = node
 
     roots = [node for node in nodes if node["report_to"] == ""]
