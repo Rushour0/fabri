@@ -1,0 +1,330 @@
+<title>Fabri Benchmark — Support HQ Setup Qualification</title>
+<style>
+  :root {
+    --bg: #14110c;
+    --panel: #1d1811;
+    --panel-2: #241e15;
+    --line: #322a1f;
+    --ink: #ece4d5;
+    --muted: #9c9080;
+    --faint: #6f6555;
+    --accent: #e0b155;
+    --accent-dim: #b8893a;
+    --pass: #7fb488;
+    --pass-bg: #1c2a1e;
+    --pending: #8b96ac;
+    --pending-bg: #1e2530;
+    --reject: #c68064;
+    --reject-bg: #2c1f18;
+    --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.7);
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #efeae0;
+      --panel: #f7f3ea;
+      --panel-2: #f1ebdd;
+      --line: #ddd4c2;
+      --ink: #2a2318;
+      --muted: #6c6350;
+      --faint: #9a8f79;
+      --accent: #b07d1c;
+      --accent-dim: #916417;
+      --pass: #3f7a48;
+      --pass-bg: #e4eede;
+      --pending: #4d5c78;
+      --pending-bg: #e2e7ef;
+      --reject: #a2542f;
+      --reject-bg: #f1e2d8;
+      --shadow: 0 1px 0 rgba(255,255,255,.6) inset, 0 16px 34px -26px rgba(80,60,20,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14110c; --panel: #1d1811; --panel-2: #241e15; --line: #322a1f;
+    --ink: #ece4d5; --muted: #9c9080; --faint: #6f6555;
+    --accent: #e0b155; --accent-dim: #b8893a;
+    --pass: #7fb488; --pass-bg: #1c2a1e; --pending: #8b96ac; --pending-bg: #1e2530;
+    --reject: #c68064; --reject-bg: #2c1f18;
+    --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.7);
+  }
+  :root[data-theme="light"] {
+    --bg: #efeae0; --panel: #f7f3ea; --panel-2: #f1ebdd; --line: #ddd4c2;
+    --ink: #2a2318; --muted: #6c6350; --faint: #9a8f79;
+    --accent: #b07d1c; --accent-dim: #916417;
+    --pass: #3f7a48; --pass-bg: #e4eede; --pending: #4d5c78; --pending-bg: #e2e7ef;
+    --reject: #a2542f; --reject-bg: #f1e2d8;
+    --shadow: 0 1px 0 rgba(255,255,255,.6) inset, 0 16px 34px -26px rgba(80,60,20,.45);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.6;
+    font-size: 16px;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: clamp(20px, 5vw, 56px) clamp(16px, 4vw, 40px) 72px; }
+
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 18px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .eyebrow::before { content: ""; width: 26px; height: 1px; background: var(--accent-dim); display: inline-block; }
+
+  h1 {
+    font-size: clamp(28px, 5.4vw, 44px); line-height: 1.08; margin: 0 0 14px;
+    font-weight: 660; letter-spacing: -.02em; text-wrap: balance;
+  }
+  .lede { color: var(--muted); font-size: clamp(16px, 2.2vw, 18px); max-width: 60ch; margin: 0 0 30px; }
+
+  .stamp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 40px; }
+  .stamp {
+    font-family: ui-monospace, Menlo, monospace; font-weight: 600;
+    letter-spacing: .16em; text-transform: uppercase; font-size: 14px;
+    color: var(--accent); border: 1.5px solid var(--accent-dim);
+    padding: 9px 16px; border-radius: 6px; position: relative;
+    background: linear-gradient(0deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
+  }
+  .stamp small { display:block; font-size: 10px; letter-spacing:.14em; color: var(--faint); font-weight: 500; margin-top: 2px; }
+  .stamp-meta { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: var(--faint); }
+  .stamp-meta b { color: var(--muted); font-weight: 600; }
+
+  section { margin-top: 46px; }
+  .kicker {
+    font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--faint); margin: 0 0 16px;
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  .kicker::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 620px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px 16px 14px; box-shadow: var(--shadow);
+  }
+  .tile .v {
+    font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
+    font-size: clamp(22px, 4.4vw, 30px); font-weight: 600; letter-spacing: -.01em; color: var(--ink);
+    line-height: 1.05;
+  }
+  .tile .v .u { font-size: 14px; color: var(--muted); font-weight: 500; }
+  .tile .k { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+  .tile .v.good { color: var(--pass); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; }
+  th, td {
+    text-align: right; padding: 11px 13px; border-bottom: 1px solid var(--line);
+    font-variant-numeric: tabular-nums; font-size: 13.5px;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  th { color: var(--faint); font-weight: 600; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; }
+  td:first-child, th:first-child { text-align: left; font-family: system-ui, sans-serif; }
+  tbody tr:last-child td { border-bottom: none; }
+  td .cid { font-weight: 600; }
+  td .sub { display:block; color: var(--faint); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600;
+    padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+  }
+  .pill.pass { color: var(--pass); background: var(--pass-bg); }
+  .pill.reject { color: var(--reject); background: var(--reject-bg); }
+  .pill.pending { color: var(--pending); background: var(--pending-bg); }
+  .pill::before { content:""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .prove { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 620px) { .prove { grid-template-columns: 1fr; } }
+  .prove .col { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
+  .prove .col.yes { border-left: 3px solid var(--pass); }
+  .prove .col.no { border-left: 3px solid var(--reject); }
+  .prove h3 { margin: 0 0 12px; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; font-family: ui-monospace, Menlo, monospace; }
+  .prove .yes h3 { color: var(--pass); }
+  .prove .no h3 { color: var(--reject); }
+  .prove ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 11px; }
+  .prove li { padding-left: 22px; position: relative; font-size: 14.5px; color: var(--ink); }
+  .prove li .why { display:block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .prove .yes li::before { content: "✓"; position: absolute; left: 0; color: var(--pass); font-weight: 700; }
+  .prove .no li::before { content: "✕"; position: absolute; left: 0; color: var(--reject); font-weight: 700; }
+
+  .discipline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 700px) { .discipline { grid-template-columns: 1fr; } }
+  .disc { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
+  .disc .n { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-size: 12px; letter-spacing: .12em; }
+  .disc p { margin: 8px 0 0; font-size: 14px; color: var(--muted); }
+  .disc b { color: var(--ink); font-weight: 600; }
+
+  .manifest { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 4px; }
+  .manifest dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; }
+  .manifest dt { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--faint); padding: 11px 16px; border-bottom: 1px solid var(--line); letter-spacing: .04em; }
+  .manifest dd { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: var(--ink); padding: 11px 16px; border-bottom: 1px solid var(--line); word-break: break-all; text-align: right; }
+  .manifest dl > :nth-last-child(1), .manifest dl > :nth-last-child(2) { border-bottom: none; }
+
+  .roadmap { display: flex; flex-direction: column; gap: 8px; }
+  .rrow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .rrow .rl { display: flex; flex-direction: column; gap: 2px; }
+  .rrow .rt { font-weight: 600; font-size: 14.5px; }
+  .rrow .rd { color: var(--muted); font-size: 13px; }
+
+  .cta { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  a.btn {
+    font-family: ui-monospace, Menlo, monospace; font-size: 13.5px; text-decoration: none;
+    color: var(--bg); background: var(--accent); padding: 11px 18px; border-radius: 7px; font-weight: 600;
+    letter-spacing: .02em; transition: filter .15s ease;
+  }
+  a.btn:hover { filter: brightness(1.08); }
+  a.btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent-dim); }
+  a:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 7px; }
+
+  footer { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between; }
+  .note { color: var(--muted); font-size: 13.5px; margin: 14px 0 0; }
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Fabri · Benchmark Report</p>
+  <h1>Support HQ — Company Setup Qualification</h1>
+  <p class="lede">Before asking whether an AI-agent company is <em>smart</em>, Fabri asks whether its
+    setup is <em>reliable</em>: can this org complete a real workload, end to end, at a known cost —
+    every time, with fresh isolated state per run?</p>
+
+  <div class="stamp-row">
+    <div class="stamp">Qualified<small>3 / 3 replicas · frozen gate</small></div>
+    <div class="stamp-meta">
+      Workload: <b>safe incident response</b> &nbsp;·&nbsp; Recommendation: <b>baseline</b> &nbsp;·&nbsp; Fabri <b>v0.18.5</b>
+    </div>
+  </div>
+
+  <section>
+    <p class="kicker">Result at a glance</p>
+    <div class="tiles">
+      <div class="tile"><div class="v good">3<span class="u">/3</span></div><div class="k">Replicas passed end-to-end</div></div>
+      <div class="tile"><div class="v good">100<span class="u">%</span></div><div class="k">Conditional rubric pass</div></div>
+      <div class="tile"><div class="v"><span class="u">$</span>0.0202</div><div class="k">Median cost / run</div></div>
+      <div class="tile"><div class="v"><span class="u">$</span>0.0605</div><div class="k">Released gate cost</div></div>
+    </div>
+    <p class="note">Cost is recursively accounted — every delegated sub-agent's spend, down the whole
+      org tree, rolls into the number above. Nothing is hidden in a child call.</p>
+  </section>
+
+  <section>
+    <p class="kicker">Candidates evaluated</p>
+    <div class="card table-scroll">
+      <table>
+        <thead>
+          <tr><th>Candidate</th><th>Runs</th><th>Completion</th><th>Rubric</th><th>E2E</th><th>Cost</th><th>Verdict</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="cid">baseline</span><span class="sub">as-shipped setup</span></td>
+            <td>3</td><td>100%</td><td>3/3</td><td>3/3</td><td>$0.0202</td>
+            <td><span class="pill pass">Qualified</span></td>
+          </tr>
+          <tr>
+            <td><span class="cid">delegated_artifact_tokens_256</span><span class="sub">raise delegated token floor → 256</span></td>
+            <td>0</td><td>—</td><td>—</td><td>—</td><td>$0.00</td>
+            <td><span class="pill reject">Rejected</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The second candidate proposed raising a delegated token floor. Preflight found the
+      compiled setup already met it, so it would change nothing — the harness rejected it before
+      spending a single model call. A no-op costs <b>$0</b>, not a rounding error.</p>
+  </section>
+
+  <section>
+    <p class="kicker">The discipline</p>
+    <div class="discipline">
+      <div class="disc"><div class="n">01 · Completion gate</div><p>An <b>incomplete run cannot earn a rubric score.</b> Operational failure and output quality are measured separately, never conflated.</p></div>
+      <div class="disc"><div class="n">02 · No-op rejection</div><p>A config change that provably does nothing <b>spends nothing.</b> Candidates are bounded and rejected at preflight.</p></div>
+      <div class="disc"><div class="n">03 · Recursive cost</div><p>Every sub-agent's cost is <b>counted into the total</b> — static specialists and spawned children alike, all the way down.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <p class="kicker">What this does &amp; doesn't prove</p>
+    <div class="prove">
+      <div class="col yes">
+        <h3>Proven</h3>
+        <ul>
+          <li>The current Support HQ setup reliably completes this incident-response workload.
+            <span class="why">3/3 replicas, end-to-end, isolated state per run.</span></li>
+          <li>It does so at a known, recursively-accounted cost.
+            <span class="why">~$0.02 per run, median across replicas.</span></li>
+        </ul>
+      </div>
+      <div class="col no">
+        <h3>Not proven — yet</h3>
+        <ul>
+          <li>That memory improves company performance.
+            <span class="why">The memory-vs-control study is the next experiment.</span></li>
+          <li>That it holds across other companies or task types.
+            <span class="why">One company, one workload, three replicas.</span></li>
+          <li>That the setup search finds an optimal configuration.
+            <span class="why">Only one bounded token-floor hypothesis has been tested.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="kicker">Reproducibility manifest</p>
+    <div class="manifest">
+      <dl>
+        <dt>Fabri version</dt><dd>0.18.5</dd>
+        <dt>Case</dt><dd>support_hq_safe_incident_response</dd>
+        <dt>Roster revision</dt><dd>533f4f23081625ec1a92c4e562b6489f167561b7</dd>
+        <dt>Worktree clean</dt><dd>true</dd>
+        <dt>Company source SHA-256</dt><dd>1ef191962a4b2a27d780fa087bb1a4fdb67e378a3030307e31b5b8386f15ffe0</dd>
+        <dt>Replicas / candidate</dt><dd>3</dd>
+        <dt>Total research spend</dt><dd>$0.272837</dd>
+        <dt>Claim boundary</dt><dd>setup qualification only</dd>
+      </dl>
+    </div>
+    <p class="note">Prompts, traces, session IDs, and raw model output stay private; only aggregate
+      metrics and rubric outcomes are published.</p>
+  </section>
+
+  <section>
+    <p class="kicker">On the bench next</p>
+    <div class="roadmap">
+      <div class="rrow"><div class="rl"><span class="rt">Support HQ</span><span class="rd">Setup qualification — incident response</span></div><span class="pill pass">Published</span></div>
+      <div class="rrow"><div class="rl"><span class="rt">Reliability Labs</span><span class="rd">Setup qualification — incident release gate</span></div><span class="pill pending">Pending</span></div>
+      <div class="rrow"><div class="rl"><span class="rt">Revenue Ops</span><span class="rd">Setup qualification — evidence-backed outreach</span></div><span class="pill pending">Pending</span></div>
+      <div class="rrow"><div class="rl"><span class="rt">Memory vs. control</span><span class="rd">Does trace-backed memory earn its cost?</span></div><span class="pill pending">Pending</span></div>
+    </div>
+  </section>
+
+  <div class="cta">
+    <a class="btn" href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-setup-qualification-2026-07-20.md">Read the full result →</a>
+    <a class="btn ghost" href="https://github.com/Rushour0/fabri">Fabri on GitHub</a>
+  </div>
+
+  <footer>
+    <span>Fabri · self-improving companies of AI agents</span>
+    <span>Report generated 2026-07-20 · setup qualification, not a memory result</span>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    try {
+      var m = document.querySelector('.stamp');
+      if (m && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        m.animate([{opacity:0, transform:'translateY(4px)'},{opacity:1, transform:'none'}], {duration:420, easing:'ease-out'});
+      }
+    } catch (e) {}
+  })();
+</script>
