@@ -2,6 +2,15 @@
 
 Date: 2026-07-20
 
+> **⚠️ SUPERSEDED BY A LARGER SAMPLE — DO NOT CITE AS ESTABLISHED RELIABILITY.**
+> This result is a 3-replica small-sample release-gate pass (3/3). A subsequent
+> 10-replica confirmation run
+> ([`support-hq-setup-qualification-10replica-2026-07-20.md`](support-hq-setup-qualification-10replica-2026-07-20.md))
+> returned only 9/10 (≈90% rubric pass rate). At adequate sample size, this
+> setup does **not** clear the 100% reliability bar. Treat the 3/3 figure below
+> as a small-sample pass that a larger sample overturned, not as proof of
+> reliable qualification.
+
 ## Release claim
 
 Support HQ's current baseline setup qualified for the incident-response

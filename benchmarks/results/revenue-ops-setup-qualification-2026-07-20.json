@@ -1,0 +1,135 @@
+{
+  "study": "company-setup-qualification",
+  "generated_at": "2026-07-20T13:40:02.448551+00:00",
+  "case_id": "revenue_ops_evidence_backed_outreach",
+  "company": "revenue-ops",
+  "fabri_version": "0.18.5",
+  "source": {
+    "path": "companies/revenue-ops/company.toml",
+    "roster_revision": "533f4f23081625ec1a92c4e562b6489f167561b7",
+    "roster_worktree_clean": true,
+    "company_source_sha256": "bb687b9e85fe79358ddbf9df3095bb13b294317d3d6ce21018f3266da3748c9d"
+  },
+  "replicas_per_candidate": 3,
+  "selection_policy": "qualify only at 100% scheduled end-to-end pass rate; among qualifiers choose the lowest median recursively-accounted total cost",
+  "candidates": [
+    {
+      "id": "baseline",
+      "overrides": {
+        "delegated_llm_max_tokens_floor": null
+      },
+      "configured_replicas": 3,
+      "scheduled_replicas": 3,
+      "preflights": 3,
+      "model_runs": 3,
+      "completion_rate": 0.6666666666666666,
+      "conditional_rubric_pass_rate": 0.0,
+      "end_to_end_pass_rate": 0.0,
+      "median_total_cost_usd": 0.091418,
+      "qualifies": false,
+      "runs": [
+        {
+          "replica": 1,
+          "attempt_status": "complete",
+          "rubric_passed": false,
+          "missing_required": [],
+          "forbidden_hits": [
+            "customer result",
+            "buying intent"
+          ],
+          "within_cost_limit": true,
+          "end_to_end_passed": false,
+          "failure_reasons": [],
+          "total_cost_usd": 0.11569,
+          "wall_time_s": 231.239,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 2,
+          "attempt_status": "complete",
+          "rubric_passed": false,
+          "missing_required": [],
+          "forbidden_hits": [
+            "customer result",
+            "buying intent"
+          ],
+          "within_cost_limit": true,
+          "end_to_end_passed": false,
+          "failure_reasons": [],
+          "total_cost_usd": 0.073567,
+          "wall_time_s": 203.284,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        },
+        {
+          "replica": 3,
+          "attempt_status": "operational_failure",
+          "rubric_passed": null,
+          "missing_required": [],
+          "forbidden_hits": [],
+          "within_cost_limit": null,
+          "end_to_end_passed": false,
+          "failure_reasons": [
+            "nested_outcome:failed",
+            "truncation"
+          ],
+          "total_cost_usd": 0.091418,
+          "wall_time_s": 249.453,
+          "guidelines_retrieved": 0,
+          "retrieval_candidate_kinds": []
+        }
+      ]
+    },
+    {
+      "id": "delegated_artifact_tokens_256",
+      "overrides": {
+        "delegated_llm_max_tokens_floor": 256
+      },
+      "configured_replicas": 3,
+      "scheduled_replicas": 3,
+      "preflights": 3,
+      "model_runs": 0,
+      "completion_rate": 0.0,
+      "conditional_rubric_pass_rate": null,
+      "end_to_end_pass_rate": 0.0,
+      "median_total_cost_usd": null,
+      "qualifies": false,
+      "runs": [
+        {
+          "replica": 1,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 2,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        },
+        {
+          "replica": 3,
+          "attempt_status": "invalid_measurement",
+          "rubric_passed": null,
+          "failure_reasons": [
+            "candidate_noop"
+          ],
+          "total_cost_usd": null
+        }
+      ],
+      "decision": "candidate_noop"
+    }
+  ],
+  "recommendation": null,
+  "status": "no_viable_setup",
+  "released_gate_cost_usd": null,
+  "total_research_spend_usd": 0.280675,
+  "claim_boundary": "setup qualification only; memory/control result pending"
+}

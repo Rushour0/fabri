@@ -16,14 +16,17 @@ Fabri publishes completed measurements and leaves pending work visibly pending:
 
 | Evidence | Result | Scope |
 |---|---|---|
-| Company setup qualification | Support HQ baseline completed and passed **3/3** fresh replicas; median recursively accounted cost **$0.020200** | Qualifies this company setup for a later memory/control study; it is not a memory-benefit result |
+| Company setup qualification | Support HQ passed a small-sample **3/3** gate, but a follow-up **10-replica** confirmation scored **9/10** (~90%) — the larger sample overturned the small-sample pass, so it does **not** clear the 100% reliability bar. Reliability Labs (**2/3**) and Revenue Ops (**0/3**, plus 1 truncation failure) also did not qualify. | At adequate sample size, none of the three evaluated company setups clears the 100% reliability bar; it is not a memory-benefit result |
 | Offline retrieval evaluation | Shipped hybrid retrieval reached **0.938 recall@5** and **0.844 MRR**, versus dense at 0.792 and 0.790 | Deterministic, labeled retrieval fixture; no live model |
 | Session-N+1 recovery pilot | Steps **5 → 4**, guideline reuse **0% → 67%**, cost **↓7.8%** | Six-run constructed task on gpt-4o-mini; not a general workload claim |
 | LongMemEval | Runner shipped; result pending | No score claimed yet |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, and
-the reviewed [Support HQ result](benchmarks/results/support-hq-setup-qualification-2026-07-20.md)
-for per-replica costs, failed hypotheses, and the release decision.
+See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, and the
+reviewed results for per-replica costs, failed hypotheses, and the release decision:
+[Support HQ 3-replica](benchmarks/results/support-hq-setup-qualification-2026-07-20.md),
+[Support HQ 10-replica confirmation](benchmarks/results/support-hq-setup-qualification-10replica-2026-07-20.md),
+[Reliability Labs](benchmarks/results/reliability-labs-setup-qualification-2026-07-20.md), and
+[Revenue Ops](benchmarks/results/revenue-ops-setup-qualification-2026-07-20.md).
 
 fabri is split into two layers: an **engine** (a frugal agent loop, per-role
 LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
