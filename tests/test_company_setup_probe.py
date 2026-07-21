@@ -475,6 +475,15 @@ def test_score_structured_uses_recursive_subset_equality() -> None:
         "mismatches": ["structured_output:not_a_mapping"],
     }
     assert score_structured(None, {}) == {"passed": True, "mismatches": []}
+    # bool/int must not false-pass via Python's True == 1 / False == 0.
+    assert score_structured({"rollback": 1}, {"rollback": True}) == {
+        "passed": False,
+        "mismatches": ["wrong:rollback"],
+    }
+    assert score_structured({"rollback": True}, {"rollback": 1}) == {
+        "passed": False,
+        "mismatches": ["wrong:rollback"],
+    }
 
 
 def _complete_probe_runner(

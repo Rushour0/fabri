@@ -956,7 +956,11 @@ def score_structured(
                     mismatches.append(f"wrong:{path}")
                 else:
                     compare(actual_value, expected_value, path)
-            elif actual_value != expected_value:
+            # Guard Python's True == 1 / False == 0: a wrong-typed structured
+            # value (e.g. JSON number 1 against an expected bool true) must not
+            # false-pass, since structured only ever tightens qualification.
+            elif isinstance(expected_value, bool) != isinstance(actual_value, bool) \
+                    or actual_value != expected_value:
                 mismatches.append(f"wrong:{path}")
 
     compare(structured_output, structured_fields, "")
