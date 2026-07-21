@@ -14,6 +14,7 @@ another.
 | **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | first result landed: ↓7.8% cost, steps 5→4, reuse 0→67% — **caveat: `gpt-4o-mini` on a constructed failure-recovery task, not the canonical anthropic-sonnet config; canonical sonnet number still pending** |
 | **offline retrieval eval** | Whether retrieval finds hand-labeled relevant guidelines without spending model credits. | hybrid: recall@5 0.938, MRR 0.844; CI-gated |
 | **LongMemEval** | The "memory loop is real" claim — exact-match accuracy on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) public dataset. Apples-to-apples with Mastra (94.87%), Letta, Zep. | runner shipped, results pending |
+| **company memory & generational evolution** | Whether fabri's memory makes a *company* better or cheaper — a 60-arm memory-vs-control study plus immutable generational accumulation (gen-001 → gen-002). OpenAI-only, 3 roster companies. | **inconclusive — the evaluator is broken, not the agent.** The forbidden-term rubric is a substring match that false-positives on negations (flags the correct "no evidence a fix was deployed"); corrected, Reliability memory is 8/8 not 5/8 and gen-002 ties gen-001 on quality, cost neutral. The self-mining control isn't a no-memory baseline (0 clean control completions on 2/3 companies). Revenue Ops was a config failure (`max_tokens: 768` truncation; 768→2048 fix verified). Net: fix the instruments (negation-aware/LLM-judge rubric + true no-memory control) before any cost claim. See [qualitative analysis + 118 per-run logs](benchmarks/results/run-logs-2026-07-22/QUALITATIVE-ANALYSIS.md) and [consolidated report](benchmarks/results/company-generation-evolution-2026-07-22.md) |
 
 The memory runners use [`configs/benchmark.yaml`](configs/benchmark.yaml) as
 their locked source of truth. Dynamic company experiments instead use
@@ -126,11 +127,11 @@ explains *why* each strategic value was chosen.
   (via `fabri.benchmarks.stats.fmt_rate`), e.g. `7/10 (70%, 95% CI 40-89%)`.
   The Wilson interval stays well-behaved at small N and at the 0%/100%
   extremes, unlike a naive normal approximation.
-- **Small-n results are underpowered by default.** At n=3–10, Wilson
-  intervals routinely span 30-60 points of probability. When two arms'
-  intervals overlap substantially, the correct read is "no significant
-  difference / underpowered" — **not** a hard delta with a directional
-  claim. A narrower CI (more replicas) is what turns a delta into evidence.
+- **Small-n results are descriptive by default.** At n=3–10, Wilson intervals
+  routinely span 30-60 points of probability. The intervals below describe
+  each arm separately; interval overlap is not a hypothesis test. No paired
+  significance test was run for these experiments, so we report the observed
+  deltas without claiming a statistically significant difference.
 - **Completed-vs-attempted denominator rule:** a rubric rate is always
   computed over runs that actually completed. If an arm's completion count
   is below the nominal replica count (e.g. 9/10 completed, not 10/10), we
@@ -210,9 +211,9 @@ memory's effect on outcome, distinct from setup qualification above.
 
 | date | company / task | replicas (memory / control completed) | guidelines retrieved (memory / control) | rubric (memory) | rubric (control) | rubric delta | mean cost delta | fabri |
 |---|---|---:|---|---:|---:|---:|---:|---|
-| 2026-07-20 | Support HQ / holdout task (3-replica pilot) | 3 / 3 | 2 / 0 | 3/3 (100%, 95% CI 44-100%) | 2/3 (67%, 95% CI 21-94%) | +33 pp (CIs overlap heavily at n=3 — not statistically resolved) | +$0.0009 (~1.5%) | 0.18.5 |
-| 2026-07-20 | Support HQ / holdout task (10-replica confirmation) | 10 / 10 | 2.0 / 0 | 7/10 (70%, 95% CI 40-89%) | 9/10 (90%, 95% CI 60-98%) | −20 pp (CIs overlap — sign not statistically resolved at n=10) | **−$0.0014** (mean $0.0600 vs $0.0614) | 0.18.5 |
-| 2026-07-21 | Reliability Labs / holdout task | 10 / **9** | 2.0 / 0 | 6/10 (60%, 95% CI 31-83%) | 7/9 (78%, 95% CI 45-94%) as-completed; **7/10 (70%, 95% CI 40-89%) conservative** (see note) | **−10 pp** conservative (CIs overlap — not statistically resolved at n=10) | **+$0.0184** (mean $0.1150 vs $0.0966) | 0.18.5 |
+| 2026-07-20 | Support HQ / holdout task (3-replica pilot) | 3 / 3 | 2 / 0 | 3/3 (100%, 95% CI 44-100%) | 2/3 (67%, 95% CI 21-94%) | +33 pp (descriptive; no paired significance test) | +$0.0009 (~1.5%) | 0.18.5 |
+| 2026-07-20 | Support HQ / holdout task (10-replica confirmation) | 10 / 10 | 2.0 / 0 | 7/10 (70%, 95% CI 40-89%) | 9/10 (90%, 95% CI 60-98%) | −20 pp (descriptive; no paired significance test) | **−$0.0014** (mean $0.0600 vs $0.0614) | 0.18.5 |
+| 2026-07-21 | Reliability Labs / holdout task | 10 / **9** | 2.0 / 0 | 6/10 (60%, 95% CI 31-83%) | 7/9 (78%, 95% CI 45-94%) as-completed; **7/10 (70%, 95% CI 40-89%) conservative** (see note) | **−10 pp** conservative (descriptive; no paired significance test) | **+$0.0184** (mean $0.1150 vs $0.0966) | 0.18.5 |
 
 The control-is-empty sanity check held at both companies: control retrieved
 **0** guidelines on every replica, while the memory arm retrieved the same
@@ -225,26 +226,23 @@ report both readings and use the completed-runs denominator as primary. Memory
 was marginally cheaper on Support HQ (mean $0.0600 vs. $0.0614); Reliability
 Labs' memory arm was more expensive.
 
-**Honest verdict: the 3-replica pilot was reversed, and the sign is now
-underpowered, not confirmed either way.** The preliminary 3-replica Support HQ
+**Honest verdict: the 3-replica pilot was reversed, with no confirmed effect
+either way.** The preliminary 3-replica Support HQ
 pilot showed memory ahead by +33pp (95% CI 21-94% vs. 44-100% — already
-heavily overlapping at n=3). The 10-replica confirmation shrank the sample
-noise but the CIs for memory (7/10, 95% CI 40-89%) and control (9/10, 95% CI
-60-98%) still overlap substantially, so **the sign of the −20pp delta is not
-statistically resolved at n=10** — the honest read is "no significant
-difference / underpowered," not "memory loses by 20 points." That is a
-*stronger*, more defensible claim than the hard-delta framing: it says the
-experiment hasn't yet produced enough evidence to call a winner, rather than
-asserting a loss the data can't actually support. This is the same
+heavily overlapping at n=3). The 10-replica confirmation produced a −20pp
+descriptive delta. Because no paired significance test was run, these per-arm
+Wilson intervals do not establish whether the difference is statistically
+significant. The experiment therefore does not support calling a winner or
+asserting that memory loses by 20 points. This is the same
 small-sample fragility the setup-qualification study above demonstrated (a 3/3
 gate that fell to 9/10 at 10 replicas), now visible in the other direction
 too: a small-sample "memory win" can just as easily be a small-sample fluke.
 A 10-replica run on **Reliability Labs** shows the same shape — memory 6/10
 (60%, 95% CI 31-83%) vs. control 7/9 (78%, 95% CI 45-94%) as-completed, or
 7/10 (70%, 95% CI 40-89%) on the conservative completed-vs-attempted basis —
-and here too the CIs overlap heavily, so the conservative **−10pp** delta (not
-the as-completed −18pp, and emphatically not the previously reported
-"−18pp") is not statistically resolved at n=10 either. On both companies,
+and here too the conservative **−10pp** delta (not the as-completed −18pp, and
+emphatically not the previously reported "−18pp") is descriptive; no paired
+significance test was run. On both companies,
 Fabri's trace-backed memory retrieves lessons reliably, but neither dataset
 yet supports a confident claim that memory improves *or* hurts holdout-task
 rubric reliability — the honest conclusion is "underpowered, no resolved
@@ -268,6 +266,17 @@ run mines and promotes) — which is the next experiment. See
 (Note: the retrieval-count invariance is deterministic and was observed on every
 completed pair; a full per-variant rubric re-measurement was cut short by
 infrastructure interruptions, but that does not affect the conclusion.)
+
+**Supply smoke — negative, scale stopped.** On 2026-07-21, one memory/control
+pair with specialist-trace mining enabled and one with it disabled produced the
+same result: the manager supplied 2 guidelines and specialists supplied 0. The
+four runs cost $0.217185 total. This does not falsify specialist mining: the old
+harness copied only the manager's single SQLite DB into the holdout, and the
+short specialist traces produced no promotable candidates. The result is
+recorded as a harness-limited null, so no 10× run was launched. The repaired
+harness now discovers every compile-declared SQLite DB, reports the
+supply→transport→retrieval→outcome funnel, and permits scaling only when both
+memory replicas transport and retrieve a specialist-produced entry.
 
 Full results:
 [Support HQ](benchmarks/results/support-hq-memory-vs-control-2026-07-20.md)
@@ -404,10 +413,10 @@ probe must not be reported as a memory win. The isolated memory-vs-control
 study ([Memory vs. control](#memory-vs-control) above) — Support HQ — shows
 the same fragility biting in the other direction: a 3-replica pilot showed
 memory +33pp ahead of control, but the 10-replica confirmation shrank that
-gap's statistical footing rather than replacing it with a resolved loss —
-memory's 7/10 (95% CI 40-89%) and control's 9/10 (95% CI 60-98%) overlap
-enough that the sign of the −20pp delta is not statistically resolved at
-n=10. The retrieval mechanism itself is proven reliable (2 guidelines fetched
+gap without establishing a resolved loss — memory's 7/10 (95% CI 40-89%) and
+control's 9/10 (95% CI 60-98%) yield a descriptive −20pp delta, but no paired
+significance test was run. The retrieval mechanism itself is proven reliable
+(2 guidelines fetched
 on every memory run, 0 on every control run), but on this workload the honest
 conclusion is that neither company's data yet supports a confident claim that
 memory improves *or* hurts holdout-task reliability — the same underpowered

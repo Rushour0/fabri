@@ -1,0 +1,146 @@
+[
+  {
+    "company": "reliability-labs",
+    "phase": "evo-candidate",
+    "n": 3,
+    "raw_pass_count": 2,
+    "corrected_pass_count": 3,
+    "mean_cost": 0.018317666666666666,
+    "mean_char_len": 1273.0
+  },
+  {
+    "company": "reliability-labs",
+    "phase": "evo-incumbent",
+    "n": 3,
+    "raw_pass_count": 3,
+    "corrected_pass_count": 3,
+    "mean_cost": 0.01806466666666667,
+    "mean_char_len": 1364.0
+  },
+  {
+    "company": "reliability-labs",
+    "phase": "study-control-holdout",
+    "n": 9,
+    "raw_pass_count": 3,
+    "corrected_pass_count": 7,
+    "mean_cost": 0.01840411111111111,
+    "mean_char_len": 1590.6666666666667
+  },
+  {
+    "company": "reliability-labs",
+    "phase": "study-control-training",
+    "n": 10,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.0182119,
+    "mean_char_len": 1631.0
+  },
+  {
+    "company": "reliability-labs",
+    "phase": "study-memory-holdout",
+    "n": 9,
+    "raw_pass_count": 6,
+    "corrected_pass_count": 9,
+    "mean_cost": 0.020540888888888886,
+    "mean_char_len": 1708.4444444444443
+  },
+  {
+    "company": "reliability-labs",
+    "phase": "study-memory-training",
+    "n": 10,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.0183705,
+    "mean_char_len": 1703.4
+  },
+  {
+    "company": "revenue-ops",
+    "phase": "study-control-holdout",
+    "n": 1,
+    "raw_pass_count": 1,
+    "corrected_pass_count": 1,
+    "mean_cost": 0.017745,
+    "mean_char_len": 1112.0
+  },
+  {
+    "company": "revenue-ops",
+    "phase": "study-control-training",
+    "n": 10,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.0198464,
+    "mean_char_len": 1866.7
+  },
+  {
+    "company": "revenue-ops",
+    "phase": "study-memory-holdout",
+    "n": 1,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.018628,
+    "mean_char_len": 1418.0
+  },
+  {
+    "company": "revenue-ops",
+    "phase": "study-memory-training",
+    "n": 10,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.019364100000000002,
+    "mean_char_len": 1805.4
+  },
+  {
+    "company": "support-hq",
+    "phase": "evo-candidate",
+    "n": 6,
+    "raw_pass_count": 6,
+    "corrected_pass_count": 6,
+    "mean_cost": 0.010858833333333333,
+    "mean_char_len": 390.0
+  },
+  {
+    "company": "support-hq",
+    "phase": "evo-incumbent",
+    "n": 6,
+    "raw_pass_count": 6,
+    "corrected_pass_count": 6,
+    "mean_cost": 0.010977833333333332,
+    "mean_char_len": 437.0
+  },
+  {
+    "company": "support-hq",
+    "phase": "study-control-holdout",
+    "n": 10,
+    "raw_pass_count": 10,
+    "corrected_pass_count": 10,
+    "mean_cost": 0.0100878,
+    "mean_char_len": 353.0
+  },
+  {
+    "company": "support-hq",
+    "phase": "study-control-training",
+    "n": 10,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.014302899999999999,
+    "mean_char_len": 1409.1
+  },
+  {
+    "company": "support-hq",
+    "phase": "study-memory-holdout",
+    "n": 10,
+    "raw_pass_count": 10,
+    "corrected_pass_count": 10,
+    "mean_cost": 0.011056199999999999,
+    "mean_char_len": 340.0
+  },
+  {
+    "company": "support-hq",
+    "phase": "study-memory-training",
+    "n": 10,
+    "raw_pass_count": 0,
+    "corrected_pass_count": 0,
+    "mean_cost": 0.0125892,
+    "mean_char_len": 1180.8
+  }
+]
