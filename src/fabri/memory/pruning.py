@@ -3,7 +3,7 @@ import math
 import re
 import time
 from contextlib import contextmanager
-from typing import Callable
+from typing import Callable, Mapping
 
 from fabri.core.logging_setup import get_logger
 from fabri.memory.compress import DEFAULT_MAX_TOKENS, enforce_token_cap
@@ -19,6 +19,63 @@ logger = get_logger()
 
 # Kinds that are protected from eviction until no other entries remain.
 _EVICTION_PROTECTED_KINDS = frozenset({"strategic"})
+
+_GENERIC_SUCCESS_SUMMARY_MAX_CHARS = 160
+_TIER_RANK = {
+    "unclassified": -1,
+    "quarantine": 0,
+    "retrieve": 1,
+    "core": 2,
+    # Reserved for Increment 2. Keeping it above core prevents a later merge
+    # from downgrading an action memory before its own classifier is added.
+    "action": 3,
+}
+
+
+def classify_tier(entry_or_fields: MemoryEntry | Mapping[str, object]) -> str:
+    """Classify a memory entry's placement tier without side effects.
+
+    This intentionally uses only transparent entry fields.  The one-off rule
+    applies to unverified success summaries: a single observation is not yet a
+    reusable success lesson, even when its wording is longer than the generic
+    summary threshold.
+    """
+    if isinstance(entry_or_fields, MemoryEntry):
+        verification = entry_or_fields.verification
+        kind = entry_or_fields.kind
+        source_session_ids = entry_or_fields.source_session_ids
+        tools = entry_or_fields.tools
+        text = entry_or_fields.text
+    else:
+        verification = str(entry_or_fields.get("verification", "unverified"))
+        kind = str(entry_or_fields.get("kind", "tactical"))
+        source_session_ids_value = entry_or_fields.get("source_session_ids", [])
+        source_session_ids = (
+            [value for value in source_session_ids_value if isinstance(value, str)]
+            if isinstance(source_session_ids_value, (list, tuple, set, frozenset))
+            else []
+        )
+        tools_value = entry_or_fields.get("tools", [])
+        tools = (
+            [value for value in tools_value if isinstance(value, str)]
+            if isinstance(tools_value, (list, tuple, set, frozenset))
+            else []
+        )
+        text = str(entry_or_fields.get("text", ""))
+
+    if verification == "contradicted":
+        return "quarantine"
+    if (
+        verification in {"tool_verified", "rubric_verified"}
+        and kind == "strategic"
+        and len(set(source_session_ids)) >= 2
+    ):
+        return "core"
+    if verification == "unverified" and kind == "success_pattern":
+        generic_summary = not tools and len(text.strip()) < _GENERIC_SUCCESS_SUMMARY_MAX_CHARS
+        if generic_summary or len(set(source_session_ids)) <= 1:
+            return "quarantine"
+    return "retrieve"
 
 
 def _eviction_score(entry: MemoryEntry, half_life_days: float) -> float:
@@ -255,6 +312,7 @@ def ingest_guideline(
     applicability: list[str] | None = None,
     do_not_reuse_when: list[str] | None = None,
     on_disposition: Callable[[str, MemoryEntry], None] | None = None,
+    tiering_enabled: bool = False,
 ) -> MemoryEntry:
     """Insert or merge a new candidate guideline. A near-duplicate of an existing
     entry (cosine sim >= similarity_threshold, tactical *or* strategic) increments
@@ -338,6 +396,10 @@ def ingest_guideline(
                 entry.kind = "strategic"
             else:
                 logger.debug("merged duplicate guideline (sim=%.2f, hit_count=%d): %r", score, entry.hit_count, entry.text)
+            if tiering_enabled:
+                candidate_tier = classify_tier(entry)
+                if _TIER_RANK.get(candidate_tier, -1) > _TIER_RANK.get(entry.tier, -1):
+                    entry.tier = candidate_tier
             store.upsert(entry)
             if entry.id != old_id:
                 store.delete(old_id)
@@ -364,11 +426,14 @@ def ingest_guideline(
             producer_agent_id=producer_agent_id,
             scope=scope,
             verification=verification,
+            tier="unclassified",
             source_session_ids=[session_id],
             source_event_ids=source_event_ids,
             applicability=applicability,
             do_not_reuse_when=do_not_reuse_when,
         )
+        if tiering_enabled:
+            entry.tier = classify_tier(entry)
         logger.debug("inserted new %s guideline: %r tools=%s domain=%s", kind, entry.text, entry.tools, entry.domain)
         store.upsert(entry)
         if on_disposition is not None:

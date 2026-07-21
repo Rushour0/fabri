@@ -104,6 +104,7 @@ class RetrievalConfig:
     # always lives on the same Qdrant instance as the primary collection.
     global_qdrant_url: str = "http://localhost:6333"
     verification: str = "any"
+    tiering_enabled: bool = False
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -119,6 +120,7 @@ class RetrievalConfig:
             global_collection=mem_cfg.get("global_collection"),
             global_qdrant_url=mem_cfg.get("qdrant_url", "http://localhost:6333"),
             verification=mem_cfg.get("retrieval_verification", "any"),
+            tiering_enabled=bool(mem_cfg.get("tiering_enabled", False)),
         )
 
 
@@ -515,6 +517,12 @@ def _retrieve_inner(
             return entry.verification in {"tool_verified", "rubric_verified"}
         return True
 
+    def tier_allowed(entry: MemoryEntry) -> bool:
+        return getattr(entry, "tier", "unclassified") != "quarantine"
+
+    def entry_allowed(entry: MemoryEntry) -> bool:
+        return verification_allowed(entry) and tier_allowed(entry)
+
     # Bind once — on the Qdrant backend count() is a network round-trip.
     store_count = store.count()
 
@@ -573,7 +581,7 @@ def _retrieve_inner(
             pair
             for pair in list(store.query_by_vector(vector, top_k=fetch_k))
             + _global_dense_results
-            if verification_allowed(pair[0])
+            if entry_allowed(pair[0])
         ],
         key=lambda p: p[1], reverse=True,
     )
@@ -608,7 +616,7 @@ def _retrieve_inner(
             sparse_backend = "rank_bm25"
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
 
-        sparse_results = [pair for pair in sparse_results if verification_allowed(pair[0])]
+        sparse_results = [pair for pair in sparse_results if entry_allowed(pair[0])]
 
         if "hybrid" in strategy and sparse_results:
             base_results = _rrf_fuse(dense_results, sparse_results, k=rcfg.rrf_k)
@@ -658,7 +666,7 @@ def _retrieve_inner(
             for pair in store.query_by_vector(
                 vector, top_k=tag_fetch_k, tools_any=[tool_name]
             )
-            if verification_allowed(pair[0])
+            if entry_allowed(pair[0])
         )
         # Global tier's tag hits merge into the SAME pre-reservation list —
         # the TAG_HIT_SCORE_FLOOR guaranteed-slot logic below then runs once
@@ -672,7 +680,7 @@ def _retrieve_inner(
             ),
             [],
             "global_collection tag-hit query failed; contributing zero candidates",
-        ) if verification_allowed(pair[0]))
+        ) if entry_allowed(pair[0]))
 
     success_results = sorted(
         [p for p in base_results if p[0].kind == "success_pattern"],
@@ -748,6 +756,11 @@ def _retrieve_inner(
         merged = _apply_mmr(merged, vector, rcfg.mmr_lambda, top_k)
     else:
         merged = merged[:top_k]
+
+    if rcfg.tiering_enabled:
+        # Python's sort is stable, so this only promotes core entries while
+        # preserving the established relevance order within each tier.
+        merged.sort(key=lambda pair: getattr(pair[0], "tier", "unclassified") != "core")
 
     if session_id is not None:
         final_reasons = [inclusion_reason.get(e.id, "base") for e, _ in merged]

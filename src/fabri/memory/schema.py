@@ -33,6 +33,7 @@ class MemoryEntry:
     producer_agent_id: str | None = None
     scope: str = "agent"              # "agent" | "agency" | "company"
     verification: str = "unverified"  # unverified | tool_verified | rubric_verified | contradicted
+    tier: str = "unclassified"        # core | retrieve | action | quarantine | unclassified
     source_session_ids: list[str] = field(default_factory=list)
     source_event_ids: list[str] = field(default_factory=list)
     applicability: list[str] = field(default_factory=list)
@@ -83,6 +84,7 @@ class MemoryEntry:
             "producer_agent_id": self.producer_agent_id,
             "scope": self.scope,
             "verification": self.verification,
+            "tier": self.tier,
             "source_session_ids": self.source_session_ids,
             "source_event_ids": self.source_event_ids,
             "applicability": self.applicability,
@@ -108,6 +110,7 @@ class MemoryEntry:
             producer_agent_id=payload.get("producer_agent_id", payload.get("agent_id")),
             scope=payload.get("scope", "agent"),
             verification=payload.get("verification", "unverified"),
+            tier=payload.get("tier", "unclassified"),
             source_session_ids=list(
                 payload.get("source_session_ids", payload.get("session_ids", []))
             ),

@@ -184,6 +184,8 @@ DEFAULT_CONFIG = {
         # "any" preserves legacy memories; "verified" injects only lessons
         # backed by deterministic tool evidence or an external rubric.
         "retrieval_verification": "any",
+        # Enables deterministic memory tier classification and core preference.
+        "tiering_enabled": False,
         # Provenance boundary stamped onto newly mined entries.
         "scope": "agent",
         # M1: when true, every run (any outcome) also writes one deterministic
