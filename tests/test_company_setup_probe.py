@@ -180,6 +180,7 @@ def test_load_probe_case_accepts_bounded_knobs_and_rejects_invalid_settings(
 
     for invalid, message in (
         ({**valid_candidate, "step_budget": 201}, "step_budget"),
+        ({**valid_candidate, "cost_ceiling": 10.01}, "cost_ceiling"),
         ({**valid_candidate, "retrieval_strategy": "bogus"}, "retrieval_strategy"),
         ({**valid_candidate, "role_model": {"role": "worker", "model": "x"}}, "role_model.role"),
         ({**valid_candidate, "unknown": "nope"}, "unsupported settings"),
@@ -247,7 +248,7 @@ def test_token_floor_changes_only_delegated_main_and_preflight_labels_narrator(
         ),
         pytest.param(
             ProbeCandidate("spawns", max_parallel_spawns=8),
-            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["tools"]["max_parallel_spawns"] == 8,
+            lambda root, child: yaml.safe_load(root.read_text(encoding="utf-8"))["tools"]["max_parallel_spawns"] == 8,
             id="max-parallel-spawns",
         ),
         pytest.param(
@@ -270,7 +271,8 @@ def test_apply_candidate_writes_each_new_knob_at_its_raw_path(
         encoding="utf-8",
     )
 
-    assert apply_candidate(root, candidate) == ["root/crew"]
+    expected_changed = ["root"] if candidate.max_parallel_spawns is not None else ["root/crew"]
+    assert apply_candidate(root, candidate) == expected_changed
     assert callable(assert_written)
     assert assert_written(root, child)
 
@@ -288,6 +290,50 @@ def test_apply_candidate_writes_nested_role_model_as_mapping(tmp_path: Path) -> 
 
     assert apply_candidate(root, ProbeCandidate("planner", role_model=("planner", "gpt-new"))) == ["root/crew"]
     assert yaml.safe_load(child.read_text(encoding="utf-8"))["llm"]["planner"] == {"model": "gpt-new"}
+
+
+def test_apply_candidate_uses_and_updates_declared_subagent_budgets(tmp_path: Path) -> None:
+    child = tmp_path / "crew.yaml"
+    root = tmp_path / "ceo.yaml"
+    child_config = _agent_config("crew", max_tokens=60)
+    child_agent = cast(dict[str, object], child_config["agent"])
+    child_agent["max_steps"] = 10
+    child_agent["max_cost_usd"] = 1.0
+    child_agent["subagent"] = {"max_steps": 20, "max_cost_usd": 0.25}
+    child.write_text(yaml.safe_dump(child_config), encoding="utf-8")
+    root.write_text(
+        yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+        encoding="utf-8",
+    )
+
+    assert apply_candidate(
+        root, ProbeCandidate("already-effective", step_budget=20, cost_ceiling=0.5)
+    ) == []
+
+    assert apply_candidate(
+        root, ProbeCandidate("raise-effective", step_budget=21, cost_ceiling=0.2)
+    ) == ["root/crew"]
+    written_agent = yaml.safe_load(child.read_text(encoding="utf-8"))["agent"]
+    assert written_agent["max_steps"] == 21
+    assert written_agent["subagent"]["max_steps"] == 21
+    assert written_agent["max_cost_usd"] == 0.2
+    assert written_agent["subagent"]["max_cost_usd"] == 0.2
+
+
+def test_max_parallel_spawns_ignores_leaf_only_values_and_noops_at_root(
+    tmp_path: Path,
+) -> None:
+    child = tmp_path / "crew.yaml"
+    root = tmp_path / "ceo.yaml"
+    child_config = _agent_config("crew", max_tokens=60)
+    cast(dict[str, object], child_config["tools"])["max_parallel_spawns"] = 4
+    child.write_text(yaml.safe_dump(child_config), encoding="utf-8")
+    root_config = _agent_config("ceo", max_tokens=1024, child=child)
+    cast(dict[str, object], root_config["tools"])["max_parallel_spawns"] = 8
+    root.write_text(yaml.safe_dump(root_config), encoding="utf-8")
+
+    assert apply_candidate(root, ProbeCandidate("spawns", max_parallel_spawns=8)) == []
+    assert yaml.safe_load(child.read_text(encoding="utf-8"))["tools"]["max_parallel_spawns"] == 4
 
 
 def _satisfy_candidate_config(config: dict[str, object], candidate: ProbeCandidate) -> None:
@@ -361,6 +407,8 @@ def test_probe_rejects_each_satisfied_candidate_without_a_model_run(
         _satisfy_candidate_config(child_config, candidate)
         child.write_text(yaml.safe_dump(child_config), encoding="utf-8")
         root_config = _agent_config("ceo", max_tokens=1024, child=child)
+        if candidate.max_parallel_spawns is not None:
+            cast(dict[str, object], root_config["tools"])["max_parallel_spawns"] = candidate.max_parallel_spawns
         if candidate.delegation_timeout is not None:
             cast(list[dict[str, object]], cast(dict[str, object], root_config["tools"])["agents"])[0]["timeout_s"] = candidate.delegation_timeout
         (destination / "ceo.yaml").write_text(yaml.safe_dump(root_config), encoding="utf-8")

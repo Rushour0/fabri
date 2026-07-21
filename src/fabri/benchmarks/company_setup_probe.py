@@ -38,6 +38,7 @@ MIN_TOKEN_FLOOR = 64
 MAX_TOKEN_FLOOR = 4096
 MIN_STEP_BUDGET = 1
 MAX_STEP_BUDGET = 200
+MAX_COST_CEILING_USD = 10.0
 MIN_RETRIEVAL_TOP_K = 1
 MAX_RETRIEVAL_TOP_K = 50
 MIN_MAX_PARALLEL_SPAWNS = 1
@@ -322,9 +323,12 @@ def load_probe_case(
         elif (
             not isinstance(cost_ceiling_value, (int, float))
             or isinstance(cost_ceiling_value, bool)
-            or float(cost_ceiling_value) <= 0
+            or not 0 < float(cost_ceiling_value) <= MAX_COST_CEILING_USD
         ):
-            raise ProbeError(f"candidate {candidate_name} cost_ceiling must be positive")
+            raise ProbeError(
+                f"candidate {candidate_name} cost_ceiling must be between 0 and "
+                f"{MAX_COST_CEILING_USD:g}"
+            )
         else:
             cost_ceiling = float(cost_ceiling_value)
         role_model_value = candidate.get("role_model")
@@ -541,6 +545,38 @@ def _mark_changed(changed: list[str], org_path: str) -> None:
         changed.append(org_path)
 
 
+def _effective_agent_budget(
+    agent: object,
+    field: str,
+    default: int | float | None,
+) -> int | float | None:
+    """Return the budget a sub-agent actually receives at runtime."""
+    if not isinstance(agent, dict):
+        return default
+    subagent = agent.get("subagent")
+    subagent_value = subagent.get(field) if isinstance(subagent, dict) else None
+    if subagent_value is not None:
+        return subagent_value if isinstance(subagent_value, (int, float)) else default
+    value = agent.get(field)
+    return value if isinstance(value, (int, float)) else default
+
+
+def _write_agent_budget(
+    raw_agent: dict[str, object],
+    field: str,
+    value: int | float,
+    *,
+    path: Path,
+) -> None:
+    """Update a budget and its declared sub-agent override, if any."""
+    raw_agent[field] = value
+    if "subagent" not in raw_agent:
+        return
+    subagent = _as_mapping(raw_agent["subagent"], f"{path}.agent.subagent")
+    subagent[field] = value
+    raw_agent["subagent"] = subagent
+
+
 def _validate_candidate_overrides(candidate: ProbeCandidate) -> None:
     if candidate.delegated_llm_max_tokens_floor is not None:
         _bounded_int(
@@ -567,9 +603,11 @@ def _validate_candidate_overrides(candidate: ProbeCandidate) -> None:
         if (
             not isinstance(candidate.cost_ceiling, (int, float))
             or isinstance(candidate.cost_ceiling, bool)
-            or candidate.cost_ceiling <= 0
+            or not 0 < candidate.cost_ceiling <= MAX_COST_CEILING_USD
         ):
-            raise ProbeError("cost_ceiling must be positive")
+            raise ProbeError(
+                f"cost_ceiling must be between 0 and {MAX_COST_CEILING_USD:g}"
+            )
     if candidate.role_model is not None:
         role, model = candidate.role_model
         if role not in LLM_ROLES or not model:
@@ -591,7 +629,7 @@ def _validate_candidate_overrides(candidate: ProbeCandidate) -> None:
 
 
 def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
-    """Apply a bounded candidate to compiled non-root nodes and delegation edges."""
+    """Apply a bounded candidate to compiled nodes, spawners, and delegation edges."""
     _validate_candidate_overrides(candidate)
     changed = apply_delegated_token_floor(
         root_config, candidate.delegated_llm_max_tokens_floor
@@ -604,7 +642,6 @@ def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
         agent = effective.get("agent", {})
         memory = effective.get("memory", {})
         llm = effective.get("llm", {})
-        tools = effective.get("tools", {})
         raw: dict[str, object] | None = None
 
         def raw_section(name: str) -> dict[str, object]:
@@ -616,9 +653,14 @@ def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
             return section
 
         if candidate.step_budget is not None:
-            current = agent.get("max_steps") if isinstance(agent, dict) else None
+            current = _effective_agent_budget(agent, "max_steps", 10)
             if not isinstance(current, int) or current < candidate.step_budget:
-                raw_section("agent")["max_steps"] = candidate.step_budget
+                _write_agent_budget(
+                    raw_section("agent"),
+                    "max_steps",
+                    candidate.step_budget,
+                    path=location.path,
+                )
         if candidate.retrieval_top_k is not None:
             current = memory.get("top_k") if isinstance(memory, dict) else None
             if not isinstance(current, int) or current < candidate.retrieval_top_k:
@@ -628,9 +670,14 @@ def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
             if current != candidate.retrieval_strategy:
                 raw_section("memory")["retrieval_strategy"] = candidate.retrieval_strategy
         if candidate.cost_ceiling is not None:
-            current = agent.get("max_cost_usd") if isinstance(agent, dict) else None
+            current = _effective_agent_budget(agent, "max_cost_usd", None)
             if current is None or not isinstance(current, (int, float)) or current > candidate.cost_ceiling:
-                raw_section("agent")["max_cost_usd"] = candidate.cost_ceiling
+                _write_agent_budget(
+                    raw_section("agent"),
+                    "max_cost_usd",
+                    candidate.cost_ceiling,
+                    path=location.path,
+                )
         if candidate.role_model is not None:
             role, target_model = candidate.role_model
             roles = llm.get("roles", {}) if isinstance(llm, dict) else {}
@@ -638,6 +685,7 @@ def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
             current = effective_role.get("model") if isinstance(effective_role, dict) else None
             if current != target_model:
                 raw_llm = raw_section("llm")
+                # A model on default-disabled planner/decompose enables that role.
                 if role == "main":
                     raw_llm["model"] = target_model
                 else:
@@ -649,11 +697,27 @@ def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
                     )
                     role_config["model"] = target_model
                     raw_llm[role] = role_config
-        if candidate.max_parallel_spawns is not None:
-            current = tools.get("max_parallel_spawns") if isinstance(tools, dict) else None
-            if not isinstance(current, int) or current < candidate.max_parallel_spawns:
-                raw_section("tools")["max_parallel_spawns"] = candidate.max_parallel_spawns
         if raw is not None:
+            _write_yaml_mapping(location.path, raw)
+            _mark_changed(changed, location.org_path)
+
+    if candidate.max_parallel_spawns is not None:
+        for location in discover_company_configs(root_config):
+            raw = _load_yaml_mapping(location.path)
+            raw_tools = raw.get("tools")
+            if not isinstance(raw_tools, dict):
+                continue
+            raw_agents = raw_tools.get("agents", [])
+            if not isinstance(raw_agents, list) or not raw_agents:
+                continue
+            effective = load_config(str(location.path))
+            tools = effective.get("tools", {})
+            current = tools.get("max_parallel_spawns", 4) if isinstance(tools, dict) else 4
+            if isinstance(current, int) and current >= candidate.max_parallel_spawns:
+                continue
+            tools = _as_mapping(raw_tools, f"{location.path}.tools")
+            tools["max_parallel_spawns"] = candidate.max_parallel_spawns
+            raw["tools"] = tools
             _write_yaml_mapping(location.path, raw)
             _mark_changed(changed, location.org_path)
 
