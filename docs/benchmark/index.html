@@ -249,6 +249,12 @@
       the larger sample did not shrink that gain so much as reverse it — the same small-sample fragility
       documented in §3. On this workload the self-improvement loop runs but does not pay: it retrieves
       lessons, and the runs that received them did no better — indeed slightly worse.</p>
+    <p>The pattern is not unique to Support HQ. A ten-replica run on <b>Reliability Labs</b> shows the
+      same shape: memory retrieved 2 guidelines every run (control: 0) yet scored <b>60%</b> against the
+      control's <b>78%</b> (−18 points), while costing ~19% more. Across the two companies measured so
+      far, trace-backed memory fires reliably but does not improve — and here slightly reduces —
+      reliability. Whether varying the retrieval configuration (how much or how diverse the pulled
+      memory) changes this is the next experiment.</p>
     <figure class="tbl">
       <div class="scroll">
         <table>
