@@ -253,8 +253,13 @@
       same shape: memory retrieved 2 guidelines every run (control: 0) yet scored <b>60%</b> against the
       control's <b>78%</b> (−18 points), while costing ~19% more. Across the two companies measured so
       far, trace-backed memory fires reliably but does not improve — and here slightly reduces —
-      reliability. Whether varying the retrieval configuration (how much or how diverse the pulled
-      memory) changes this is the next experiment.</p>
+      reliability. Varying the <em>retrieval configuration</em> does not rescue it: raising
+      <code>top_k</code> from 5 to 10, and switching to MMR-diversified selection, left the retrieved
+      evidence unchanged — memory returned the same <b>2</b> guidelines every run in all three
+      configurations, because the trained memory only <em>contains</em> ~2 guidelines. You cannot pull
+      more than exists, so retrieval config is not the lever. The bottleneck is upstream — how many
+      good, distinct lessons a training run mines and promotes — which is the next experiment worth
+      running.</p>
     <figure class="tbl">
       <div class="scroll">
         <table>

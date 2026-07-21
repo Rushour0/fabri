@@ -195,8 +195,19 @@ larger sample says it slightly hurts. A 10-replica run on **Reliability Labs**
 shows the same shape (memory 60% vs. control 78%, −18pp, and ~19% more
 expensive), so the pattern now holds across **two** companies — though still on
 one related-task/holdout pair each, not general memory effectiveness across all
-workload shapes. Whether varying the retrieval configuration (top_k / strategy)
-changes this is the next experiment.
+workload shapes.
+
+**Retrieval configuration is not the lever.** Re-running the Support HQ memory
+arm with `top_k` raised 5→10, and with `hybrid+mmr` selection, left the retrieved
+evidence unchanged — memory returned the same **2** guidelines every run in all
+three configs, because the trained memory only *contains* ~2 guidelines. You
+cannot pull more than exists, so the outcome cannot move. The bottleneck is
+upstream — guideline supply/quality (how many good, distinct lessons a training
+run mines and promotes) — which is the next experiment. See
+[retrieval sweep](benchmarks/results/support-hq-retrieval-sweep-2026-07-21.md).
+(Note: the retrieval-count invariance is deterministic and was observed on every
+completed pair; a full per-variant rubric re-measurement was cut short by
+infrastructure interruptions, but that does not affect the conclusion.)
 
 Full results:
 [Support HQ](benchmarks/results/support-hq-memory-vs-control-2026-07-20.md)
