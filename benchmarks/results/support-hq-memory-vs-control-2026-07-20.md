@@ -1,10 +1,11 @@
 # Company memory vs control study
 
 > **Finding:** memory retrieves trained guidelines on every run (2 vs 0 for control) but does **not**
-> improve reliability — the memory arm scored 7/10 vs the control's 9/10 (−20pp) at essentially equal
-> cost. A preliminary 3-replica pilot showed the opposite (memory 3/3 vs control 2/3, +33pp); the
-> 10-replica confirmation below reversed it — the same small-sample fragility seen in the setup-
-> qualification study. On this workload the self-improvement loop runs but does not pay.
+> improve reliability — the memory arm scored 7/10 (70%, 95% CI 40-89%) vs the control's 9/10 (90%,
+> 95% CI 60-98%) (−20pp) at essentially equal cost. A preliminary 3-replica pilot showed the opposite
+> (memory 3/3 vs control 2/3, +33pp); the 10-replica confirmation below reversed it — the same
+> small-sample fragility seen in the setup-qualification study. On this workload the self-improvement
+> loop runs but does not pay.
 
 - Case: `support_hq_safe_incident_response`
 - Company: `support-hq`
@@ -15,8 +16,8 @@
 
 | Condition | Completion | Holdout rubric | Median cost | Mean cost | Mean guidelines |
 |---|---:|---:|---:|---:|---:|
-| memory | 100% | 70% | $0.0603 | $0.0600 | 2.00 |
-| control | 100% | 90% | $0.0632 | $0.0614 | 0.00 |
+| memory | 100% (10/10) | 7/10 (70%, 95% CI 40-89%) | $0.0603 | $0.0600 | 2.00 |
+| control | 100% (10/10) | 9/10 (90%, 95% CI 60-98%) | $0.0632 | $0.0614 | 0.00 |
 
 | Memory − control | Rubric pass-rate delta | Mean cost delta | Mean guidelines delta |
 |---|---:|---:|---:|

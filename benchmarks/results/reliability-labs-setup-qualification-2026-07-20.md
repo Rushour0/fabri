@@ -15,7 +15,7 @@
 
 | Candidate | Model runs | Decision | Completion | Conditional rubric | End-to-end | Median cost | Qualifies |
 |---|---:|---|---:|---:|---:|---:|---:|
-| baseline | 3 | — | 100% | 67% | 67% | $0.0578 | no |
+| baseline | 3 | — | 100% (3/3) | 2/3 (67%, 95% CI 21-94%) | 2/3 (67%, 95% CI 21-94%) | $0.0578 | no |
 | delegated_artifact_tokens_256 | 0 | candidate_noop | 0% | — | 0% | — | no |
 
 Incomplete runs are operational failures and have no rubric verdict. Raw prompts, traces, session IDs, and model output remain under `private-attempts/`.

@@ -1,7 +1,8 @@
 # Retrieval-configuration sweep — Support HQ memory study
 
 **Question.** The memory-vs-control study found that trace-backed memory does not improve holdout
-reliability on Support HQ (memory 7/10 vs control 9/10 at ten replicas). Does varying the *retrieval
+reliability on Support HQ (memory 7/10 (70%, 95% CI 40-89%) vs control 9/10 (90%, 95% CI 60-98%) at
+ten replicas). Does varying the *retrieval
 configuration* — how much memory is pulled (`top_k`) or how it is selected (`retrieval_strategy`) —
 recover a benefit?
 

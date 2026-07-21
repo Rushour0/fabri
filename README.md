@@ -21,7 +21,8 @@ Fabri publishes completed measurements and leaves pending work visibly pending:
 | Session-N+1 recovery pilot | Steps **5 → 4**, guideline reuse **0% → 67%**, cost **↓7.8%** | Six-run constructed task on gpt-4o-mini; not a general workload claim |
 | LongMemEval | Runner shipped; result pending | No score claimed yet |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, and the
+See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, the
+[live benchmark page](https://rushour0.github.io/fabri/benchmark/) for the latest run, and the
 reviewed results for per-replica costs, failed hypotheses, and the release decision:
 [Support HQ 3-replica](benchmarks/results/support-hq-setup-qualification-2026-07-20.md),
 [Support HQ 10-replica confirmation](benchmarks/results/support-hq-setup-qualification-10replica-2026-07-20.md),

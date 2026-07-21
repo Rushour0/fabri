@@ -10,8 +10,9 @@ perfect.
 Baseline (re-measured 2026-07-07 after the RRF-k retune + success-slot
 back-load, MiniLM-L6-v2, tests/fixtures/retrieval_eval.json, 40 guidelines /
 24 queries, top_k=5):
-    dense   recall@5 = 0.7917  recall@3 = 0.6875  mrr = 0.7896
-    hybrid  recall@5 = 0.9375  recall@3 = 0.8958  mrr = 0.8438  (default)
+    dense       recall@5 = 0.7917  recall@3 = 0.6875  mrr = 0.7896
+    hybrid      recall@5 = 0.9375  recall@3 = 0.8958  mrr = 0.8438  (default)
+    hybrid+mmr  recall@5 = 0.729                       mrr = 0.804
 
 Floors are baseline − 0.05 (absorbs float jitter; never exact equality — that
 was the shape of the July 2026 CI flakiness). Regenerate the baseline with
@@ -40,12 +41,19 @@ HYBRID_RECALL5_FLOOR = 0.89  # protects the shipped default strategy
 HYBRID_RECALL3_FLOOR = 0.84  # back-load win — must not silently regress
 HYBRID_MRR_FLOOR = 0.79      # back-load win — must not silently regress
 
+# "hybrid+mmr" (published: recall@5 0.729, mrr 0.804) — note the literal `+`;
+# a `hybrid_mmr` underscore typo would silently fall through to `dense`
+# (both runner.py and orchestrator/retrieval.py match strategies via
+# `"mmr" in strategy` / exact-string membership, not this specific spelling).
+HYBRID_MMR_RECALL5_FLOOR = 0.68
+HYBRID_MMR_MRR_FLOOR = 0.75
+
 
 @pytest.fixture(scope="module")
 def eval_results(tmp_path_factory):
-    """Run dense + hybrid once for the whole module (embeds the corpus once)."""
+    """Run dense + hybrid + hybrid+mmr once for the whole module (embeds the corpus once)."""
     tmp = tmp_path_factory.mktemp("retrieval_eval")
-    return run_eval(strategies=["dense", "hybrid"], tmp_dir=tmp)
+    return run_eval(strategies=["dense", "hybrid", "hybrid+mmr"], tmp_dir=tmp)
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +103,22 @@ def test_hybrid_default_mrr_meets_baseline(eval_results):
     assert got >= HYBRID_MRR_FLOOR, (
         f"default (hybrid) MRR regressed to {got} (floor {HYBRID_MRR_FLOOR}) "
         f"— success patterns may be stealing rank 1 again (check the merge order)"
+    )
+
+
+def test_hybrid_mmr_recall_at_5_meets_baseline(eval_results):
+    """Locks in the "hybrid+mmr" strategy (confirm the exact literal string —
+    an underscore variant silently falls through to dense)."""
+    got = eval_results["hybrid+mmr"]["recall@5"]
+    assert got >= HYBRID_MMR_RECALL5_FLOOR, (
+        f"hybrid+mmr recall@5 regressed to {got} (floor {HYBRID_MMR_RECALL5_FLOOR})"
+    )
+
+
+def test_hybrid_mmr_mrr_meets_baseline(eval_results):
+    got = eval_results["hybrid+mmr"]["mrr"]
+    assert got >= HYBRID_MMR_MRR_FLOOR, (
+        f"hybrid+mmr MRR regressed to {got} (floor {HYBRID_MMR_MRR_FLOOR})"
     )
 
 

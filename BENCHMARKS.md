@@ -10,8 +10,8 @@ another.
 
 | benchmark | what it measures | status |
 |---|---|---|
-| **company setup qualification** | Whether a compiled roster completes its required delegation tree, satisfies a frozen deterministic rubric, and stays inside its company budget across fresh replicas. | None of the three companies clear the 100% bar at adequate sample size. Support HQ passed the 3-replica gate 3/3 but only 9/10 (90%) at 10 replicas; Reliability Labs 2/3 (67%) rubric; Revenue Ops 0/3 (0%) rubric |
-| **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | first result landed (gpt-4o-mini, failure-recovery task): ↓7.8% cost, steps 5→4, reuse 0→67%; canonical sonnet number still pending |
+| **company setup qualification** | Whether a compiled roster completes its required delegation tree, satisfies a frozen deterministic rubric, and stays inside its company budget across fresh replicas. | None of the three companies clear the 100% bar at adequate sample size. Support HQ passed the 3-replica gate 3/3 but only 9/10 (90%, 95% CI 60-98%) at 10 replicas; Reliability Labs 2/3 (67%, 95% CI 21-94%) rubric; Revenue Ops 0/3 (0%, 95% CI 0-56%) rubric — at n=3 the Reliability Labs and Revenue Ops CIs are wide enough that these are underpowered reads, not precise measurements |
+| **session-N+1 cost delta** | The "agent gets cheaper per session" claim — cost per task drop across N runs of the same task with the memory loop active. fabri's own metric. | first result landed: ↓7.8% cost, steps 5→4, reuse 0→67% — **caveat: `gpt-4o-mini` on a constructed failure-recovery task, not the canonical anthropic-sonnet config; canonical sonnet number still pending** |
 | **offline retrieval eval** | Whether retrieval finds hand-labeled relevant guidelines without spending model credits. | hybrid: recall@5 0.938, MRR 0.844; CI-gated |
 | **LongMemEval** | The "memory loop is real" claim — exact-match accuracy on the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) public dataset. Apples-to-apples with Mastra (94.87%), Letta, Zep. | runner shipped, results pending |
 
@@ -120,25 +120,64 @@ explains *why* each strategic value was chosen.
 - Vendor lock-in benefits. The benchmark config uses one provider; we'd
   expect cross-provider numbers to track within 10%.
 
+### Statistical conventions
+
+- **Every k/N rubric rate is reported with its 95% Wilson score interval**
+  (via `fabri.benchmarks.stats.fmt_rate`), e.g. `7/10 (70%, 95% CI 40-89%)`.
+  The Wilson interval stays well-behaved at small N and at the 0%/100%
+  extremes, unlike a naive normal approximation.
+- **Small-n results are underpowered by default.** At n=3–10, Wilson
+  intervals routinely span 30-60 points of probability. When two arms'
+  intervals overlap substantially, the correct read is "no significant
+  difference / underpowered" — **not** a hard delta with a directional
+  claim. A narrower CI (more replicas) is what turns a delta into evidence.
+- **Completed-vs-attempted denominator rule:** a rubric rate is always
+  computed over runs that actually completed. If an arm's completion count
+  is below the nominal replica count (e.g. 9/10 completed, not 10/10), we
+  report the as-completed rate as primary (e.g. 7/9) **and** a conservative
+  reading against the full nominal denominator (7/10) so a reader can't be
+  misled by silently dropping the failed run from the base. Any cross-arm
+  comparison uses the conservative (matched-denominator) reading.
+
+### Gated vs. ungated evidence
+
+Not all rows in this document carry the same evidentiary weight. Two
+metrics are **CI-gated regression tests** — they run in CI, fail the build
+on regression, and are re-measured on every relevant change: the
+[offline retrieval eval](#offline-retrieval-eval-recallk--mrr) (recall/MRR
+floors in `tests/test_retrieval_eval_gate.py`) and the
+[retrieval configuration invariance check](#memory-vs-control)
+(config-invariance / hybrid+mmr gates). Everything else — company setup
+qualification, memory-vs-control, and the session-N+1 cost delta — is a
+**one-off live measurement**: a point-in-time result from a specific run on a
+specific date, not re-run automatically, and not enforced by CI. Treat the
+gated pair as durable regression protection and everything else as dated
+evidence that can go stale; re-read the date column before citing a number
+from a live-measurement row.
+
 ## Results
 
 ### Company setup qualification
 
 | date | company / task | completed | rubric given completion | end-to-end | median cost | decision | fabri |
 |---|---|---:|---:|---:|---:|---|---|
-| 2026-07-20 | Support HQ / safe incident response (3 replicas) | 3/3 | 3/3 | 3/3 | $0.020200 | small-sample pass — did **not** replicate at 10 replicas (see below) | 0.18.5 |
-| 2026-07-20 | Support HQ / safe incident response (10 replicas, confirmation) | 10/10 | 9/10 (90%) | 9/10 | $0.021100 | **does not qualify** — below the 100% bar; one run omitted the required follow-up/further-update commitment | 0.18.5 |
-| 2026-07-20 | Reliability Labs / setup qualification | 3/3 | 2/3 (67%) | 2/3 | — | **does not qualify** — one run over-claimed "fix was deployed" (forbidden unverified-release-claim phrase) | 0.18.5 |
-| 2026-07-20 | Revenue Ops / setup qualification | 2/3 | 0/3 (0%) | 0/3 | — | **does not qualify** — one run truncated operationally; both completed runs over-claimed forbidden phrases ("customer result", "buying intent") | 0.18.5 |
+| 2026-07-20 | Support HQ / safe incident response (3 replicas) | 3/3 | 3/3 (100%, 95% CI 44-100%) | 3/3 | $0.020200 | small-sample pass — did **not** replicate at 10 replicas (see below) | 0.18.5 |
+| 2026-07-20 | Support HQ / safe incident response (10 replicas, confirmation) | 10/10 | 9/10 (90%, 95% CI 60-98%) | 9/10 | $0.021100 | **does not qualify** — below the 100% bar; one run omitted the required follow-up/further-update commitment | 0.18.5 |
+| 2026-07-20 | Reliability Labs / setup qualification | 3/3 | 2/3 (67%, 95% CI 21-94%) | 2/3 | — | **does not qualify** — one run over-claimed "fix was deployed" (forbidden unverified-release-claim phrase); n=3, underpowered | 0.18.5 |
+| 2026-07-20 | Revenue Ops / setup qualification | 2/3 | 0/3 (0%, 95% CI 0-56%) | 0/3 | — | **does not qualify** — one run truncated operationally; both completed runs over-claimed forbidden phrases ("customer result", "buying intent"); n=3, underpowered | 0.18.5 |
 
 **Honest takeaway:** at adequate sample size, **none** of the three companies
 clear the 100% qualification bar. Support HQ's 3-replica gate passed 3/3, but
 that was a statistically fragile small-sample result — a 10-replica
-confirmation came back 9/10 (90%), below the bar. This is the harness working
-as intended, not a regression: a 3-replica gate is not enough evidence to call
-a company "qualified," and going forward none of these companies should be
-described that way except to note the 3-replica Support HQ result as a
-small-sample pass later overturned by a larger sample.
+confirmation came back 9/10 (90%, 95% CI 60-98%), below the bar. This is the
+harness working as intended, not a regression: a 3-replica gate is not enough
+evidence to call a company "qualified," and going forward none of these
+companies should be described that way except to note the 3-replica Support HQ
+result as a small-sample pass later overturned by a larger sample. Reliability
+Labs (2/3, 95% CI 21-94%) and Revenue Ops (0/3, 95% CI 0-56%) were only ever
+run at n=3 — their CIs are wide enough to span most of the plausible range, so
+"failed" is the correct call on the frozen rubric, but the *precise* rate at
+those companies is not yet resolved either.
 
 The original 3-replica Support HQ gate cost **$0.060496**; the 10-replica
 confirmation, Reliability Labs, and Revenue Ops probes brought total live
@@ -169,33 +208,54 @@ once with that SQLite memory copied into a clean compile (memory arm), once
 with empty memory (control arm). This is the first live result that isolates
 memory's effect on outcome, distinct from setup qualification above.
 
-| date | company / task | replicas | guidelines retrieved (memory / control) | rubric (memory) | rubric (control) | rubric delta | mean cost delta | fabri |
+| date | company / task | replicas (memory / control completed) | guidelines retrieved (memory / control) | rubric (memory) | rubric (control) | rubric delta | mean cost delta | fabri |
 |---|---|---:|---|---:|---:|---:|---:|---|
-| 2026-07-20 | Support HQ / holdout task (3-replica pilot) | 3 | 2 / 0 | 3/3 (100%) | 2/3 (67%) | +33 pp | +$0.0009 (~1.5%) | 0.18.5 |
-| 2026-07-20 | Support HQ / holdout task (10-replica confirmation) | 10 | 2.0 / 0 | 7/10 (70%) | 9/10 (90%) | **−20 pp** | **−$0.0014** (mean $0.0600 vs $0.0614) | 0.18.5 |
-| 2026-07-21 | Reliability Labs / holdout task | 10 | 2.0 / 0 | 60% | 78% | **−18 pp** | **+$0.0184** (mean $0.1150 vs $0.0966) | 0.18.5 |
+| 2026-07-20 | Support HQ / holdout task (3-replica pilot) | 3 / 3 | 2 / 0 | 3/3 (100%, 95% CI 44-100%) | 2/3 (67%, 95% CI 21-94%) | +33 pp (CIs overlap heavily at n=3 — not statistically resolved) | +$0.0009 (~1.5%) | 0.18.5 |
+| 2026-07-20 | Support HQ / holdout task (10-replica confirmation) | 10 / 10 | 2.0 / 0 | 7/10 (70%, 95% CI 40-89%) | 9/10 (90%, 95% CI 60-98%) | −20 pp (CIs overlap — sign not statistically resolved at n=10) | **−$0.0014** (mean $0.0600 vs $0.0614) | 0.18.5 |
+| 2026-07-21 | Reliability Labs / holdout task | 10 / **9** | 2.0 / 0 | 6/10 (60%, 95% CI 31-83%) | 7/9 (78%, 95% CI 45-94%) as-completed; **7/10 (70%, 95% CI 40-89%) conservative** (see note) | **−10 pp** conservative (CIs overlap — not statistically resolved at n=10) | **+$0.0184** (mean $0.1150 vs $0.0966) | 0.18.5 |
 
-The control-is-empty sanity check held at both sample sizes: control retrieved
+The control-is-empty sanity check held at both companies: control retrieved
 **0** guidelines on every replica, while the memory arm retrieved the same
 **2** trained guidelines on every replica — the retrieval mechanism fires
-reliably. Completion was 10/10 in both arms at 10 replicas — the gap is in
-rubric quality, not task failure. Memory was marginally cheaper (mean $0.0600
-vs. $0.0614), but that saving does not offset the reliability loss.
+reliably. Completion was 10/10 in both arms for Support HQ at 10 replicas.
+**Reliability Labs' control arm completed only 9 of 10 replicas** (one run did
+not finish), so its control rubric is properly denominated **7/9 (78%)**, not
+7/10 — see [Statistical conventions](#statistical-conventions) for why we
+report both readings and use the completed-runs denominator as primary. Memory
+was marginally cheaper on Support HQ (mean $0.0600 vs. $0.0614); Reliability
+Labs' memory arm was more expensive.
 
-**Honest verdict: the 3-replica pilot was reversed, not confirmed.** The
-preliminary 3-replica pilot showed memory ahead by +33pp; the 10-replica
-confirmation did not merely shrink that gain, it flipped the sign — memory
-finished **20 percentage points behind control** (7/10 vs. 9/10). This is the
-same small-sample fragility the setup-qualification study above demonstrated
-(a 3/3 gate that fell to 9/10 at 10 replicas), now shown to bite in the
-opposite direction too: a small-sample "memory win" can just as easily be a
-small-sample fluke. On this workload, Fabri's trace-backed memory retrieves
-lessons reliably but does **not** improve holdout-task reliability — the
-larger sample says it slightly hurts. A 10-replica run on **Reliability Labs**
-shows the same shape (memory 60% vs. control 78%, −18pp, and ~19% more
-expensive), so the pattern now holds across **two** companies — though still on
-one related-task/holdout pair each, not general memory effectiveness across all
-workload shapes.
+**Honest verdict: the 3-replica pilot was reversed, and the sign is now
+underpowered, not confirmed either way.** The preliminary 3-replica Support HQ
+pilot showed memory ahead by +33pp (95% CI 21-94% vs. 44-100% — already
+heavily overlapping at n=3). The 10-replica confirmation shrank the sample
+noise but the CIs for memory (7/10, 95% CI 40-89%) and control (9/10, 95% CI
+60-98%) still overlap substantially, so **the sign of the −20pp delta is not
+statistically resolved at n=10** — the honest read is "no significant
+difference / underpowered," not "memory loses by 20 points." That is a
+*stronger*, more defensible claim than the hard-delta framing: it says the
+experiment hasn't yet produced enough evidence to call a winner, rather than
+asserting a loss the data can't actually support. This is the same
+small-sample fragility the setup-qualification study above demonstrated (a 3/3
+gate that fell to 9/10 at 10 replicas), now visible in the other direction
+too: a small-sample "memory win" can just as easily be a small-sample fluke.
+A 10-replica run on **Reliability Labs** shows the same shape — memory 6/10
+(60%, 95% CI 31-83%) vs. control 7/9 (78%, 95% CI 45-94%) as-completed, or
+7/10 (70%, 95% CI 40-89%) on the conservative completed-vs-attempted basis —
+and here too the CIs overlap heavily, so the conservative **−10pp** delta (not
+the as-completed −18pp, and emphatically not the previously reported
+"−18pp") is not statistically resolved at n=10 either. On both companies,
+Fabri's trace-backed memory retrieves lessons reliably, but neither dataset
+yet supports a confident claim that memory improves *or* hurts holdout-task
+rubric reliability — the honest conclusion is "underpowered, no resolved
+effect," across **two** companies, still on one related-task/holdout pair
+each, not general memory effectiveness across all workload shapes. One newly
+identified factor likely compresses the ceiling on both arms: the trained
+memory in these runs held only ~2 guidelines because delegated sub-agent
+traces were never mined into memory (only the top-level manager trace was;
+see `agent_runner_tool.py`, now fixed) — so the natural next experiment is
+re-running this study with the supply-side fix in place, not tuning retrieval
+further.
 
 **Retrieval configuration is not the lever.** Re-running the Support HQ memory
 arm with `top_k` raised 5→10, and with `hybrid+mmr` selection, left the retrieved
@@ -219,22 +279,23 @@ Full results:
 
 | date | task | runs | first $ | median-of-last-3 $ | delta | fabri |
 |---|---|---|---|---|---|---|
-| 2026-07-19 | read wrong-ext file → recover + summarize | 6 | $0.0006 | $0.0005 | ↓7.8% | 0.16.4* |
+| 2026-07-19 | read wrong-ext file → recover + summarize (`gpt-4o-mini`, constructed task — see caveat below, **not** canonical sonnet)* | 6 | $0.0006 | $0.0005 | ↓7.8%* | 0.16.4* |
+
+_\*Caveats (read before citing this 7.8% number anywhere): run on
+**`gpt-4o-mini`** via `configs/benchmark.openai-recovery.yaml`, **not** the
+canonical anthropic-sonnet `configs/benchmark.yaml` (Bedrock Anthropic is
+account-gated here and no `ANTHROPIC_API_KEY` was set). It is a **constructed
+failure-recovery task** (the workspace deliberately hides the file under a
+different extension) and depends on the **guideline-dedup fix** (deterministic
+`dedup_key`) — without that fix cross-session reuse is structurally stuck at
+0% and this delta does not appear. Full run:
+`.fabri/benchmarks/1784483*/results.md`. **The canonical sonnet number is
+still pending** — do not cite 7.8% as fabri's general session-N+1 result._
 
 Beyond cost: **steps 5 → 4** (run 1 recovered from a failed read via `list_dir`;
 runs 2–6 skipped the failed call and went straight to `list_dir`), **outcome
 success_with_recovery → success**, **guideline-reuse 0% → 67%**. The agent learned
 to avoid its own first-run mistake — the self-improving loop working end to end.
-
-_\*Caveats (read before citing): run on **`gpt-4o-mini`** via
-`configs/benchmark.openai-recovery.yaml`, **not** the canonical anthropic-sonnet
-`configs/benchmark.yaml` (Bedrock Anthropic is account-gated here and no
-`ANTHROPIC_API_KEY` was set). It is a **constructed failure-recovery task** (the
-workspace deliberately hides the file under a different extension) and depends on
-the **guideline-dedup fix** (deterministic `dedup_key`) — without that fix
-cross-session reuse is structurally stuck at 0% and this delta does not appear.
-Full run: `.fabri/benchmarks/1784483*/results.md`. The canonical sonnet number is
-still pending._
 
 ### Self-improvement integration contracts
 
@@ -333,20 +394,26 @@ The biggest open question Fabri has not answered yet:
 
 Company setup qualification has now run live for all three companies, and
 **none qualify at adequate sample size.** Support HQ's 3-replica gate passed
-3/3 but a 10-replica confirmation came back 9/10 (90%) — below the 100% bar.
-Reliability Labs and Revenue Ops both failed their rubric outright (2/3 and
-0/3 respectively) on frozen prompts and assertions. This shows the 3-replica
-gate is statistically fragile, not that the harness is broken — a small
-sample overstates confidence. A passing (or fragile-passing) setup probe must
-not be reported as a memory win. The isolated memory-vs-control study
-([Memory vs. control](#memory-vs-control) above) — Support HQ — shows the
-same fragility biting in the other direction: a 3-replica pilot showed memory
-+33pp ahead of control, but the 10-replica confirmation reversed it, with
-memory finishing 20pp behind control (7/10 vs. 9/10). The retrieval mechanism
-itself is proven reliable (2 guidelines fetched on every memory run, 0 on
-every control run), but on this workload memory does not improve — and may
-slightly hurt — holdout-task reliability. This covers one company on one
-related-task/holdout pair, not general memory effectiveness.
+3/3 but a 10-replica confirmation came back 9/10 (90%, 95% CI 60-98%) — below
+the 100% bar. Reliability Labs (2/3, 95% CI 21-94%) and Revenue Ops (0/3, 95%
+CI 0-56%) both failed their rubric outright on frozen prompts and assertions,
+though at n=3 those two are underpowered reads in their own right. This shows
+the 3-replica gate is statistically fragile, not that the harness is broken —
+a small sample overstates confidence. A passing (or fragile-passing) setup
+probe must not be reported as a memory win. The isolated memory-vs-control
+study ([Memory vs. control](#memory-vs-control) above) — Support HQ — shows
+the same fragility biting in the other direction: a 3-replica pilot showed
+memory +33pp ahead of control, but the 10-replica confirmation shrank that
+gap's statistical footing rather than replacing it with a resolved loss —
+memory's 7/10 (95% CI 40-89%) and control's 9/10 (95% CI 60-98%) overlap
+enough that the sign of the −20pp delta is not statistically resolved at
+n=10. The retrieval mechanism itself is proven reliable (2 guidelines fetched
+on every memory run, 0 on every control run), but on this workload the honest
+conclusion is that neither company's data yet supports a confident claim that
+memory improves *or* hurts holdout-task reliability — the same underpowered
+pattern holds on Reliability Labs (6/10 memory vs. 7/9 completed / 7/10
+conservative control, CIs overlapping). This covers two companies on one
+related-task/holdout pair each, not general memory effectiveness.
 
 When a benchmark gap closes, this paragraph shrinks.
 

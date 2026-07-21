@@ -290,6 +290,14 @@ def ingest_guideline(
             for tool_name in tools:
                 if tool_name not in entry.tools:
                     entry.tools.append(tool_name)
+            # entry.id is a deterministic hash of entry.text (see MemoryEntry.id),
+            # so upgrading entry.text below also changes its point id. Remember
+            # the pre-upgrade id and delete that point after the upsert so the
+            # stale, less-informative point doesn't linger as an orphan.
+            old_id = entry.id
+            if len(text) > len(entry.text):
+                logger.debug("upgrading merged guideline text (longer/more informative): %r -> %r", entry.text, text)
+                entry.text = text
             promoted = len(set(entry.session_ids)) >= promotion_threshold_sessions
             if promoted and entry.kind != "strategic":
                 logger.info("promoting guideline to strategic (sim=%.2f): %r", score, entry.text)
@@ -297,6 +305,8 @@ def ingest_guideline(
             else:
                 logger.debug("merged duplicate guideline (sim=%.2f, hit_count=%d): %r", score, entry.hit_count, entry.text)
             store.upsert(entry)
+            if entry.id != old_id:
+                store.delete(old_id)
             return entry
 
         auto_domain = _classify_domain(text, tools) if kind != "postmortem" else "generic"

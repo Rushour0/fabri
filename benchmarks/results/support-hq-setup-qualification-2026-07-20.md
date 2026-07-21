@@ -3,10 +3,10 @@
 Date: 2026-07-20
 
 > **⚠️ SUPERSEDED BY A LARGER SAMPLE — DO NOT CITE AS ESTABLISHED RELIABILITY.**
-> This result is a 3-replica small-sample release-gate pass (3/3). A subsequent
+> This result is a 3-replica small-sample release-gate pass (3/3, 95% CI 44-100%). A subsequent
 > 10-replica confirmation run
 > ([`support-hq-setup-qualification-10replica-2026-07-20.md`](support-hq-setup-qualification-10replica-2026-07-20.md))
-> returned only 9/10 (≈90% rubric pass rate). At adequate sample size, this
+> returned only 9/10 (90%, 95% CI 60-98%). At adequate sample size, this
 > setup does **not** clear the 100% reliability bar. Treat the 3/3 figure below
 > as a small-sample pass that a larger sample overturned, not as proof of
 > reliable qualification.
@@ -51,7 +51,7 @@ remain operational failures.
 
 | Candidate | Completion | Rubric given completion | End-to-end | Median cost | Decision |
 |---|---:|---:|---:|---:|---|
-| Baseline | 3/3 | 3/3 | 3/3 | $0.020200 | Qualified and recommended |
+| Baseline | 3/3 (100%, 95% CI 44-100%) | 3/3 (100%, 95% CI 44-100%) | 3/3 (100%, 95% CI 44-100%) | $0.020200 | Qualified and recommended |
 | Delegated artifact floor: 256 tokens | 0 model runs; 3 preflights | Not measured | Not measured | $0 | Rejected as a no-op |
 
 The three released baseline runs cost $0.019853, $0.020443, and $0.020200, or
