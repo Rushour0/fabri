@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -16,6 +16,8 @@ from fabri.benchmarks.company_setup_probe import (
     MANIFEST_GIT_TIMEOUT_S,
     ProbeCandidate,
     ProbeError,
+    JudgeConfig,
+    JudgeResult,
     analyze_run,
     apply_candidate,
     apply_delegated_token_floor,
@@ -24,9 +26,11 @@ from fabri.benchmarks.company_setup_probe import (
     main,
     render_markdown,
     run_probe,
+    score_structured,
     score_text,
     validate_publication_payload,
 )
+from fabri.core.llm import LLMUsage
 
 pytestmark = pytest.mark.integration
 
@@ -133,9 +137,29 @@ def test_load_probe_case_resolves_source_and_rejects_arbitrary_candidate_setting
     assert case.company_name == "support-hq"
     assert case.required_delegations == ("crew",)
     assert case.required_terms == (("checkout",),)
+    assert case.structured_fields == {}
     assert case.candidates[1].delegated_llm_max_tokens_floor == 256
 
     raw = yaml.safe_load(dataset.read_text(encoding="utf-8"))
+    raw["cases"][0]["expected"]["structured"] = {"rollback": True}
+    raw["cases"][0]["judge"] = {
+        "model": "gpt-4o-mini",
+        "criteria": ["The response confirms a rollback."],
+    }
+    dataset.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    configured_case = load_probe_case(
+        dataset,
+        "support",
+        environ={"FABRI_ROSTERS_ROOT": str(roster_root)},
+    )
+    assert configured_case.structured_fields == {"rollback": True}
+    assert configured_case.judge == JudgeConfig(
+        provider="openai",
+        model="gpt-4o-mini",
+        api_key_env="OPENAI_API_KEY",
+        criteria=("The response confirms a rollback.",),
+    )
+
     raw["cases"][0]["setup_probe"]["candidates"][1]["system_prompt"] = "unsafe"
     dataset.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     with pytest.raises(ProbeError, match="unsupported settings"):
@@ -433,6 +457,216 @@ def test_score_text_is_case_insensitive_and_deterministic() -> None:
         "forbidden": ["blame"],
     }
     assert score_text("We will follow up", (("follow-up",),), ())["passed"] is True
+
+
+def test_score_structured_uses_recursive_subset_equality() -> None:
+    expected = {"rollback": True, "follow_up": {"owner": "ops"}}
+
+    assert score_structured(
+        {"rollback": True, "follow_up": {"owner": "ops", "extra": "allowed"}},
+        expected,
+    ) == {"passed": True, "mismatches": []}
+    assert score_structured({"rollback": False}, expected) == {
+        "passed": False,
+        "mismatches": ["wrong:rollback", "missing:follow_up"],
+    }
+    assert score_structured(None, expected) == {
+        "passed": False,
+        "mismatches": ["structured_output:not_a_mapping"],
+    }
+    assert score_structured(None, {}) == {"passed": True, "mismatches": []}
+
+
+def _complete_probe_runner(
+    roster_root: Path,
+    structured_output: object,
+) -> Callable[[list[str], Path, Mapping[str, str], float], subprocess.CompletedProcess[str]]:
+    run_number = 0
+
+    def runner(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal run_number
+        del cwd, timeout_s
+        if argv[0] == "git":
+            if "--show-toplevel" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{roster_root}\n", "")
+            if "HEAD" in argv:
+                return subprocess.CompletedProcess(argv, 0, "test-roster-sha\n", "")
+            if "status" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError(f"unexpected git command: {argv}")
+        if "compile" in argv:
+            destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+            child = destination / "agencies" / "crew" / "agent.yaml"
+            child.parent.mkdir(parents=True)
+            child.write_text(yaml.safe_dump(_agent_config("crew", max_tokens=256)), encoding="utf-8")
+            (destination / "ceo.yaml").write_text(
+                yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, "compiled", "")
+
+        run_number += 1
+        state_root = Path(env["FABRI_HOME"])
+        traces = state_root / ".fabri" / "traces"
+        traces.mkdir(parents=True)
+        root_session = f"root-{run_number}"
+        child_session = f"child-{run_number}"
+        (traces / f"{child_session}.jsonl").write_text(
+            json.dumps({"type": "final", "outcome": "success"})
+            + "\n"
+            + json.dumps({"type": "usage", "cost_usd": 0.02})
+            + "\n",
+            encoding="utf-8",
+        )
+        (traces / f"{root_session}.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "name": "crew",
+                    "result": {
+                        "ok": True,
+                        "result": {"session_id": child_session, "outcome": "success"},
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps({"type": "final", "outcome": "success"})
+            + "\n"
+            + json.dumps({"type": "usage", "cost_usd": 0.01})
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "session_id": root_session,
+                    "success": True,
+                    "final_text": "Checkout complete",
+                    "outcome": "success",
+                    "structured_output": structured_output,
+                }
+            ),
+            "",
+        )
+
+    return runner
+
+
+def test_probe_structured_assertions_gate_end_to_end_and_preserve_unconfigured_cases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    structured_case = replace(
+        loaded,
+        candidates=(loaded.candidates[0],),
+        structured_fields={"rollback": True},
+    )
+    structured_result = run_probe(
+        structured_case,
+        tmp_path / "structured-results",
+        command_runner=_complete_probe_runner(roster_root, {"rollback": False}),
+    )
+    structured_candidate = cast(list[dict[str, object]], structured_result["candidates"])[0]
+    structured_run = cast(list[dict[str, object]], structured_candidate["runs"])[0]
+    assert structured_run["attempt_status"] == "complete"
+    assert structured_run["rubric_passed"] is True
+    assert structured_run["structured_passed"] is False
+    assert structured_run["structured_mismatches"] == ["wrong:rollback"]
+    assert structured_run["end_to_end_passed"] is False
+    assert structured_candidate["qualifies"] is False
+
+    backward_compatible_case = replace(loaded, candidates=(loaded.candidates[0],))
+    backward_compatible_result = run_probe(
+        backward_compatible_case,
+        tmp_path / "legacy-results",
+        command_runner=_complete_probe_runner(roster_root, None),
+    )
+    legacy_run = cast(
+        list[dict[str, object]],
+        cast(list[dict[str, object]], backward_compatible_result["candidates"])[0]["runs"],
+    )[0]
+    assert legacy_run["structured_passed"] is True
+    assert legacy_run["end_to_end_passed"] is True
+
+
+def test_probe_optional_judge_is_injectable_and_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    loaded = load_probe_case(dataset, "support")
+    case = replace(loaded, candidates=(loaded.candidates[0],))
+    calls = 0
+
+    def fake_judge(config: JudgeConfig, final_text: str) -> JudgeResult:
+        nonlocal calls
+        calls += 1
+        assert config.model == "gpt-4o-mini"
+        assert final_text == "Checkout complete"
+        return JudgeResult(
+            verdict="fail",
+            rationale="canned semantic failure",
+            usage=LLMUsage(input_tokens=100, output_tokens=20, model=config.model),
+        )
+
+    judge_off = run_probe(
+        case,
+        tmp_path / "judge-off",
+        command_runner=_complete_probe_runner(roster_root, None),
+        judge_runner=fake_judge,
+    )
+    judge_off_run = cast(
+        list[dict[str, object]], cast(list[dict[str, object]], judge_off["candidates"])[0]["runs"]
+    )[0]
+    assert calls == 0
+    assert judge_off_run["judge"] is None
+    assert judge_off_run["end_to_end_passed"] is True
+
+    judged_case = replace(
+        case,
+        judge=JudgeConfig(
+            provider="openai",
+            model="gpt-4o-mini",
+            api_key_env="OPENAI_API_KEY",
+            criteria=("The response confirms checkout completion.",),
+        ),
+    )
+    judge_on = run_probe(
+        judged_case,
+        tmp_path / "judge-on",
+        command_runner=_complete_probe_runner(roster_root, None),
+        judge_runner=fake_judge,
+    )
+    judged_candidate = cast(list[dict[str, object]], judge_on["candidates"])[0]
+    judged_run = cast(list[dict[str, object]], judged_candidate["runs"])[0]
+    assert calls == 1
+    assert judged_run["judge"] == {
+        "verdict": "fail",
+        "rationale": "canned semantic failure",
+        "model": "gpt-4o-mini",
+        "prompt_version": "v1",
+        "cost_usd": pytest.approx(0.000027),
+    }
+    assert judged_run["judge_cost_usd"] == pytest.approx(0.000027)
+    assert judged_run["total_cost_usd"] == pytest.approx(0.03)
+    assert judged_run["end_to_end_passed"] is True
+    assert judged_candidate["qualifies"] is True
+    assert judged_candidate["judge_pass_rate"] == 0
+    assert judge_on["judge_model"] == "gpt-4o-mini"
+    assert judge_on["judge_prompt_version"] == "v1"
+    assert judge_on["judge_temperature"] == 0.0
+    validate_publication_payload(judge_on)
 
 
 @pytest.mark.parametrize(

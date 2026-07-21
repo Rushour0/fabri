@@ -25,13 +25,15 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
 from fabri.config import load_config
+from fabri.core.llm import LLMUsage
+from fabri.pricing import cost_for
 
 SUCCESS_OUTCOMES = {"success", "success_with_recovery"}
 MIN_TOKEN_FLOOR = 64
@@ -50,6 +52,19 @@ LLM_ROLES = {"main", "decompose", "planner", "narrator"}
 DEFAULT_RUN_TIMEOUT_S = 600.0
 MANIFEST_GIT_TIMEOUT_S = 15.0
 CLAIM_BOUNDARY = "setup qualification only; memory/control result pending"
+JUDGE_PROMPT_VERSION = "v1"
+JUDGE_TEMPERATURE = 0.0
+DEFAULT_JUDGE = {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "api_key_env": "OPENAI_API_KEY",
+}
+JUDGE_SYSTEM_PROMPT = (
+    "You are a frozen semantic evaluator for a benchmark. Apply only the supplied "
+    "criteria to the holdout response. Return strict JSON with exactly these fields: "
+    '{"verdict":"pass"|"fail","rationale":"brief evidence-based explanation"}. '
+    "Do not include markdown or additional fields."
+)
 
 CommandRunner = Callable[
     [list[str], Path, Mapping[str, str], float], subprocess.CompletedProcess[str]
@@ -58,6 +73,28 @@ CommandRunner = Callable[
 
 class ProbeError(ValueError):
     """Raised when a setup-probe input or compiled company is invalid."""
+
+
+@dataclass(frozen=True)
+class JudgeConfig:
+    """Auditable configuration for the optional semantic judge."""
+
+    provider: str
+    model: str
+    api_key_env: str
+    criteria: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class JudgeResult:
+    """A judge verdict and the provider usage needed for separate pricing."""
+
+    verdict: str
+    rationale: str
+    usage: LLMUsage
+
+
+JudgeRunner = Callable[[JudgeConfig, str], JudgeResult]
 
 
 @dataclass(frozen=True)
@@ -121,6 +158,8 @@ class ProbeCase:
     required_delegations: tuple[str, ...]
     replicas: int
     candidates: tuple[ProbeCandidate, ...]
+    structured_fields: Mapping[str, object] = field(default_factory=dict)
+    judge: JudgeConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +199,38 @@ def _as_required_groups(value: object, field: str) -> tuple[tuple[str, ...], ...
                 f"{field}[{index}] must be a string or non-empty list of strings"
             )
     return tuple(groups)
+
+
+def _load_judge_config(value: object, field: str) -> JudgeConfig:
+    """Validate an opt-in dataset judge block, applying frozen defaults."""
+    judge = _as_mapping(value, field)
+    unknown = set(judge) - {"provider", "model", "api_key_env", "criteria"}
+    if unknown:
+        raise ProbeError(f"{field} contains unsupported settings: " + ", ".join(sorted(unknown)))
+    provider = judge.get("provider", DEFAULT_JUDGE["provider"])
+    model = judge.get("model", DEFAULT_JUDGE["model"])
+    api_key_env = judge.get("api_key_env", DEFAULT_JUDGE["api_key_env"])
+    for key, item in {
+        "provider": provider,
+        "model": model,
+        "api_key_env": api_key_env,
+    }.items():
+        if not isinstance(item, str) or not item:
+            raise ProbeError(f"{field}.{key} must be a non-empty string")
+    return JudgeConfig(
+        provider=provider,
+        model=model,
+        api_key_env=api_key_env,
+        criteria=_as_string_list(judge.get("criteria", []), f"{field}.criteria"),
+    )
+
+
+def _default_judge_config() -> JudgeConfig:
+    return JudgeConfig(
+        provider=DEFAULT_JUDGE["provider"],
+        model=DEFAULT_JUDGE["model"],
+        api_key_env=DEFAULT_JUDGE["api_key_env"],
+    )
 
 
 def _positive_int(value: object, field: str) -> int:
@@ -422,6 +493,14 @@ def load_probe_case(
         required_delegations=required_delegations,
         replicas=replicas,
         candidates=tuple(candidates),
+        structured_fields=_as_mapping(
+            expected.get("structured", {}), f"case {case_id}.expected.structured"
+        ),
+        judge=(
+            _load_judge_config(selected["judge"], f"case {case_id}.judge")
+            if "judge" in selected
+            else None
+        ),
     )
 
 
@@ -853,6 +932,123 @@ def score_text(
     return {"passed": not missing and not forbidden, "missing": missing, "forbidden": forbidden}
 
 
+def score_structured(
+    structured_output: object,
+    structured_fields: Mapping[str, object],
+) -> dict[str, object]:
+    """Score required structured fields by deterministic recursive subset equality."""
+    if not structured_fields:
+        return {"passed": True, "mismatches": []}
+    if not isinstance(structured_output, dict):
+        return {"passed": False, "mismatches": ["structured_output:not_a_mapping"]}
+
+    mismatches: list[str] = []
+
+    def compare(actual: dict[str, object], expected: Mapping[str, object], prefix: str) -> None:
+        for key, expected_value in expected.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if key not in actual:
+                mismatches.append(f"missing:{path}")
+                continue
+            actual_value = actual[key]
+            if isinstance(expected_value, Mapping):
+                if not isinstance(actual_value, dict):
+                    mismatches.append(f"wrong:{path}")
+                else:
+                    compare(actual_value, expected_value, path)
+            elif actual_value != expected_value:
+                mismatches.append(f"wrong:{path}")
+
+    compare(structured_output, structured_fields, "")
+    return {"passed": not mismatches, "mismatches": mismatches}
+
+
+def _judge_user_prompt(config: JudgeConfig, final_text: str) -> str:
+    return json.dumps(
+        {
+            "prompt_version": JUDGE_PROMPT_VERSION,
+            "criteria": list(config.criteria),
+            "holdout_final_text": final_text,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _judge_verdict(value: object) -> tuple[str, str]:
+    response = _as_mapping(value, "judge response")
+    if set(response) != {"verdict", "rationale"}:
+        raise ProbeError("judge response must contain exactly verdict and rationale")
+    verdict = response.get("verdict")
+    rationale = response.get("rationale")
+    if verdict not in {"pass", "fail"} or not isinstance(rationale, str):
+        raise ProbeError("judge response has an invalid verdict or rationale")
+    return verdict, rationale
+
+
+def _run_default_judge(config: JudgeConfig, final_text: str) -> JudgeResult:
+    """Call a provider SDK directly so the frozen temperature is explicit."""
+    user_prompt = _judge_user_prompt(config, final_text)
+    if config.provider == "openai":
+        import openai
+
+        client = openai.OpenAI(api_key=os.environ.get(config.api_key_env))
+        response = client.chat.completions.create(
+            model=config.model,
+            temperature=JUDGE_TEMPERATURE,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content = response.choices[0].message.content
+        if not isinstance(content, str):
+            raise ProbeError("judge returned no text")
+        verdict, rationale = _judge_verdict(json.loads(content))
+        usage = response.usage
+        return JudgeResult(
+            verdict=verdict,
+            rationale=rationale,
+            usage=LLMUsage(
+                input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+                model=config.model,
+            ),
+        )
+    if config.provider == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=os.environ.get(config.api_key_env))
+        response = client.messages.create(
+            model=config.model,
+            max_tokens=512,
+            temperature=JUDGE_TEMPERATURE,
+            system=JUDGE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        text_blocks = [block.text for block in response.content if block.type == "text"]
+        if not text_blocks:
+            raise ProbeError("judge returned no text")
+        verdict, rationale = _judge_verdict(json.loads("".join(text_blocks)))
+        usage = response.usage
+        return JudgeResult(
+            verdict=verdict,
+            rationale=rationale,
+            usage=LLMUsage(
+                input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+                output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+                cache_creation_input_tokens=int(
+                    getattr(usage, "cache_creation_input_tokens", 0) or 0
+                ),
+                cache_read_input_tokens=int(
+                    getattr(usage, "cache_read_input_tokens", 0) or 0
+                ),
+                model=config.model,
+            ),
+        )
+    raise ProbeError(f"unsupported judge provider: {config.provider}")
+
+
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     if not path.is_file():
@@ -1125,6 +1321,17 @@ def validate_publication_payload(payload: dict[str, object]) -> None:
         ):
             raise ProbeError(f"publication payload field {key!r} has an invalid type")
 
+    optional_top_level: dict[str, tuple[type[object], ...]] = {
+        "judge_model": (str, type(None)),
+        "judge_prompt_version": (str, type(None)),
+        "judge_temperature": (int, float, type(None)),
+    }
+    for key, expected_types in optional_top_level.items():
+        if key in payload and (
+            not isinstance(payload[key], expected_types) or isinstance(payload[key], bool)
+        ):
+            raise ProbeError(f"publication payload field {key!r} has an invalid type")
+
     source = payload["source"]
     if not isinstance(source, dict):  # Kept for type narrowing after validation above.
         raise ProbeError("publication payload field 'source' has an invalid type")
@@ -1157,6 +1364,9 @@ def validate_publication_payload(payload: dict[str, object]) -> None:
         "qualifies": (bool,),
         "runs": (list,),
     }
+    optional_candidate: dict[str, tuple[type[object], ...]] = {
+        "judge_pass_rate": (int, float, type(None)),
+    }
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             raise ProbeError(f"publication payload candidate {index} must be a mapping")
@@ -1179,6 +1389,14 @@ def validate_publication_payload(payload: dict[str, object]) -> None:
                     "median_total_cost_usd",
                 }
                 and isinstance(value, bool)
+            ):
+                raise ProbeError(
+                    f"publication payload candidate {index} field {key!r} has an invalid type"
+                )
+        for key, expected_types in optional_candidate.items():
+            if key in candidate and (
+                not isinstance(candidate[key], expected_types)
+                or isinstance(candidate[key], bool)
             ):
                 raise ProbeError(
                     f"publication payload candidate {index} field {key!r} has an invalid type"
@@ -1220,6 +1438,8 @@ def run_probe(
     output_dir: str | Path,
     *,
     command_runner: CommandRunner = _run_command,
+    judge: bool = False,
+    judge_runner: JudgeRunner | None = None,
     run_timeout_s: float = DEFAULT_RUN_TIMEOUT_S,
     cwd: Path | None = None,
 ) -> dict[str, object]:
@@ -1236,6 +1456,12 @@ def run_probe(
         command_cwd,
         environment=environment,
     )
+    judge_config = (
+        case.judge
+        if case.judge is not None
+        else (_default_judge_config() if judge else None)
+    )
+    active_judge_runner = judge_runner or _run_default_judge
     public_candidates: list[dict[str, object]] = []
 
     for candidate in case.candidates:
@@ -1390,6 +1616,11 @@ def run_probe(
                     case.required_terms,
                     case.forbidden_terms,
                 )
+                structured = (
+                    score_structured(payload.get("structured_output"), case.structured_fields)
+                    if complete
+                    else {"passed": None, "mismatches": []}
+                )
                 total_cost = analysis["total_cost_usd"]
                 within_cost = (
                     case.company_max_cost_usd is None
@@ -1398,16 +1629,48 @@ def run_probe(
                 failure_reasons = list(analysis["failures"])
                 if complete and not within_cost:
                     failure_reasons.append("company_cost_limit_exceeded")
+                judge_record: dict[str, object] | None = None
+                if complete and judge_config is not None:
+                    try:
+                        judge_result = active_judge_runner(
+                            judge_config,
+                            final_text if isinstance(final_text, str) else "",
+                        )
+                        judge_record = {
+                            "verdict": judge_result.verdict,
+                            "rationale": judge_result.rationale,
+                            "model": judge_config.model,
+                            "prompt_version": JUDGE_PROMPT_VERSION,
+                            "cost_usd": cost_for(judge_result.usage),
+                        }
+                    # Provider SDKs have no shared exception hierarchy. A judge
+                    # failure remains advisory and cannot invalidate the run.
+                    except Exception:
+                        judge_record = {
+                            "verdict": None,
+                            "rationale": "judge_unavailable",
+                            "model": judge_config.model,
+                            "prompt_version": JUDGE_PROMPT_VERSION,
+                            "cost_usd": None,
+                        }
                 public_run = {
                     "replica": replica,
                     "attempt_status": "complete" if complete else "operational_failure",
                     "rubric_passed": rubric["passed"] if complete else None,
                     "missing_required": rubric["missing"] if complete else [],
                     "forbidden_hits": rubric["forbidden"] if complete else [],
+                    "structured_passed": structured["passed"],
+                    "structured_mismatches": structured["mismatches"],
                     "within_cost_limit": within_cost if complete else None,
-                    "end_to_end_passed": bool(complete and rubric["passed"] and within_cost),
+                    "end_to_end_passed": bool(
+                        complete and rubric["passed"] and structured["passed"] and within_cost
+                    ),
                     "failure_reasons": sorted(set(failure_reasons)),
                     "total_cost_usd": total_cost,
+                    "judge_cost_usd": (
+                        judge_record["cost_usd"] if judge_record is not None else None
+                    ),
+                    "judge": judge_record,
                     "wall_time_s": elapsed_s,
                     "guidelines_retrieved": analysis["guidelines_retrieved"],
                     "retrieval_candidate_kinds": analysis["retrieval_candidate_kinds"],
@@ -1430,6 +1693,12 @@ def run_probe(
                 private_result=private_result,
             )
             public_runs.append(public_run)
+
+        for run in public_runs:
+            run.setdefault("structured_passed", None)
+            run.setdefault("structured_mismatches", [])
+            run.setdefault("judge_cost_usd", None)
+            run.setdefault("judge", None)
 
         completed = [run for run in public_runs if run["attempt_status"] == "complete"]
         passed = [run for run in public_runs if run.get("end_to_end_passed") is True]
@@ -1458,6 +1727,16 @@ def run_probe(
             "conditional_rubric_pass_rate": (
                 sum(run.get("rubric_passed") is True for run in completed) / len(completed)
                 if completed else None
+            ),
+            "judge_pass_rate": (
+                sum(
+                    isinstance(run.get("judge"), dict)
+                    and run["judge"].get("verdict") == "pass"
+                    for run in public_runs
+                )
+                / sum(isinstance(run.get("judge"), dict) for run in public_runs)
+                if any(isinstance(run.get("judge"), dict) for run in public_runs)
+                else None
             ),
             "end_to_end_pass_rate": len(passed) / case.replicas,
             "median_total_cost_usd": statistics.median(costs) if costs else None,
@@ -1505,6 +1784,9 @@ def run_probe(
         "case_id": case.case_id,
         "company": case.company_name,
         "fabri_version": fabri_version,
+        "judge_model": judge_config.model if judge_config is not None else None,
+        "judge_prompt_version": JUDGE_PROMPT_VERSION if judge_config is not None else None,
+        "judge_temperature": JUDGE_TEMPERATURE if judge_config is not None else None,
         "source": source_manifest,
         "replicas_per_candidate": case.replicas,
         "selection_policy": (
@@ -1607,16 +1889,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--replicas", type=int, default=None)
     parser.add_argument("--run-timeout-s", type=float, default=DEFAULT_RUN_TIMEOUT_S)
+    parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="run the optional frozen semantic judge (also enabled by a dataset judge block)",
+    )
     args = parser.parse_args(argv)
     if args.run_timeout_s <= 0:
         parser.error("--run-timeout-s must be positive")
     try:
         case = load_probe_case(args.dataset, args.case_id, replicas_override=args.replicas)
-        result = run_probe(
-            case,
-            args.output_dir,
-            run_timeout_s=args.run_timeout_s,
-        )
+        if args.judge:
+            result = run_probe(
+                case,
+                args.output_dir,
+                judge=True,
+                run_timeout_s=args.run_timeout_s,
+            )
+        else:
+            result = run_probe(case, args.output_dir, run_timeout_s=args.run_timeout_s)
     except (OSError, ProbeError) as exc:
         parser.error(str(exc))
     print(json.dumps({
