@@ -9,10 +9,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -65,6 +67,15 @@ class MemoryCase:
     retrieval_expectations: dict[str, object]
     replicas: int
     conditions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MemoryDbSpec:
+    """One unique SQLite database declared by compiled agent configs."""
+
+    relative_path: Path
+    agent_ids: tuple[str, ...]
+    config_paths: tuple[str, ...]
 
 
 def _as_mapping(value: object, field: str) -> dict[str, object]:
@@ -246,14 +257,17 @@ def apply_retrieval_overrides(
     *,
     top_k: int | None,
     strategy: str | None,
+    verification: str | None = None,
 ) -> list[str]:
     """Rewrite optional retrieval settings into every raw compiled node config."""
     _validate_retrieval_overrides(top_k, strategy)
-    if top_k is None and strategy is None:
+    if verification is not None and verification not in {"any", "verified"}:
+        raise ProbeError("memory retrieval verification must be 'any' or 'verified'")
+    if top_k is None and strategy is None and verification is None:
         return []
 
     changed: list[str] = []
-    for config_path in sorted((compiled_dest / company_name).glob("*.yaml")):
+    for config_path in sorted((compiled_dest / company_name).rglob("*.yaml")):
         try:
             loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         except OSError as exc:
@@ -267,6 +281,8 @@ def apply_retrieval_overrides(
             memory["top_k"] = top_k
         if strategy is not None:
             memory["retrieval_strategy"] = strategy
+        if verification is not None:
+            memory["retrieval_verification"] = verification
         try:
             config_path.write_text(
                 yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -275,6 +291,152 @@ def apply_retrieval_overrides(
             raise ProbeError(f"could not write compiled config {config_path}: {exc}") from exc
         changed.append(str(config_path))
     return changed
+
+
+def discover_memory_dbs(
+    compiled_destination: Path, company_name: str
+) -> tuple[MemoryDbSpec, ...]:
+    """Return every unique, company-local SQLite path declared by compiled YAML."""
+    company_root = (compiled_destination / company_name).resolve()
+    declarations: dict[Path, dict[str, set[str]]] = {}
+    for config_path in sorted(company_root.rglob("*.yaml")):
+        try:
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ProbeError(f"could not read compiled config {config_path}: {exc}") from exc
+        except yaml.YAMLError as exc:
+            raise ProbeError(f"malformed YAML in compiled config {config_path}: {exc}") from exc
+        raw = _as_mapping(loaded, str(config_path))
+        memory = raw.get("memory")
+        if not isinstance(memory, dict) or memory.get("backend") not in (None, "sqlite"):
+            continue
+        sqlite_path = memory.get("sqlite_path")
+        if not isinstance(sqlite_path, str) or not sqlite_path:
+            continue
+        declared = Path(sqlite_path)
+        resolved = (
+            declared.resolve()
+            if declared.is_absolute()
+            else (company_root / declared).resolve()
+        )
+        if not resolved.is_relative_to(company_root):
+            raise ProbeError(
+                f"compiled memory path escapes company root: {config_path}: {sqlite_path}"
+            )
+        relative = resolved.relative_to(company_root)
+        agent = raw.get("agent")
+        agent_id = (
+            str(agent.get("name"))
+            if isinstance(agent, dict) and agent.get("name")
+            else config_path.stem
+        )
+        item = declarations.setdefault(relative, {"agents": set(), "configs": set()})
+        item["agents"].add(agent_id)
+        item["configs"].add(str(config_path.relative_to(company_root)))
+    if not declarations:
+        raise ProbeError(f"compiled company declares no SQLite memory DBs: {company_root}")
+    return tuple(
+        MemoryDbSpec(
+            relative_path=relative,
+            agent_ids=tuple(sorted(values["agents"])),
+            config_paths=tuple(sorted(values["configs"])),
+        )
+        for relative, values in sorted(declarations.items(), key=lambda item: str(item[0]))
+    )
+
+
+def _db_manifest(path: Path, spec: MemoryDbSpec) -> dict[str, object]:
+    """Build a transport-safe manifest without loading the embedding extension."""
+    payload: dict[str, object] = {
+        "path": str(spec.relative_path),
+        "agent_ids": list(spec.agent_ids),
+        "config_paths": list(spec.config_paths),
+        "present": path.is_file(),
+        "size_bytes": None,
+        "sha256": None,
+        "entry_ids": [],
+        "entry_payload_sha256": None,
+    }
+    if not path.is_file():
+        return payload
+    data = path.read_bytes()
+    payload["size_bytes"] = len(data)
+    payload["sha256"] = hashlib.sha256(data).hexdigest()
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT id, payload FROM guidelines ORDER BY id"
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return payload
+    payload["entry_ids"] = [str(row[0]) for row in rows]
+    canonical = json.dumps(
+        [(str(entry_id), str(entry_payload)) for entry_id, entry_payload in rows],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload["entry_payload_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
+def _manifest_for_specs(
+    compiled_destination: Path, company_name: str, specs: tuple[MemoryDbSpec, ...]
+) -> list[dict[str, object]]:
+    company_root = compiled_destination / company_name
+    return [_db_manifest(company_root / spec.relative_path, spec) for spec in specs]
+
+
+def _trace_events(state_root: Path) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for trace in sorted((state_root / ".fabri" / "traces").glob("*.jsonl")):
+        for line in trace.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def _funnel_observations(state_root: Path) -> dict[str, object]:
+    events = _trace_events(state_root)
+    reports = [event for event in events if event.get("type") == "mining_report"]
+    retrieval_ids = {
+        str(candidate["id"])
+        for event in events
+        if event.get("type") == "retrieval"
+        for candidate in event.get("candidates", [])
+        if isinstance(candidate, dict) and candidate.get("id")
+    }
+    repair_retries = sum(event.get("type") == "repair_attempt" for event in events)
+    structured_retries = sum(
+        event.get("type") == "structured_output"
+        and isinstance(event.get("attempt"), int)
+        and int(event["attempt"]) > 0
+        for event in events
+    )
+    provider_retries = sum(
+        int(event.get("provider_transient_retries", 0) or 0)
+        for event in events
+        if event.get("type") in {"usage", "post_run_usage"}
+    )
+    max_token_retries = sum(
+        int(event.get("max_token_retries", 0) or 0)
+        for event in events
+        if event.get("type") in {"usage", "post_run_usage"}
+    )
+    return {
+        "mining_reports": reports,
+        "retrieved_entry_ids": sorted(retrieval_ids),
+        "repair_retries": repair_retries,
+        "structured_output_retries": structured_retries,
+        "provider_transient_retries": provider_retries,
+        "max_token_retries": max_token_retries,
+        "total_retries": (
+            repair_retries + structured_retries + provider_retries + max_token_retries
+        ),
+        "cost_unaccounted": any(event.get("type") == "cost_unaccounted" for event in events),
+    }
 
 
 def _run_company(
@@ -324,10 +486,6 @@ def _analysis_for_process(
     return analysis
 
 
-def _memory_db(compiled_destination: Path, case: MemoryCase) -> Path:
-    return compiled_destination / case.company_name / ".fabri" / f"{case.namespace}.db"
-
-
 def _private_write(
     attempt_root: Path,
     processes: Mapping[str, subprocess.CompletedProcess[str] | None],
@@ -343,6 +501,23 @@ def _private_write(
     (private / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
+# Reasons that mean the training phase itself never produced a successful,
+# complete run.  Every other invalid-run reason is only reachable after training
+# already validated, so it belongs to the holdout/transport phase and must not
+# mark training as failed.
+_TRAINING_PHASE_REASONS = frozenset(
+    {
+        "training_compile_timeout",
+        "training_compile_failed",
+        "training_memory_manifest_invalid",
+        "training_root_config_missing",
+        "training_run_timeout",
+        "training_result_unreadable",
+        "training_failed",
+    }
+)
+
+
 def _invalid_run(
     replica: int,
     condition: str,
@@ -351,8 +526,24 @@ def _invalid_run(
     reason: str,
     *,
     training_failures: list[str] | None = None,
-    training_success: bool | None = None,
+    execution_order: int = 0,
 ) -> dict[str, object]:
+    # ``training_success`` is authoritative here, not the agent's self-report: a
+    # run that failed in the training phase never counts as a training success,
+    # even when the raw payload optimistically reported ``success: true`` (a
+    # truncated run does exactly this).  Holdout and transport reasons are only
+    # reachable after training already validated, so training stays successful
+    # and the reason is recorded against the holdout phase instead of leaking
+    # into ``training_failure_reasons``.
+    training_phase = reason in _TRAINING_PHASE_REASONS
+    if training_phase:
+        training_success = False
+        training_failure_reasons = sorted(set((training_failures or []) + [reason]))
+        holdout_failure_reasons: list[str] = []
+    else:
+        training_success = True
+        training_failure_reasons = sorted(set(training_failures or []))
+        holdout_failure_reasons = [reason]
     return {
         "replica": replica,
         "condition": condition,
@@ -365,8 +556,22 @@ def _invalid_run(
         "retrieval_candidate_kinds": [],
         "training_outcome": training_outcome if isinstance(training_outcome, str) else None,
         "training_success": training_success,
-        "training_failure_reasons": sorted(set((training_failures or []) + [reason])),
-        "holdout_failure_reasons": [],
+        "training_failure_reasons": training_failure_reasons,
+        "holdout_failure_reasons": holdout_failure_reasons,
+        "execution_order": execution_order,
+        "funnel": {
+            "supply": {"mining_reports": [], "dbs": []},
+            "transport": {"dbs": [], "intact": False},
+            "retrieval": {"entry_ids": [], "guidelines_retrieved": 0},
+            "outcome": {
+                "rubric_passed": None,
+                "repair_retries": 0,
+                "structured_output_retries": 0,
+                "provider_transient_retries": 0,
+                "max_token_retries": 0,
+                "total_retries": 0,
+            },
+        },
     }
 
 
@@ -386,6 +591,7 @@ def _run_pair(
     timeout_s: float,
     retrieval_top_k: int | None,
     retrieval_strategy: str | None,
+    execution_order: int,
 ) -> dict[str, object]:
     """Run one training-to-fresh-holdout pair, retaining raw material privately."""
     attempt_root = work_root / f"replica-{replica:02d}" / condition
@@ -406,12 +612,18 @@ def _run_pair(
             case, train_dest, command_runner, command_cwd, environment, timeout_s
         )
     except subprocess.TimeoutExpired:
-        result = _invalid_run(replica, condition, None, None, "training_compile_timeout")
+        result = _invalid_run(
+            replica, condition, None, None, "training_compile_timeout",
+            execution_order=execution_order,
+        )
         _private_write(attempt_root, processes, result)
         return result
     processes["training-compile"] = train_compile
     if train_compile.returncode != 0:
-        result = _invalid_run(replica, condition, None, None, "training_compile_failed")
+        result = _invalid_run(
+            replica, condition, None, None, "training_compile_failed",
+            execution_order=execution_order,
+        )
         _private_write(attempt_root, processes, result)
         return result
     apply_retrieval_overrides(
@@ -420,10 +632,22 @@ def _run_pair(
         top_k=retrieval_top_k,
         strategy=retrieval_strategy,
     )
+    try:
+        train_specs = discover_memory_dbs(train_dest, case.company_name)
+    except ProbeError as exc:
+        result = _invalid_run(
+            replica, condition, None, None, "training_memory_manifest_invalid",
+            execution_order=execution_order,
+        )
+        _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
+        return result
 
     train_root = train_dest / case.company_name / f"{case.root_id}.yaml"
     if not train_root.is_file():
-        result = _invalid_run(replica, condition, None, None, "training_root_config_missing")
+        result = _invalid_run(
+            replica, condition, None, None, "training_root_config_missing",
+            execution_order=execution_order,
+        )
         _private_write(attempt_root, processes, result)
         return result
     try:
@@ -440,11 +664,17 @@ def _run_pair(
         train_payload = _parse_payload(train_run)
         train_analysis = _analysis_for_process(train_run, train_payload, train_state, ())
     except subprocess.TimeoutExpired:
-        result = _invalid_run(replica, condition, None, None, "training_run_timeout")
+        result = _invalid_run(
+            replica, condition, None, None, "training_run_timeout",
+            execution_order=execution_order,
+        )
         _private_write(attempt_root, processes, result)
         return result
     except ProbeError as exc:
-        result = _invalid_run(replica, condition, None, None, "training_result_unreadable")
+        result = _invalid_run(
+            replica, condition, None, None, "training_result_unreadable",
+            execution_order=execution_order,
+        )
         _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
 
@@ -461,8 +691,7 @@ def _run_pair(
             training_outcome,
             training_cost,
             "training_failed",
-            training_failures=training_failures,
-            training_success=training_success,
+            training_failures=training_failures,            execution_order=execution_order,
         )
         _private_write(
             attempt_root,
@@ -485,8 +714,7 @@ def _run_pair(
             condition,
             training_outcome,
             training_cost,
-            "holdout_compile_timeout",
-            training_success=training_success,
+            "holdout_compile_timeout",            execution_order=execution_order,
         )
         _private_write(attempt_root, processes, result)
         return result
@@ -497,8 +725,7 @@ def _run_pair(
             condition,
             training_outcome,
             training_cost,
-            "holdout_compile_failed",
-            training_success=training_success,
+            "holdout_compile_failed",            execution_order=execution_order,
         )
         _private_write(attempt_root, processes, result)
         return result
@@ -509,36 +736,76 @@ def _run_pair(
         strategy=retrieval_strategy,
     )
 
+    try:
+        holdout_specs = discover_memory_dbs(holdout_dest, case.company_name)
+    except ProbeError as exc:
+        result = _invalid_run(
+            replica, condition, training_outcome, training_cost,
+            "holdout_memory_manifest_invalid",
+            execution_order=execution_order,
+        )
+        _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
+        return result
+
+    train_by_path = {spec.relative_path: spec for spec in train_specs}
+    holdout_by_path = {spec.relative_path: spec for spec in holdout_specs}
+    if set(train_by_path) != set(holdout_by_path):
+        result = _invalid_run(
+            replica, condition, training_outcome, training_cost,
+            "memory_manifest_mismatch",
+            execution_order=execution_order,
+        )
+        _private_write(attempt_root, processes, result)
+        return result
+
+    training_db_manifest = _manifest_for_specs(train_dest, case.company_name, train_specs)
+    training_funnel = _funnel_observations(train_state)
+
     holdout_root = holdout_dest / case.company_name / f"{case.root_id}.yaml"
-    train_db = _memory_db(train_dest, case)
-    holdout_db = _memory_db(holdout_dest, case)
     if condition == "memory":
-        if not train_db.is_file():
+        missing = [item["path"] for item in training_db_manifest if item["present"] is not True]
+        if missing:
             result = _invalid_run(
                 replica,
                 condition,
                 training_outcome,
                 training_cost,
-                "training_memory_db_missing",
-                training_success=training_success,
+                "training_memory_db_missing",                execution_order=execution_order,
             )
-            _private_write(attempt_root, processes, result)
+            _private_write(attempt_root, processes, {**result, "missing_memory_dbs": missing})
             return result
-        holdout_db.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(train_db, holdout_db)
+        for relative in train_by_path:
+            source = train_dest / case.company_name / relative
+            target = holdout_dest / case.company_name / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
     else:
         # A real fresh compile has no learned DB.  Removing a pre-created empty
         # sqlite file also keeps injected offline fakes from accidentally acting
         # as a control-memory source.
-        holdout_db.unlink(missing_ok=True)
+        for relative in holdout_by_path:
+            (holdout_dest / case.company_name / relative).unlink(missing_ok=True)
+
+    transported_db_manifest = _manifest_for_specs(
+        holdout_dest, case.company_name, holdout_specs
+    )
+    transport_intact = condition == "memory" and all(
+        before["sha256"] == after["sha256"]
+        and before["entry_payload_sha256"] == after["entry_payload_sha256"]
+        and before["entry_ids"] == after["entry_ids"]
+        and before["present"] is True
+        and after["present"] is True
+        for before, after in zip(training_db_manifest, transported_db_manifest, strict=True)
+    )
+    if condition == "control":
+        transport_intact = all(item["present"] is False for item in transported_db_manifest)
     if not holdout_root.is_file():
         result = _invalid_run(
             replica,
             condition,
             training_outcome,
             training_cost,
-            "holdout_root_config_missing",
-            training_success=training_success,
+            "holdout_root_config_missing",            execution_order=execution_order,
         )
         _private_write(attempt_root, processes, result)
         return result
@@ -564,8 +831,7 @@ def _run_pair(
             condition,
             training_outcome,
             training_cost,
-            "holdout_run_timeout",
-            training_success=training_success,
+            "holdout_run_timeout",            execution_order=execution_order,
         )
         _private_write(attempt_root, processes, result)
         return result
@@ -575,8 +841,7 @@ def _run_pair(
             condition,
             training_outcome,
             training_cost,
-            "holdout_result_unreadable",
-            training_success=training_success,
+            "holdout_result_unreadable",            execution_order=execution_order,
         )
         _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
@@ -595,6 +860,13 @@ def _run_pair(
         case.required_terms,
         case.forbidden_terms,
     )
+    holdout_funnel = _funnel_observations(holdout_state)
+    transported_entry_ids = {
+        str(entry_id)
+        for item in transported_db_manifest
+        for entry_id in item.get("entry_ids", [])
+    }
+    retrieved_entry_ids = set(holdout_funnel["retrieved_entry_ids"])
     result = {
         "replica": replica,
         "condition": condition,
@@ -609,6 +881,36 @@ def _run_pair(
         "training_success": training_success,
         "training_failure_reasons": [],
         "holdout_failure_reasons": sorted(set(str(item) for item in holdout_failures)),
+        "execution_order": execution_order,
+        "funnel": {
+            "supply": {
+                "mining_reports": training_funnel["mining_reports"],
+                "dbs": training_db_manifest,
+            },
+            "transport": {
+                "dbs": transported_db_manifest,
+                "intact": transport_intact,
+            },
+            "retrieval": {
+                "entry_ids": sorted(retrieved_entry_ids),
+                "transported_entry_ids_retrieved": sorted(
+                    transported_entry_ids & retrieved_entry_ids
+                ),
+                "guidelines_retrieved": guidelines_retrieved,
+            },
+            "outcome": {
+                "rubric_passed": rubric["passed"] if complete else None,
+                "repair_retries": holdout_funnel["repair_retries"],
+                "structured_output_retries": holdout_funnel[
+                    "structured_output_retries"
+                ],
+                "provider_transient_retries": holdout_funnel[
+                    "provider_transient_retries"
+                ],
+                "max_token_retries": holdout_funnel["max_token_retries"],
+                "total_retries": holdout_funnel["total_retries"],
+            },
+        },
     }
     _private_write(
         attempt_root,
@@ -675,6 +977,52 @@ def _comparison(aggregates: Mapping[str, dict[str, object]]) -> dict[str, float 
     }
 
 
+def _smoke_gate(runs: list[dict[str, object]], root_id: str) -> dict[str, object]:
+    """Decide whether supply plumbing is sound enough to fund variant trials."""
+    failures: list[str] = []
+    memory_runs = [run for run in runs if run.get("condition") == "memory"]
+    control_runs = [run for run in runs if run.get("condition") == "control"]
+    if len(memory_runs) != 2 or len(control_runs) != 2:
+        failures.append("requires_exactly_two_replicas_per_condition")
+    for run in memory_runs:
+        replica = run.get("replica")
+        funnel = run.get("funnel")
+        if not isinstance(funnel, dict):
+            failures.append(f"memory_replica_{replica}_funnel_missing")
+            continue
+        supply = funnel.get("supply")
+        transport = funnel.get("transport")
+        retrieval = funnel.get("retrieval")
+        reports = supply.get("mining_reports", []) if isinstance(supply, dict) else []
+        specialist_entry_ids = {
+            str(entry_id)
+            for report in reports
+            if isinstance(report, dict)
+            and report.get("producer_agent_id") not in {None, root_id}
+            for entry_id in report.get("entry_ids", [])
+        }
+        if not specialist_entry_ids:
+            failures.append(f"memory_replica_{replica}_specialist_supply_missing")
+        if not isinstance(transport, dict) or transport.get("intact") is not True:
+            failures.append(f"memory_replica_{replica}_transport_failed")
+        transported_retrieved = (
+            retrieval.get("transported_entry_ids_retrieved", [])
+            if isinstance(retrieval, dict) else []
+        )
+        if not specialist_entry_ids.intersection(map(str, transported_retrieved)):
+            failures.append(f"memory_replica_{replica}_specialist_entry_not_retrieved")
+    for run in control_runs:
+        replica = run.get("replica")
+        funnel = run.get("funnel")
+        transport = funnel.get("transport") if isinstance(funnel, dict) else None
+        dbs = transport.get("dbs", []) if isinstance(transport, dict) else []
+        if any(isinstance(db, dict) and db.get("present") is True for db in dbs):
+            failures.append(f"control_replica_{replica}_db_present")
+        if run.get("guidelines_retrieved") != 0:
+            failures.append(f"control_replica_{replica}_retrieval_nonzero")
+    return {"go": not failures, "failures": sorted(set(failures))}
+
+
 def _is_number(value: object, *, nullable: bool = False) -> bool:
     return (nullable and value is None) or (
         isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -697,6 +1045,7 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "comparison": (dict,),
         "claim_boundary": (str,),
         "status": (str,),
+        "smoke_gate": (dict,),
     }
     for key, types in required.items():
         if key not in payload:
@@ -750,6 +1099,8 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "training_success": (bool, type(None)),
         "training_failure_reasons": (list,),
         "holdout_failure_reasons": (list,),
+        "execution_order": (int,),
+        "funnel": (dict,),
     }
     for index, run in enumerate(runs):
         if not isinstance(run, dict):
@@ -762,6 +1113,10 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
                 raise ProbeError(f"memory payload run {index} field {key!r} has an invalid type")
         if run["rubric_passed"] is not None and run["holdout_complete"] is not True:
             raise ProbeError(f"memory payload run {index} has a rubric verdict without completion")
+        if run["training_success"] is True and run["training_failure_reasons"]:
+            raise ProbeError(
+                f"memory payload run {index} reports training success with training failures"
+            )
     aggregates = payload["condition_aggregates"]
     if not isinstance(aggregates, dict):
         raise ProbeError("memory payload condition_aggregates has an invalid type")
@@ -823,6 +1178,7 @@ def render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Company memory vs control study",
         "",
+        f"- Supply smoke gate: `{'GO' if isinstance(payload.get('smoke_gate'), dict) and payload['smoke_gate'].get('go') else 'STOP'}`",
         f"- Retrieval overrides: top_k=`{top_k}`, retrieval_strategy=`{strategy}`",
         f"- Case: `{payload['case_id']}`",
         f"- Company: `{payload['company']}`",
@@ -894,7 +1250,10 @@ def run_memory_study(
     )
     runs: list[dict[str, object]] = []
     for replica in range(1, case.replicas + 1):
-        for condition in case.conditions:
+        condition_order = (
+            case.conditions if replica % 2 == 1 else tuple(reversed(case.conditions))
+        )
+        for execution_order, condition in enumerate(condition_order, start=1):
             runs.append(
                 _run_pair(
                     case,
@@ -907,6 +1266,7 @@ def run_memory_study(
                     run_timeout_s,
                     retrieval_top_k,
                     retrieval_strategy,
+                    execution_order,
                 )
             )
     aggregates = {
@@ -935,6 +1295,7 @@ def run_memory_study(
         "runs": runs,
         "condition_aggregates": aggregates,
         "comparison": _comparison(aggregates),
+        "smoke_gate": _smoke_gate(runs, case.root_id),
         "claim_boundary": CLAIM_BOUNDARY,
         "status": "completed",
     }
