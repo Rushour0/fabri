@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, TypeVar
 
 from fabri.events import EventType
 from fabri.memory.embeddings import embeddings_available, embed
+from fabri.memory.recurrence import applicable, apply_confidence
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
 
@@ -105,6 +106,7 @@ class RetrievalConfig:
     global_qdrant_url: str = "http://localhost:6333"
     verification: str = "any"
     tiering_enabled: bool = False
+    memory_action_enabled: bool = False
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -121,7 +123,21 @@ class RetrievalConfig:
             global_qdrant_url=mem_cfg.get("qdrant_url", "http://localhost:6333"),
             verification=mem_cfg.get("retrieval_verification", "any"),
             tiering_enabled=bool(mem_cfg.get("tiering_enabled", False)),
+            memory_action_enabled=bool(mem_cfg.get("memory_action_enabled", False)),
         )
+
+
+def propose_actions(
+    store: QdrantMemoryStore, current_state: dict, *, top_n: int = 1
+) -> list[dict]:
+    """Return the highest-confidence applicable ActionMemory resolutions."""
+    ranked: list[tuple[float, dict]] = []
+    for entry in store.iterate():
+        resolution = entry.resolution
+        if isinstance(resolution, dict) and applicable(resolution, current_state):
+            ranked.append((apply_confidence(resolution, current_state, 1.0), resolution))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [resolution for _, resolution in ranked[:top_n]]
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +380,7 @@ def retrieve_context_with_meta(
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
     session_id: str | None = None,
+    current_state: dict | None = None,
 ) -> tuple[str, dict]:
     """Same as `retrieve_context` but also returns retrieval metadata so
     callers can emit the guideline-reuse-rate metric.
@@ -394,6 +411,11 @@ def retrieve_context_with_meta(
         ),
         "strategic": sum(1 for entry, _ in merged if entry.kind == "strategic"),
     }
+    if (
+        (retrieval_config or RetrievalConfig()).memory_action_enabled
+        and current_state is not None
+    ):
+        meta["proposed_actions"] = propose_actions(store, current_state)
     return text, meta
 
 

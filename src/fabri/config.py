@@ -186,6 +186,8 @@ DEFAULT_CONFIG = {
         "retrieval_verification": "any",
         # Enables deterministic memory tier classification and core preference.
         "tiering_enabled": False,
+        # Enables shadow-only surfacing of applicable remembered actions.
+        "memory_action_enabled": False,
         # Provenance boundary stamped onto newly mined entries.
         "scope": "agent",
         # M1: when true, every run (any outcome) also writes one deterministic
