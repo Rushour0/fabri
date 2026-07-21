@@ -570,7 +570,11 @@ def _write_agent_budget(
 ) -> None:
     """Update a budget and its declared sub-agent override, if any."""
     raw_agent[field] = value
-    if "subagent" not in raw_agent:
+    # Mirror into a declared sub-agent block so the runtime-effective budget
+    # (subagent.<field> or agent.<field>) actually changes. A bare `subagent:`
+    # (YAML null) has no override to shadow the write, so treat it as absent —
+    # matching the read side in _effective_agent_budget.
+    if not isinstance(raw_agent.get("subagent"), dict):
         return
     subagent = _as_mapping(raw_agent["subagent"], f"{path}.agent.subagent")
     subagent[field] = value
