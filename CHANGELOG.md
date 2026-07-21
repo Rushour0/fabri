@@ -4,6 +4,31 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.19.1 — 2026-07-22
+
+### Added
+
+- **Immutable company generations + quality-first evolution.** `fabri.benchmarks.company_evolution`
+  snapshots a trained company's memory (hash-verified manifests), restores it into a fresh compile,
+  trains a child generation, and compares parent vs child under a promotion gate (no rubric
+  regression / forbidden hit / unaccounted cost; median cost ≤ 1.05× incumbent; ≥10% cheaper or
+  ≥25% fewer retries; verified specialist retrieval on ≥2 variants).
+- **Training-lesson verification.** `apply_training_verification` marks mined `success_pattern`
+  lessons `rubric_verified` when the training run succeeded operationally; deterministic
+  tool-failure lessons stay `tool_verified`. Verified-only retrieval consumes these verdicts.
+- **Consolidated memory report.** `fabri.benchmarks.company_memory_report` aggregates a multi-company
+  run into one JSON/Markdown report — separate attempted/finished/completed denominators, paired
+  per-replica sign tests (not CI-overlap), retry categories, transport and specialist-retrieval rates.
+
+### Fixed
+
+- **Honest `training_success` accounting.** A truncated training run no longer reports
+  `training_success: true`; the flag is derived from the failing phase, holdout/transport reasons
+  route to `holdout_failure_reasons`, and `validate_memory_payload` rejects the contradiction.
+- **Negation-aware rubric.** `score_text`'s forbidden-term check no longer false-positives on
+  negations (e.g. "no evidence a fix was deployed"); a term counts only when it appears at least
+  once un-negated.
+
 ## 0.19.0 — 2026-07-21
 
 ### Added
