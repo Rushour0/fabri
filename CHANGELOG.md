@@ -4,6 +4,46 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.19.0 — 2026-07-21
+
+### Added
+
+- **Automated company memory-vs-control study.** A new `fabri.benchmarks.company_memory_study`
+  runner trains a roster company, then runs a fresh holdout twice — once with the learned
+  SQLite memory copied into a clean compile, once with an empty control — reusing the setup
+  probe's deterministic scoring. It publishes per-condition aggregates and memory−control
+  deltas (rubric, cost, guidelines retrieved) with a self-generated reproducibility manifest,
+  keeping prompts, traces, and raw output private. A `--retrieval-top-k` / `--retrieval-strategy`
+  override lets a run sweep the compiled retrieval configuration.
+- **Self-generated reproducibility manifests and schema-validated results.** The setup probe
+  now emits its own manifest (roster revision, worktree-clean flag, company-source SHA-256,
+  Fabri version) and validates the publication payload against a schema before writing, so
+  `results.json` and `results.md` can no longer drift or be hand-curated.
+- **Wider setup-probe candidate search.** The bounded search now covers per-role step and cost
+  budgets, retrieval `top_k` and strategy, per-role model, delegation timeout, and max parallel
+  spawns — each with no-op rejection so a config change with no runtime effect never spends a
+  model run. Prompts, tools, and security policy stay outside the search.
+- **Structured-field scoring and an optional frozen LLM judge.** Deterministic
+  `expected.structured` subset assertions gate qualification; an opt-in, frozen judge (pinned
+  model, temperature 0, versioned prompt, recorded in the manifest) provides an advisory
+  semantic verdict that is kept out of qualification, winner selection, and the subject's cost.
+- **Setup qualification for Reliability Labs and Revenue Ops** via `setup_probe` candidate blocks.
+- **Remaining failure-path coverage** for the setup probe: compile failure, preflight failure,
+  root-process timeout, malformed CLI JSON, missing trace, company cost-limit violation, the
+  no-viable-setup status, and CLI exit codes.
+
+### Changed
+
+- **Manager delegations get a generous call timeout** so deep companies no longer spuriously
+  time out waiting on a child's subtree; delegation timeout fields are validated at compile time.
+
+### Fixed
+
+- Setup-probe robustness: the reproducibility manifest degrades gracefully when the roster is
+  not a git repository (missing/hung `git`), candidate knobs no longer spend on runtime-inert
+  changes (subagent-shadowed budgets, non-spawning nodes), and structured-field scoring no
+  longer treats `1` as `True`.
+
 ## 0.18.5 — 2026-07-20
 
 ### Added
