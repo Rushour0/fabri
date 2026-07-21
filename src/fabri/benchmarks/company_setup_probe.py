@@ -36,6 +36,16 @@ from fabri.config import load_config
 SUCCESS_OUTCOMES = {"success", "success_with_recovery"}
 MIN_TOKEN_FLOOR = 64
 MAX_TOKEN_FLOOR = 4096
+MIN_STEP_BUDGET = 1
+MAX_STEP_BUDGET = 200
+MIN_RETRIEVAL_TOP_K = 1
+MAX_RETRIEVAL_TOP_K = 50
+MIN_MAX_PARALLEL_SPAWNS = 1
+MAX_MAX_PARALLEL_SPAWNS = 64
+MIN_DELEGATION_TIMEOUT_S = 1.0
+MAX_DELEGATION_TIMEOUT_S = 3600.0
+RETRIEVAL_STRATEGIES = {"dense", "sparse", "hybrid", "hybrid+mmr"}
+LLM_ROLES = {"main", "decompose", "planner", "narrator"}
 DEFAULT_RUN_TIMEOUT_S = 600.0
 MANIFEST_GIT_TIMEOUT_S = 15.0
 CLAIM_BOUNDARY = "setup qualification only; memory/control result pending"
@@ -53,6 +63,48 @@ class ProbeError(ValueError):
 class ProbeCandidate:
     candidate_id: str
     delegated_llm_max_tokens_floor: int | None = None
+    step_budget: int | None = None
+    retrieval_top_k: int | None = None
+    retrieval_strategy: str | None = None
+    cost_ceiling: float | None = None
+    role_model: tuple[str, str] | None = None
+    max_parallel_spawns: int | None = None
+    delegation_timeout: float | None = None
+
+    def overrides(self) -> dict[str, object]:
+        """Return the public, normalized candidate configuration."""
+        overrides: dict[str, object] = {
+            "delegated_llm_max_tokens_floor": self.delegated_llm_max_tokens_floor,
+        }
+        for name in (
+            "step_budget",
+            "retrieval_top_k",
+            "retrieval_strategy",
+            "cost_ceiling",
+            "max_parallel_spawns",
+            "delegation_timeout",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                overrides[name] = value
+        if self.role_model is not None:
+            overrides["role_model"] = {
+                "role": self.role_model[0],
+                "model": self.role_model[1],
+            }
+        return overrides
+
+    def has_overrides(self) -> bool:
+        return any(value is not None for value in (
+            self.delegated_llm_max_tokens_floor,
+            self.step_budget,
+            self.retrieval_top_k,
+            self.retrieval_strategy,
+            self.cost_ceiling,
+            self.role_model,
+            self.max_parallel_spawns,
+            self.delegation_timeout,
+        ))
 
 
 @dataclass(frozen=True)
@@ -113,6 +165,22 @@ def _positive_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ProbeError(f"{field} must be a positive integer")
     return value
+
+
+def _bounded_int(value: object, field: str, minimum: int, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+        raise ProbeError(f"{field} must be an integer between {minimum} and {maximum}")
+    return value
+
+
+def _bounded_float(value: object, field: str, minimum: float, maximum: float) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not minimum <= float(value) <= maximum
+    ):
+        raise ProbeError(f"{field} must be a number between {minimum:g} and {maximum:g}")
+    return float(value)
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, object]:
@@ -206,22 +274,131 @@ def load_probe_case(
         if candidate_name in seen_ids:
             raise ProbeError(f"duplicate setup candidate id: {candidate_name}")
         seen_ids.add(candidate_name)
-        floor = candidate.get("delegated_llm_max_tokens_floor")
-        if floor is not None:
-            if not isinstance(floor, int) or isinstance(floor, bool):
-                raise ProbeError(f"candidate {candidate_name} token floor must be an integer")
-            if not MIN_TOKEN_FLOOR <= floor <= MAX_TOKEN_FLOOR:
+        floor_value = candidate.get("delegated_llm_max_tokens_floor")
+        floor = (
+            None
+            if floor_value is None
+            else _bounded_int(
+                floor_value,
+                f"candidate {candidate_name} token floor",
+                MIN_TOKEN_FLOOR,
+                MAX_TOKEN_FLOOR,
+            )
+        )
+        step_budget_value = candidate.get("step_budget")
+        step_budget = (
+            None
+            if step_budget_value is None
+            else _bounded_int(
+                step_budget_value,
+                f"candidate {candidate_name} step_budget",
+                MIN_STEP_BUDGET,
+                MAX_STEP_BUDGET,
+            )
+        )
+        retrieval_top_k_value = candidate.get("retrieval_top_k")
+        retrieval_top_k = (
+            None
+            if retrieval_top_k_value is None
+            else _bounded_int(
+                retrieval_top_k_value,
+                f"candidate {candidate_name} retrieval_top_k",
+                MIN_RETRIEVAL_TOP_K,
+                MAX_RETRIEVAL_TOP_K,
+            )
+        )
+        retrieval_strategy_value = candidate.get("retrieval_strategy")
+        if retrieval_strategy_value is not None and (
+            not isinstance(retrieval_strategy_value, str)
+            or retrieval_strategy_value not in RETRIEVAL_STRATEGIES
+        ):
+            raise ProbeError(
+                f"candidate {candidate_name} retrieval_strategy must be one of "
+                + ", ".join(sorted(RETRIEVAL_STRATEGIES))
+            )
+        cost_ceiling_value = candidate.get("cost_ceiling")
+        if cost_ceiling_value is None:
+            cost_ceiling = None
+        elif (
+            not isinstance(cost_ceiling_value, (int, float))
+            or isinstance(cost_ceiling_value, bool)
+            or float(cost_ceiling_value) <= 0
+        ):
+            raise ProbeError(f"candidate {candidate_name} cost_ceiling must be positive")
+        else:
+            cost_ceiling = float(cost_ceiling_value)
+        role_model_value = candidate.get("role_model")
+        if role_model_value is None:
+            role_model = None
+        else:
+            role_model_map = _as_mapping(
+                role_model_value, f"candidate {candidate_name} role_model"
+            )
+            if set(role_model_map) != {"role", "model"}:
                 raise ProbeError(
-                    f"candidate {candidate_name} token floor must be between "
-                    f"{MIN_TOKEN_FLOOR} and {MAX_TOKEN_FLOOR}"
+                    f"candidate {candidate_name} role_model needs exactly role and model"
                 )
-        unknown = set(candidate) - {"id", "delegated_llm_max_tokens_floor"}
+            role = role_model_map.get("role")
+            model = role_model_map.get("model")
+            if not isinstance(role, str) or role not in LLM_ROLES:
+                raise ProbeError(
+                    f"candidate {candidate_name} role_model.role must be one of "
+                    + ", ".join(sorted(LLM_ROLES))
+                )
+            if not isinstance(model, str) or not model:
+                raise ProbeError(f"candidate {candidate_name} role_model.model must be a string")
+            role_model = (role, model)
+        max_parallel_spawns_value = candidate.get("max_parallel_spawns")
+        max_parallel_spawns = (
+            None
+            if max_parallel_spawns_value is None
+            else _bounded_int(
+                max_parallel_spawns_value,
+                f"candidate {candidate_name} max_parallel_spawns",
+                MIN_MAX_PARALLEL_SPAWNS,
+                MAX_MAX_PARALLEL_SPAWNS,
+            )
+        )
+        delegation_timeout_value = candidate.get("delegation_timeout")
+        delegation_timeout = (
+            None
+            if delegation_timeout_value is None
+            else _bounded_float(
+                delegation_timeout_value,
+                f"candidate {candidate_name} delegation_timeout",
+                MIN_DELEGATION_TIMEOUT_S,
+                MAX_DELEGATION_TIMEOUT_S,
+            )
+        )
+        unknown = set(candidate) - {
+            "id",
+            "delegated_llm_max_tokens_floor",
+            "step_budget",
+            "retrieval_top_k",
+            "retrieval_strategy",
+            "cost_ceiling",
+            "role_model",
+            "max_parallel_spawns",
+            "delegation_timeout",
+        }
         if unknown:
             raise ProbeError(
                 f"candidate {candidate_name} contains unsupported settings: "
                 + ", ".join(sorted(unknown))
             )
-        candidates.append(ProbeCandidate(candidate_name, floor))
+        candidates.append(
+            ProbeCandidate(
+                candidate_id=candidate_name,
+                delegated_llm_max_tokens_floor=floor,
+                step_budget=step_budget,
+                retrieval_top_k=retrieval_top_k,
+                retrieval_strategy=retrieval_strategy_value,
+                cost_ceiling=cost_ceiling,
+                role_model=role_model,
+                max_parallel_spawns=max_parallel_spawns,
+                delegation_timeout=delegation_timeout,
+            )
+        )
 
     replicas_value = setup.get("replicas", defaults.get("setup_probe_replicas", 3))
     replicas = (
@@ -310,6 +487,216 @@ def apply_delegated_token_floor(
             encoding="utf-8",
         )
         changed.append(location.org_path)
+    return changed
+
+
+@dataclass(frozen=True)
+class DelegationEdge:
+    parent_path: Path
+    agent_index: int
+    child_path: Path
+    child_org_path: str
+
+
+def _delegation_edges_by_child(root_config: Path) -> dict[Path, list[DelegationEdge]]:
+    """Re-walk raw config edges so timeout edits land in their parent files."""
+    queue = [(root_config.resolve(), "root")]
+    seen: set[Path] = set()
+    edges_by_child: dict[Path, list[DelegationEdge]] = {}
+    while queue:
+        parent_path, parent_org_path = queue.pop(0)
+        if parent_path in seen:
+            continue
+        seen.add(parent_path)
+        data = _load_yaml_mapping(parent_path)
+        tools = data.get("tools")
+        if tools is None:
+            continue
+        agents = _as_mapping(tools, f"{parent_path}.tools").get("agents", [])
+        if not isinstance(agents, list):
+            raise ProbeError(f"{parent_path}.tools.agents must be a list")
+        for index, raw_agent in enumerate(agents):
+            agent = _as_mapping(raw_agent, f"{parent_path}.tools.agents[{index}]")
+            name = agent.get("name")
+            config_value = agent.get("config")
+            if not isinstance(name, str) or not isinstance(config_value, str):
+                raise ProbeError(f"{parent_path}.tools.agents[{index}] needs name and config")
+            child_path = Path(config_value)
+            if not child_path.is_absolute():
+                child_path = parent_path.parent / child_path
+            child_path = child_path.resolve()
+            child_org_path = f"{parent_org_path}/{name}"
+            edge = DelegationEdge(parent_path, index, child_path, child_org_path)
+            edges_by_child.setdefault(child_path, []).append(edge)
+            queue.append((child_path, child_org_path))
+    return edges_by_child
+
+
+def _write_yaml_mapping(path: Path, data: dict[str, object]) -> None:
+    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _mark_changed(changed: list[str], org_path: str) -> None:
+    if org_path not in changed:
+        changed.append(org_path)
+
+
+def _validate_candidate_overrides(candidate: ProbeCandidate) -> None:
+    if candidate.delegated_llm_max_tokens_floor is not None:
+        _bounded_int(
+            candidate.delegated_llm_max_tokens_floor,
+            "token floor",
+            MIN_TOKEN_FLOOR,
+            MAX_TOKEN_FLOOR,
+        )
+    if candidate.step_budget is not None:
+        _bounded_int(candidate.step_budget, "step_budget", MIN_STEP_BUDGET, MAX_STEP_BUDGET)
+    if candidate.retrieval_top_k is not None:
+        _bounded_int(
+            candidate.retrieval_top_k,
+            "retrieval_top_k",
+            MIN_RETRIEVAL_TOP_K,
+            MAX_RETRIEVAL_TOP_K,
+        )
+    if candidate.retrieval_strategy is not None and (
+        not isinstance(candidate.retrieval_strategy, str)
+        or candidate.retrieval_strategy not in RETRIEVAL_STRATEGIES
+    ):
+        raise ProbeError("retrieval_strategy must be an allowed strategy")
+    if candidate.cost_ceiling is not None:
+        if (
+            not isinstance(candidate.cost_ceiling, (int, float))
+            or isinstance(candidate.cost_ceiling, bool)
+            or candidate.cost_ceiling <= 0
+        ):
+            raise ProbeError("cost_ceiling must be positive")
+    if candidate.role_model is not None:
+        role, model = candidate.role_model
+        if role not in LLM_ROLES or not model:
+            raise ProbeError("role_model must have an allowed role and non-empty model")
+    if candidate.max_parallel_spawns is not None:
+        _bounded_int(
+            candidate.max_parallel_spawns,
+            "max_parallel_spawns",
+            MIN_MAX_PARALLEL_SPAWNS,
+            MAX_MAX_PARALLEL_SPAWNS,
+        )
+    if candidate.delegation_timeout is not None:
+        _bounded_float(
+            candidate.delegation_timeout,
+            "delegation_timeout",
+            MIN_DELEGATION_TIMEOUT_S,
+            MAX_DELEGATION_TIMEOUT_S,
+        )
+
+
+def apply_candidate(root_config: Path, candidate: ProbeCandidate) -> list[str]:
+    """Apply a bounded candidate to compiled non-root nodes and delegation edges."""
+    _validate_candidate_overrides(candidate)
+    changed = apply_delegated_token_floor(
+        root_config, candidate.delegated_llm_max_tokens_floor
+    )
+    root_path = root_config.resolve()
+    for location in discover_company_configs(root_config):
+        if location.path == root_path:
+            continue
+        effective = load_config(str(location.path))
+        agent = effective.get("agent", {})
+        memory = effective.get("memory", {})
+        llm = effective.get("llm", {})
+        tools = effective.get("tools", {})
+        raw: dict[str, object] | None = None
+
+        def raw_section(name: str) -> dict[str, object]:
+            nonlocal raw
+            if raw is None:
+                raw = _load_yaml_mapping(location.path)
+            section = _as_mapping(raw.setdefault(name, {}), f"{location.path}.{name}")
+            raw[name] = section
+            return section
+
+        if candidate.step_budget is not None:
+            current = agent.get("max_steps") if isinstance(agent, dict) else None
+            if not isinstance(current, int) or current < candidate.step_budget:
+                raw_section("agent")["max_steps"] = candidate.step_budget
+        if candidate.retrieval_top_k is not None:
+            current = memory.get("top_k") if isinstance(memory, dict) else None
+            if not isinstance(current, int) or current < candidate.retrieval_top_k:
+                raw_section("memory")["top_k"] = candidate.retrieval_top_k
+        if candidate.retrieval_strategy is not None:
+            current = memory.get("retrieval_strategy") if isinstance(memory, dict) else None
+            if current != candidate.retrieval_strategy:
+                raw_section("memory")["retrieval_strategy"] = candidate.retrieval_strategy
+        if candidate.cost_ceiling is not None:
+            current = agent.get("max_cost_usd") if isinstance(agent, dict) else None
+            if current is None or not isinstance(current, (int, float)) or current > candidate.cost_ceiling:
+                raw_section("agent")["max_cost_usd"] = candidate.cost_ceiling
+        if candidate.role_model is not None:
+            role, target_model = candidate.role_model
+            roles = llm.get("roles", {}) if isinstance(llm, dict) else {}
+            effective_role = roles.get(role) if isinstance(roles, dict) else None
+            current = effective_role.get("model") if isinstance(effective_role, dict) else None
+            if current != target_model:
+                raw_llm = raw_section("llm")
+                if role == "main":
+                    raw_llm["model"] = target_model
+                else:
+                    role_value = raw_llm.get(role)
+                    role_config = (
+                        _as_mapping(role_value, f"{location.path}.llm.{role}")
+                        if isinstance(role_value, dict)
+                        else {}
+                    )
+                    role_config["model"] = target_model
+                    raw_llm[role] = role_config
+        if candidate.max_parallel_spawns is not None:
+            current = tools.get("max_parallel_spawns") if isinstance(tools, dict) else None
+            if not isinstance(current, int) or current < candidate.max_parallel_spawns:
+                raw_section("tools")["max_parallel_spawns"] = candidate.max_parallel_spawns
+        if raw is not None:
+            _write_yaml_mapping(location.path, raw)
+            _mark_changed(changed, location.org_path)
+
+    if candidate.delegation_timeout is not None:
+        for child_edges in _delegation_edges_by_child(root_config).values():
+            for edge in child_edges:
+                effective_parent = load_config(str(edge.parent_path))
+                effective_tools = effective_parent.get("tools", {})
+                effective_agents = (
+                    effective_tools.get("agents", [])
+                    if isinstance(effective_tools, dict)
+                    else []
+                )
+                effective_agent = (
+                    effective_agents[edge.agent_index]
+                    if isinstance(effective_agents, list)
+                    and edge.agent_index < len(effective_agents)
+                    else None
+                )
+                current = (
+                    effective_agent.get("timeout_s", 120.0)
+                    if isinstance(effective_agent, dict)
+                    else 120.0
+                )
+                if isinstance(current, (int, float)) and current >= candidate.delegation_timeout:
+                    continue
+                parent = _load_yaml_mapping(edge.parent_path)
+                tools = _as_mapping(
+                    parent.setdefault("tools", {}), f"{edge.parent_path}.tools"
+                )
+                agents = tools.get("agents", [])
+                if not isinstance(agents, list):
+                    raise ProbeError(f"{edge.parent_path}.tools.agents must be a list")
+                agent = _as_mapping(
+                    agents[edge.agent_index],
+                    f"{edge.parent_path}.tools.agents[{edge.agent_index}]",
+                )
+                agent["timeout_s"] = candidate.delegation_timeout
+                agents[edge.agent_index] = agent
+                tools["agents"] = agents
+                parent["tools"] = tools
+                _write_yaml_mapping(edge.parent_path, parent)
+                _mark_changed(changed, edge.child_org_path)
     return changed
 
 
@@ -829,9 +1216,7 @@ def run_probe(
 
             root_config = compiled_parent / case.company_name / f"{case.root_id}.yaml"
             try:
-                changed_paths = apply_delegated_token_floor(
-                    root_config, candidate.delegated_llm_max_tokens_floor
-                )
+                changed_paths = apply_candidate(root_config, candidate)
                 preflight = build_preflight_manifest(root_config)
             except (OSError, ProbeError, ValueError) as exc:
                 public_run = {
@@ -853,7 +1238,7 @@ def run_probe(
                 public_runs.append(public_run)
                 continue
 
-            if candidate.delegated_llm_max_tokens_floor is not None and not changed_paths:
+            if candidate.has_overrides() and not changed_paths:
                 public_run = {
                     "replica": replica,
                     "attempt_status": "invalid_measurement",
@@ -996,9 +1381,7 @@ def run_probe(
         )
         candidate_result: dict[str, object] = {
             "id": candidate.candidate_id,
-            "overrides": {
-                "delegated_llm_max_tokens_floor": candidate.delegated_llm_max_tokens_floor,
-            },
+            "overrides": candidate.overrides(),
             "configured_replicas": case.replicas,
             "scheduled_replicas": case.replicas,
             "preflights": preflights,

@@ -14,8 +14,10 @@ import fabri.benchmarks.company_setup_probe as company_setup_probe
 from fabri.benchmarks.company_setup_probe import (
     CLAIM_BOUNDARY,
     MANIFEST_GIT_TIMEOUT_S,
+    ProbeCandidate,
     ProbeError,
     analyze_run,
+    apply_candidate,
     apply_delegated_token_floor,
     build_preflight_manifest,
     load_probe_case,
@@ -144,6 +146,52 @@ def test_load_probe_case_resolves_source_and_rejects_arbitrary_candidate_setting
         )
 
 
+def test_load_probe_case_accepts_bounded_knobs_and_rejects_invalid_settings(
+    tmp_path: Path,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path)
+    valid_candidate = {
+        "id": "all-knobs",
+        "step_budget": 20,
+        "retrieval_top_k": 9,
+        "retrieval_strategy": "dense",
+        "cost_ceiling": 0.5,
+        "role_model": {"role": "main", "model": "gpt-4o-mini"},
+        "max_parallel_spawns": 8,
+        "delegation_timeout": 300,
+    }
+    raw = yaml.safe_load(dataset.read_text(encoding="utf-8"))
+    raw["cases"][0]["setup_probe"]["candidates"] = [valid_candidate]
+    dataset.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    candidate = load_probe_case(
+        dataset, "support", environ={"FABRI_ROSTERS_ROOT": str(roster_root)}
+    ).candidates[0]
+    assert candidate.overrides() == {
+        "delegated_llm_max_tokens_floor": None,
+        "step_budget": 20,
+        "retrieval_top_k": 9,
+        "retrieval_strategy": "dense",
+        "cost_ceiling": 0.5,
+        "role_model": {"role": "main", "model": "gpt-4o-mini"},
+        "max_parallel_spawns": 8,
+        "delegation_timeout": 300.0,
+    }
+
+    for invalid, message in (
+        ({**valid_candidate, "step_budget": 201}, "step_budget"),
+        ({**valid_candidate, "retrieval_strategy": "bogus"}, "retrieval_strategy"),
+        ({**valid_candidate, "role_model": {"role": "worker", "model": "x"}}, "role_model.role"),
+        ({**valid_candidate, "unknown": "nope"}, "unsupported settings"),
+    ):
+        raw["cases"][0]["setup_probe"]["candidates"] = [invalid]
+        dataset.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        with pytest.raises(ProbeError, match=message):
+            load_probe_case(
+                dataset, "support", environ={"FABRI_ROSTERS_ROOT": str(roster_root)}
+            )
+
+
 def test_token_floor_changes_only_delegated_main_and_preflight_labels_narrator(
     tmp_path: Path,
 ) -> None:
@@ -167,6 +215,161 @@ def test_token_floor_changes_only_delegated_main_and_preflight_labels_narrator(
     assert next(role for role in roles if role["role"] == "main")["artifact_role"] is True
     assert next(role for role in roles if role["role"] == "narrator")["max_tokens"] == 60
     assert not cast(list[str], manifest["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("candidate", "assert_written"),
+    [
+        pytest.param(
+            ProbeCandidate("step", step_budget=20),
+            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["agent"]["max_steps"] == 20,
+            id="step-budget",
+        ),
+        pytest.param(
+            ProbeCandidate("top-k", retrieval_top_k=9),
+            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["memory"]["top_k"] == 9,
+            id="retrieval-top-k",
+        ),
+        pytest.param(
+            ProbeCandidate("strategy", retrieval_strategy="dense"),
+            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["memory"]["retrieval_strategy"] == "dense",
+            id="retrieval-strategy",
+        ),
+        pytest.param(
+            ProbeCandidate("cost", cost_ceiling=0.5),
+            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["agent"]["max_cost_usd"] == 0.5,
+            id="cost-ceiling",
+        ),
+        pytest.param(
+            ProbeCandidate("model", role_model=("main", "gpt-new")),
+            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["llm"]["model"] == "gpt-new",
+            id="main-role-model",
+        ),
+        pytest.param(
+            ProbeCandidate("spawns", max_parallel_spawns=8),
+            lambda root, child: yaml.safe_load(child.read_text(encoding="utf-8"))["tools"]["max_parallel_spawns"] == 8,
+            id="max-parallel-spawns",
+        ),
+        pytest.param(
+            ProbeCandidate("timeout", delegation_timeout=300.0),
+            lambda root, child: yaml.safe_load(root.read_text(encoding="utf-8"))["tools"]["agents"][0]["timeout_s"] == 300.0,
+            id="delegation-timeout-parent-edge",
+        ),
+    ],
+)
+def test_apply_candidate_writes_each_new_knob_at_its_raw_path(
+    tmp_path: Path,
+    candidate: ProbeCandidate,
+    assert_written: object,
+) -> None:
+    child = tmp_path / "crew.yaml"
+    root = tmp_path / "ceo.yaml"
+    child.write_text(yaml.safe_dump(_agent_config("crew", max_tokens=60)), encoding="utf-8")
+    root.write_text(
+        yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+        encoding="utf-8",
+    )
+
+    assert apply_candidate(root, candidate) == ["root/crew"]
+    assert callable(assert_written)
+    assert assert_written(root, child)
+
+
+def test_apply_candidate_writes_nested_role_model_as_mapping(tmp_path: Path) -> None:
+    child = tmp_path / "crew.yaml"
+    root = tmp_path / "ceo.yaml"
+    config = _agent_config("crew", max_tokens=60)
+    cast(dict[str, object], config["llm"])["planner"] = "gpt-old"
+    child.write_text(yaml.safe_dump(config), encoding="utf-8")
+    root.write_text(
+        yaml.safe_dump(_agent_config("ceo", max_tokens=1024, child=child)),
+        encoding="utf-8",
+    )
+
+    assert apply_candidate(root, ProbeCandidate("planner", role_model=("planner", "gpt-new"))) == ["root/crew"]
+    assert yaml.safe_load(child.read_text(encoding="utf-8"))["llm"]["planner"] == {"model": "gpt-new"}
+
+
+def _satisfy_candidate_config(config: dict[str, object], candidate: ProbeCandidate) -> None:
+    agent = cast(dict[str, object], config["agent"])
+    memory = cast(dict[str, object], config["memory"])
+    llm = cast(dict[str, object], config["llm"])
+    tools = cast(dict[str, object], config["tools"])
+    if candidate.delegated_llm_max_tokens_floor is not None:
+        llm["max_tokens"] = candidate.delegated_llm_max_tokens_floor
+    if candidate.step_budget is not None:
+        agent["max_steps"] = candidate.step_budget
+    if candidate.retrieval_top_k is not None:
+        memory["top_k"] = candidate.retrieval_top_k
+    if candidate.retrieval_strategy is not None:
+        memory["retrieval_strategy"] = candidate.retrieval_strategy
+    if candidate.cost_ceiling is not None:
+        agent["max_cost_usd"] = candidate.cost_ceiling / 2
+    if candidate.role_model is not None:
+        role, model = candidate.role_model
+        if role == "main":
+            llm["model"] = model
+        else:
+            llm[role] = {"model": model}
+    if candidate.max_parallel_spawns is not None:
+        tools["max_parallel_spawns"] = candidate.max_parallel_spawns
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        ProbeCandidate("tokens", delegated_llm_max_tokens_floor=256),
+        ProbeCandidate("step", step_budget=20),
+        ProbeCandidate("top-k", retrieval_top_k=9),
+        ProbeCandidate("strategy", retrieval_strategy="dense"),
+        ProbeCandidate("cost", cost_ceiling=0.5),
+        ProbeCandidate("model", role_model=("main", "gpt-new")),
+        ProbeCandidate("spawns", max_parallel_spawns=8),
+        ProbeCandidate("timeout", delegation_timeout=300.0),
+    ],
+)
+def test_probe_rejects_each_satisfied_candidate_without_a_model_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: ProbeCandidate,
+) -> None:
+    dataset, roster_root = _write_dataset_and_company(tmp_path, replicas=1)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = replace(load_probe_case(dataset, "support"), candidates=(candidate,))
+
+    def compile_only(
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env, timeout_s
+        if argv[0] == "git":
+            if "--show-toplevel" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{roster_root}\n", "")
+            if "HEAD" in argv:
+                return subprocess.CompletedProcess(argv, 0, "test-roster-sha\n", "")
+            if "status" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError(f"unexpected git command: {argv}")
+        if "compile" not in argv:
+            raise AssertionError("a no-op candidate must not start a model run")
+        destination = Path(argv[argv.index("--dest") + 1]) / "support-hq"
+        child = destination / "agencies" / "crew" / "agent.yaml"
+        child.parent.mkdir(parents=True)
+        child_config = _agent_config("crew", max_tokens=60)
+        _satisfy_candidate_config(child_config, candidate)
+        child.write_text(yaml.safe_dump(child_config), encoding="utf-8")
+        root_config = _agent_config("ceo", max_tokens=1024, child=child)
+        if candidate.delegation_timeout is not None:
+            cast(list[dict[str, object]], cast(dict[str, object], root_config["tools"])["agents"])[0]["timeout_s"] = candidate.delegation_timeout
+        (destination / "ceo.yaml").write_text(yaml.safe_dump(root_config), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "compiled", "")
+
+    result = run_probe(case, tmp_path / "results", command_runner=compile_only)
+    run = cast(list[dict[str, object]], cast(list[dict[str, object]], result["candidates"])[0]["runs"])[0]
+    assert run["failure_reasons"] == ["candidate_noop"]
+    assert cast(list[dict[str, object]], result["candidates"])[0]["model_runs"] == 0
 
 
 def test_score_text_is_case_insensitive_and_deterministic() -> None:
