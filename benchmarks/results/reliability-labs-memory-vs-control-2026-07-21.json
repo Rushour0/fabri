@@ -1,0 +1,393 @@
+{
+  "study": "company-memory-vs-control",
+  "generated_at": "2026-07-21T06:01:28.450194+00:00",
+  "case_id": "reliability_labs_incident_release_gate",
+  "company": "reliability-labs",
+  "fabri_version": "0.18.5",
+  "source": {
+    "path": "companies/reliability-labs/company.toml",
+    "roster_revision": "081536872d9dcfae30f033971b84a2f023065d05",
+    "roster_worktree_clean": true,
+    "company_source_sha256": "de8ba1674d567168e349f142cff23009557c87e61b11569338ce9c49529276c3"
+  },
+  "replicas": 10,
+  "conditions": [
+    "memory",
+    "control"
+  ],
+  "runs": [
+    {
+      "replica": 1,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": false,
+      "missing_required": [],
+      "forbidden_hits": [
+        "fix was deployed"
+      ],
+      "total_cost_usd": 0.102544,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 1,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.098064,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 2,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": false,
+      "missing_required": [],
+      "forbidden_hits": [
+        "fix was deployed"
+      ],
+      "total_cost_usd": 0.102831,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 2,
+      "condition": "control",
+      "holdout_complete": false,
+      "rubric_passed": null,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.046631,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [
+        "nested_outcome:all_tools_failed",
+        "training_failed",
+        "truncation"
+      ],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 3,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.139023,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 3,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.090912,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 4,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.124614,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 4,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.108391,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 5,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.106362,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 5,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.103744,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 6,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.136123,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 6,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": false,
+      "missing_required": [],
+      "forbidden_hits": [
+        "fix was deployed"
+      ],
+      "total_cost_usd": 0.104603,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 7,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.112258,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 7,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.09908,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 8,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.107214,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 8,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.113016,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 9,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": false,
+      "missing_required": [],
+      "forbidden_hits": [
+        "fix was deployed"
+      ],
+      "total_cost_usd": 0.098657,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 9,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": false,
+      "missing_required": [],
+      "forbidden_hits": [
+        "fix was deployed"
+      ],
+      "total_cost_usd": 0.100284,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 10,
+      "condition": "memory",
+      "holdout_complete": true,
+      "rubric_passed": false,
+      "missing_required": [],
+      "forbidden_hits": [
+        "fix was deployed"
+      ],
+      "total_cost_usd": 0.120282,
+      "guidelines_retrieved": 2,
+      "retrieval_candidate_kinds": [
+        "postmortem",
+        "success_pattern"
+      ],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    },
+    {
+      "replica": 10,
+      "condition": "control",
+      "holdout_complete": true,
+      "rubric_passed": true,
+      "missing_required": [],
+      "forbidden_hits": [],
+      "total_cost_usd": 0.101252,
+      "guidelines_retrieved": 0,
+      "retrieval_candidate_kinds": [],
+      "training_outcome": "success",
+      "training_success": true,
+      "training_failure_reasons": [],
+      "holdout_failure_reasons": []
+    }
+  ],
+  "condition_aggregates": {
+    "memory": {
+      "condition": "memory",
+      "scheduled_replicas": 10,
+      "completion_rate": 1.0,
+      "holdout_rubric_pass_rate": 0.6,
+      "median_total_cost_usd": 0.109736,
+      "mean_total_cost_usd": 0.1149908,
+      "mean_guidelines_retrieved": 2.0
+    },
+    "control": {
+      "condition": "control",
+      "scheduled_replicas": 10,
+      "completion_rate": 0.9,
+      "holdout_rubric_pass_rate": 0.7777777777777778,
+      "median_total_cost_usd": 0.100768,
+      "mean_total_cost_usd": 0.0965977,
+      "mean_guidelines_retrieved": 0.0
+    }
+  },
+  "comparison": {
+    "rubric_pass_rate_delta": -0.1777777777777778,
+    "mean_total_cost_usd_delta": 0.01839310000000001,
+    "mean_guidelines_retrieved_delta": 2.0
+  },
+  "claim_boundary": "This measures this roster company's related-task performance when its learned SQLite memory is copied into a fresh holdout compile; it does not establish general memory effectiveness.",
+  "status": "completed"
+}

@@ -173,6 +173,7 @@ memory's effect on outcome, distinct from setup qualification above.
 |---|---|---:|---|---:|---:|---:|---:|---|
 | 2026-07-20 | Support HQ / holdout task (3-replica pilot) | 3 | 2 / 0 | 3/3 (100%) | 2/3 (67%) | +33 pp | +$0.0009 (~1.5%) | 0.18.5 |
 | 2026-07-20 | Support HQ / holdout task (10-replica confirmation) | 10 | 2.0 / 0 | 7/10 (70%) | 9/10 (90%) | **−20 pp** | **−$0.0014** (mean $0.0600 vs $0.0614) | 0.18.5 |
+| 2026-07-21 | Reliability Labs / holdout task | 10 | 2.0 / 0 | 60% | 78% | **−18 pp** | **+$0.0184** (mean $0.1150 vs $0.0966) | 0.18.5 |
 
 The control-is-empty sanity check held at both sample sizes: control retrieved
 **0** guidelines on every replica, while the memory arm retrieved the same
@@ -190,13 +191,18 @@ same small-sample fragility the setup-qualification study above demonstrated
 opposite direction too: a small-sample "memory win" can just as easily be a
 small-sample fluke. On this workload, Fabri's trace-backed memory retrieves
 lessons reliably but does **not** improve holdout-task reliability — the
-larger sample says it slightly hurts. This covers one company on one
-related-task/holdout pair, not general memory effectiveness across companies
-or workload shapes.
+larger sample says it slightly hurts. A 10-replica run on **Reliability Labs**
+shows the same shape (memory 60% vs. control 78%, −18pp, and ~19% more
+expensive), so the pattern now holds across **two** companies — though still on
+one related-task/holdout pair each, not general memory effectiveness across all
+workload shapes. Whether varying the retrieval configuration (top_k / strategy)
+changes this is the next experiment.
 
-Full result:
-[Support HQ, memory vs. control](benchmarks/results/support-hq-memory-vs-control-2026-07-20.md)
-([JSON](benchmarks/results/support-hq-memory-vs-control-2026-07-20.json)).
+Full results:
+[Support HQ](benchmarks/results/support-hq-memory-vs-control-2026-07-20.md)
+([JSON](benchmarks/results/support-hq-memory-vs-control-2026-07-20.json)),
+[Reliability Labs](benchmarks/results/reliability-labs-memory-vs-control-2026-07-21.md)
+([JSON](benchmarks/results/reliability-labs-memory-vs-control-2026-07-21.json)).
 
 ### session-N+1 cost delta
 
