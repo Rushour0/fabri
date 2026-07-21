@@ -103,6 +103,7 @@ class RetrievalConfig:
     # construct the second store without a new config field — the global tier
     # always lives on the same Qdrant instance as the primary collection.
     global_qdrant_url: str = "http://localhost:6333"
+    verification: str = "any"
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -117,6 +118,7 @@ class RetrievalConfig:
             rrf_k=int(mem_cfg.get("rrf_k", 20)),
             global_collection=mem_cfg.get("global_collection"),
             global_qdrant_url=mem_cfg.get("qdrant_url", "http://localhost:6333"),
+            verification=mem_cfg.get("retrieval_verification", "any"),
         )
 
 
@@ -503,6 +505,15 @@ def _retrieve_inner(
 
     rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
     strategy = rcfg.strategy
+    if rcfg.verification not in {"any", "verified"}:
+        raise ValueError(f"unsupported retrieval verification policy: {rcfg.verification}")
+
+    def verification_allowed(entry: MemoryEntry) -> bool:
+        if entry.verification == "contradicted":
+            return False
+        if rcfg.verification == "verified":
+            return entry.verification in {"tool_verified", "rubric_verified"}
+        return True
 
     # Bind once — on the Qdrant backend count() is a network round-trip.
     store_count = store.count()
@@ -538,6 +549,11 @@ def _retrieve_inner(
     # Fetch a larger pool when post-processing (decay, MMR) will further filter.
     pool_multiplier = 4 if (rcfg.temporal_decay or "mmr" in strategy) else 2
     fetch_k = top_k * pool_multiplier
+    # Verification is a post-payload filter on both stores. Fetch the full
+    # bounded company store so high-ranking candidates cannot hide a lower
+    # verified lesson merely by occupying the initial ANN window.
+    if rcfg.verification == "verified":
+        fetch_k = max(fetch_k, store_count + global_count)
 
     # --- Dense retrieval ---
     # Global-tier candidates are merged into the SAME pre-fusion pool as the
@@ -553,7 +569,12 @@ def _retrieve_inner(
         "global_collection dense query failed; contributing zero candidates",
     )
     dense_results: list[tuple[MemoryEntry, float]] = sorted(
-        list(store.query_by_vector(vector, top_k=fetch_k)) + _global_dense_results,
+        [
+            pair
+            for pair in list(store.query_by_vector(vector, top_k=fetch_k))
+            + _global_dense_results
+            if verification_allowed(pair[0])
+        ],
         key=lambda p: p[1], reverse=True,
     )
 
@@ -586,6 +607,8 @@ def _retrieve_inner(
             # (merged above), so this re-rank naturally covers both stores.
             sparse_backend = "rank_bm25"
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
+
+        sparse_results = [pair for pair in sparse_results if verification_allowed(pair[0])]
 
         if "hybrid" in strategy and sparse_results:
             base_results = _rrf_fuse(dense_results, sparse_results, k=rcfg.rrf_k)
@@ -628,19 +651,28 @@ def _retrieve_inner(
     # These run AFTER fusion+scoring so their slot guarantees override the
     # ranked list regardless of which retrieval strategy is active.
     tag_results: list[tuple[MemoryEntry, float]] = []
+    tag_fetch_k = max(top_k, store_count) if rcfg.verification == "verified" else top_k
     for tool_name in mentioned_tools:
         tag_results.extend(
-            store.query_by_vector(vector, top_k=top_k, tools_any=[tool_name])
+            pair
+            for pair in store.query_by_vector(
+                vector, top_k=tag_fetch_k, tools_any=[tool_name]
+            )
+            if verification_allowed(pair[0])
         )
         # Global tier's tag hits merge into the SAME pre-reservation list —
         # the TAG_HIT_SCORE_FLOOR guaranteed-slot logic below then runs once
         # over the combined list, same top_k budget as always.
-        tag_results.extend(_safe_global(
+        tag_results.extend(pair for pair in _safe_global(
             global_store,
-            lambda s: s.query_by_vector(vector, top_k=top_k, tools_any=[tool_name]),
+            lambda s: s.query_by_vector(
+                vector,
+                top_k=(max(top_k, global_count) if rcfg.verification == "verified" else top_k),
+                tools_any=[tool_name],
+            ),
             [],
             "global_collection tag-hit query failed; contributing zero candidates",
-        ))
+        ) if verification_allowed(pair[0]))
 
     success_results = sorted(
         [p for p in base_results if p[0].kind == "success_pattern"],
@@ -721,6 +753,7 @@ def _retrieve_inner(
         final_reasons = [inclusion_reason.get(e.id, "base") for e, _ in merged]
         _emit_retrieval_event(session_id, {
             "strategy": strategy,
+            "verification": rcfg.verification,
             "top_k": top_k,
             "store_count": store_count,
             "embedding_ms": round(embedding_ms, 2),

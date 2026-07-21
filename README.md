@@ -1,6 +1,7 @@
 # fabri
 
 [![PyPI](https://img.shields.io/pypi/v/fabri.svg)](https://pypi.org/project/fabri/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/fabri?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/fabri)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/fabri.svg)](https://pypi.org/project/fabri/)
 
@@ -21,7 +22,8 @@ Fabri publishes completed measurements and leaves pending work visibly pending:
 | Session-N+1 recovery pilot | Steps **5 → 4**, guideline reuse **0% → 67%**, cost **↓7.8%** | Six-run constructed task on gpt-4o-mini; not a general workload claim |
 | LongMemEval | Runner shipped; result pending | No score claimed yet |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, and the
+See [BENCHMARKS.md](BENCHMARKS.md) for reproduction commands and caveats, the
+[live benchmark page](https://rushour0.github.io/fabri/benchmark/) for the latest run, and the
 reviewed results for per-replica costs, failed hypotheses, and the release decision:
 [Support HQ 3-replica](benchmarks/results/support-hq-setup-qualification-2026-07-20.md),
 [Support HQ 10-replica confirmation](benchmarks/results/support-hq-setup-qualification-10replica-2026-07-20.md),

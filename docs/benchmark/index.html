@@ -116,6 +116,28 @@
     font-family: var(--sans); font-size: 13px; color: var(--faint);
     display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between; }
   footer .refs a { margin-right: 18px; }
+  footer .refs a { display: inline-block; margin-bottom: 4px; }
+
+  /* status bar — version + CI-gated vs one-off distinction */
+  .status { max-width: var(--measure); margin: 22px auto 0; font-family: var(--sans); font-size: 12.5px;
+    color: var(--ink-soft); background: var(--leaf); border: 1px solid var(--rule); border-radius: 3px;
+    padding: 10px 14px; line-height: 1.55; }
+  .status p { margin: 0 0 4px; text-align: left; }
+  .status p:last-child { margin-bottom: 0; }
+  .status b { color: var(--ink); font-weight: 640; }
+  .badge { display: inline-block; font-family: var(--sans); font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; font-weight: 640; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+  .badge.gated { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .badge.live { background: color-mix(in srgb, var(--rust) 16%, transparent); color: var(--rust); }
+
+  /* pending-work block */
+  .pending { max-width: var(--measure); margin: 18px auto 0; font-family: var(--sans); font-size: 13px;
+    color: var(--ink-soft); border-left: 3px solid var(--rule-strong); padding: 4px 0 4px 14px; }
+  .pending .lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
+    font-weight: 640; margin: 0 0 6px; }
+  .pending ul { margin: 0; padding-left: 1.1em; }
+  .pending li { margin: 0 0 6px; }
+  .pending li:last-child { margin-bottom: 0; }
 
   @media (prefers-reduced-motion: no-preference) {
     .reveal { animation: fade .5s ease both; }
@@ -144,6 +166,15 @@
       run; the complete study cost $0.82. Every result carries a self-generated reproducibility
       manifest; prompts, traces, and raw output are withheld.</p>
     <p class="kw">Keywords: <b>agent evaluation</b> · <b>reliability</b> · <b>reproducibility</b> · <b>over-claiming</b> · <b>recursive cost accounting</b></p>
+  </div>
+
+  <div class="status reveal">
+    <p><span class="badge gated">CI-gated</span>Only the offline retrieval eval (recall@k / MRR) runs as an
+      automated regression gate on every commit. <span class="badge live">One-off live</span>every other
+      number on this page — setup qualification, memory-vs-control, the retrieval-config sweep, and the
+      session-N+1 cost delta — is a single reviewed live measurement, not a continuously re-verified one.</p>
+    <p>This page is current as of <b>Fabri v0.19.0</b> (published 2026-07-21). Individual results below
+      carry their own Fabri version where it differs.</p>
   </div>
 
   <section>
@@ -190,33 +221,40 @@
           <tbody>
             <tr>
               <td><span class="co">Support HQ<small>incident response</small></span></td>
-              <td>3 → 10</td><td>10/10</td><td>9/10</td><td class="no">No</td>
-              <td class="brk">3/3 gate did not replicate; 1 run omitted the follow-up</td>
+              <td>3 → 10</td><td>10/10</td>
+              <td><span class="co">9/10<small>90%, 95% CI 60–98%</small></span></td><td class="no">No</td>
+              <td class="brk">3/3 gate (95% CI 44–100%) did not replicate; 1 run omitted the follow-up</td>
             </tr>
             <tr>
               <td><span class="co">Reliability Labs<small>incident release gate</small></span></td>
-              <td>3</td><td>3/3</td><td>2/3</td><td class="no">No</td>
-              <td class="brk">claimed "fix was deployed" (unverified)</td>
+              <td>3</td><td>3/3</td>
+              <td><span class="co">2/3<small>67%, 95% CI 21–94%</small></span></td><td class="no">No</td>
+              <td class="brk">claimed "fix was deployed" (unverified); n=3, underpowered</td>
             </tr>
             <tr>
               <td><span class="co">Revenue Ops<small>evidence-backed outreach</small></span></td>
-              <td>3</td><td>2/3</td><td>0/3</td><td class="no">No</td>
-              <td class="brk">claimed unsourced results; 1 truncation</td>
+              <td>3</td><td>2/3</td>
+              <td><span class="co">0/3<small>0%, 95% CI 0–56%</small></span></td><td class="no">No</td>
+              <td class="brk">claimed unsourced results; 1 truncation; n=3, underpowered</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <figcaption><b>Table 1.</b> Setup-qualification outcomes. Completion is near-total everywhere; the
-        gap is entirely in the rubric — i.e. in output correctness, not in whether the run finished.
-        Support HQ's small-sample 3/3 gate is shown alongside its 10-replica confirmation.</figcaption>
+      <figcaption><b>Table 1.</b> Setup-qualification outcomes with 95% Wilson score intervals on the
+        rubric rate. Completion is near-total everywhere; the gap is entirely in the rubric — i.e. in
+        output correctness, not in whether the run finished. Support HQ's small-sample 3/3 gate is shown
+        alongside its 10-replica confirmation. At n=3, Reliability Labs' and Revenue Ops' intervals span
+        roughly 20–95% — wide enough that these two rows are underpowered reads, not precise
+        measurements; only Support HQ's n=10 confirmation narrows the interval enough to be informative.</figcaption>
     </figure>
   </section>
 
   <section>
     <h2><span class="num">4</span>Discussion</h2>
-    <p><b>Small samples overstate reliability.</b> Support HQ's 3/3 release gate read as flawless, yet
-      ten runs of the identical setup produced 9/10. The additional replicas did not refine the estimate
-      so much as overturn it: the true rubric reliability is near 90%, and the 100% gate is not met.</p>
+    <p><b>Small samples overstate reliability.</b> Support HQ's 3/3 release gate (95% CI 44–100%) read
+      as flawless, yet ten runs of the identical setup produced 9/10 (90%, 95% CI 60–98%). The additional
+      replicas did not refine the estimate so much as overturn it: the true rubric reliability is near
+      90%, and the 100% gate is not met.</p>
     <p><b>The dominant failure is over-claiming.</b> Two of three companies failed by asserting facts the
       evidence did not support — a deployed fix, a customer result, buying intent. These are precisely
       the errors the rubrics forbid, and the harness caught each one. That completion was near-total
@@ -243,40 +281,111 @@
       given a fresh holdout task <em>twice</em>: once with that memory copied into a clean compile, once
       with empty memory (the control). Across <b>ten replicas</b> of Support HQ, memory retrieved
       <b>2 trained guidelines on every run</b> (control: <b>0</b>) — the mechanism fires reliably. Yet
-      the memory arm passed the holdout rubric only <b>7/10 (70%)</b>, against <b>9/10 (90%)</b> for
-      control: with memory the company was <b>20 points less reliable</b>, and merely $0.0014 cheaper. A
-      preliminary three-replica pilot had shown the <em>opposite</em> sign (memory 3/3 vs control 2/3);
-      the larger sample did not shrink that gain so much as reverse it — the same small-sample fragility
-      documented in §3. On this workload the self-improvement loop runs but does not pay: it retrieves
-      lessons, and the runs that received them did no better — indeed slightly worse.</p>
+      the memory arm passed the holdout rubric only <b>7/10 (70%, 95% CI 40–89%)</b>, against
+      <b>9/10 (90%, 95% CI 60–98%)</b> for control. That is a descriptive −20-point gap. The Wilson
+      intervals describe each arm separately, and no paired significance test was run, so this does
+      not establish a statistically significant disadvantage for memory. A preliminary three-replica
+      pilot had shown the <em>opposite</em> sign (memory 3/3 vs
+      control 2/3, both with CIs spanning roughly 20–100% at n=3 — barely more than a coin flip's worth
+      of evidence); the larger sample did not so much shrink that gain as flip its point estimate — the
+      same small-sample fragility documented in §3. On this workload the self-improvement loop runs and
+      is not shown to pay: it retrieves lessons reliably, and the runs that received them did not
+      measurably do better.</p>
     <p>The pattern is not unique to Support HQ. A ten-replica run on <b>Reliability Labs</b> shows the
-      same shape: memory retrieved 2 guidelines every run (control: 0) yet scored <b>60%</b> against the
-      control's <b>78%</b> (−18 points), while costing ~19% more. Across the two companies measured so
-      far, trace-backed memory fires reliably but does not improve — and here slightly reduces —
-      reliability. Varying the <em>retrieval configuration</em> does not rescue it: raising
-      <code>top_k</code> from 5 to 10, and switching to MMR-diversified selection, left the retrieved
-      evidence unchanged — memory returned the same <b>2</b> guidelines every run in all three
-      configurations, because the trained memory only <em>contains</em> ~2 guidelines. You cannot pull
-      more than exists, so retrieval config is not the lever. The bottleneck is upstream — how many
-      good, distinct lessons a training run mines and promotes — which is the next experiment worth
-      running.</p>
+      same shape: memory retrieved 2 guidelines every run (control: 0) yet passed <b>6/10 (60%, 95% CI
+      31–83%)</b> against control's <b>7/10 (70%, 95% CI 40–89%)</b> on the same 10-replica basis
+      (control completed only 9 of its 10 scheduled replicas; the completed-only rate is 7/9, 78%, but
+      that is not on the same denominator as memory's 7/10 — comparing like-for-like, memory trails by
+      <b>10 points</b>, and it cost ~19% more). As with Support HQ, this is a descriptive difference;
+      no paired significance test was run. Across the two companies measured so far, trace-backed
+      memory fires reliably but is not shown
+      to improve reliability, and both point estimates run slightly the other way. Varying the
+      <em>retrieval configuration</em> does not rescue it: raising <code>top_k</code> from 5 to 10, and
+      switching to MMR-diversified selection, left the retrieved evidence unchanged — memory returned the
+      same <b>2</b> guidelines every run in all three configurations, because the trained memory only
+      <em>contains</em> ~2 guidelines. You cannot pull more than exists, so retrieval config is not the
+      lever. The bottleneck is upstream — how many good, distinct lessons a training run mines and
+      promotes — which is the next experiment worth running.</p>
     <figure class="tbl">
       <div class="scroll">
         <table>
           <thead>
-            <tr><th>Condition</th><th>Holdout rubric</th><th>Guidelines retrieved</th><th>Mean cost</th></tr>
+            <tr><th>Condition</th><th>Holdout rubric</th><th>95% CI</th><th>Guidelines retrieved</th><th>Mean cost</th></tr>
           </thead>
           <tbody>
-            <tr><td><span class="co">Memory</span></td><td class="no">7/10 (70%)</td><td>2.0</td><td>$0.0600</td></tr>
-            <tr><td><span class="co">Control</span></td><td>9/10 (90%)</td><td>0.0</td><td>$0.0614</td></tr>
+            <tr><td><span class="co">Memory</span></td><td class="no">7/10 (70%)</td><td>40–89%</td><td>2.0</td><td>$0.0600</td></tr>
+            <tr><td><span class="co">Control</span></td><td>9/10 (90%)</td><td>60–98%</td><td>0.0</td><td>$0.0614</td></tr>
           </tbody>
         </table>
       </div>
-      <figcaption><b>Table 2.</b> Memory vs. control on a fresh Support HQ holdout, ten replicas. Memory
-        retrieves trained guidelines on every run but does <b>not</b> improve — and here slightly
-        reduces — rubric reliability. A 3-replica pilot showed the opposite sign, a direct illustration
-        of the small-sample fragility in §3.</figcaption>
+      <figcaption><b>Table 2.</b> Memory vs. control on a fresh Support HQ holdout, ten replicas, with
+        descriptive per-arm 95% Wilson intervals. No paired significance test was run; memory's point
+        estimate trails control, but the study does not establish a statistically significant gap. A
+        3-replica pilot showed the opposite sign, a direct illustration of the small-sample fragility in
+        §3.</figcaption>
     </figure>
+    <figure class="tbl">
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>Condition</th><th>Holdout rubric</th><th>95% CI</th><th>Guidelines retrieved</th><th>Mean cost</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="co">Memory</span></td><td class="no">6/10 (60%)</td><td>31–83%</td><td>2.0</td><td>$0.1150</td></tr>
+            <tr><td><span class="co">Control<small>7/10 of scheduled; 7/9 completed-only</small></span></td><td>7/10 (70%)</td><td>40–89%</td><td>0.0</td><td>$0.0966</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><b>Table 2b.</b> Memory vs. control on a fresh Reliability Labs holdout, ten replicas
+        (control completed 9 of 10 scheduled). Reported on the same 10-replica denominator for both arms
+        so the comparison is apples-to-apples. The intervals are descriptive; no paired significance
+        test was run.</figcaption>
+    </figure>
+
+    <h2 style="margin-top:36px"><span class="num">6.1</span>Retrieval-configuration sweep</h2>
+    <p>If memory's shortfall were a retrieval problem, widening or diversifying what gets pulled back
+      should change the evidence the agent sees. Re-running the Support HQ memory arm with
+      <code>top_k</code> raised from 5 to 10, and again with <code>hybrid+mmr</code> selection, tested
+      exactly that.</p>
+    <figure class="tbl">
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>Retrieval config</th><th>Guidelines retrieved (memory)</th><th>Guidelines retrieved (control)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="co">top_k=5, hybrid<small>baseline</small></span></td><td>2 (every run, 10/10)</td><td>0</td></tr>
+            <tr><td><span class="co">top_k=10, hybrid</span></td><td>2 (every run)</td><td>0</td></tr>
+            <tr><td><span class="co">hybrid+mmr</span></td><td>2 (every run)</td><td>0</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><b>Table 3.</b> Config-invariance: every retrieval configuration returns the identical
+        2 trained guidelines, because the trained memory only contains ~2 — a retrieval knob cannot
+        exceed the store's size. Full write-up:
+        <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-retrieval-sweep-2026-07-21.md">retrieval sweep</a>.</figcaption>
+    </figure>
+    <p style="font-family:var(--sans);font-size:13px;color:var(--faint)">Honesty / provenance
+      (verbatim from the source result): <em>"The retrieval-count invariance above is deterministic and
+      was observed on every completed pair. A full ten-replica rubric re-measurement for each variant was
+      not completed — repeated infrastructure interruptions cut the runs short (8 memory / 7 control
+      completed pairs per variant before interruption). That does not affect the conclusion: the knob
+      demonstrably does not change the retrieved evidence, so it cannot change the outcome."</em></p>
+
+    <div class="pending">
+      <p class="lbl">Pending work</p>
+      <ul>
+        <li><b>LongMemEval.</b> The runner (`python -m fabri.benchmarks.longmemeval`) is shipped and
+          exact-match scoring works end to end, but no result has been published yet — this row stays
+          empty until a real run lands. Reference points for comparison when it does: Mastra
+          "Observational Memory" 94.87%, Zep 63.8%.</li>
+        <li><b>Canonical sonnet session-N+1 delta.</b> The only published cost-delta number
+          (↓7.8% cost, steps 5→4, reuse 0→67%) ran on <code>gpt-4o-mini</code> via
+          <code>configs/benchmark.openai-recovery.yaml</code>, not the canonical
+          anthropic-sonnet <code>configs/benchmark.yaml</code> — Bedrock Anthropic access was
+          account-gated when it was run. The canonical sonnet number is still pending.</li>
+      </ul>
+    </div>
   </section>
 
   <section>
@@ -301,8 +410,16 @@
   <footer>
     <div class="refs">
       <a href="https://github.com/Rushour0/fabri/blob/main/BENCHMARKS.md">Full results &amp; methodology</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-setup-qualification-2026-07-20.md">Support HQ setup (3-replica)</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-setup-qualification-10replica-2026-07-20.md">Support HQ setup (10-replica)</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/reliability-labs-setup-qualification-2026-07-20.md">Reliability Labs setup</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/revenue-ops-setup-qualification-2026-07-20.md">Revenue Ops setup</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-memory-vs-control-2026-07-20.md">Support HQ memory vs. control</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/reliability-labs-memory-vs-control-2026-07-21.md">Reliability Labs memory vs. control</a>
+      <a href="https://github.com/Rushour0/fabri/blob/main/benchmarks/results/support-hq-retrieval-sweep-2026-07-21.md">Retrieval-config sweep</a>
       <a href="https://github.com/Rushour0/fabri">Fabri source</a>
+      <a href="https://rushour0.github.io/fabri/benchmark/">This page, live</a>
     </div>
-    <div>Fabri · self-improving companies of AI agents</div>
+    <div>Fabri v0.19.0 · self-improving companies of AI agents</div>
   </footer>
 </article>

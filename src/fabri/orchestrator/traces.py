@@ -2,6 +2,7 @@ import fcntl
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
@@ -23,7 +24,7 @@ def trace_path(session_id: str) -> Path:
 
 
 def log_event(session_id: str, event: dict) -> None:
-    record = {"ts": time.time(), **event}
+    record = {"ts": time.time(), "event_id": str(uuid.uuid4()), **event}
     line = json.dumps(record) + "\n"
     with trace_path(session_id).open("a") as f:
         # Exclusive lock so concurrent appenders (parent + sub-agent both writing

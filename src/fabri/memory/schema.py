@@ -30,6 +30,22 @@ class MemoryEntry:
     agent_id: str | None = None       # which agent produced this entry
     task_embedding_hash: str | None = None  # sha256(task)[:8] for clustering
     dedup_key: str | None = None      # stable signature of the mined lesson inputs
+    producer_agent_id: str | None = None
+    scope: str = "agent"              # "agent" | "agency" | "company"
+    verification: str = "unverified"  # unverified | tool_verified | rubric_verified | contradicted
+    source_session_ids: list[str] = field(default_factory=list)
+    source_event_ids: list[str] = field(default_factory=list)
+    applicability: list[str] = field(default_factory=list)
+    do_not_reuse_when: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Keep legacy provenance aliases synchronized during the transition."""
+        sessions = list(dict.fromkeys([*self.source_session_ids, *self.session_ids]))
+        self.source_session_ids = sessions
+        self.session_ids = list(sessions)
+        producer = self.producer_agent_id or self.agent_id
+        self.producer_agent_id = producer
+        self.agent_id = producer
 
     @property
     def id(self) -> str:
@@ -64,6 +80,13 @@ class MemoryEntry:
             "agent_id": self.agent_id,
             "task_embedding_hash": self.task_embedding_hash,
             "dedup_key": self.dedup_key,
+            "producer_agent_id": self.producer_agent_id,
+            "scope": self.scope,
+            "verification": self.verification,
+            "source_session_ids": self.source_session_ids,
+            "source_event_ids": self.source_event_ids,
+            "applicability": self.applicability,
+            "do_not_reuse_when": self.do_not_reuse_when,
         }
 
     @classmethod
@@ -71,7 +94,7 @@ class MemoryEntry:
         return cls(
             text=payload["text"],
             kind=payload["kind"],
-            session_ids=list(payload.get("session_ids", [])),
+            session_ids=list(payload.get("session_ids", payload.get("source_session_ids", []))),
             tags=list(payload.get("tags", [])),
             tools=list(payload.get("tools", [])),
             hit_count=payload.get("hit_count", 1),
@@ -79,7 +102,16 @@ class MemoryEntry:
             model_version=payload.get("model_version", EMBEDDING_MODEL_VERSION),
             domain=payload.get("domain", "generic"),
             outcome=payload.get("outcome", "unknown"),
-            agent_id=payload.get("agent_id"),
+            agent_id=payload.get("agent_id", payload.get("producer_agent_id")),
             task_embedding_hash=payload.get("task_embedding_hash"),
             dedup_key=payload.get("dedup_key"),
+            producer_agent_id=payload.get("producer_agent_id", payload.get("agent_id")),
+            scope=payload.get("scope", "agent"),
+            verification=payload.get("verification", "unverified"),
+            source_session_ids=list(
+                payload.get("source_session_ids", payload.get("session_ids", []))
+            ),
+            source_event_ids=list(payload.get("source_event_ids", [])),
+            applicability=list(payload.get("applicability", [])),
+            do_not_reuse_when=list(payload.get("do_not_reuse_when", [])),
         )

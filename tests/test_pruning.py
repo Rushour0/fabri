@@ -125,14 +125,54 @@ def test_dedup_key_merges_paraphrases_but_different_tasks_do_not_merge():
         store, "Validate account identifiers before loading the inventory file.", session_id="s3", dedup_key=second_key,
     )
 
-    assert merged.id == first.id
+    # The second paraphrase is longer/more informative than the first, so the
+    # merge upgrades the stored text -- and since entry.id is a hash of the
+    # text (see MemoryEntry.id), the merged entry's id necessarily changes
+    # along with it. What must hold is that this stays a single point (no
+    # orphaned stale point left behind) with counters carried over.
+    assert merged.id != first.id
+    assert merged.text == "Check every customer reference before retrying the financial upload."
     assert merged.hit_count == 2
     assert set(merged.session_ids) == {"s1", "s2"}
-    assert distinct.id != first.id
+    assert distinct.id != merged.id
     assert store.count() == 2
 
-    store.delete(first.id)
+    store.delete(merged.id)
     store.delete(distinct.id)
+
+
+def test_merge_upgrades_text_to_the_longer_more_informative_candidate():
+    store = make_store()
+    key = guideline_dedup_key(
+        "tactical", task="Repair the billing import", failed_tool_name="import_csv", error_text="Missing account id",
+    )
+    short_text = "Validate account ids first."
+    longer_text = "Validate account identifiers against the customer table before loading the billing file, since missing ids abort the whole batch."
+
+    first = ingest_guideline(store, short_text, session_id="s1", dedup_key=key)
+    assert first.text == short_text
+
+    # entry.id is a hash of entry.text (see MemoryEntry.id), so upgrading the
+    # text necessarily changes the id too -- what matters is that the merge
+    # still collapses to a single stored point (no orphan of the old, less
+    # informative point) with counters/session_ids carried over.
+    upgraded = ingest_guideline(store, longer_text, session_id="s2", dedup_key=key)
+    assert upgraded.id != first.id
+    assert upgraded.text == longer_text
+    assert upgraded.hit_count == 2
+    assert set(upgraded.session_ids) == {"s1", "s2"}
+    assert store.count() == 1
+
+    # A subsequent shorter/less-informative recurrence must NOT downgrade the
+    # already-upgraded text, and since the text doesn't change this time, the
+    # id stays stable.
+    not_downgraded = ingest_guideline(store, short_text, session_id="s3", dedup_key=key)
+    assert not_downgraded.id == upgraded.id
+    assert not_downgraded.text == longer_text
+    assert not_downgraded.hit_count == 3
+    assert store.count() == 1
+
+    store.delete(not_downgraded.id)
 
 
 def test_concurrent_ingest_does_not_lose_updates():

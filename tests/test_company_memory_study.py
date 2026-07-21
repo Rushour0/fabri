@@ -12,7 +12,9 @@ import yaml
 
 from fabri.benchmarks.company_memory_study import (
     CLAIM_BOUNDARY,
+    _invalid_run,
     apply_retrieval_overrides,
+    discover_memory_dbs,
     load_memory_case,
     main,
     render_markdown,
@@ -85,12 +87,15 @@ class FakeRunner:
         *,
         incomplete_holdout: str | None = None,
         failed_training: str | None = None,
+        truncated_training: str | None = None,
     ) -> None:
         self.roster_root = roster_root
         self.incomplete_holdout = incomplete_holdout
         self.failed_training = failed_training
+        self.truncated_training = truncated_training
         self.compile_destinations: list[Path] = []
         self.holdout_db_before_run: dict[str, bytes | None] = {}
+        self.holdout_dbs_before_run: dict[str, dict[str, bytes | None]] = {}
         self.run_stages: list[tuple[str, str]] = []
         self.retrieval_configs_before_run: dict[tuple[str, str], dict[str, object]] = {}
 
@@ -115,13 +120,33 @@ class FakeRunner:
             self.compile_destinations.append(destination)
             company = destination / "support-hq"
             company.mkdir(parents=True)
+            manager_db = company / ".fabri" / "support_hq.db"
+            specialist_db = company / ".fabri" / "support_hq_crew.db"
             (company / "ceo.yaml").write_text(
-                "agent: {name: ceo}\nmemory:\n  top_k: 5\n",
+                yaml.safe_dump({
+                    "agent": {"name": "ceo"},
+                    "memory": {
+                        "backend": "sqlite", "top_k": 5,
+                        "sqlite_path": str(manager_db),
+                    },
+                }, sort_keys=False),
                 encoding="utf-8",
             )
-            database = company / ".fabri" / "support_hq.db"
-            database.parent.mkdir(parents=True)
-            database.write_bytes(f"compiled:{destination.name}".encode())
+            specialist_config = company / "agencies" / "crew" / "specialist.yaml"
+            specialist_config.parent.mkdir(parents=True)
+            specialist_config.write_text(
+                yaml.safe_dump({
+                    "agent": {"name": "specialist"},
+                    "memory": {
+                        "backend": "sqlite", "top_k": 5,
+                        "sqlite_path": str(specialist_db),
+                    },
+                }, sort_keys=False),
+                encoding="utf-8",
+            )
+            manager_db.parent.mkdir(parents=True)
+            manager_db.write_bytes(f"manager:{destination.name}".encode())
+            specialist_db.write_bytes(f"specialist:{destination.name}".encode())
             return subprocess.CompletedProcess(argv, 0, "compiled", "")
 
         root_config = Path(argv[argv.index("--config") + 1])
@@ -138,23 +163,33 @@ class FakeRunner:
             self.holdout_db_before_run[condition] = (
                 database.read_bytes() if database.exists() else None
             )
+            self.holdout_dbs_before_run[condition] = {
+                name: (path.read_bytes() if path.exists() else None)
+                for name, path in {
+                    "manager": database,
+                    "specialist": root_config.parent / ".fabri" / "support_hq_crew.db",
+                }.items()
+            }
         state_root = Path(env["FABRI_HOME"])
         traces = state_root / ".fabri" / "traces"
         traces.mkdir(parents=True)
         session = f"{condition}-{stage}"
         child_session = f"{session}-child"
         failed = stage == "training" and condition == self.failed_training
+        truncated = stage == "training" and condition == self.truncated_training
         incomplete = stage == "holdout" and condition == self.incomplete_holdout
         outcome = "failed" if failed else "success"
+        crew_result: dict[str, object] = {
+            "ok": not failed and not truncated,
+            "result": {"session_id": child_session, "outcome": outcome},
+        }
+        if truncated:
+            # The agent self-reports success while a nested delegation was cut
+            # short — the exact shape that used to leak ``training_success: true``
+            # into an invalid, truncated run.
+            crew_result["error"] = "response truncated: max_tokens reached"
         root_events: list[dict[str, object]] = [
-            {
-                "type": "tool_call",
-                "name": "crew",
-                "result": {
-                    "ok": not failed,
-                    "result": {"session_id": child_session, "outcome": outcome},
-                },
-            },
+            {"type": "tool_call", "name": "crew", "result": crew_result},
             {"type": "final" if not failed else "failed", "outcome": outcome},
         ]
         if not incomplete:
@@ -192,7 +227,7 @@ class FakeRunner:
         return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
 
 
-def test_memory_study_copies_only_memory_db_and_emits_safe_public_payload(
+def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,18 +241,28 @@ def test_memory_study_copies_only_memory_db_and_emits_safe_public_payload(
     assert case.namespace == "support_hq"
     assert len(runner.compile_destinations) == 4
     assert len(set(runner.compile_destinations)) == 4
-    assert runner.holdout_db_before_run["memory"] == b"compiled:training-compiled"
+    assert runner.holdout_db_before_run["memory"] == b"manager:training-compiled"
     assert runner.holdout_db_before_run["control"] is None
+    assert runner.holdout_dbs_before_run["memory"] == {
+        "manager": b"manager:training-compiled",
+        "specialist": b"specialist:training-compiled",
+    }
+    assert runner.holdout_dbs_before_run["control"] == {
+        "manager": None,
+        "specialist": None,
+    }
     runs = cast(list[dict[str, object]], result["runs"])
     memory_run = next(run for run in runs if run["condition"] == "memory")
     control_run = next(run for run in runs if run["condition"] == "control")
     assert memory_run["rubric_passed"] is True
     assert control_run["rubric_passed"] is False
     assert control_run["guidelines_retrieved"] == 0
+    assert memory_run["funnel"]["transport"]["intact"] is True
+    assert control_run["funnel"]["transport"]["intact"] is True
     assert result["claim_boundary"] == CLAIM_BOUNDARY
     assert result["retrieval_overrides"] == {"top_k": None, "retrieval_strategy": None}
     assert all(
-        config == {"top_k": 5}
+        config["top_k"] == 5 and config["backend"] == "sqlite"
         for config in runner.retrieval_configs_before_run.values()
     )
     public_text = (tmp_path / "results" / "results.json").read_text(encoding="utf-8")
@@ -254,6 +299,54 @@ def test_apply_retrieval_overrides_rewrites_compiled_node_configs(tmp_path: Path
         tmp_path / "compiled", "support-hq", top_k=None, strategy=None
     ) == []
     assert config.read_text(encoding="utf-8") == before
+
+
+def test_discover_memory_dbs_deduplicates_shared_paths_and_rejects_escape(
+    tmp_path: Path,
+) -> None:
+    company = tmp_path / "compiled" / "support-hq"
+    nested = company / "agencies" / "crew"
+    nested.mkdir(parents=True)
+    shared = company / ".fabri" / "shared.db"
+    for path, agent in ((company / "ceo.yaml", "ceo"), (nested / "agent.yaml", "worker")):
+        path.write_text(yaml.safe_dump({
+            "agent": {"name": agent},
+            "memory": {"backend": "sqlite", "sqlite_path": str(shared)},
+        }), encoding="utf-8")
+
+    specs = discover_memory_dbs(tmp_path / "compiled", "support-hq")
+
+    assert len(specs) == 1
+    assert specs[0].relative_path == Path(".fabri/shared.db")
+    assert specs[0].agent_ids == ("ceo", "worker")
+
+    (nested / "agent.yaml").write_text(yaml.safe_dump({
+        "agent": {"name": "worker"},
+        "memory": {"backend": "sqlite", "sqlite_path": "../../../../escaped.db"},
+    }), encoding="utf-8")
+    with pytest.raises(ProbeError, match="escapes company root"):
+        discover_memory_dbs(tmp_path / "compiled", "support-hq")
+
+
+def test_memory_study_counterbalances_condition_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path, replicas=2)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    runner = FakeRunner(roster_root)
+
+    result = run_memory_study(
+        load_memory_case(dataset, "support"), tmp_path / "results", command_runner=runner
+    )
+
+    runs = cast(list[dict[str, object]], result["runs"])
+    assert [(run["replica"], run["condition"], run["execution_order"]) for run in runs] == [
+        (1, "memory", 1),
+        (1, "control", 2),
+        (2, "control", 1),
+        (2, "memory", 2),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -299,12 +392,14 @@ def test_memory_study_applies_and_records_retrieval_overrides(
         retrieval_strategy="sparse",
     )
 
-    assert runner.retrieval_configs_before_run == {
-        ("memory", "training"): {"top_k": 11, "retrieval_strategy": "sparse"},
-        ("memory", "holdout"): {"top_k": 11, "retrieval_strategy": "sparse"},
-        ("control", "training"): {"top_k": 11, "retrieval_strategy": "sparse"},
-        ("control", "holdout"): {"top_k": 11, "retrieval_strategy": "sparse"},
+    assert set(runner.retrieval_configs_before_run) == {
+        ("memory", "training"), ("memory", "holdout"),
+        ("control", "training"), ("control", "holdout"),
     }
+    assert all(
+        config["top_k"] == 11 and config["retrieval_strategy"] == "sparse"
+        for config in runner.retrieval_configs_before_run.values()
+    )
     assert result["retrieval_overrides"] == {"top_k": 11, "retrieval_strategy": "sparse"}
     validate_memory_payload(result)
     assert "Retrieval overrides: top_k=`11`, retrieval_strategy=`sparse`" in render_markdown(result)
@@ -347,6 +442,67 @@ def test_failed_training_invalidates_pair_without_running_holdout(
     assert run["training_outcome"] == "failed"
     assert run["rubric_passed"] is None
     assert "training_failed" in cast(list[str], run["training_failure_reasons"])
+
+
+def test_truncated_training_reports_failure_not_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated run self-reports success; the study must not.
+
+    Regression for the accounting bug where ``training_success`` echoed the
+    agent's optimistic ``success: true`` even though training was truncated and
+    incomplete, contradicting ``training_failure_reasons``.
+    """
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = replace(load_memory_case(dataset, "support"), conditions=("memory",))
+    runner = FakeRunner(roster_root, truncated_training="memory")
+
+    result = run_memory_study(case, tmp_path / "results", command_runner=runner)
+
+    # Training truncated, so the holdout must never run.
+    assert runner.run_stages == [("memory", "training")]
+    run = cast(list[dict[str, object]], result["runs"])[0]
+    assert run["training_outcome"] == "success"
+    assert run["training_success"] is False
+    reasons = cast(list[str], run["training_failure_reasons"])
+    assert "training_failed" in reasons
+    assert "truncation" in reasons
+    assert run["holdout_failure_reasons"] == []
+    # The published payload must satisfy the reconciled invariant.
+    validate_memory_payload(result)
+
+
+def test_invalid_run_routes_holdout_reason_to_holdout_phase() -> None:
+    """A post-training failure keeps training successful and is filed as holdout."""
+    run = _invalid_run(
+        1,
+        "memory",
+        "success",
+        0.05,
+        "holdout_run_timeout",
+        execution_order=1,
+    )
+    assert run["training_success"] is True
+    assert run["training_failure_reasons"] == []
+    assert run["holdout_failure_reasons"] == ["holdout_run_timeout"]
+
+
+def test_validate_memory_payload_rejects_success_with_training_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = replace(load_memory_case(dataset, "support"), conditions=("memory",))
+    payload = run_memory_study(case, tmp_path / "results", command_runner=FakeRunner(roster_root))
+
+    contradictory = cast(list[dict[str, object]], payload["runs"])[0]
+    contradictory["training_success"] = True
+    contradictory["training_failure_reasons"] = ["training_failed"]
+    with pytest.raises(ProbeError, match="training success with training failures"):
+        validate_memory_payload(payload)
 
 
 def test_validate_memory_payload_rejects_malformed_payload() -> None:

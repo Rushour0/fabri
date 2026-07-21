@@ -12,8 +12,9 @@ from fabri.config import load_config
 from fabri.core.agent import run_agent
 from fabri.core.outcome import Outcome
 from fabri.core.run_config import AgentRunConfig
+from fabri.orchestrator.pipeline import process_trace
 from fabri.orchestrator.traces import trace_path
-from fabri.runtime import build_memory_store, build_run_llms, build_tool_defs, build_tools
+from fabri.runtime import build_llm, build_memory_store, build_run_llms, build_tool_defs, build_tools
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -102,6 +103,45 @@ def main() -> int:
         narrator_llm=llms["narrator_llm"],
         **run_cfg.as_kwargs(),
     )
+
+    # Root-cause fix: mine THIS child's own trace into the same memory store,
+    # mirroring cli.py's cmd_run path -- otherwise a delegated sub-agent's
+    # trace is discarded and only the parent's thin trace ever gets mined,
+    # capping the guidelines a company can ever learn.
+    if os.environ.get("FABRI_DISABLE_SUBAGENT_MINING"):
+        pass  # EXPERIMENT-ONLY escape hatch for a mining-off benchmark arm
+    else:
+        try:
+            # Dedicated compression LLM, empty tool list -- do NOT reuse
+            # `llms["llm"]`, which carries the full tool schema on every call.
+            compress_llm = build_llm(config, [])
+            _eviction_half_life = (
+                mem_cfg.get("eviction_half_life_days")
+                or mem_cfg.get("temporal_half_life_days", 30.0)
+            )
+            process_trace(
+                result["session_id"],
+                store,
+                compress_llm,
+                guideline_max_tokens=mem_cfg["guideline_max_tokens"],
+                similarity_threshold=mem_cfg["similarity_threshold"],
+                promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
+                record_postmortem=mem_cfg.get("record_postmortems", False),
+                success_pattern_requires_evidence=mem_cfg.get("success_pattern_requires_evidence", False),
+                max_entries=mem_cfg.get("max_entries"),
+                eviction_half_life_days=float(_eviction_half_life),
+                eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
+                producer_agent_id=config.get("agent", {}).get("name"),
+                memory_scope=mem_cfg.get("scope", "agent"),
+            )
+        except Exception as e:
+            # Deliberate deviation from cli.py's cmd_run: there, a mining
+            # failure is allowed to propagate (it's the whole `fabri run`
+            # process). Here mining is a bonus side-effect of spawn_subagent,
+            # so a mining bug must never flip this tool's success/exit signal
+            # -- log to stderr and continue.
+            print(f"[fabri] subagent trace mining failed: {e}", file=sys.stderr)
+
     # Surface session_id + trace path so a parent agent / human reader can
     # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`
     # carries own tokens + grandchildren; the parent's dispatch loop reads

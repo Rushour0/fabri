@@ -284,6 +284,7 @@ def test_openai_truncation_retries_once_then_succeeds():
     # Discarded truncated attempt's tokens fold into reported usage.
     assert resp.usage.output_tokens == 4096 + 50
     assert resp.usage.input_tokens == 10 + 10
+    assert resp.usage.max_token_retries == 1
 
 
 def test_openai_truncated_attempt_cached_tokens_fold_into_cache_read():

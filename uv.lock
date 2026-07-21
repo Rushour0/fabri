@@ -600,7 +600,7 @@ wheels = [
 
 [[package]]
 name = "fabri"
-version = "0.14.1"
+version = "0.19.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -610,7 +610,6 @@ dependencies = [
     { name = "openai" },
     { name = "pyyaml" },
     { name = "qdrant-client" },
-    { name = "sentence-transformers" },
     { name = "tiktoken" },
 ]
 
@@ -623,10 +622,18 @@ dev = [
     { name = "pytest" },
     { name = "twine" },
 ]
+embeddings = [
+    { name = "sentence-transformers" },
+]
 otel = [
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
+]
+self-improving = [
+    { name = "rank-bm25" },
+    { name = "sentence-transformers" },
+    { name = "sqlite-vec" },
 ]
 sqlite = [
     { name = "sqlite-vec" },
@@ -647,12 +654,15 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qdrant-client", specifier = ">=1.9" },
     { name = "rank-bm25", marker = "extra == 'bm25'", specifier = ">=0.2.2" },
-    { name = "sentence-transformers", specifier = ">=3.0" },
+    { name = "rank-bm25", marker = "extra == 'self-improving'", specifier = ">=0.2.2" },
+    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3.0" },
+    { name = "sentence-transformers", marker = "extra == 'self-improving'", specifier = ">=3.0" },
+    { name = "sqlite-vec", marker = "extra == 'self-improving'", specifier = ">=0.1.6" },
     { name = "sqlite-vec", marker = "extra == 'sqlite'", specifier = ">=0.1.6" },
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0" },
 ]
-provides-extras = ["sqlite", "bm25", "otel", "dev"]
+provides-extras = ["embeddings", "sqlite", "bm25", "self-improving", "otel", "dev"]
 
 [[package]]
 name = "fastuuid"

@@ -459,6 +459,44 @@ def test_score_text_is_case_insensitive_and_deterministic() -> None:
     assert score_text("We will follow up", (("follow-up",),), ())["passed"] is True
 
 
+def test_score_text_ignores_forbidden_phrase_in_negated_context() -> None:
+    assert score_text(
+        "There is no evidence that a fix was deployed.",
+        (("evidence",),),
+        ("fix was deployed",),
+    ) == {"passed": True, "missing": [], "forbidden": []}
+
+
+def test_score_text_flags_plain_forbidden_phrase() -> None:
+    assert score_text(
+        "The fix was deployed to production.",
+        (("fix",),),
+        ("fix was deployed",),
+    ) == {"passed": False, "missing": [], "forbidden": ["fix was deployed"]}
+
+
+def test_score_text_flags_mixed_negated_and_plain_forbidden_occurrences() -> None:
+    text = (
+        "There is no evidence that a fix was deployed. "
+        "Later, operations confirmed the production rollout during the scheduled maintenance window. "
+        "The fix was deployed."
+    )
+
+    assert score_text(text, (("fix",),), ("fix was deployed",)) == {
+        "passed": False,
+        "missing": [],
+        "forbidden": ["fix was deployed"],
+    }
+
+
+def test_score_text_does_not_flag_absent_forbidden_phrase() -> None:
+    assert score_text(
+        "There is no evidence that a deployment occurred.",
+        (("evidence",),),
+        ("fix was deployed",),
+    ) == {"passed": True, "missing": [], "forbidden": []}
+
+
 def test_score_structured_uses_recursive_subset_equality() -> None:
     expected = {"rollback": True, "follow_up": {"owner": "ops"}}
 

@@ -280,6 +280,7 @@ def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
         # G10/G11: fan-out telemetry + regret detection.
         "subagent_count", "subagent_successful_count", "subagent_failed_count",
         "subagent_max_subtree_cost_usd", "subagent_regret_count",
+        "max_token_retries", "provider_transient_retries",
     }
     assert usage["step_count"] == 1
     assert usage["wall_time_s"] >= 0

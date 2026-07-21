@@ -54,6 +54,34 @@ cases:
       domains: [support, code]
       tools: [read_file, write_file]
       useful_lesson: Preserve evidence boundaries and customer-safe language.
+    evolution:
+      variants:
+        - id: anchor_checkout_update
+          prompt: >-
+            Delegate to the support macro and incident postmortem crews. Return a
+            customer-safe executive update about the checkout incident: acknowledge
+            impact, state the rollback, and give a follow-up without exposing the
+            missing production environment variable.
+          expected:
+            required: [[checkout], [rollback, rolled back], [follow-up, further update]]
+            forbidden: [payment-provider environment variable, blame]
+        - id: checkout_customer_bulletin
+          prompt: >-
+            Ask both support and incident specialists for evidence, then draft a
+            short customer bulletin about the checkout interruption. Mention the
+            rollback and promise another update without revealing internal
+            configuration details or assigning blame.
+          expected:
+            required: [[checkout], [rollback, rolled back], [update, follow-up]]
+            forbidden: [payment-provider environment variable, blame]
+        - id: checkout_status_summary
+          prompt: >-
+            Use the support macro and incident postmortem crews to prepare an
+            external status summary for the checkout incident. Separate confirmed
+            rollback evidence from the next follow-up and omit the missing secret.
+          expected:
+            required: [[checkout], [rollback, rolled back], [follow-up, update]]
+            forbidden: [payment-provider environment variable, blame]
 
   - id: reliability_labs_incident_release_gate
     company_source: companies/reliability-labs/company.toml
@@ -80,6 +108,35 @@ cases:
       domains: [code, planning]
       tools: [read_file, write_file]
       useful_lesson: Do not turn an incident observation into an unverified release claim.
+    evolution:
+      variants:
+        - id: anchor_release_readiness
+          prompt: >-
+            Delegate to every crew and return a release-readiness recommendation for
+            the checkout change. Include the rollback evidence and the missing
+            production configuration as a verification item; do not claim a fix was
+            deployed unless a crew supplied that evidence.
+          expected:
+            required: [[checkout], [rollback, rolled back], [verification, verify]]
+            forbidden: [fix was deployed, resolved in production]
+        - id: deployment_gate_brief
+          prompt: >-
+            Ask incident, bug-triage, and QA specialists for evidence, then issue a
+            concise deployment gate decision for the checkout change. Distinguish
+            rollback facts from outstanding production verification and do not state
+            that remediation is live without evidence.
+          expected:
+            required: [[checkout], [rollback, rolled back], [verification, verify]]
+            forbidden: [fix was deployed, resolved in production]
+        - id: qa_release_summary
+          prompt: >-
+            Use every crew to prepare an executive QA release summary for the checkout
+            incident. Include confirmed rollback evidence, identify the missing
+            production configuration as work to verify, and avoid any unsupported
+            production-resolution claim.
+          expected:
+            required: [[checkout], [rollback, rolled back], [verification, verify]]
+            forbidden: [fix was deployed, resolved in production]
 
   - id: revenue_ops_evidence_backed_outreach
     company_source: companies/revenue-ops/company.toml
@@ -106,3 +163,31 @@ cases:
       domains: [search, generic]
       tools: [read_file, write_file]
       useful_lesson: Separate source-backed account facts from hypotheses and recommendations.
+    evolution:
+      variants:
+        - id: anchor_northstar_outreach
+          prompt: >-
+            Delegate to every crew and draft an evidence-backed outreach recommendation
+            for Maya Chen at Northstar Labs. Reference the onboarding problem and avoid
+            claiming any metric, customer result, or buying intent absent from the
+            source material.
+          expected:
+            required: [[Maya Chen], [onboarding], [Northstar Labs]]
+            forbidden: [guaranteed, customer result, buying intent]
+        - id: northstar_account_brief
+          prompt: >-
+            Ask outreach, research, and data specialists for their evidence, then write
+            an account brief for Maya Chen at Northstar Labs focused on the onboarding
+            problem. Keep hypotheses labeled and do not invent results, intent, or
+            guarantees.
+          expected:
+            required: [[Maya Chen], [onboarding], [Northstar Labs]]
+            forbidden: [guaranteed, customer result, buying intent]
+        - id: northstar_message_strategy
+          prompt: >-
+            Use all three crews to recommend a source-backed message strategy for Maya
+            Chen at Northstar Labs about onboarding. Separate known account facts from
+            recommendations and omit unsupported metrics, outcomes, or purchase intent.
+          expected:
+            required: [[Maya Chen], [onboarding], [Northstar Labs]]
+            forbidden: [guaranteed, customer result, buying intent]

@@ -100,6 +100,8 @@ class LLMUsage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    provider_transient_retries: int = 0
+    max_token_retries: int = 0
     model: str | None = None
 
 
@@ -140,7 +142,13 @@ class LLMBackend(Protocol):
         ...
 
 
-def _call_with_retry(fn: Callable, transient: tuple[type[Exception], ...], attempts: int = 3, base_delay: float = 0.5):
+def _call_with_retry(
+    fn: Callable,
+    transient: tuple[type[Exception], ...],
+    attempts: int = 3,
+    base_delay: float = 0.5,
+    on_retry: Callable[[], None] | None = None,
+):
     """Call `fn`, retrying transient provider errors (rate limit, connection,
     5xx) with exponential backoff. Non-transient exceptions propagate
     unchanged; exhausting the retries raises LLMError."""
@@ -151,6 +159,8 @@ def _call_with_retry(fn: Callable, transient: tuple[type[Exception], ...], attem
         except transient as e:
             last = e
             if i < attempts - 1:
+                if on_retry is not None:
+                    on_retry()
                 delay = base_delay * (2**i)
                 logger.warning("llm call transient error (attempt %d/%d), retrying in %.1fs: %s", i + 1, attempts, delay, e)
                 time.sleep(delay)
@@ -332,6 +342,11 @@ class AnthropicLLMBackend:
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         import anthropic
 
+        transient_retries = [0]
+
+        def _record_retry() -> None:
+            transient_retries[0] += 1
+
         def _create(max_tokens: int):
             # Stream so a long completion arrives incrementally rather than as one
             # blocking HTTP response the SDK can time out on for large max_tokens.
@@ -351,6 +366,7 @@ class AnthropicLLMBackend:
             return _call_with_retry(
                 _stream_once,
                 transient=(anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError),
+                on_retry=_record_retry,
             )
 
         t0 = time.monotonic()
@@ -394,6 +410,8 @@ class AnthropicLLMBackend:
             output_tokens=_attr_int(usage, "output_tokens") + _attr_int(t_usage, "output_tokens"),
             cache_creation_input_tokens=cache_create,
             cache_read_input_tokens=cache_read,
+            provider_transient_retries=transient_retries[0],
+            max_token_retries=1 if truncated_attempt is not None else 0,
             model=self._model,
         )
         logger.info(
@@ -549,6 +567,11 @@ class OpenAILLMBackend:
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         import openai
 
+        transient_retries = [0]
+
+        def _record_retry() -> None:
+            transient_retries[0] += 1
+
         t0 = time.monotonic()
         oa_messages = [{"role": "system", "content": system}]
         for m in messages:
@@ -583,6 +606,7 @@ class OpenAILLMBackend:
                     **extra_kwargs,
                 ),
                 transient=(openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError),
+                on_retry=_record_retry,
             )
 
         truncated_attempt = None
@@ -629,6 +653,8 @@ class OpenAILLMBackend:
             output_tokens=_attr_int(oai_usage, "completion_tokens")
             + _attr_int(t_usage, "completion_tokens"),
             cache_read_input_tokens=cache_read,
+            provider_transient_retries=transient_retries[0],
+            max_token_retries=1 if truncated_attempt is not None else 0,
             model=self._model,
         )
 
@@ -799,6 +825,11 @@ class GeminiLLMBackend:
         from google.genai import errors as genai_errors
         from google.genai import types
 
+        transient_retries = [0]
+
+        def _record_retry() -> None:
+            transient_retries[0] += 1
+
         contents = self._to_gemini_contents(messages)
 
         def _create(max_tokens: int):
@@ -812,6 +843,7 @@ class GeminiLLMBackend:
                     model=self._model, contents=contents, config=cfg
                 ),
                 transient=(genai_errors.ServerError,),
+                on_retry=_record_retry,
             )
 
         t0 = time.monotonic()
@@ -858,6 +890,8 @@ class GeminiLLMBackend:
             output_tokens=_attr_int(um, "candidates_token_count")
             + _attr_int(t_um, "candidates_token_count"),
             cache_read_input_tokens=g_cache_read,
+            provider_transient_retries=transient_retries[0],
+            max_token_retries=1 if truncated_attempt is not None else 0,
             model=self._model,
         )
         logger.info(
@@ -1063,6 +1097,11 @@ class BedrockLLMBackend:
     def step(self, system: str, messages: list[dict]) -> LLMResponse:
         import botocore.exceptions
 
+        transient_retries = [0]
+
+        def _record_retry() -> None:
+            transient_retries[0] += 1
+
         # Resolve the transient tuple HERE (not in __init__) so a backend built
         # via __new__ in tests -- which skips __init__ -- still works, mirroring
         # the Gemini backend's in-step error import.
@@ -1089,7 +1128,8 @@ class BedrockLLMBackend:
             if self._tools:
                 kwargs["toolConfig"] = {"tools": self._tools}
             return _call_with_retry(
-                lambda: self._client.converse(**kwargs), transient=transient
+                lambda: self._client.converse(**kwargs), transient=transient,
+                on_retry=_record_retry,
             )
 
         t0 = time.monotonic()
@@ -1132,6 +1172,8 @@ class BedrockLLMBackend:
             + _key_int(truncated_attempt, "usage", "cacheReadInputTokens"),
             cache_creation_input_tokens=_key_int(resp, "usage", "cacheWriteInputTokens")
             + _key_int(truncated_attempt, "usage", "cacheWriteInputTokens"),
+            provider_transient_retries=transient_retries[0],
+            max_token_retries=1 if truncated_attempt is not None else 0,
             model=self._model,
         )
         logger.info(

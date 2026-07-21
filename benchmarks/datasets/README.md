@@ -52,10 +52,9 @@ for example, `[rollback, rolled back]`. Define these alternatives before the
 qualification run rather than adding them retroactively to rescue an output.
 
 For each case and condition, create isolated training and holdout directories.
-The memory arm copies only its learned SQLite database into a fresh holdout
-compile. This preserves learned guidelines without leaking files changed in the
-training workspace. The control arm also uses a fresh holdout compile, but does
-not receive the trained database:
+The memory arm discovers every SQLite path declared by the compiled manager and
+agency YAML files, then copies each database into the corresponding path in a
+fresh holdout compile. The control arm removes every declared database:
 
 ```sh
 fabri company compile "$FABRI_ROSTERS_ROOT/companies/support-hq/company.toml" --dest /tmp/support-memory-train
@@ -65,6 +64,7 @@ fabri company compile "$FABRI_ROSTERS_ROOT/companies/support-hq/company.toml" --
 mkdir -p /tmp/support-memory-holdout/support-hq/.fabri
 cp /tmp/support-memory-train/support-hq/.fabri/support_hq.db \
   /tmp/support-memory-holdout/support-hq/.fabri/support_hq.db
+# Repeat for every agency DB declared by the compiled YAML configs.
 FABRI_HOME=/tmp/support-memory-holdout-state \
   fabri --config /tmp/support-memory-holdout/support-hq/ceo.yaml run '<holdout_prompt>'
 
@@ -83,6 +83,28 @@ cost, step count, and retrieved-guideline count. A failed training run
 invalidates its train/holdout pair because failure lessons are still mined.
 Publish curated aggregates only; the raw workspaces and traces can contain
 model output and operational source material.
+
+For a two-replica smoke, continue only when `results.json` reports
+`smoke_gate.go: true`. That requires specialist supply in both memory replicas,
+intact transport, retrieval of the transported entry IDs, and clean controls.
+
+After creating immutable incumbent and candidate snapshots, run the frozen
+three-prompt, two-replica promotion suite with verified-only retrieval:
+
+```sh
+python -m fabri.benchmarks.company_evolution \
+  --dataset benchmarks/datasets/company_memory_experiments.yaml \
+  --case support_hq_safe_incident_response \
+  --incumbent-snapshot /path/to/snapshots/generation-001 \
+  --candidate-snapshot /path/to/snapshots/generation-002 \
+  --current-pointer /path/to/snapshots/current.json \
+  --output-dir benchmarks/runs/support-hq-evolution \
+  --max-cost-usd 1.00
+```
+
+Promotion is atomic and quality-first: no candidate-only rubric regression,
+cost within 5% of the incumbent, a 10% cost or 25% retry improvement, and a
+verified specialist lesson retrieved by at least two prompt variants.
 
 ## Released status
 
