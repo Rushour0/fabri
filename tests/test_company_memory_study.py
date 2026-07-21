@@ -12,7 +12,9 @@ import yaml
 
 from fabri.benchmarks.company_memory_study import (
     CLAIM_BOUNDARY,
+    apply_retrieval_overrides,
     load_memory_case,
+    main,
     render_markdown,
     run_memory_study,
     validate_memory_payload,
@@ -90,6 +92,7 @@ class FakeRunner:
         self.compile_destinations: list[Path] = []
         self.holdout_db_before_run: dict[str, bytes | None] = {}
         self.run_stages: list[tuple[str, str]] = []
+        self.retrieval_configs_before_run: dict[tuple[str, str], dict[str, object]] = {}
 
     def __call__(
         self,
@@ -112,7 +115,10 @@ class FakeRunner:
             self.compile_destinations.append(destination)
             company = destination / "support-hq"
             company.mkdir(parents=True)
-            (company / "ceo.yaml").write_text("agent: {name: ceo}\n", encoding="utf-8")
+            (company / "ceo.yaml").write_text(
+                "agent: {name: ceo}\nmemory:\n  top_k: 5\n",
+                encoding="utf-8",
+            )
             database = company / ".fabri" / "support_hq.db"
             database.parent.mkdir(parents=True)
             database.write_bytes(f"compiled:{destination.name}".encode())
@@ -122,6 +128,11 @@ class FakeRunner:
         stage = "training" if root_config.parents[1].name == "training-compiled" else "holdout"
         condition = root_config.parents[2].name
         self.run_stages.append((condition, stage))
+        root_config_data = yaml.safe_load(root_config.read_text(encoding="utf-8"))
+        assert isinstance(root_config_data, dict)
+        memory = root_config_data.get("memory")
+        assert isinstance(memory, dict)
+        self.retrieval_configs_before_run[(condition, stage)] = memory
         database = root_config.parent / ".fabri" / "support_hq.db"
         if stage == "holdout":
             self.holdout_db_before_run[condition] = (
@@ -204,6 +215,11 @@ def test_memory_study_copies_only_memory_db_and_emits_safe_public_payload(
     assert control_run["rubric_passed"] is False
     assert control_run["guidelines_retrieved"] == 0
     assert result["claim_boundary"] == CLAIM_BOUNDARY
+    assert result["retrieval_overrides"] == {"top_k": None, "retrieval_strategy": None}
+    assert all(
+        config == {"top_k": 5}
+        for config in runner.retrieval_configs_before_run.values()
+    )
     public_text = (tmp_path / "results" / "results.json").read_text(encoding="utf-8")
     assert "Train privately" not in public_text
     assert "memory-training" not in public_text
@@ -211,6 +227,87 @@ def test_memory_study_copies_only_memory_db_and_emits_safe_public_payload(
     validate_memory_payload(emitted)
     markdown = (tmp_path / "results" / "results.md").read_text(encoding="utf-8")
     assert markdown == render_markdown(emitted)
+
+
+def test_apply_retrieval_overrides_rewrites_compiled_node_configs(tmp_path: Path) -> None:
+    config = tmp_path / "compiled" / "support-hq" / "ceo.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "agent: {name: ceo}\nmemory:\n  top_k: 5\n  retrieval_strategy: hybrid\n",
+        encoding="utf-8",
+    )
+
+    changed = apply_retrieval_overrides(
+        tmp_path / "compiled",
+        "support-hq",
+        top_k=11,
+        strategy="hybrid+mmr",
+    )
+
+    assert changed == [str(config)]
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["memory"] == {
+        "top_k": 11,
+        "retrieval_strategy": "hybrid+mmr",
+    }
+    before = config.read_text(encoding="utf-8")
+    assert apply_retrieval_overrides(
+        tmp_path / "compiled", "support-hq", top_k=None, strategy=None
+    ) == []
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("argument", "value", "message"),
+    [
+        ("--retrieval-top-k", "0", "--retrieval-top-k must be an integer between 1 and 50"),
+        ("--retrieval-top-k", "51", "--retrieval-top-k must be an integer between 1 and 50"),
+        ("--retrieval-strategy", "invalid", "--retrieval-strategy must be one of"),
+    ],
+)
+def test_cli_rejects_invalid_retrieval_overrides(
+    argument: str, value: str, message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        main(
+            [
+                "--dataset",
+                "unused.yaml",
+                "--case",
+                "unused",
+                "--output-dir",
+                "unused",
+                argument,
+                value,
+            ]
+        )
+    assert message in capsys.readouterr().err
+
+
+def test_memory_study_applies_and_records_retrieval_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    runner = FakeRunner(roster_root)
+
+    result = run_memory_study(
+        load_memory_case(dataset, "support"),
+        tmp_path / "results",
+        command_runner=runner,
+        retrieval_top_k=11,
+        retrieval_strategy="sparse",
+    )
+
+    assert runner.retrieval_configs_before_run == {
+        ("memory", "training"): {"top_k": 11, "retrieval_strategy": "sparse"},
+        ("memory", "holdout"): {"top_k": 11, "retrieval_strategy": "sparse"},
+        ("control", "training"): {"top_k": 11, "retrieval_strategy": "sparse"},
+        ("control", "holdout"): {"top_k": 11, "retrieval_strategy": "sparse"},
+    }
+    assert result["retrieval_overrides"] == {"top_k": 11, "retrieval_strategy": "sparse"}
+    validate_memory_payload(result)
+    assert "Retrieval overrides: top_k=`11`, retrieval_strategy=`sparse`" in render_markdown(result)
 
 
 def test_incomplete_holdout_gets_no_rubric_verdict(
