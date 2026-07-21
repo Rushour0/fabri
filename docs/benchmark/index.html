@@ -282,10 +282,10 @@
       with empty memory (the control). Across <b>ten replicas</b> of Support HQ, memory retrieved
       <b>2 trained guidelines on every run</b> (control: <b>0</b>) — the mechanism fires reliably. Yet
       the memory arm passed the holdout rubric only <b>7/10 (70%, 95% CI 40–89%)</b>, against
-      <b>9/10 (90%, 95% CI 60–98%)</b> for control. Those two intervals overlap substantially (40–89%
-      vs. 60–98%) — at this sample size the ten-point cost saving is real, but the reliability gap is
-      <b>not statistically resolved</b>; it reads as a mild, inconclusive disadvantage for memory, not a
-      proven one. A preliminary three-replica pilot had shown the <em>opposite</em> sign (memory 3/3 vs
+      <b>9/10 (90%, 95% CI 60–98%)</b> for control. That is a descriptive −20-point gap. The Wilson
+      intervals describe each arm separately, and no paired significance test was run, so this does
+      not establish a statistically significant disadvantage for memory. A preliminary three-replica
+      pilot had shown the <em>opposite</em> sign (memory 3/3 vs
       control 2/3, both with CIs spanning roughly 20–100% at n=3 — barely more than a coin flip's worth
       of evidence); the larger sample did not so much shrink that gain as flip its point estimate — the
       same small-sample fragility documented in §3. On this workload the self-improvement loop runs and
@@ -296,9 +296,9 @@
       31–83%)</b> against control's <b>7/10 (70%, 95% CI 40–89%)</b> on the same 10-replica basis
       (control completed only 9 of its 10 scheduled replicas; the completed-only rate is 7/9, 78%, but
       that is not on the same denominator as memory's 7/10 — comparing like-for-like, memory trails by
-      <b>10 points</b>, and it cost ~19% more). As with Support HQ, the two 95% intervals (31–83% vs.
-      40–89%) overlap almost entirely — this is another <b>unresolved</b> difference, not a confirmed
-      one. Across the two companies measured so far, trace-backed memory fires reliably but is not shown
+      <b>10 points</b>, and it cost ~19% more). As with Support HQ, this is a descriptive difference;
+      no paired significance test was run. Across the two companies measured so far, trace-backed
+      memory fires reliably but is not shown
       to improve reliability, and both point estimates run slightly the other way. Varying the
       <em>retrieval configuration</em> does not rescue it: raising <code>top_k</code> from 5 to 10, and
       switching to MMR-diversified selection, left the retrieved evidence unchanged — memory returned the
@@ -319,8 +319,8 @@
         </table>
       </div>
       <figcaption><b>Table 2.</b> Memory vs. control on a fresh Support HQ holdout, ten replicas, with
-        95% Wilson intervals. The intervals overlap (40–89% vs. 60–98%): memory does not measurably
-        improve — and its point estimate slightly trails — rubric reliability at this sample size. A
+        descriptive per-arm 95% Wilson intervals. No paired significance test was run; memory's point
+        estimate trails control, but the study does not establish a statistically significant gap. A
         3-replica pilot showed the opposite sign, a direct illustration of the small-sample fragility in
         §3.</figcaption>
     </figure>
@@ -338,8 +338,8 @@
       </div>
       <figcaption><b>Table 2b.</b> Memory vs. control on a fresh Reliability Labs holdout, ten replicas
         (control completed 9 of 10 scheduled). Reported on the same 10-replica denominator for both arms
-        so the comparison is apples-to-apples; intervals overlap (31–83% vs. 40–89%), so this is another
-        unresolved, not confirmed, difference.</figcaption>
+        so the comparison is apples-to-apples. The intervals are descriptive; no paired significance
+        test was run.</figcaption>
     </figure>
 
     <h2 style="margin-top:36px"><span class="num">6.1</span>Retrieval-configuration sweep</h2>

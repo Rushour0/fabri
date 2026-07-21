@@ -1,4 +1,4 @@
-"""CI gate: retrieval CONFIG cannot conjure evidence that isn't in the store.
+"""Fixture-specific CI regression checks for retrieval configuration.
 
 This locks in the benchmark discovery (results/benchmarks/retrieval-config-sweep,
 2026-07) that tuning top_k / strategy (hybrid vs hybrid+mmr) is not the lever for
@@ -9,28 +9,28 @@ Builds one small in-memory guideline corpus with ~2 entries that are genuinely
 relevant to a fixed query and a pile (~18) of topically-distinct distractors --
 enough that hybrid fusion and MMR diversification have real ranking work to do,
 not a tautological 2-vs-2 pick -- then runs `_retrieve_inner` under multiple
-configs and checks two properties:
+configs and checks two properties on this frozen corpus/query fixture:
 
-  1. top_k (5 vs 10) never changes WHICH relevant ids a given strategy finds --
-     only how many ranked slots surround them. Widening top_k cannot make a
-     strategy discover relevance that its ranking didn't already put near the
-     top.
-  2. No config -- including hybrid+mmr, which the existing offline eval already
-     documents as trading recall for diversity (see test_retrieval_eval_gate.py
-     HYBRID_MMR_RECALL5_FLOOR, well below hybrid's) -- ever returns MORE
-     relevant ids than the corpus actually contains. A config can rank or even
-     drop relevant evidence differently; it can never manufacture extra
-     evidence that isn't in the store.
+  1. top_k (5 vs 10) preserves the relevant-id set for each fixed strategy.
+  2. hybrid+mmr does not surface a relevant id that plain hybrid misses.
+
+These assertions protect the published sweep's concrete reproduction. They do
+not claim that top_k or MMR are invariant for arbitrary corpora and queries.
 
 Skips cleanly where sqlite-vec isn't installed.
 """
 from __future__ import annotations
+
+import hashlib
+import math
+import re
 
 import pytest
 
 pytest.importorskip("sqlite_vec")  # the sqlite embedded store needs sqlite-vec
 
 from fabri.memory.embedded_store import SqliteMemoryStore
+from fabri.memory.embeddings import EMBEDDING_DIM
 from fabri.memory.schema import MemoryEntry
 from fabri.orchestrator.retrieval import RetrievalConfig, _retrieve_inner
 
@@ -72,8 +72,23 @@ DISTRACTOR_TEXTS = [
 ]
 
 
+def _offline_embed(text: str) -> list[float]:
+    """Stable token-hash embedding for this ranking fixture; never downloads."""
+    vector = [0.0] * EMBEDDING_DIM
+    for token in re.findall(r"[a-z0-9]+", text.lower().replace("_", " ")):
+        index = int.from_bytes(hashlib.sha256(token.encode()).digest()[:4], "big") % EMBEDDING_DIM
+        vector[index] += 1.0
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / norm for value in vector]
+
+
 @pytest.fixture()
-def corpus_store(tmp_path) -> SqliteMemoryStore:
+def corpus_store(tmp_path, monkeypatch) -> SqliteMemoryStore:
+    import fabri.memory.embedded_store as embedded_store
+    import fabri.orchestrator.retrieval as retrieval
+
+    monkeypatch.setattr(embedded_store, "embed", _offline_embed)
+    monkeypatch.setattr(retrieval, "embed", _offline_embed)
     store = SqliteMemoryStore(path=tmp_path / "memory.db", collection="invariance_test")
     for text in RELEVANT_TEXTS + DISTRACTOR_TEXTS:
         store.upsert(MemoryEntry(text=text, kind="tactical"))
@@ -98,8 +113,7 @@ def _retrieved_relevant_ids(
 # Grouped by strategy so top_k invariance is checked within a fixed strategy --
 # hybrid+mmr's diversification legitimately ranks (and can drop) relevant
 # candidates differently from plain hybrid; that's a documented trade-off, not
-# a bug this gate should chase. What must never happen, for ANY of these
-# configs, is surfacing MORE relevant ids than the corpus contains.
+# a bug this fixture-specific gate should chase.
 STRATEGY_CONFIGS: dict[str, dict[str, dict]] = {
     "hybrid": {
         "top5": dict(top_k=5, retrieval_config=RetrievalConfig(strategy="hybrid")),
@@ -111,17 +125,9 @@ STRATEGY_CONFIGS: dict[str, dict[str, dict]] = {
     },
 }
 
-ALL_CONFIGS: dict[str, dict] = {
-    f"{strategy}_{tk_name}": kwargs
-    for strategy, by_topk in STRATEGY_CONFIGS.items()
-    for tk_name, kwargs in by_topk.items()
-}
-
 
 def test_top_k_does_not_change_relevant_set_within_a_strategy(corpus_store):
-    """Within a fixed strategy, top_k 5 vs 10 must find the SAME relevant ids --
-    a wider top_k widens the ranked short-list, it does not change which
-    guidelines the strategy considers relevant to begin with."""
+    """Freeze the sweep fixture's observed top_k=5 vs. top_k=10 result."""
     relevant_ids = _relevant_ids()
     assert len(relevant_ids) == 2
 
@@ -133,8 +139,7 @@ def test_top_k_does_not_change_relevant_set_within_a_strategy(corpus_store):
         top5, top10 = found["top5"], found["top10"]
         assert top5 == top10, (
             f"strategy {strategy!r}: top_k=5 found {top5} but top_k=10 found "
-            f"{top10} -- widening top_k changed WHICH relevant guidelines were "
-            f"found, not just the ranked list size"
+            f"{top10} on the frozen retrieval-sweep fixture"
         )
 
 
@@ -150,29 +155,8 @@ def test_hybrid_finds_the_full_relevant_set(corpus_store):
     )
 
 
-def test_no_config_exceeds_the_corpus_relevant_ceiling(corpus_store):
-    """No config -- across top_k or strategy, including hybrid+mmr's
-    diversification -- may surface MORE than the 2 relevant guidelines that
-    exist in the corpus. This is the core claim: retrieval config can re-rank
-    or even under-surface relevant evidence, but it can never conjure evidence
-    that was never mined into the store in the first place."""
-    relevant_ids = _relevant_ids()
-    for name, kwargs in ALL_CONFIGS.items():
-        ids = _retrieved_relevant_ids(corpus_store, relevant_ids, **kwargs)
-        assert ids <= relevant_ids  # tautological given the `&` in the helper; documents intent
-        assert len(ids) <= len(relevant_ids), (
-            f"config {name!r} somehow returned more relevant hits ({ids}) than "
-            f"exist in the corpus ({relevant_ids})"
-        )
-
-
 def test_mmr_never_finds_relevant_ids_hybrid_missed(corpus_store):
-    """hybrid+mmr may find FEWER relevant ids than plain hybrid (diversity
-    trading away a near-duplicate relevant hit -- see
-    test_retrieval_eval_gate.py's much lower HYBRID_MMR recall floors), but it
-    must never find MORE: MMR only re-ranks/diversifies the same base
-    candidate pool hybrid produces, it cannot introduce evidence hybrid's
-    fusion never surfaced."""
+    """Freeze the sweep fixture's observed hybrid vs. hybrid+mmr result."""
     relevant_ids = _relevant_ids()
     for tk_name in ("top5", "top10"):
         hybrid_ids = _retrieved_relevant_ids(
@@ -183,6 +167,5 @@ def test_mmr_never_finds_relevant_ids_hybrid_missed(corpus_store):
         )
         assert mmr_ids <= hybrid_ids, (
             f"{tk_name}: hybrid+mmr found relevant ids {mmr_ids} not present in "
-            f"plain hybrid's {hybrid_ids} -- MMR should only diversify hybrid's "
-            f"candidate pool, never surface extra relevant evidence hybrid missed"
+            f"plain hybrid's {hybrid_ids} on the frozen retrieval-sweep fixture"
         )

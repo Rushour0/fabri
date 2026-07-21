@@ -70,6 +70,9 @@ class EventType(str, Enum):
     # surface for "why is retrieval weak" and the raw material a report rollup
     # or OTel span reads. See docs/design/memory-observability-plan.md (A).
     RETRIEVAL = "retrieval"
+    # Post-run trace-mining funnel for this agent/session. Carries counts and
+    # reason-coded skips; it is observability only and never enters prompts.
+    MINING_REPORT = "mining_report"
 
 
 def emit_discrepancy(session_id: str, path: str, reason: str) -> None:

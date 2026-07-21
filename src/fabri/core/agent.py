@@ -274,11 +274,15 @@ def _run_single_attempt(
         usage_totals.output_tokens += resp_usage.output_tokens
         usage_totals.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
         usage_totals.cache_read_input_tokens += resp_usage.cache_read_input_tokens
+        usage_totals.provider_transient_retries += resp_usage.provider_transient_retries
+        usage_totals.max_token_retries += resp_usage.max_token_retries
         bucket = usage_by_model.setdefault(resp_usage.model or "", LLMUsage(model=resp_usage.model))
         bucket.input_tokens += resp_usage.input_tokens
         bucket.output_tokens += resp_usage.output_tokens
         bucket.cache_creation_input_tokens += resp_usage.cache_creation_input_tokens
         bucket.cache_read_input_tokens += resp_usage.cache_read_input_tokens
+        bucket.provider_transient_retries += resp_usage.provider_transient_retries
+        bucket.max_token_retries += resp_usage.max_token_retries
 
     def _budget_breached() -> bool:
         if max_cost_usd is None:
@@ -858,6 +862,8 @@ def _run_single_attempt(
         "output_tokens": usage_totals.output_tokens,
         "cache_creation_input_tokens": usage_totals.cache_creation_input_tokens,
         "cache_read_input_tokens": usage_totals.cache_read_input_tokens,
+        "provider_transient_retries": usage_totals.provider_transient_retries,
+        "max_token_retries": usage_totals.max_token_retries,
         "step_count": step_count,
         "wall_time_s": round(time.monotonic() - run_t0, 3),
         "cost_usd": own_cost,

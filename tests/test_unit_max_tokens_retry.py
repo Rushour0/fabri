@@ -89,6 +89,8 @@ def test_truncation_retries_once_at_double_cap_then_succeeds():
     # into the reported usage (4096 + 50 output).
     assert resp.usage.output_tokens == 4096 + 50
     assert resp.usage.input_tokens == 10 + 10
+    assert resp.usage.max_token_retries == 1
+    assert resp.usage.provider_transient_retries == 0
 
 
 def test_truncation_twice_fails_loud():
@@ -103,6 +105,7 @@ def test_no_truncation_is_a_single_call():
     resp = b.step("sys", [{"role": "user", "content": "go"}])
     assert len(b._client.calls) == 1
     assert resp.usage.output_tokens == 20
+    assert resp.usage.max_token_retries == 0
 
 
 def test_retry_cap_is_bounded_by_ceiling():

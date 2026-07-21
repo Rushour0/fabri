@@ -1,5 +1,7 @@
 import hashlib
+import json
 import re
+from dataclasses import dataclass, field
 from typing import Callable
 
 from fabri.core.llm import LLMBackend, LLMUsage
@@ -16,10 +18,73 @@ from fabri.memory.embeddings import embeddings_available
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD, ingest_guideline
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
-from fabri.orchestrator.traces import read_trace
+from fabri.orchestrator.traces import log_event, read_trace
 from fabri.tools.result import is_error
 
 logger = get_logger()
+
+_MEMORY_SCOPES = frozenset({"agent", "agency", "company"})
+
+
+@dataclass
+class MiningReport:
+    """Reason-coded, per-agent account of one trace-mining pass."""
+
+    session_id: str
+    producer_agent_id: str | None
+    qualifying_events: dict[str, int] = field(default_factory=dict)
+    candidates_produced: int = 0
+    inserted: int = 0
+    merged: int = 0
+    skipped: int = 0
+    skip_reasons: list[str] = field(default_factory=list)
+    entry_ids: list[str] = field(default_factory=list)
+
+    def skip(self, reason: str) -> None:
+        self.skipped += 1
+        self.skip_reasons.append(reason)
+
+    def disposition(self, action: str, entry: MemoryEntry) -> None:
+        if action == "inserted":
+            self.inserted += 1
+        elif action == "merged":
+            self.merged += 1
+        if entry.id not in self.entry_ids:
+            self.entry_ids.append(entry.id)
+
+    def to_event(self) -> dict[str, object]:
+        return {
+            "type": EventType.MINING_REPORT.value,
+            "producer_agent_id": self.producer_agent_id,
+            "qualifying_events": self.qualifying_events,
+            "candidates_produced": self.candidates_produced,
+            "inserted": self.inserted,
+            "merged": self.merged,
+            "skipped": self.skipped,
+            "skip_reasons": sorted(self.skip_reasons),
+            "entry_ids": sorted(self.entry_ids),
+        }
+
+
+def _source_event_id(session_id: str, index: int, event: dict) -> str:
+    existing = event.get("event_id")
+    if isinstance(existing, str) and existing:
+        return existing
+    canonical = json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(f"{session_id}:{index}:{canonical}".encode()).hexdigest()
+    return digest[:32]
+
+
+def _emit_mining_report(
+    report: MiningReport,
+    on_report: Callable[[MiningReport], None] | None,
+) -> None:
+    try:
+        log_event(report.session_id, report.to_event())
+    except (OSError, ValueError):
+        logger.warning("could not persist mining report for %s", report.session_id, exc_info=True)
+    if on_report is not None:
+        on_report(report)
 
 
 def is_tool_failure(event: dict) -> bool:
@@ -208,6 +273,9 @@ def process_trace(
     max_entries: int | None = None,
     eviction_half_life_days: float = 30.0,
     eviction_strategy: str = "delete",
+    producer_agent_id: str | None = None,
+    memory_scope: str = "agent",
+    on_report: Callable[[MiningReport], None] | None = None,
 ) -> list[MemoryEntry]:
     """Mine a session's trace for failures, synthesize each into a compressed
     guideline, and ingest it into memory (dedup/promote per pruning rules).
@@ -228,17 +296,58 @@ def process_trace(
     arbitrarily large external log costs $0; `llm` is never invoked in that
     mode. Both default to today's behaviour (read from disk, LLM synthesis) so
     every existing caller is byte-identical."""
+    if memory_scope not in _MEMORY_SCOPES:
+        raise ValueError(f"unsupported memory scope: {memory_scope}")
+    report = MiningReport(session_id=session_id, producer_agent_id=producer_agent_id)
     if not embeddings_available():
         logger.info("memory learning disabled — install fabri[embeddings] to enable")
+        report.skip("embeddings_unavailable")
+        _emit_mining_report(report, on_report)
         return []
 
     if events is None:
         events = read_trace(session_id)
+    if not events:
+        report.skip("empty_trace")
+        _emit_mining_report(report, on_report)
+        return []
+    event_ids = {
+        id(event): _source_event_id(session_id, index, event)
+        for index, event in enumerate(events)
+    }
     task = next((e["task"] for e in events if e.get("type") == EventType.START.value), "")
     failures = [e for e in events if is_tool_failure(e)]
+    discrepancies = [event for event in events if is_discrepancy(event)]
+    final_events = [event for event in events if event.get("type") == EventType.FINAL.value]
+    report.qualifying_events = {
+        "tool_failures": len(failures),
+        "discrepancies": len(discrepancies),
+        "finals": len(final_events),
+    }
     logger.info("processing trace %s: %d failure(s) found", session_id, len(failures))
 
     new_entries: list[MemoryEntry] = []
+
+    def _ingest(
+        text: str,
+        *,
+        source_events: list[dict],
+        verification: str = "unverified",
+        **kwargs: object,
+    ) -> MemoryEntry:
+        report.candidates_produced += 1
+        return ingest_guideline(
+            store,
+            text,
+            session_id,
+            producer_agent_id=producer_agent_id,
+            scope=memory_scope,
+            verification=verification,
+            source_event_ids=[event_ids[id(event)] for event in source_events],
+            applicability=[task] if task else [],
+            on_disposition=report.disposition,
+            **kwargs,
+        )
 
     if record_postmortem and events:
         postmortem_text = build_postmortem_text(events)
@@ -246,10 +355,9 @@ def process_trace(
         # future task pulls the postmortem via the tag path too, not just
         # vector similarity.
         failed_tools = list(dict.fromkeys(e["name"] for e in failures if e.get("name")))
-        entry = ingest_guideline(
-            store,
+        entry = _ingest(
             postmortem_text,
-            session_id,
+            source_events=events,
             tools=failed_tools,
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
@@ -285,6 +393,7 @@ def process_trace(
                     "skipping generic success pattern for %s: no recovery evidence",
                     session_id,
                 )
+                report.skip("success_missing_tool_evidence")
             else:
                 success_summary = (
                     f"Task: {task}\n"
@@ -300,22 +409,27 @@ def process_trace(
                 if agent_memory:
                     memory_lines = "\n".join(f"{k}: {v}" for k, v in agent_memory.items())
                     success_summary += f"\nAgent-reported memory:\n{memory_lines}"
-                if synthesize:
-                    success_text = synthesize_success_pattern(
-                        success_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
-                    )
-                else:
-                    success_text = _deterministic_success_text(
-                        task, tool_names, final_event.get("outcome", "success"),
-                    )
+                try:
+                    if synthesize:
+                        success_text = synthesize_success_pattern(
+                            success_summary, llm,
+                            max_tokens=guideline_max_tokens, on_usage=on_usage,
+                        )
+                    else:
+                        success_text = _deterministic_success_text(
+                            task, tool_names, final_event.get("outcome", "success"),
+                        )
+                except Exception:  # noqa: BLE001 -- emit diagnostics, then preserve failure
+                    report.skip("success_synthesis_failed")
+                    _emit_mining_report(report, on_report)
+                    raise
                 logger.debug(
                     "success pattern (%d tokens): %r",
                     count_tokens(success_text), success_text,
                 )
-                entry = ingest_guideline(
-                    store,
+                entry = _ingest(
                     success_text,
-                    session_id,
+                    source_events=[final_event, *ok_tool_calls],
                     tools=unique_tools,
                     similarity_threshold=similarity_threshold,
                     promotion_threshold_sessions=promotion_threshold_sessions,
@@ -331,16 +445,20 @@ def process_trace(
                     on_eviction_usage=on_usage,
                 )
                 new_entries.append(entry)
+        else:
+            report.skip("success_missing_ok_tool_call")
+    else:
+        report.skip("success_missing_final")
 
     for event in events:
         if not is_discrepancy(event):
             continue
         path = event.get("path", "<unknown>")
         guideline_text = _discrepancy_guideline_text(path)
-        entry = ingest_guideline(
-            store,
+        entry = _ingest(
             guideline_text,
-            session_id,
+            source_events=[event],
+            verification="tool_verified",
             tools=["write_file", "edit_file"],
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
@@ -362,9 +480,15 @@ def process_trace(
                 f"Task: {task}\nTool: {event['name']}\nArgs: {event.get('args', {})}\n"
                 f"Failure: {(event.get('result') or {}).get('error')}"
             )
-            guideline_text = synthesize_guideline(
-                failure_summary, llm, max_tokens=guideline_max_tokens, on_usage=on_usage,
-            )
+            try:
+                guideline_text = synthesize_guideline(
+                    failure_summary, llm,
+                    max_tokens=guideline_max_tokens, on_usage=on_usage,
+                )
+            except Exception:  # noqa: BLE001 -- emit diagnostics, then preserve failure
+                report.skip("failure_synthesis_failed")
+                _emit_mining_report(report, on_report)
+                raise
         else:
             guideline_text = _deterministic_failure_text(task, event)
         logger.debug(
@@ -373,10 +497,10 @@ def process_trace(
             event["name"],
             guideline_text,
         )
-        entry = ingest_guideline(
-            store,
+        entry = _ingest(
             guideline_text,
-            session_id,
+            source_events=[event],
+            verification="unverified" if synthesize else "tool_verified",
             tools=[event["name"]],
             similarity_threshold=similarity_threshold,
             promotion_threshold_sessions=promotion_threshold_sessions,
@@ -395,4 +519,7 @@ def process_trace(
         )
         new_entries.append(entry)
 
+    if report.candidates_produced == 0 and not report.skip_reasons:
+        report.skip("no_qualifying_events")
+    _emit_mining_report(report, on_report)
     return new_entries

@@ -1,6 +1,7 @@
 # fabri
 
 [![PyPI](https://img.shields.io/pypi/v/fabri.svg)](https://pypi.org/project/fabri/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/fabri?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/fabri)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Rushour0/fabri/blob/main/LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/fabri.svg)](https://pypi.org/project/fabri/)
 

@@ -255,11 +255,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         post_run_usage.output_tokens += u.output_tokens
         post_run_usage.cache_creation_input_tokens += u.cache_creation_input_tokens
         post_run_usage.cache_read_input_tokens += u.cache_read_input_tokens
+        post_run_usage.provider_transient_retries += u.provider_transient_retries
+        post_run_usage.max_token_retries += u.max_token_retries
         bucket = post_run_by_model.setdefault(u.model or "", LLMUsage(model=u.model))
         bucket.input_tokens += u.input_tokens
         bucket.output_tokens += u.output_tokens
         bucket.cache_creation_input_tokens += u.cache_creation_input_tokens
         bucket.cache_read_input_tokens += u.cache_read_input_tokens
+        bucket.provider_transient_retries += u.provider_transient_retries
+        bucket.max_token_retries += u.max_token_retries
 
     _eviction_half_life = (
         mem_cfg.get("eviction_half_life_days")
@@ -278,6 +282,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         max_entries=mem_cfg.get("max_entries"),
         eviction_half_life_days=float(_eviction_half_life),
         eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
+        producer_agent_id=config.get("agent", {}).get("name"),
+        memory_scope=mem_cfg.get("scope", "agent"),
     )
     if (post_run_usage.input_tokens or post_run_usage.output_tokens
             or post_run_usage.cache_creation_input_tokens
@@ -296,6 +302,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             "output_tokens": post_run_usage.output_tokens,
             "cache_creation_input_tokens": post_run_usage.cache_creation_input_tokens,
             "cache_read_input_tokens": post_run_usage.cache_read_input_tokens,
+            "provider_transient_retries": post_run_usage.provider_transient_retries,
+            "max_token_retries": post_run_usage.max_token_retries,
             "cost_usd": round(post_cost_total, 6),
             "cost_by_model": post_cost_by_model,
         })
@@ -339,6 +347,8 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
         max_entries=mem_cfg.get("max_entries"),
         eviction_half_life_days=float(_eviction_half_life_ingest),
         eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
+        producer_agent_id=config.get("agent", {}).get("name"),
+        memory_scope=mem_cfg.get("scope", "agent"),
     )
     print(json.dumps([e.to_payload() for e in entries], indent=2))
 

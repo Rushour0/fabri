@@ -23,7 +23,8 @@ from fabri.ingest import (
 )
 from fabri.memory.embedded_store import SqliteMemoryStore
 from fabri.memory.store import QdrantMemoryStore
-from fabri.orchestrator.pipeline import process_trace
+from fabri.memory.verification import apply_session_verification
+from fabri.orchestrator.pipeline import MiningReport, process_trace
 from fabri.runtime import build_llm, build_tool_defs, build_tools
 from fabri.tools.agent_tool import make_agent_tool_manifest
 from fabri.tools.registry import ToolRegistry
@@ -44,6 +45,7 @@ __all__ = [
     "GeminiLLMBackend",
     "LLMBackend",
     "LLMError",
+    "MiningReport",
     "OpenAILLMBackend",
     "Outcome",
     "QdrantMemoryStore",
@@ -55,6 +57,7 @@ __all__ = [
     "build_tool_defs",
     "build_tools",
     "describe_config",
+    "apply_session_verification",
     "load_config",
     "make_agent_tool_manifest",
     "memory_summary",

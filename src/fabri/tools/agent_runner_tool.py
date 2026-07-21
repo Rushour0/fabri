@@ -131,6 +131,8 @@ def main() -> int:
                 max_entries=mem_cfg.get("max_entries"),
                 eviction_half_life_days=float(_eviction_half_life),
                 eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
+                producer_agent_id=config.get("agent", {}).get("name"),
+                memory_scope=mem_cfg.get("scope", "agent"),
             )
         except Exception as e:
             # Deliberate deviation from cli.py's cmd_run: there, a mining

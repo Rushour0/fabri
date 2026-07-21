@@ -248,6 +248,13 @@ def ingest_guideline(
     eviction_llm=None,
     eviction_guideline_max_tokens: int = DEFAULT_MAX_TOKENS,
     on_eviction_usage: Callable | None = None,
+    producer_agent_id: str | None = None,
+    scope: str = "agent",
+    verification: str = "unverified",
+    source_event_ids: list[str] | None = None,
+    applicability: list[str] | None = None,
+    do_not_reuse_when: list[str] | None = None,
+    on_disposition: Callable[[str, MemoryEntry], None] | None = None,
 ) -> MemoryEntry:
     """Insert or merge a new candidate guideline. A near-duplicate of an existing
     entry (cosine sim >= similarity_threshold, tactical *or* strategic) increments
@@ -259,6 +266,9 @@ def ingest_guideline(
     time."""
     tags = tags or []
     tools = tools or []
+    source_event_ids = source_event_ids or []
+    applicability = applicability or []
+    do_not_reuse_when = do_not_reuse_when or []
     with _collection_lock(store.collection):
         # A4: success_pattern entries are deduped against same-kind entries
         # only, so a "what worked" guideline doesn't merge into a textually
@@ -286,6 +296,30 @@ def ingest_guideline(
             entry, score = existing
             if session_id not in entry.session_ids:
                 entry.session_ids.append(session_id)
+            if session_id not in entry.source_session_ids:
+                entry.source_session_ids.append(session_id)
+            for event_id in source_event_ids:
+                if event_id not in entry.source_event_ids:
+                    entry.source_event_ids.append(event_id)
+            for value in applicability:
+                if value not in entry.applicability:
+                    entry.applicability.append(value)
+            for value in do_not_reuse_when:
+                if value not in entry.do_not_reuse_when:
+                    entry.do_not_reuse_when.append(value)
+            if entry.producer_agent_id is None:
+                entry.producer_agent_id = producer_agent_id
+                entry.agent_id = producer_agent_id
+            verification_rank = {
+                "unverified": 0,
+                "tool_verified": 1,
+                "rubric_verified": 2,
+                "contradicted": 3,
+            }
+            if verification_rank.get(verification, 0) > verification_rank.get(
+                entry.verification, 0
+            ):
+                entry.verification = verification
             entry.hit_count += 1
             for tool_name in tools:
                 if tool_name not in entry.tools:
@@ -307,6 +341,8 @@ def ingest_guideline(
             store.upsert(entry)
             if entry.id != old_id:
                 store.delete(old_id)
+            if on_disposition is not None:
+                on_disposition("merged", entry)
             return entry
 
         auto_domain = _classify_domain(text, tools) if kind != "postmortem" else "generic"
@@ -324,9 +360,19 @@ def ingest_guideline(
             domain=auto_domain,
             outcome=auto_outcome,
             dedup_key=dedup_key,
+            agent_id=producer_agent_id,
+            producer_agent_id=producer_agent_id,
+            scope=scope,
+            verification=verification,
+            source_session_ids=[session_id],
+            source_event_ids=source_event_ids,
+            applicability=applicability,
+            do_not_reuse_when=do_not_reuse_when,
         )
         logger.debug("inserted new %s guideline: %r tools=%s domain=%s", kind, entry.text, entry.tools, entry.domain)
         store.upsert(entry)
+        if on_disposition is not None:
+            on_disposition("inserted", entry)
 
     # Eviction runs outside the per-ingest lock: iterate() is a full scan
     # and holding the lock for it would block concurrent ingests unnecessarily.

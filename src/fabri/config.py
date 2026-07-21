@@ -181,6 +181,11 @@ DEFAULT_CONFIG = {
         # retrieval/prompt cost for generic "the tools worked" summaries.
         # Kept opt-in while existing deployments migrate their memories.
         "success_pattern_requires_evidence": False,
+        # "any" preserves legacy memories; "verified" injects only lessons
+        # backed by deterministic tool evidence or an external rubric.
+        "retrieval_verification": "any",
+        # Provenance boundary stamped onto newly mined entries.
+        "scope": "agent",
         # M1: when true, every run (any outcome) also writes one deterministic
         # whole-run postmortem to memory — task + outcome + retry/cost signal —
         # retrieved by task similarity so a similar future task sees "last time

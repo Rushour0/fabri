@@ -495,6 +495,7 @@ def test_step_transient_server_error_is_retried_then_succeeds(monkeypatch):
     resp = b.step("sys", [{"role": "user", "content": "go"}])
     assert resp.final_text == "recovered"
     assert len(b._client.calls) == 2  # one failed attempt, one success
+    assert resp.usage.provider_transient_retries == 1
 
 
 def test_step_transient_server_error_exhausts_retries_to_llmerror(monkeypatch):
