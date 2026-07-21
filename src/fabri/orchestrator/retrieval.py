@@ -38,6 +38,9 @@ def _emit_retrieval_event(session_id: str, payload: dict) -> None:
 
 DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
+# Upper bound on the ActionMemory candidate scan in propose_actions -- keeps it
+# from degrading into an unbounded full-store read as the store grows.
+_ACTION_SCAN_LIMIT = 200
 # Keyed on (tool name, description) so a description edit invalidates.
 _tool_embedding_cache: dict[tuple[str, str], list[float]] = {}
 _embeddings_disabled_logged = False
@@ -130,9 +133,20 @@ class RetrievalConfig:
 def propose_actions(
     store: QdrantMemoryStore, current_state: dict, *, top_n: int = 1
 ) -> list[dict]:
-    """Return the highest-confidence applicable ActionMemory resolutions."""
+    """Return the highest-confidence applicable ActionMemory resolutions.
+
+    Fail-closed: a store error (e.g. a transient Qdrant blip mid-scan) degrades to
+    an empty proposal list rather than aborting the agent turn, matching every
+    other store access in this module. The scan is bounded -- resolutions only ride
+    on ``success_pattern`` entries -- so it never becomes an unbounded full-store
+    read as the store grows.
+    """
+    try:
+        entries = store.iterate(kind="success_pattern", limit=_ACTION_SCAN_LIMIT)
+    except Exception:  # noqa: BLE001 -- degrade to no proposal, never abort retrieval
+        return []
     ranked: list[tuple[float, dict]] = []
-    for entry in store.iterate():
+    for entry in entries:
         resolution = entry.resolution
         if isinstance(resolution, dict) and applicable(resolution, current_state):
             ranked.append((apply_confidence(resolution, current_state, 1.0), resolution))

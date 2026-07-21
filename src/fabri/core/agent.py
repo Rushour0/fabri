@@ -223,6 +223,14 @@ def _run_single_attempt(
 
     current_state = None
     if retrieval_config is not None and retrieval_config.memory_action_enabled:
+        # KNOWN LIMITATION (shadow-mode Part 1): this only carries THIS agent's own
+        # backend config (main/decompose/...), not sibling agency-role config or the
+        # company/agency identifiers. So config-precondition actions (e.g. the
+        # Revenue-Ops researcher/writer max_tokens fix) cannot match here -- that
+        # detection belongs at the orchestration/compile layer where the whole
+        # compiled agency is visible. The recurrence/surfacing mechanism is proven at
+        # the propose_actions() level (see tests/test_memory_action_golden.py); live
+        # cross-agent enablement is a deliberate follow-up, not wired here.
         current_state = {
             "roles_config": {
                 role: {"max_tokens": max_tokens}

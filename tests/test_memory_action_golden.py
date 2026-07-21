@@ -111,3 +111,23 @@ def test_prompt_adds_proposal_block_only_when_actions_exist() -> None:
     assert build_system_prompt("context", "", proposed_actions=[]) == without_actions
     assert PROPOSED_ACTION_NOTE.split("\n", 1)[0] not in without_actions
     assert "configure_role({'role': 'researcher', 'max_tokens': 2048})" in with_actions
+
+
+def _live_agent_current_state() -> dict:
+    """The shape `agent.py::_run_single_attempt` actually builds today: keyed by
+    the request's LLM backend SLOTS (main/decompose/...), with NO company/agency.
+    A single agent cannot see sibling agency-role config, so this documents the
+    live integration gap -- config-precondition detection belongs at the
+    orchestration/compile layer, not inside one agent's run."""
+    return {
+        "roles_config": {"main": {"max_tokens": 768}, "decompose": {"max_tokens": 768}},
+        "task": "Produce the Revenue Ops market research brief.",
+    }
+
+
+def test_live_agent_current_state_cannot_match_today() -> None:
+    # Honest guard (code-review finding): the golden tests above hand-build a
+    # current_state shape the real agent loop never produces. Through the actual
+    # _run_single_attempt-built state, no config-precondition action can match,
+    # because company/agency are absent and roles are keyed by backend slot.
+    assert propose_actions(_store(_resolution()), _live_agent_current_state()) == []
