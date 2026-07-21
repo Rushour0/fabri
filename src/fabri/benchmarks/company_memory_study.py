@@ -45,6 +45,7 @@ CLAIM_BOUNDARY = (
     "general memory effectiveness."
 )
 _ALLOWED_CONDITIONS = {"memory", "control"}
+_ALLOWED_RETRIEVAL_STRATEGIES = {"dense", "sparse", "hybrid", "hybrid+mmr"}
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,19 @@ def _positive_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ProbeError(f"{field} must be a positive integer")
     return value
+
+
+def _validate_retrieval_overrides(
+    top_k: int | None, strategy: str | None
+) -> None:
+    """Validate optional retrieval settings accepted by the study runner."""
+    if top_k is not None and (
+        not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 50
+    ):
+        raise ProbeError("--retrieval-top-k must be an integer between 1 and 50")
+    if strategy is not None and strategy not in _ALLOWED_RETRIEVAL_STRATEGIES:
+        choices = ", ".join(sorted(_ALLOWED_RETRIEVAL_STRATEGIES))
+        raise ProbeError(f"--retrieval-strategy must be one of: {choices}")
 
 
 def _load_dataset(path: Path) -> dict[str, object]:
@@ -226,6 +240,43 @@ def _compile_company(
     )
 
 
+def apply_retrieval_overrides(
+    compiled_dest: Path,
+    company_name: str,
+    *,
+    top_k: int | None,
+    strategy: str | None,
+) -> list[str]:
+    """Rewrite optional retrieval settings into every raw compiled node config."""
+    _validate_retrieval_overrides(top_k, strategy)
+    if top_k is None and strategy is None:
+        return []
+
+    changed: list[str] = []
+    for config_path in sorted((compiled_dest / company_name).glob("*.yaml")):
+        try:
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ProbeError(f"could not read compiled config {config_path}: {exc}") from exc
+        except yaml.YAMLError as exc:
+            raise ProbeError(f"malformed YAML in compiled config {config_path}: {exc}") from exc
+        raw = _as_mapping(loaded, str(config_path))
+        memory = _as_mapping(raw.setdefault("memory", {}), f"{config_path}.memory")
+        raw["memory"] = memory
+        if top_k is not None:
+            memory["top_k"] = top_k
+        if strategy is not None:
+            memory["retrieval_strategy"] = strategy
+        try:
+            config_path.write_text(
+                yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
+            )
+        except OSError as exc:
+            raise ProbeError(f"could not write compiled config {config_path}: {exc}") from exc
+        changed.append(str(config_path))
+    return changed
+
+
 def _run_company(
     root_config: Path,
     prompt: str,
@@ -333,6 +384,8 @@ def _run_pair(
     command_cwd: Path,
     environment: Mapping[str, str],
     timeout_s: float,
+    retrieval_top_k: int | None,
+    retrieval_strategy: str | None,
 ) -> dict[str, object]:
     """Run one training-to-fresh-holdout pair, retaining raw material privately."""
     attempt_root = work_root / f"replica-{replica:02d}" / condition
@@ -361,6 +414,12 @@ def _run_pair(
         result = _invalid_run(replica, condition, None, None, "training_compile_failed")
         _private_write(attempt_root, processes, result)
         return result
+    apply_retrieval_overrides(
+        train_dest,
+        case.company_name,
+        top_k=retrieval_top_k,
+        strategy=retrieval_strategy,
+    )
 
     train_root = train_dest / case.company_name / f"{case.root_id}.yaml"
     if not train_root.is_file():
@@ -443,6 +502,12 @@ def _run_pair(
         )
         _private_write(attempt_root, processes, result)
         return result
+    apply_retrieval_overrides(
+        holdout_dest,
+        case.company_name,
+        top_k=retrieval_top_k,
+        strategy=retrieval_strategy,
+    )
 
     holdout_root = holdout_dest / case.company_name / f"{case.root_id}.yaml"
     train_db = _memory_db(train_dest, case)
@@ -642,6 +707,16 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
             raise ProbeError(f"memory payload field {key!r} has an invalid type")
     if payload["study"] != "company-memory-vs-control":
         raise ProbeError("memory payload study has an invalid value")
+    retrieval_overrides = payload.get("retrieval_overrides")
+    if retrieval_overrides is not None:
+        if not isinstance(retrieval_overrides, dict):
+            raise ProbeError("memory payload retrieval_overrides has an invalid type")
+        for key in ("top_k", "retrieval_strategy"):
+            if key not in retrieval_overrides:
+                raise ProbeError(f"memory payload retrieval_overrides missing key: {key}")
+        top_k = retrieval_overrides.get("top_k")
+        strategy = retrieval_overrides.get("retrieval_strategy")
+        _validate_retrieval_overrides(top_k, strategy)
     if not isinstance(payload["replicas"], int) or payload["replicas"] < 1:
         raise ProbeError("memory payload replicas must be positive")
     conditions = payload["conditions"]
@@ -737,9 +812,18 @@ def render_markdown(payload: dict[str, object]) -> str:
     def display(value: object, format_spec: str, prefix: str = "") -> str:
         return "—" if value is None else f"{prefix}{float(value):{format_spec}}"
 
+    retrieval_overrides = payload.get("retrieval_overrides")
+    if isinstance(retrieval_overrides, dict):
+        top_k = retrieval_overrides.get("top_k")
+        strategy = retrieval_overrides.get("retrieval_strategy")
+    else:
+        top_k = None
+        strategy = None
+
     lines = [
         "# Company memory vs control study",
         "",
+        f"- Retrieval overrides: top_k=`{top_k}`, retrieval_strategy=`{strategy}`",
         f"- Case: `{payload['case_id']}`",
         f"- Company: `{payload['company']}`",
         f"- Fabri version: `{payload['fabri_version'] or 'unavailable'}`",
@@ -792,10 +876,13 @@ def run_memory_study(
     command_runner: CommandRunner = _run_command,
     run_timeout_s: float = DEFAULT_RUN_TIMEOUT_S,
     cwd: Path | None = None,
+    retrieval_top_k: int | None = None,
+    retrieval_strategy: str | None = None,
 ) -> dict[str, object]:
     """Run sequential, fresh-compile memory and control replicas and publish aggregates."""
     if run_timeout_s <= 0:
         raise ProbeError("run_timeout_s must be positive")
+    _validate_retrieval_overrides(retrieval_top_k, retrieval_strategy)
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     work_root = output / "private-attempts"
@@ -818,6 +905,8 @@ def run_memory_study(
                     command_cwd,
                     environment,
                     run_timeout_s,
+                    retrieval_top_k,
+                    retrieval_strategy,
                 )
             )
     aggregates = {
@@ -837,6 +926,10 @@ def run_memory_study(
         "company": case.company_name,
         "fabri_version": fabri_version,
         "source": source_manifest,
+        "retrieval_overrides": {
+            "top_k": retrieval_top_k,
+            "retrieval_strategy": retrieval_strategy,
+        },
         "replicas": case.replicas,
         "conditions": list(case.conditions),
         "runs": runs,
@@ -858,12 +951,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--replicas", type=int, default=None)
     parser.add_argument("--run-timeout-s", type=float, default=DEFAULT_RUN_TIMEOUT_S)
+    parser.add_argument("--retrieval-top-k", type=int, default=None)
+    parser.add_argument("--retrieval-strategy", default=None)
     args = parser.parse_args(argv)
     if args.run_timeout_s <= 0:
         parser.error("--run-timeout-s must be positive")
     try:
+        _validate_retrieval_overrides(args.retrieval_top_k, args.retrieval_strategy)
         case = load_memory_case(args.dataset, args.case_id, replicas_override=args.replicas)
-        result = run_memory_study(case, args.output_dir, run_timeout_s=args.run_timeout_s)
+        result = run_memory_study(
+            case,
+            args.output_dir,
+            run_timeout_s=args.run_timeout_s,
+            retrieval_top_k=args.retrieval_top_k,
+            retrieval_strategy=args.retrieval_strategy,
+        )
     except (OSError, ProbeError) as exc:
         parser.error(str(exc))
     print(
