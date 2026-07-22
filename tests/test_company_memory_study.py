@@ -13,6 +13,7 @@ import yaml
 from fabri.benchmarks.company_memory_study import (
     CLAIM_BOUNDARY,
     _invalid_run,
+    apply_holdout_response_contract,
     apply_retrieval_overrides,
     discover_memory_dbs,
     load_memory_case,
@@ -66,7 +67,20 @@ report_to = "ceo"
                         "holdout_prompt": "Hold out privately.",
                         "expected": {
                             "required": [["checkout"], ["rollback", "rolled back"]],
+                            "structured": {"decision": "READY"},
                             "forbidden": ["blame"],
+                        },
+                        "legacy_expected": {
+                            "required": [["checkout"], ["rollback", "rolled back"]],
+                            "forbidden": ["legacy-only"],
+                        },
+                        "response_schema": {
+                            "type": "object",
+                            "required": ["response", "decision"],
+                            "properties": {
+                                "response": {"type": "string"},
+                                "decision": {"type": "string"},
+                            },
                         },
                         "setup_probe": {"required_delegations": ["crew"]},
                         "retrieval_expectations": {"useful_lesson": "be factual"},
@@ -88,16 +102,19 @@ class FakeRunner:
         incomplete_holdout: str | None = None,
         failed_training: str | None = None,
         truncated_training: str | None = None,
+        structured_outputs: Mapping[str, object] | None = None,
     ) -> None:
         self.roster_root = roster_root
         self.incomplete_holdout = incomplete_holdout
         self.failed_training = failed_training
         self.truncated_training = truncated_training
+        self.structured_outputs = structured_outputs
         self.compile_destinations: list[Path] = []
         self.holdout_db_before_run: dict[str, bytes | None] = {}
         self.holdout_dbs_before_run: dict[str, dict[str, bytes | None]] = {}
         self.run_stages: list[tuple[str, str]] = []
         self.retrieval_configs_before_run: dict[tuple[str, str], dict[str, object]] = {}
+        self.response_contracts_before_run: dict[tuple[str, str], dict[str, object]] = {}
 
     def __call__(
         self,
@@ -124,7 +141,7 @@ class FakeRunner:
             specialist_db = company / ".fabri" / "support_hq_crew.db"
             (company / "ceo.yaml").write_text(
                 yaml.safe_dump({
-                    "agent": {"name": "ceo"},
+                    "agent": {"name": "ceo", "system_prompt": "Delegate and summarize."},
                     "memory": {
                         "backend": "sqlite", "top_k": 5,
                         "sqlite_path": str(manager_db),
@@ -158,6 +175,9 @@ class FakeRunner:
         memory = root_config_data.get("memory")
         assert isinstance(memory, dict)
         self.retrieval_configs_before_run[(condition, stage)] = memory
+        agent = root_config_data.get("agent")
+        assert isinstance(agent, dict)
+        self.response_contracts_before_run[(condition, stage)] = agent
         database = root_config.parent / ".fabri" / "support_hq.db"
         if stage == "holdout":
             self.holdout_db_before_run[condition] = (
@@ -217,11 +237,21 @@ class FakeRunner:
             encoding="utf-8",
         )
         final_text = "checkout rollback" if condition == "memory" else "checkout rollback blame"
+        structured_output: object = None
+        if stage == "holdout":
+            if self.structured_outputs is not None:
+                structured_output = self.structured_outputs.get(condition)
+            else:
+                structured_output = {
+                    "response": final_text,
+                    "decision": "READY" if condition == "memory" else "UNKNOWN",
+                }
         payload = {
             "session_id": session,
             "success": not failed,
             "final_text": final_text,
             "outcome": outcome,
+            "structured_output": structured_output,
             "usage": {"cost_usd": 0.01},
         }
         return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
@@ -256,6 +286,7 @@ def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     control_run = next(run for run in runs if run["condition"] == "control")
     assert memory_run["rubric_passed"] is True
     assert control_run["rubric_passed"] is False
+    assert memory_run["scoring_mode"] == "structured"
     assert control_run["guidelines_retrieved"] == 0
     assert memory_run["funnel"]["transport"]["intact"] is True
     assert control_run["funnel"]["transport"]["intact"] is True
@@ -265,13 +296,144 @@ def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
         config["top_k"] == 5 and config["backend"] == "sqlite"
         for config in runner.retrieval_configs_before_run.values()
     )
+    for condition in ("memory", "control"):
+        training_agent = runner.response_contracts_before_run[(condition, "training")]
+        holdout_agent = runner.response_contracts_before_run[(condition, "holdout")]
+        assert "response_schema" not in training_agent
+        assert holdout_agent["response_schema"] == case.response_schema
+        assert "READY" not in json.dumps(holdout_agent["response_schema"])
     public_text = (tmp_path / "results" / "results.json").read_text(encoding="utf-8")
     assert "Train privately" not in public_text
     assert "memory-training" not in public_text
     emitted = json.loads(public_text)
+    assert all("structured_output" not in run for run in emitted["runs"])
+    private_result = json.loads(
+        (
+            tmp_path
+            / "results/private-attempts/replica-01/memory/private/result.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert private_result["structured_output"] == {
+        "response": "checkout rollback",
+        "decision": "READY",
+    }
     validate_memory_payload(emitted)
     markdown = (tmp_path / "results" / "results.md").read_text(encoding="utf-8")
     assert markdown == render_markdown(emitted)
+
+
+def test_load_memory_case_accepts_only_value_free_string_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+
+    case = load_memory_case(dataset, "support")
+
+    assert case.structured_fields == {"decision": "READY"}
+    assert case.legacy_required_terms == (("checkout",), ("rollback", "rolled back"))
+    assert case.legacy_forbidden_terms == ("legacy-only",)
+    assert case.response_schema == {
+        "type": "object",
+        "required": ["response", "decision"],
+        "properties": {
+            "response": {"type": "string"},
+            "decision": {"type": "string"},
+        },
+    }
+    assert "READY" not in json.dumps(case.response_schema)
+
+    data = yaml.safe_load(dataset.read_text(encoding="utf-8"))
+    data["cases"][0]["response_schema"]["properties"]["decision"]["enum"] = ["READY"]
+    dataset.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ProbeError, match="must expose only type: string"):
+        load_memory_case(dataset, "support")
+
+
+def test_load_memory_case_allows_structured_case_without_archive_rubric(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    data = yaml.safe_load(dataset.read_text(encoding="utf-8"))
+    del data["cases"][0]["legacy_expected"]
+    dataset.write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+
+    case = load_memory_case(dataset, "support")
+
+    assert case.legacy_required_terms is None
+    assert case.legacy_forbidden_terms is None
+
+
+def test_apply_holdout_response_contract_sets_strict_root_only_schema(tmp_path: Path) -> None:
+    root = tmp_path / "ceo.yaml"
+    root.write_text(
+        yaml.safe_dump(
+            {"agent": {"name": "ceo", "system_prompt": "Base prompt."}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    schema = {
+        "type": "object",
+        "required": ["response", "decision"],
+        "properties": {
+            "response": {"type": "string"},
+            "decision": {"type": "string"},
+        },
+    }
+
+    apply_holdout_response_contract(root, schema)
+
+    agent = yaml.safe_load(root.read_text(encoding="utf-8"))["agent"]
+    assert agent["response_schema"] == schema
+    assert agent["response_retries"] == 1
+    assert agent["error_strategy"] == "strict"
+    assert "return the JSON object matching" in agent["system_prompt"]
+    assert "append the required AGENT_MEMORY block" in agent["system_prompt"]
+
+
+@pytest.mark.parametrize(
+    ("structured_output", "expected_missing", "expected_forbidden"),
+    [
+        ({"response": "safe"}, ["missing:decision"], []),
+        (None, ["structured_output:not_a_mapping"], []),
+        (
+            {"response": "This assigns blame.", "decision": "READY"},
+            [],
+            ["blame"],
+        ),
+    ],
+)
+def test_structured_required_and_designated_prose_safety_are_both_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    structured_output: object,
+    expected_missing: list[str],
+    expected_forbidden: list[str],
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = replace(load_memory_case(dataset, "support"), conditions=("memory",))
+    runner = FakeRunner(roster_root, structured_outputs={"memory": structured_output})
+
+    result = run_memory_study(case, tmp_path / "results", command_runner=runner)
+
+    run = cast(list[dict[str, object]], result["runs"])[0]
+    assert run["rubric_passed"] is False
+    assert run["missing_required"] == expected_missing
+    assert run["forbidden_hits"] == expected_forbidden
+    private_result = json.loads(
+        (
+            tmp_path
+            / "results/private-attempts/replica-01/memory/private/result.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert "structured_output" in private_result
+    assert private_result["structured_output"] == structured_output
+    assert "structured_output" not in cast(list[dict[str, object]], result["runs"])[0]
 
 
 def test_apply_retrieval_overrides_rewrites_compiled_node_configs(tmp_path: Path) -> None:

@@ -21,12 +21,13 @@ import sys
 import time
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
+from fabri.benchmarks.company_record import score_arm_output
 from fabri.benchmarks.company_setup_probe import (
     DEFAULT_RUN_TIMEOUT_S,
     SUCCESS_OUTCOMES,
@@ -37,7 +38,6 @@ from fabri.benchmarks.company_setup_probe import (
     _run_command,
     analyze_run,
     build_source_manifest,
-    score_text,
 )
 
 
@@ -48,6 +48,11 @@ CLAIM_BOUNDARY = (
 )
 _ALLOWED_CONDITIONS = {"memory", "control"}
 _ALLOWED_RETRIEVAL_STRATEGIES = {"dense", "sparse", "hybrid", "hybrid+mmr"}
+_STRUCTURED_RESPONSE_INSTRUCTION = (
+    "For the final executive response, return the JSON object matching "
+    "agent.response_schema first. Put all user-facing prose in the response field. "
+    "After the complete JSON object, append the required AGENT_MEMORY block."
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,10 @@ class MemoryCase:
     retrieval_expectations: dict[str, object]
     replicas: int
     conditions: tuple[str, ...]
+    structured_fields: Mapping[str, object] = field(default_factory=dict)
+    response_schema: Mapping[str, object] = field(default_factory=dict)
+    legacy_required_terms: tuple[tuple[str, ...], ...] | None = None
+    legacy_forbidden_terms: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +142,35 @@ def _conditions(value: object, field: str) -> tuple[str, ...]:
     return conditions
 
 
+def _validated_response_schema(
+    value: object,
+    structured_fields: Mapping[str, object],
+    field: str,
+) -> dict[str, object]:
+    """Accept only the value-free string schema used by memory holdouts."""
+    schema = _as_mapping(value, field)
+    allowed_top_level = {"type", "required", "properties"}
+    if set(schema) != allowed_top_level or schema.get("type") != "object":
+        raise ProbeError(
+            f"{field} must contain exactly type, required, and properties for an object"
+        )
+    properties = _as_mapping(schema.get("properties"), f"{field}.properties")
+    expected_keys = {"response", *structured_fields}
+    if set(properties) != expected_keys:
+        raise ProbeError(
+            f"{field}.properties must be response plus every expected structured field"
+        )
+    for key, property_schema in properties.items():
+        if property_schema != {"type": "string"}:
+            raise ProbeError(
+                f"{field}.properties.{key} must expose only type: string"
+            )
+    required = _as_string_list(schema.get("required"), f"{field}.required")
+    if len(required) != len(set(required)) or set(required) != expected_keys:
+        raise ProbeError(f"{field}.required must contain every schema property exactly once")
+    return schema
+
+
 def load_memory_case(
     dataset_path: str | Path,
     case_id: str,
@@ -192,6 +230,25 @@ def load_memory_case(
         selected.get("holdout_prompt"), f"case {case_id}.holdout_prompt"
     )
     expected = _as_mapping(selected.get("expected"), f"case {case_id}.expected")
+    legacy_expected_value = selected.get("legacy_expected")
+    legacy_expected = (
+        None
+        if legacy_expected_value is None
+        else _as_mapping(
+            legacy_expected_value,
+            f"case {case_id}.legacy_expected",
+        )
+    )
+    structured_fields = _as_mapping(
+        expected.get("structured"), f"case {case_id}.expected.structured"
+    )
+    if not structured_fields:
+        raise ProbeError(f"case {case_id}.expected.structured must not be empty")
+    response_schema = _validated_response_schema(
+        selected.get("response_schema"),
+        structured_fields,
+        f"case {case_id}.response_schema",
+    )
     setup = _as_mapping(selected.get("setup_probe"), f"case {case_id}.setup_probe")
     retrieval_expectations = _as_mapping(
         selected.get("retrieval_expectations"), f"case {case_id}.retrieval_expectations"
@@ -215,7 +272,25 @@ def load_memory_case(
         training_prompt=training_prompt,
         holdout_prompt=holdout_prompt,
         required_terms=_as_required_groups(expected.get("required"), "expected.required"),
+        structured_fields=structured_fields,
         forbidden_terms=_as_string_list(expected.get("forbidden"), "expected.forbidden"),
+        response_schema=response_schema,
+        legacy_required_terms=(
+            _as_required_groups(
+                legacy_expected.get("required"),
+                f"case {case_id}.legacy_expected.required",
+            )
+            if legacy_expected is not None
+            else None
+        ),
+        legacy_forbidden_terms=(
+            _as_string_list(
+                legacy_expected.get("forbidden"),
+                f"case {case_id}.legacy_expected.forbidden",
+            )
+            if legacy_expected is not None
+            else None
+        ),
         required_delegations=_as_string_list(
             setup.get("required_delegations"),
             f"case {case_id}.setup_probe.required_delegations",
@@ -224,6 +299,39 @@ def load_memory_case(
         replicas=replicas,
         conditions=conditions,
     )
+
+
+def apply_holdout_response_contract(
+    root_config: Path,
+    response_schema: Mapping[str, object],
+) -> None:
+    """Inject strict structured output into one freshly compiled holdout root."""
+    try:
+        loaded = yaml.safe_load(root_config.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ProbeError(f"could not read compiled root config {root_config}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ProbeError(f"malformed YAML in compiled root config {root_config}: {exc}") from exc
+    raw = _as_mapping(loaded, str(root_config))
+    agent = _as_mapping(raw.get("agent"), f"{root_config}.agent")
+    system_prompt = _required_string(
+        agent.get("system_prompt"), f"{root_config}.agent.system_prompt"
+    )
+    if _STRUCTURED_RESPONSE_INSTRUCTION not in system_prompt:
+        agent["system_prompt"] = (
+            system_prompt.rstrip() + "\n\n" + _STRUCTURED_RESPONSE_INSTRUCTION
+        )
+    agent["response_schema"] = dict(response_schema)
+    agent["response_retries"] = 1
+    agent["error_strategy"] = "strict"
+    raw["agent"] = agent
+    try:
+        root_config.write_text(
+            yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise ProbeError(f"could not write compiled root config {root_config}: {exc}") from exc
 
 
 def _compile_company(
@@ -510,7 +618,11 @@ def _private_write(
             continue
         (private / f"{label}.stdout").write_text(process.stdout, encoding="utf-8")
         (private / f"{label}.stderr").write_text(process.stderr, encoding="utf-8")
-    (private / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    private_result = dict(result)
+    private_result.setdefault("structured_output", None)
+    (private / "result.json").write_text(
+        json.dumps(private_result, indent=2), encoding="utf-8"
+    )
 
 
 # Reasons that mean the training phase itself never produced a successful,
@@ -561,6 +673,7 @@ def _invalid_run(
         "condition": condition,
         "holdout_complete": False,
         "rubric_passed": None,
+        "scoring_mode": "structured",
         "missing_required": [],
         "forbidden_hits": [],
         "total_cost_usd": training_cost if isinstance(training_cost, (int, float)) else None,
@@ -823,6 +936,19 @@ def _run_pair(
         )
         _private_write(attempt_root, processes, result)
         return result
+    try:
+        apply_holdout_response_contract(holdout_root, case.response_schema)
+    except ProbeError as exc:
+        result = _invalid_run(
+            replica,
+            condition,
+            training_outcome,
+            training_cost,
+            "holdout_response_contract_invalid",
+            execution_order=execution_order,
+        )
+        _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
+        return result
 
     try:
         holdout_run, holdout_elapsed = _run_company(
@@ -869,11 +995,16 @@ def _run_pair(
         complete = False
         holdout_failures.append("control_guidelines_retrieved_nonzero")
     final_text = holdout_payload.get("final_text")
-    rubric = score_text(
-        final_text if isinstance(final_text, str) else "",
+    structured_output = holdout_payload.get("structured_output")
+    rubric = score_arm_output(
+        {"structured_output": structured_output},
+        final_text if isinstance(final_text, str) else None,
         case.required_terms,
+        case.structured_fields,
         case.forbidden_terms,
     )
+    if rubric is None:  # Structured mode always returns a deterministic verdict.
+        raise ProbeError("structured scoring unexpectedly returned no verdict")
     holdout_funnel = _funnel_observations(holdout_state)
     transported_entry_ids = {
         str(entry_id)
@@ -886,6 +1017,7 @@ def _run_pair(
         "condition": condition,
         "holdout_complete": complete,
         "rubric_passed": rubric["passed"] if complete else None,
+        "scoring_mode": rubric["scoring_mode"],
         "missing_required": rubric["missing"] if complete else [],
         "forbidden_hits": rubric["forbidden"] if complete else [],
         "total_cost_usd": _sum_costs(training_cost, holdout_analysis.get("total_cost_usd")),
@@ -935,6 +1067,7 @@ def _run_pair(
             "holdout_wall_time_s": holdout_elapsed,
             "training_session_id": train_payload.get("session_id"),
             "holdout_session_id": holdout_payload.get("session_id"),
+            "structured_output": structured_output,
         },
     )
     return result
@@ -1104,6 +1237,7 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "condition": (str,),
         "holdout_complete": (bool,),
         "rubric_passed": (bool, type(None)),
+        "scoring_mode": (str,),
         "missing_required": (list,),
         "forbidden_hits": (list,),
         "total_cost_usd": (int, float, type(None)),
@@ -1127,6 +1261,8 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
                 raise ProbeError(f"memory payload run {index} field {key!r} has an invalid type")
         if run["rubric_passed"] is not None and run["holdout_complete"] is not True:
             raise ProbeError(f"memory payload run {index} has a rubric verdict without completion")
+        if run["scoring_mode"] != "structured":
+            raise ProbeError(f"memory payload run {index} has an invalid scoring mode")
         if run["training_success"] is True and run["training_failure_reasons"]:
             raise ProbeError(
                 f"memory payload run {index} reports training success with training failures"

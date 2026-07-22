@@ -495,7 +495,12 @@ def _run_single_attempt(
         value: object | None = None
         last_errors: list[str] = []
         for attempt in range(max(0, response_retries) + 1):
-            value, errors = parse_response(text, response_schema)
+            # Company root managers append a machine-memory suffix after their
+            # answer. Validate only the human-facing answer, but keep `text`
+            # whole so the FINAL trace still feeds post-run memory mining. With
+            # no marker, split_agent_output returns the original bytes exactly.
+            answer, _ = split_agent_output(text)
+            value, errors = parse_response(answer, response_schema)
             log_event(session_id, {
                 "type": EventType.STRUCTURED_OUTPUT.value,
                 "step": step,
