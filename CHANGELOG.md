@@ -4,6 +4,46 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.19.2 — 2026-07-22
+
+### Fixed
+
+- **Rubric scoring was invalid in both directions.** Forbidden terms used a fixed 60-character
+  negation lookbehind, so a negation cue one clause back was missed (false positive) *and* a
+  negation cue in a **previous sentence** wrongly exempted a real hit (false negative). The window
+  is now scoped to the enclosing sentence (capped at 400 chars). Required terms used naive
+  substring matching, so a correct answer phrased differently scored as missing — e.g. "share
+  **further customer-facing updates**" failed the required literal `further update`. Required
+  matching is now order-preserving proximity within one sentence (≤4 intervening words, plural and
+  hyphen/compound tolerant); single-word requirements keep their exact prior behavior, and the
+  forbidden side is deliberately **not** loosened.
+- **A "control" arm was never a no-memory control.** It started with no transported DB but still
+  mined and retrieved its own lessons within the same run — contamination the study could only
+  detect after the fact, which is why 2 of 3 companies had zero usable control arms.
+
+### Added
+
+- **Real memory off-switches.** `memory.mining_enabled` and `memory.retrieval_enabled` (both default
+  `True`). Mining is gated at both `process_trace` call sites; retrieval short-circuits before any
+  embedding or store query. The memory study writes both `False` into every compiled node for
+  control arms — verified live at **0 guidelines retrieved**.
+- **ActionMemory mining + shadow action detection.** `ingest_guideline` accepts `tier` and
+  `resolution`; new `memory/action_mining.py` turns a run that hit `max_token_retries` into a typed
+  `{problem_signature, scope, preconditions, steps, postconditions, rollback, evidence, policy}`
+  resolution, stored as a quarantine-tier entry keyed by its recurrence fingerprint. `cmd_run` makes
+  a **shadow** (log-only, never executed) `detect_proposed_actions` call behind
+  `memory.memory_action_enabled` (default off). A test asserts a miner-produced candidate satisfies
+  `recurrence.applicable()` and is refused against an already-fixed state.
+- **`benchmarks/rescore_runs.py`.** Re-extracts each arm's real holdout output from its trace and
+  re-scores it with the current rubric, reporting raw vs corrected without re-spending.
+
+### Changed
+
+- **Re-measured memory vs a true control (36 arms, $4.82).** No significant memory effect on quality
+  or cost on any of three companies. Both the prior "memory hurts" headline and this study's own
+  initial "+100pp memory wins" were scoring artifacts. See
+  `benchmarks/results/memory-vs-true-control-2026-07-22.md`.
+
 ## 0.19.1 — 2026-07-22
 
 ### Added

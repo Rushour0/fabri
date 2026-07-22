@@ -462,6 +462,11 @@ def test_score_text_is_case_insensitive_and_deterministic() -> None:
 def test_score_text_matches_required_terms_by_proximity_and_light_morphology() -> None:
     required = (("follow-up", "further update"),)
 
+    assert score_text("We will provide a follow-up.", required, ()) == {
+        "passed": True,
+        "missing": [],
+        "forbidden": [],
+    }
     assert score_text("We will provide a followup.", required, ()) == {
         "passed": True,
         "missing": [],
