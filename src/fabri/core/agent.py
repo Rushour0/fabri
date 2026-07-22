@@ -519,6 +519,7 @@ def _run_single_attempt(
             try:
                 resp = llm.step(system, msgs)
             except LLMError as e:
+                _accumulate(e.usage)
                 return text, False, f"structured-output retry failed: {e}", None
             _accumulate(resp.usage)
             _track_last_text(resp)
@@ -632,6 +633,7 @@ def _run_single_attempt(
                     })
                     continue
             except LLMError as e:
+                _accumulate(e.usage)
                 item_failed = True
                 item_error = str(e)
                 logger.error("step %d: unrecoverable llm error: %s", global_step, e)
@@ -694,6 +696,7 @@ def _run_single_attempt(
                 task, planner_backend, max_items=planner_max_items, on_usage=_accumulate,
             )
         except LLMError as e:
+            _accumulate(e.usage)
             failed = True
             error_reason = f"planner failed: {e}"
             plan_items = []
@@ -1327,7 +1330,6 @@ def _dispatch_tool_calls(
         if (
             is_agent_child
             and on_subagent_cost is not None
-            and bool(result.get("ok"))
             and isinstance(child_usage, dict)
         ):
             child_cost = child_usage.get("total_cost_usd")
@@ -1336,8 +1338,20 @@ def _dispatch_tool_calls(
             if isinstance(child_cost, (int, float)):
                 on_subagent_cost(float(child_cost))
 
-        # spawn_subagent-specific bookkeeping: nested-outcome surfacing, the
-        # unaccounted-cost marker, and fan-out stats.
+        if is_agent_child:
+            ok = bool(result.get("ok"))
+            nested_outcome = child.get("outcome") if isinstance(child, dict) else None
+            if ok and nested_outcome is not None and nested_outcome != Outcome.SUCCESS.value:
+                had_failure = True
+            if on_subagent_finished is not None:
+                on_subagent_finished(
+                    call,
+                    ok,
+                    child_usage if isinstance(child_usage, dict) else None,
+                )
+
+        # spawn_subagent-specific unaccounted-cost marker. Nested outcomes and
+        # fan-out stats above cover both dynamic and static delegated agents.
         if call.name == SPAWN_SUBAGENT_TOOL_NAME:
             ok = bool(result.get("ok"))
             # A spawn_subagent call can exit 0 (ok=True -- the subprocess
@@ -1347,9 +1361,6 @@ def _dispatch_tool_calls(
             # the PARENT's own had_failure bookkeeping so a parent can never
             # report a cleaner outcome than the worst outcome any of its
             # nested specialist calls actually experienced.
-            nested_outcome = child.get("outcome") if isinstance(child, dict) else None
-            if ok and nested_outcome is not None and nested_outcome != Outcome.SUCCESS.value:
-                had_failure = True
             # A spawn that failed without surfacing usage (e.g. qdrant down ->
             # the runner crashed before printing its final JSON) almost always
             # burned real provider tokens that the parent can't roll into its
@@ -1365,11 +1376,6 @@ def _dispatch_tool_calls(
                     "child_returncode": err_payload.get("returncode"),
                     "child_stderr_tail": err_payload.get("stderr_tail"),
                 })
-            if on_subagent_finished is not None:
-                on_subagent_finished(
-                    call, ok,
-                    child_usage if isinstance(child_usage, dict) else None,
-                )
 
         event = {
             "type": EventType.TOOL_CALL.value,

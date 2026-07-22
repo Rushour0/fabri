@@ -87,3 +87,15 @@ def derive_scope_from_collection(collection: str | None) -> tuple[str | None, st
     if not separator or not namespace or not node_id:
         return None, None
     return namespace, node_id
+
+
+def resolve_action_scope(memory_config: Mapping[str, object]) -> tuple[str | None, str | None]:
+    """Prefer compiler-stamped scope and retain collection parsing as fallback."""
+    scope = memory_config.get("action_scope")
+    if isinstance(scope, Mapping):
+        company = scope.get("company")
+        agency = scope.get("agency")
+        if isinstance(company, str) and company and isinstance(agency, str) and agency:
+            return company, agency
+    collection = memory_config.get("collection")
+    return derive_scope_from_collection(collection if isinstance(collection, str) else None)

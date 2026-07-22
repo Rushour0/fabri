@@ -75,6 +75,13 @@ def test_revenue_ops_action_is_detected_and_proposed_with_high_confidence() -> N
     assert apply_confidence(resolution, current_state, 1.0) >= 0.9
 
 
+def test_promoted_action_remains_executable() -> None:
+    resolution = _resolution()
+    entry = MemoryEntry(text="promoted recovery", kind="strategic", resolution=resolution)
+
+    assert propose_actions(MemoryStore([entry]), _state()) == [resolution]
+
+
 @pytest.mark.parametrize(
     "current_state, resolution",
     [

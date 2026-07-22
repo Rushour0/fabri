@@ -310,13 +310,29 @@ def test_multiple_spawns_each_roll_up():
     assert round(sum(captured), 6) == 0.22
 
 
-def test_failed_spawn_contributes_nothing():
-    # ok=false -> no rollup, and the dispatch reports a failure.
+def test_failed_spawn_with_usage_still_rolls_up_billed_cost():
+    # A failed child still consumed provider tokens. Excluding it makes failure
+    # curricula and company cost comparisons systematically under-report COGS.
     captured = []
     reg = _SpawnRegistry(ok=False, usage={"total_cost_usd": 9.99})
     had_failure = _dispatch(reg, [_spawn_call()], captured, "p-failed")
     assert had_failure is True
-    assert captured == []  # nothing rolled up from a failed spawn
+    assert captured == [9.99]
+
+
+def test_failed_static_specialist_with_usage_rolls_up_billed_cost():
+    captured = []
+    reg = _SpawnRegistry(ok=False, usage={"total_cost_usd": 0.44})
+
+    had_failure = _dispatch(
+        reg,
+        [_static_specialist_call()],
+        captured,
+        "p-static-failed",
+    )
+
+    assert had_failure is True
+    assert captured == [0.44]
 
 
 # ============================================================================

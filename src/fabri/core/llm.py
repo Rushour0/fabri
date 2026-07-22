@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import re
 import time
@@ -59,6 +61,10 @@ class LLMError(RuntimeError):
     Outcome.FAILED and ends the run cleanly instead of crashing with a raw
     provider traceback."""
 
+    def __init__(self, message: str, *, usage: LLMUsage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
+
 
 def _retry_cap(current: int, ceiling: int) -> int:
     """The cap for the one-shot retry after a max_tokens truncation: double the
@@ -68,7 +74,13 @@ def _retry_cap(current: int, ceiling: int) -> int:
     return min(current * 2, ceiling)
 
 
-def _truncation_error(provider: str, cap: int, suffix: str = "") -> LLMError:
+def _truncation_error(
+    provider: str,
+    cap: int,
+    suffix: str = "",
+    *,
+    usage: LLMUsage | None = None,
+) -> LLMError:
     """The shared 'still truncated after the one retry' failure. Reaching this
     means even `cap` wasn't enough: a tool_use block may carry partial/invalid
     args and a cut-off text answer isn't a real final answer, so we fail loud
@@ -76,7 +88,8 @@ def _truncation_error(provider: str, cap: int, suffix: str = "") -> LLMError:
     return LLMError(
         f"{provider} response truncated at max_tokens even after retry to "
         f"{cap}; raise llm.max_tokens "
-        f"or split this turn into smaller actions{suffix}"
+        f"or split this turn into smaller actions{suffix}",
+        usage=usage,
     )
 
 
@@ -430,6 +443,7 @@ class AnthropicLLMBackend:
                 "anthropic",
                 _retry_cap(self._max_tokens, ANTHROPIC_MAX_TOKENS_CEILING),
                 " (fewer/lighter tool calls)",
+                usage=call_usage,
             )
 
         # Claude can return several content blocks in one turn (reasoning text
@@ -632,9 +646,6 @@ class OpenAILLMBackend:
         choice = resp.choices[0]
         logger.info("openai call: model=%s latency=%.2fs finish=%s", self._model, elapsed, choice.finish_reason)
 
-        if choice.finish_reason == "length":
-            raise _truncation_error("openai", _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING))
-
         oai_usage = getattr(resp, "usage", None)
         # Fold the discarded truncated attempt's tokens in -- it was still billed.
         t_usage = getattr(truncated_attempt, "usage", None) if truncated_attempt is not None else None
@@ -657,6 +668,13 @@ class OpenAILLMBackend:
             max_token_retries=1 if truncated_attempt is not None else 0,
             model=self._model,
         )
+
+        if choice.finish_reason == "length":
+            raise _truncation_error(
+                "openai",
+                _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING),
+                usage=call_usage,
+            )
 
         message = choice.message
         if message.tool_calls:
@@ -905,7 +923,11 @@ class GeminiLLMBackend:
         )
 
         if finish == "MAX_TOKENS":
-            raise _truncation_error("gemini", _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING))
+            raise _truncation_error(
+                "gemini",
+                _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING),
+                usage=call_usage,
+            )
 
         # Walk the candidate's parts: collect text (reasoning prose when it
         # accompanies calls, the final answer otherwise) and function_calls.
@@ -1189,7 +1211,11 @@ class BedrockLLMBackend:
         )
 
         if stop_reason == "max_tokens":
-            raise _truncation_error("bedrock", _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING))
+            raise _truncation_error(
+                "bedrock",
+                _retry_cap(self._max_tokens, MAX_TOKENS_RETRY_CEILING),
+                usage=call_usage,
+            )
         if stop_reason in _BEDROCK_FAILURE_STOP_REASONS:
             raise LLMError(
                 f"bedrock returned stopReason={stop_reason!r} (model={self._model}); "
