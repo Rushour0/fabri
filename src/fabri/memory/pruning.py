@@ -313,6 +313,8 @@ def ingest_guideline(
     do_not_reuse_when: list[str] | None = None,
     on_disposition: Callable[[str, MemoryEntry], None] | None = None,
     tiering_enabled: bool = False,
+    tier: str | None = None,
+    resolution: dict | None = None,
 ) -> MemoryEntry:
     """Insert or merge a new candidate guideline. A near-duplicate of an existing
     entry (cosine sim >= similarity_threshold, tactical *or* strategic) increments
@@ -368,6 +370,8 @@ def ingest_guideline(
             if entry.producer_agent_id is None:
                 entry.producer_agent_id = producer_agent_id
                 entry.agent_id = producer_agent_id
+            if resolution is not None:
+                entry.resolution = resolution
             verification_rank = {
                 "unverified": 0,
                 "tool_verified": 1,
@@ -396,7 +400,10 @@ def ingest_guideline(
                 entry.kind = "strategic"
             else:
                 logger.debug("merged duplicate guideline (sim=%.2f, hit_count=%d): %r", score, entry.hit_count, entry.text)
-            if tiering_enabled:
+            if tier is not None:
+                if _TIER_RANK.get(tier, -1) > _TIER_RANK.get(entry.tier, -1):
+                    entry.tier = tier
+            elif tiering_enabled:
                 candidate_tier = classify_tier(entry)
                 if _TIER_RANK.get(candidate_tier, -1) > _TIER_RANK.get(entry.tier, -1):
                     entry.tier = candidate_tier
@@ -426,13 +433,14 @@ def ingest_guideline(
             producer_agent_id=producer_agent_id,
             scope=scope,
             verification=verification,
-            tier="unclassified",
+            tier=tier if tier is not None else "unclassified",
+            resolution=resolution,
             source_session_ids=[session_id],
             source_event_ids=source_event_ids,
             applicability=applicability,
             do_not_reuse_when=do_not_reuse_when,
         )
-        if tiering_enabled:
+        if tier is None and tiering_enabled:
             entry.tier = classify_tier(entry)
         logger.debug("inserted new %s guideline: %r tools=%s domain=%s", kind, entry.text, entry.tools, entry.domain)
         store.upsert(entry)
