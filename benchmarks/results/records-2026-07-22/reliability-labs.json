@@ -1,0 +1,62 @@
+{
+  "company": "reliability-labs",
+  "case_id": "reliability_labs_incident_release_gate",
+  "benchmark": "memory_vs_true_control",
+  "generated_at": "2026-07-22T08:59:33.578872+00:00",
+  "fabri_version": "0.19.1",
+  "roster_revision": null,
+  "replicas": 6,
+  "arms_total": 12,
+  "quality": {
+    "memory": {
+      "n_complete": 5,
+      "raw_pass_pct": 80.0,
+      "corrected_pass_pct": 100.0,
+      "mean_cost_usd": 0.124056
+    },
+    "control": {
+      "n_complete": 6,
+      "raw_pass_pct": 83.3,
+      "corrected_pass_pct": 100.0,
+      "mean_cost_usd": 0.120597
+    }
+  },
+  "cost": {
+    "clean_pairs": 5,
+    "mean_delta_usd": 0.013294,
+    "median_delta_usd": 0.018205,
+    "memory_cheaper_pairs": 2,
+    "sign_test_p": 1.0,
+    "pairs": [
+      {
+        "replica": 1,
+        "delta_usd": -0.000191
+      },
+      {
+        "replica": 2,
+        "delta_usd": 0.040157
+      },
+      {
+        "replica": 4,
+        "delta_usd": 0.028548
+      },
+      {
+        "replica": 5,
+        "delta_usd": 0.018205
+      },
+      {
+        "replica": 6,
+        "delta_usd": -0.020247
+      }
+    ]
+  },
+  "control_memory_free": true,
+  "excluded_arms": [
+    {
+      "replica": 3,
+      "condition": "memory",
+      "reason": "training_failed"
+    }
+  ],
+  "total_spend_usd": 1.3994
+}
