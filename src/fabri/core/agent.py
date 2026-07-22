@@ -105,6 +105,12 @@ RETRIEVED_GUIDELINES_TASK_PRECEDENCE = (
     "that every explicit task requirement is satisfied."
 )
 
+PROPOSED_ACTION_NOTE = (
+    "PROPOSED from a past resolution of a similar problem — NOT yet executed and "
+    "NOT authoritative; verify applicability before choosing to invoke; the current "
+    "task's requirements always take precedence.\nProposed actions:\n{actions}"
+)
+
 
 def build_system_prompt(
     context_block: str,
@@ -114,6 +120,7 @@ def build_system_prompt(
     system_prompt_prefix: str = "",
     result_format: str = "json",
     retrieved_guidelines_task_precedence: bool = True,
+    proposed_actions: list[dict] | None = None,
 ) -> str:
     identity = system_prompt or DEFAULT_AGENT_IDENTITY
     # Word-boundary match because tool_descriptions is a bullet list
@@ -141,6 +148,18 @@ def build_system_prompt(
         (
             RETRIEVED_GUIDELINES_TASK_PRECEDENCE
             if retrieved_guidelines_task_precedence and context_block
+            else ""
+        ),
+        (
+            PROPOSED_ACTION_NOTE.format(
+                actions="\n".join(
+                    f"- {step.get('capability')}({step.get('args_template')})"
+                    for resolution in proposed_actions
+                    for step in resolution.get("steps", [])
+                    if isinstance(step, dict)
+                )
+            )
+            if proposed_actions
             else ""
         ),
     ]
@@ -202,9 +221,32 @@ def _run_single_attempt(
     # event's candidate list, so it no longer needs to ride on START.)
     log_event(session_id, {"type": EventType.START.value, "task": task})
 
+    current_state = None
+    if retrieval_config is not None and retrieval_config.memory_action_enabled:
+        # KNOWN LIMITATION (shadow-mode Part 1): this only carries THIS agent's own
+        # backend config (main/decompose/...), not sibling agency-role config or the
+        # company/agency identifiers. So config-precondition actions (e.g. the
+        # Revenue-Ops researcher/writer max_tokens fix) cannot match here -- that
+        # detection belongs at the orchestration/compile layer where the whole
+        # compiled agency is visible. The recurrence/surfacing mechanism is proven at
+        # the propose_actions() level (see tests/test_memory_action_golden.py); live
+        # cross-agent enablement is a deliberate follow-up, not wired here.
+        current_state = {
+            "roles_config": {
+                role: {"max_tokens": max_tokens}
+                for role, backend in {
+                    "main": llm,
+                    "decompose": decompose_llm,
+                    "planner": planner_llm,
+                    "narrator": narrator_llm,
+                }.items()
+                if isinstance((max_tokens := getattr(backend, "max_tokens", None)), int)
+            },
+            "task": task,
+        }
     context_block, retrieval_meta = retrieve_context_with_meta(
         store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
-        retrieval_config=retrieval_config, session_id=session_id,
+        retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
     )
     # When retrieval is on, the filtered subset stays constant for the whole
     # run so the prompt cache still hits across steps. The model is given the
@@ -237,6 +279,7 @@ def _run_single_attempt(
         system_prompt_prefix=system_prompt_prefix,
         result_format=result_format,
         retrieved_guidelines_task_precedence=retrieved_guidelines_task_precedence,
+        proposed_actions=retrieval_meta.get("proposed_actions"),
     )
 
     final_text = None

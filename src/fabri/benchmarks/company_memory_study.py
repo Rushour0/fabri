@@ -258,12 +258,20 @@ def apply_retrieval_overrides(
     top_k: int | None,
     strategy: str | None,
     verification: str | None = None,
+    mining_enabled: bool | None = None,
+    retrieval_enabled: bool | None = None,
 ) -> list[str]:
     """Rewrite optional retrieval settings into every raw compiled node config."""
     _validate_retrieval_overrides(top_k, strategy)
     if verification is not None and verification not in {"any", "verified"}:
         raise ProbeError("memory retrieval verification must be 'any' or 'verified'")
-    if top_k is None and strategy is None and verification is None:
+    if (
+        top_k is None
+        and strategy is None
+        and verification is None
+        and mining_enabled is None
+        and retrieval_enabled is None
+    ):
         return []
 
     changed: list[str] = []
@@ -283,6 +291,10 @@ def apply_retrieval_overrides(
             memory["retrieval_strategy"] = strategy
         if verification is not None:
             memory["retrieval_verification"] = verification
+        if mining_enabled is not None:
+            memory["mining_enabled"] = mining_enabled
+        if retrieval_enabled is not None:
+            memory["retrieval_enabled"] = retrieval_enabled
         try:
             config_path.write_text(
                 yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -734,6 +746,8 @@ def _run_pair(
         case.company_name,
         top_k=retrieval_top_k,
         strategy=retrieval_strategy,
+        mining_enabled=False if condition == "control" else None,
+        retrieval_enabled=False if condition == "control" else None,
     )
 
     try:

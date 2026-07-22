@@ -459,12 +459,81 @@ def test_score_text_is_case_insensitive_and_deterministic() -> None:
     assert score_text("We will follow up", (("follow-up",),), ())["passed"] is True
 
 
+def test_score_text_matches_required_terms_by_proximity_and_light_morphology() -> None:
+    required = (("follow-up", "further update"),)
+
+    assert score_text("We will provide a follow-up.", required, ()) == {
+        "passed": True,
+        "missing": [],
+        "forbidden": [],
+    }
+    assert score_text("We will provide a followup.", required, ()) == {
+        "passed": True,
+        "missing": [],
+        "forbidden": [],
+    }
+    assert score_text(
+        "We will share further customer-facing updates if warranted.", required, ()
+    ) == {"passed": True, "missing": [], "forbidden": []}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We will discuss further with the affected teams before providing a detailed update.",
+        "We will consider this further. An update may be provided later.",
+        "We have rolled back the change. Checkout is restored.",
+    ],
+)
+def test_score_text_required_proximity_does_not_create_false_passes(text: str) -> None:
+    assert score_text(text, (("follow-up", "further update"),), ()) == {
+        "passed": False,
+        "missing": ["follow-up | further update"],
+        "forbidden": [],
+    }
+
+
+def test_score_text_preserves_single_word_required_matching() -> None:
+    assert score_text("Checkout is restored.", (("checkout",),), ()) == {
+        "passed": True,
+        "missing": [],
+        "forbidden": [],
+    }
+
+
 def test_score_text_ignores_forbidden_phrase_in_negated_context() -> None:
     assert score_text(
         "There is no evidence that a fix was deployed.",
         (("evidence",),),
         ("fix was deployed",),
     ) == {"passed": True, "missing": [], "forbidden": []}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_forbidden"),
+    [
+        (
+            "No crew supplied evidence that a corrective fix was deployed.",
+            [],
+        ),
+        (
+            "…not that a corrected checkout fix was deployed.",
+            [],
+        ),
+        (
+            "The fix was deployed to production.",
+            ["fix was deployed"],
+        ),
+        (
+            "No issues were found. The fix was deployed.",
+            ["fix was deployed"],
+        ),
+    ],
+)
+def test_score_text_scopes_negation_to_the_current_sentence(
+    text: str, expected_forbidden: list[str]
+) -> None:
+    assert score_text(text, (), ("fix was deployed",))["forbidden"] == expected_forbidden
 
 
 def test_score_text_flags_plain_forbidden_phrase() -> None:

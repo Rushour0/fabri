@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, TypeVar
 
 from fabri.events import EventType
 from fabri.memory.embeddings import embeddings_available, embed
+from fabri.memory.recurrence import applicable, apply_confidence
 from fabri.memory.schema import MemoryEntry
 from fabri.memory.store import QdrantMemoryStore
 
@@ -37,6 +38,9 @@ def _emit_retrieval_event(session_id: str, payload: dict) -> None:
 
 DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
+# Upper bound on the ActionMemory candidate scan in propose_actions -- keeps it
+# from degrading into an unbounded full-store read as the store grows.
+_ACTION_SCAN_LIMIT = 200
 # Keyed on (tool name, description) so a description edit invalidates.
 _tool_embedding_cache: dict[tuple[str, str], list[float]] = {}
 _embeddings_disabled_logged = False
@@ -80,6 +84,7 @@ class RetrievalConfig:
     """
 
     strategy: str = "hybrid"
+    retrieval_enabled: bool = True
     temporal_decay: bool = False
     temporal_half_life_days: float = 30.0
     mmr_lambda: float = 0.7
@@ -104,11 +109,14 @@ class RetrievalConfig:
     # always lives on the same Qdrant instance as the primary collection.
     global_qdrant_url: str = "http://localhost:6333"
     verification: str = "any"
+    tiering_enabled: bool = False
+    memory_action_enabled: bool = False
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
         return cls(
             strategy=mem_cfg.get("retrieval_strategy", "hybrid"),
+            retrieval_enabled=bool(mem_cfg.get("retrieval_enabled", True)),
             temporal_decay=bool(mem_cfg.get("temporal_decay", False)),
             temporal_half_life_days=float(mem_cfg.get("temporal_half_life_days", 30.0)),
             mmr_lambda=float(mem_cfg.get("mmr_lambda", 0.7)),
@@ -119,7 +127,33 @@ class RetrievalConfig:
             global_collection=mem_cfg.get("global_collection"),
             global_qdrant_url=mem_cfg.get("qdrant_url", "http://localhost:6333"),
             verification=mem_cfg.get("retrieval_verification", "any"),
+            tiering_enabled=bool(mem_cfg.get("tiering_enabled", False)),
+            memory_action_enabled=bool(mem_cfg.get("memory_action_enabled", False)),
         )
+
+
+def propose_actions(
+    store: QdrantMemoryStore, current_state: dict, *, top_n: int = 1
+) -> list[dict]:
+    """Return the highest-confidence applicable ActionMemory resolutions.
+
+    Fail-closed: a store error (e.g. a transient Qdrant blip mid-scan) degrades to
+    an empty proposal list rather than aborting the agent turn, matching every
+    other store access in this module. The scan is bounded -- resolutions only ride
+    on ``success_pattern`` entries -- so it never becomes an unbounded full-store
+    read as the store grows.
+    """
+    try:
+        entries = store.iterate(kind="success_pattern", limit=_ACTION_SCAN_LIMIT)
+    except Exception:  # noqa: BLE001 -- degrade to no proposal, never abort retrieval
+        return []
+    ranked: list[tuple[float, dict]] = []
+    for entry in entries:
+        resolution = entry.resolution
+        if isinstance(resolution, dict) and applicable(resolution, current_state):
+            ranked.append((apply_confidence(resolution, current_state, 1.0), resolution))
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [resolution for _, resolution in ranked[:top_n]]
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +396,7 @@ def retrieve_context_with_meta(
     tag_hit_score_floor: float = TAG_HIT_SCORE_FLOOR,
     retrieval_config: RetrievalConfig | None = None,
     session_id: str | None = None,
+    current_state: dict | None = None,
 ) -> tuple[str, dict]:
     """Same as `retrieve_context` but also returns retrieval metadata so
     callers can emit the guideline-reuse-rate metric.
@@ -392,6 +427,11 @@ def retrieve_context_with_meta(
         ),
         "strategic": sum(1 for entry, _ in merged if entry.kind == "strategic"),
     }
+    if (
+        (retrieval_config or RetrievalConfig()).memory_action_enabled
+        and current_state is not None
+    ):
+        meta["proposed_actions"] = propose_actions(store, current_state)
     return text, meta
 
 
@@ -499,11 +539,13 @@ def _retrieve_inner(
     retrieval decided (strategy, pool sizes, BM25 fired/fell-back, slot counts,
     MMR, and a lean per-candidate list). Trace-only, never enters the prompt.
     See docs/design/memory-observability-plan.md (unit A)."""
+    rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
+    if not rcfg.retrieval_enabled:
+        return "", []
     if not embeddings_available():
         _log_embeddings_disabled()
         return "", []
 
-    rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
     strategy = rcfg.strategy
     if rcfg.verification not in {"any", "verified"}:
         raise ValueError(f"unsupported retrieval verification policy: {rcfg.verification}")
@@ -514,6 +556,12 @@ def _retrieve_inner(
         if rcfg.verification == "verified":
             return entry.verification in {"tool_verified", "rubric_verified"}
         return True
+
+    def tier_allowed(entry: MemoryEntry) -> bool:
+        return getattr(entry, "tier", "unclassified") != "quarantine"
+
+    def entry_allowed(entry: MemoryEntry) -> bool:
+        return verification_allowed(entry) and tier_allowed(entry)
 
     # Bind once — on the Qdrant backend count() is a network round-trip.
     store_count = store.count()
@@ -573,7 +621,7 @@ def _retrieve_inner(
             pair
             for pair in list(store.query_by_vector(vector, top_k=fetch_k))
             + _global_dense_results
-            if verification_allowed(pair[0])
+            if entry_allowed(pair[0])
         ],
         key=lambda p: p[1], reverse=True,
     )
@@ -608,7 +656,7 @@ def _retrieve_inner(
             sparse_backend = "rank_bm25"
             sparse_results = _qdrant_bm25(task, dense_results, top_k=fetch_k)
 
-        sparse_results = [pair for pair in sparse_results if verification_allowed(pair[0])]
+        sparse_results = [pair for pair in sparse_results if entry_allowed(pair[0])]
 
         if "hybrid" in strategy and sparse_results:
             base_results = _rrf_fuse(dense_results, sparse_results, k=rcfg.rrf_k)
@@ -658,7 +706,7 @@ def _retrieve_inner(
             for pair in store.query_by_vector(
                 vector, top_k=tag_fetch_k, tools_any=[tool_name]
             )
-            if verification_allowed(pair[0])
+            if entry_allowed(pair[0])
         )
         # Global tier's tag hits merge into the SAME pre-reservation list —
         # the TAG_HIT_SCORE_FLOOR guaranteed-slot logic below then runs once
@@ -672,7 +720,7 @@ def _retrieve_inner(
             ),
             [],
             "global_collection tag-hit query failed; contributing zero candidates",
-        ) if verification_allowed(pair[0]))
+        ) if entry_allowed(pair[0]))
 
     success_results = sorted(
         [p for p in base_results if p[0].kind == "success_pattern"],
@@ -748,6 +796,11 @@ def _retrieve_inner(
         merged = _apply_mmr(merged, vector, rcfg.mmr_lambda, top_k)
     else:
         merged = merged[:top_k]
+
+    if rcfg.tiering_enabled:
+        # Python's sort is stable, so this only promotes core entries while
+        # preserving the established relevance order within each tier.
+        merged.sort(key=lambda pair: getattr(pair[0], "tier", "unclassified") != "core")
 
     if session_id is not None:
         final_reasons = [inclusion_reason.get(e.id, "base") for e, _ in merged]

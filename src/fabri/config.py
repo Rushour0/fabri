@@ -166,6 +166,10 @@ DEFAULT_CONFIG = {
         "mcp_servers": [],
     },
     "memory": {
+        # Enables mining run traces into reusable memory entries.
+        "mining_enabled": True,
+        # Enables retrieval of reusable memory entries into agent context.
+        "retrieval_enabled": True,
         # "qdrant" (networked) or "sqlite" (in-process, file-backed, no
         # docker). The two are interchangeable from the agent's perspective.
         "backend": "qdrant",
@@ -184,6 +188,10 @@ DEFAULT_CONFIG = {
         # "any" preserves legacy memories; "verified" injects only lessons
         # backed by deterministic tool evidence or an external rubric.
         "retrieval_verification": "any",
+        # Enables deterministic memory tier classification and core preference.
+        "tiering_enabled": False,
+        # Enables shadow-only surfacing of applicable remembered actions.
+        "memory_action_enabled": False,
         # Provenance boundary stamped onto newly mined entries.
         "scope": "agent",
         # M1: when true, every run (any outcome) also writes one deterministic

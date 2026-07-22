@@ -923,11 +923,53 @@ def score_text(
     def normalize(value: str) -> str:
         return " ".join(value.casefold().replace("-", " ").split())
 
-    normalized = normalize(text)
+    def word_matches(expected: str, actual: str) -> bool:
+        return actual == expected or actual == f"{expected}s" or actual == f"{expected}es"
+
+    def required_term_matches(phrase: str) -> bool:
+        """Match multi-word requirements within a short, single-sentence window."""
+        words = normalize(phrase).split()
+        if len(words) <= 1:
+            # Preserve the original normalized-substring behavior for single-word
+            # requirements.
+            return bool(words) and words[0] in comparison_normalized
+
+        # A hyphenated requirement may also be written as one compound word.
+        # The token comparison below covers its hyphenated and space-separated forms.
+        compact = "".join(words)
+        allow_compact = "-" in phrase
+
+        for sentence in re.split(r"[.!?\n]+", normalized):
+            tokens = re.findall(r"\b\w+\b", sentence)
+            if allow_compact and any(word_matches(compact, token) for token in tokens):
+                return True
+            for start, token in enumerate(tokens):
+                if not word_matches(words[0], token):
+                    continue
+                previous = start
+                for word in words[1:]:
+                    upper_bound = min(previous + 5, len(tokens))
+                    next_index = next(
+                        (
+                            index
+                            for index in range(previous + 1, upper_bound)
+                            if word_matches(word, tokens[index])
+                        ),
+                        None,
+                    )
+                    if next_index is None:
+                        break
+                    previous = next_index
+                else:
+                    return True
+        return False
+
+    normalized = re.sub(r"[^\S\n]+", " ", text.casefold().replace("-", " "))
+    comparison_normalized = normalize(text)
     missing = [
         " | ".join(group)
         for group in required_terms
-        if not any(normalize(phrase) in normalized for phrase in group)
+        if not any(required_term_matches(phrase) for phrase in group)
     ]
     negation_pattern = re.compile(
         r"\b(no|not|never|without|nor|neither|cannot|can not|n't|did not|does not|do not|isn't|wasn't|aren't|weren't|absence of|lack of|unable|no evidence)\b",
@@ -936,13 +978,24 @@ def score_text(
     forbidden = []
     for term in forbidden_terms:
         normalized_term = normalize(term)
-        occurrence = normalized.find(normalized_term)
-        while occurrence != -1:
-            preceding = normalized[max(0, occurrence - 60):occurrence]
+        term_pattern = re.compile(re.escape(normalized_term).replace(r"\ ", r"[ \n]+"))
+        match = term_pattern.search(normalized)
+        while match is not None:
+            occurrence = match.start()
+            preceding = normalized[max(0, occurrence - 400):occurrence]
+            boundary = max(
+                preceding.rfind("."),
+                preceding.rfind(";"),
+                preceding.rfind("!"),
+                preceding.rfind("?"),
+                preceding.rfind("\n"),
+            )
+            if boundary != -1:
+                preceding = preceding[boundary + 1:]
             if not negation_pattern.search(preceding):
                 forbidden.append(term)
                 break
-            occurrence = normalized.find(normalized_term, occurrence + 1)
+            match = term_pattern.search(normalized, occurrence + 1)
     return {"passed": not missing and not forbidden, "missing": missing, "forbidden": forbidden}
 
 
