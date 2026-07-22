@@ -302,7 +302,11 @@ def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     assert memory_run["funnel"]["transport"]["intact"] is True
     assert control_run["funnel"]["transport"]["intact"] is True
     assert result["claim_boundary"] == CLAIM_BOUNDARY
-    assert result["retrieval_overrides"] == {"top_k": None, "retrieval_strategy": None}
+    assert result["retrieval_overrides"] == {
+        "top_k": None,
+        "retrieval_strategy": None,
+        "guideline_max_tokens": None,
+    }
     assert all(
         config["top_k"] == 5 and config["backend"] == "sqlite"
         for config in runner.retrieval_configs_before_run.values()
@@ -567,6 +571,54 @@ def test_apply_retrieval_overrides_rewrites_compiled_node_configs(tmp_path: Path
     assert config.read_text(encoding="utf-8") == before
 
 
+def test_apply_retrieval_overrides_writes_guideline_max_tokens(tmp_path: Path) -> None:
+    config = tmp_path / "compiled" / "support-hq" / "ceo.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "agent: {name: ceo}\nmemory:\n  top_k: 5\n  retrieval_strategy: hybrid\n",
+        encoding="utf-8",
+    )
+
+    changed = apply_retrieval_overrides(
+        tmp_path / "compiled",
+        "support-hq",
+        top_k=None,
+        strategy=None,
+        guideline_max_tokens=120,
+    )
+
+    assert changed == [str(config)]
+    memory = yaml.safe_load(config.read_text(encoding="utf-8"))["memory"]
+    assert memory["guideline_max_tokens"] == 120
+    assert memory["top_k"] == 5
+    assert memory["retrieval_strategy"] == "hybrid"
+
+    before = config.read_text(encoding="utf-8")
+    assert apply_retrieval_overrides(
+        tmp_path / "compiled", "support-hq", top_k=None, strategy=None,
+        guideline_max_tokens=None,
+    ) == []
+    assert config.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("bad_value", [4, 10000, True])
+def test_apply_retrieval_overrides_rejects_out_of_range_guideline_max_tokens(
+    tmp_path: Path, bad_value: object
+) -> None:
+    config = tmp_path / "compiled" / "support-hq" / "ceo.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("agent: {name: ceo}\nmemory: {}\n", encoding="utf-8")
+
+    with pytest.raises(ProbeError, match="--guideline-max-tokens"):
+        apply_retrieval_overrides(
+            tmp_path / "compiled",
+            "support-hq",
+            top_k=None,
+            strategy=None,
+            guideline_max_tokens=bad_value,
+        )
+
+
 def test_discover_memory_dbs_deduplicates_shared_paths_and_rejects_escape(
     tmp_path: Path,
 ) -> None:
@@ -621,6 +673,16 @@ def test_memory_study_counterbalances_condition_order(
         ("--retrieval-top-k", "0", "--retrieval-top-k must be an integer between 1 and 50"),
         ("--retrieval-top-k", "51", "--retrieval-top-k must be an integer between 1 and 50"),
         ("--retrieval-strategy", "invalid", "--retrieval-strategy must be one of"),
+        (
+            "--guideline-max-tokens",
+            "4",
+            "--guideline-max-tokens must be an integer between 8 and 512",
+        ),
+        (
+            "--guideline-max-tokens",
+            "10000",
+            "--guideline-max-tokens must be an integer between 8 and 512",
+        ),
     ],
 )
 def test_cli_rejects_invalid_retrieval_overrides(
@@ -666,7 +728,11 @@ def test_memory_study_applies_and_records_retrieval_overrides(
         config["top_k"] == 11 and config["retrieval_strategy"] == "sparse"
         for config in runner.retrieval_configs_before_run.values()
     )
-    assert result["retrieval_overrides"] == {"top_k": 11, "retrieval_strategy": "sparse"}
+    assert result["retrieval_overrides"] == {
+        "top_k": 11,
+        "retrieval_strategy": "sparse",
+        "guideline_max_tokens": None,
+    }
     validate_memory_payload(result)
     assert "Retrieval overrides: top_k=`11`, retrieval_strategy=`sparse`" in render_markdown(result)
 
@@ -775,3 +841,35 @@ def test_validate_memory_payload_rejects_malformed_payload() -> None:
     malformed: dict[str, object] = {"study": "company-memory-vs-control"}
     with pytest.raises(ProbeError, match="missing required key"):
         validate_memory_payload(malformed)
+
+
+def test_validate_memory_payload_accepts_int_or_none_guideline_max_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = replace(load_memory_case(dataset, "support"), conditions=("memory",))
+    payload = run_memory_study(case, tmp_path / "results", command_runner=FakeRunner(roster_root))
+
+    retrieval_overrides = cast(dict[str, object], payload["retrieval_overrides"])
+    retrieval_overrides["guideline_max_tokens"] = None
+    validate_memory_payload(payload)
+
+    retrieval_overrides["guideline_max_tokens"] = 120
+    validate_memory_payload(payload)
+
+
+def test_validate_memory_payload_rejects_string_guideline_max_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = replace(load_memory_case(dataset, "support"), conditions=("memory",))
+    payload = run_memory_study(case, tmp_path / "results", command_runner=FakeRunner(roster_root))
+
+    retrieval_overrides = cast(dict[str, object], payload["retrieval_overrides"])
+    retrieval_overrides["guideline_max_tokens"] = "120"
+    with pytest.raises(ProbeError, match="guideline_max_tokens has an invalid type"):
+        validate_memory_payload(payload)

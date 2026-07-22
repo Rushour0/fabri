@@ -100,7 +100,9 @@ def _positive_int(value: object, field: str) -> int:
 
 
 def _validate_retrieval_overrides(
-    top_k: int | None, strategy: str | None
+    top_k: int | None,
+    strategy: str | None,
+    guideline_max_tokens: int | None = None,
 ) -> None:
     """Validate optional retrieval settings accepted by the study runner."""
     if top_k is not None and (
@@ -110,6 +112,14 @@ def _validate_retrieval_overrides(
     if strategy is not None and strategy not in _ALLOWED_RETRIEVAL_STRATEGIES:
         choices = ", ".join(sorted(_ALLOWED_RETRIEVAL_STRATEGIES))
         raise ProbeError(f"--retrieval-strategy must be one of: {choices}")
+    if guideline_max_tokens is not None and (
+        not isinstance(guideline_max_tokens, int)
+        or isinstance(guideline_max_tokens, bool)
+        or not 8 <= guideline_max_tokens <= 512
+    ):
+        raise ProbeError(
+            "--guideline-max-tokens must be an integer between 8 and 512"
+        )
 
 
 def _load_dataset(path: Path) -> dict[str, object]:
@@ -388,9 +398,10 @@ def apply_retrieval_overrides(
     verification: str | None = None,
     mining_enabled: bool | None = None,
     retrieval_enabled: bool | None = None,
+    guideline_max_tokens: int | None = None,
 ) -> list[str]:
     """Rewrite optional retrieval settings into every raw compiled node config."""
-    _validate_retrieval_overrides(top_k, strategy)
+    _validate_retrieval_overrides(top_k, strategy, guideline_max_tokens)
     if verification is not None and verification not in {"any", "verified"}:
         raise ProbeError("memory retrieval verification must be 'any' or 'verified'")
     if (
@@ -399,6 +410,7 @@ def apply_retrieval_overrides(
         and verification is None
         and mining_enabled is None
         and retrieval_enabled is None
+        and guideline_max_tokens is None
     ):
         return []
 
@@ -423,6 +435,8 @@ def apply_retrieval_overrides(
             memory["mining_enabled"] = mining_enabled
         if retrieval_enabled is not None:
             memory["retrieval_enabled"] = retrieval_enabled
+        if guideline_max_tokens is not None:
+            memory["guideline_max_tokens"] = guideline_max_tokens
         try:
             config_path.write_text(
                 yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -738,6 +752,7 @@ def _run_pair(
     retrieval_top_k: int | None,
     retrieval_strategy: str | None,
     execution_order: int,
+    guideline_max_tokens: int | None = None,
 ) -> dict[str, object]:
     """Run one training-to-fresh-holdout pair, retaining raw material privately."""
     attempt_root = work_root / f"replica-{replica:02d}" / condition
@@ -777,6 +792,7 @@ def _run_pair(
         case.company_name,
         top_k=retrieval_top_k,
         strategy=retrieval_strategy,
+        guideline_max_tokens=guideline_max_tokens,
     )
     try:
         train_specs = discover_memory_dbs(train_dest, case.company_name)
@@ -882,6 +898,7 @@ def _run_pair(
         strategy=retrieval_strategy,
         mining_enabled=False if condition == "control" else None,
         retrieval_enabled=False if condition == "control" else None,
+        guideline_max_tokens=guideline_max_tokens,
     )
 
     try:
@@ -1243,12 +1260,17 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
     if retrieval_overrides is not None:
         if not isinstance(retrieval_overrides, dict):
             raise ProbeError("memory payload retrieval_overrides has an invalid type")
-        for key in ("top_k", "retrieval_strategy"):
+        for key in ("top_k", "retrieval_strategy", "guideline_max_tokens"):
             if key not in retrieval_overrides:
                 raise ProbeError(f"memory payload retrieval_overrides missing key: {key}")
         top_k = retrieval_overrides.get("top_k")
         strategy = retrieval_overrides.get("retrieval_strategy")
-        _validate_retrieval_overrides(top_k, strategy)
+        guideline_max_tokens = retrieval_overrides.get("guideline_max_tokens")
+        if guideline_max_tokens is not None and not isinstance(guideline_max_tokens, int):
+            raise ProbeError(
+                "memory payload retrieval_overrides guideline_max_tokens has an invalid type"
+            )
+        _validate_retrieval_overrides(top_k, strategy, guideline_max_tokens)
     if not isinstance(payload["replicas"], int) or payload["replicas"] < 1:
         raise ProbeError("memory payload replicas must be positive")
     conditions = payload["conditions"]
@@ -1358,15 +1380,18 @@ def render_markdown(payload: dict[str, object]) -> str:
     if isinstance(retrieval_overrides, dict):
         top_k = retrieval_overrides.get("top_k")
         strategy = retrieval_overrides.get("retrieval_strategy")
+        guideline_max_tokens = retrieval_overrides.get("guideline_max_tokens")
     else:
         top_k = None
         strategy = None
+        guideline_max_tokens = None
 
     lines = [
         "# Company memory vs control study",
         "",
         f"- Supply smoke gate: `{'GO' if isinstance(payload.get('smoke_gate'), dict) and payload['smoke_gate'].get('go') else 'STOP'}`",
-        f"- Retrieval overrides: top_k=`{top_k}`, retrieval_strategy=`{strategy}`",
+        f"- Retrieval overrides: top_k=`{top_k}`, retrieval_strategy=`{strategy}`, "
+        f"guideline_max_tokens=`{guideline_max_tokens}`",
         f"- Case: `{payload['case_id']}`",
         f"- Company: `{payload['company']}`",
         f"- Fabri version: `{payload['fabri_version'] or 'unavailable'}`",
@@ -1421,11 +1446,12 @@ def run_memory_study(
     cwd: Path | None = None,
     retrieval_top_k: int | None = None,
     retrieval_strategy: str | None = None,
+    guideline_max_tokens: int | None = None,
 ) -> dict[str, object]:
     """Run sequential, fresh-compile memory and control replicas and publish aggregates."""
     if run_timeout_s <= 0:
         raise ProbeError("run_timeout_s must be positive")
-    _validate_retrieval_overrides(retrieval_top_k, retrieval_strategy)
+    _validate_retrieval_overrides(retrieval_top_k, retrieval_strategy, guideline_max_tokens)
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     work_root = output / "private-attempts"
@@ -1454,6 +1480,7 @@ def run_memory_study(
                     retrieval_top_k,
                     retrieval_strategy,
                     execution_order,
+                    guideline_max_tokens,
                 )
             )
     aggregates = {
@@ -1476,6 +1503,7 @@ def run_memory_study(
         "retrieval_overrides": {
             "top_k": retrieval_top_k,
             "retrieval_strategy": retrieval_strategy,
+            "guideline_max_tokens": guideline_max_tokens,
         },
         "replicas": case.replicas,
         "conditions": list(case.conditions),
@@ -1501,11 +1529,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-timeout-s", type=float, default=DEFAULT_RUN_TIMEOUT_S)
     parser.add_argument("--retrieval-top-k", type=int, default=None)
     parser.add_argument("--retrieval-strategy", default=None)
+    parser.add_argument("--guideline-max-tokens", type=int, default=None)
     args = parser.parse_args(argv)
     if args.run_timeout_s <= 0:
         parser.error("--run-timeout-s must be positive")
     try:
-        _validate_retrieval_overrides(args.retrieval_top_k, args.retrieval_strategy)
+        _validate_retrieval_overrides(
+            args.retrieval_top_k, args.retrieval_strategy, args.guideline_max_tokens
+        )
         case = load_memory_case(args.dataset, args.case_id, replicas_override=args.replicas)
         result = run_memory_study(
             case,
@@ -1513,6 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
             run_timeout_s=args.run_timeout_s,
             retrieval_top_k=args.retrieval_top_k,
             retrieval_strategy=args.retrieval_strategy,
+            guideline_max_tokens=args.guideline_max_tokens,
         )
     except (OSError, ProbeError) as exc:
         parser.error(str(exc))
