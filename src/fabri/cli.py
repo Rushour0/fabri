@@ -242,7 +242,6 @@ def cmd_run(args: argparse.Namespace) -> None:
     success_outcomes = {Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value}
     run_failed = not result.get("success") or result.get("outcome") not in success_outcomes
 
-    compress_llm = build_llm(config, [])
     # Accumulate memory-compression LLM usage so the host can roll it onto
     # the run's totals — these calls happen AFTER the run's `usage` event
     # is emitted, so they need to ride out as a follow-up POST_RUN_USAGE
@@ -269,22 +268,25 @@ def cmd_run(args: argparse.Namespace) -> None:
         mem_cfg.get("eviction_half_life_days")
         or mem_cfg.get("temporal_half_life_days", 30.0)
     )
-    entries = process_trace(
-        session_id,
-        store,
-        compress_llm,
-        guideline_max_tokens=mem_cfg["guideline_max_tokens"],
-        similarity_threshold=mem_cfg["similarity_threshold"],
-        promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
-        record_postmortem=mem_cfg.get("record_postmortems", False),
-        success_pattern_requires_evidence=mem_cfg.get("success_pattern_requires_evidence", False),
-        on_usage=_accumulate_post_run,
-        max_entries=mem_cfg.get("max_entries"),
-        eviction_half_life_days=float(_eviction_half_life),
-        eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
-        producer_agent_id=config.get("agent", {}).get("name"),
-        memory_scope=mem_cfg.get("scope", "agent"),
-    )
+    entries = []
+    if mem_cfg.get("mining_enabled", True):
+        compress_llm = build_llm(config, [])
+        entries = process_trace(
+            session_id,
+            store,
+            compress_llm,
+            guideline_max_tokens=mem_cfg["guideline_max_tokens"],
+            similarity_threshold=mem_cfg["similarity_threshold"],
+            promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
+            record_postmortem=mem_cfg.get("record_postmortems", False),
+            success_pattern_requires_evidence=mem_cfg.get("success_pattern_requires_evidence", False),
+            on_usage=_accumulate_post_run,
+            max_entries=mem_cfg.get("max_entries"),
+            eviction_half_life_days=float(_eviction_half_life),
+            eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
+            producer_agent_id=config.get("agent", {}).get("name"),
+            memory_scope=mem_cfg.get("scope", "agent"),
+        )
     if (post_run_usage.input_tokens or post_run_usage.output_tokens
             or post_run_usage.cache_creation_input_tokens
             or post_run_usage.cache_read_input_tokens):
@@ -330,26 +332,28 @@ def cmd_ingest_traces(args: argparse.Namespace) -> None:
     configure_logging(args.session_id, verbose=args.verbose)
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
-    llm = build_llm(config, [])
     _eviction_half_life_ingest = (
         mem_cfg.get("eviction_half_life_days")
         or mem_cfg.get("temporal_half_life_days", 30.0)
     )
-    entries = process_trace(
-        args.session_id,
-        store,
-        llm,
-        guideline_max_tokens=mem_cfg["guideline_max_tokens"],
-        similarity_threshold=mem_cfg["similarity_threshold"],
-        promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
-        record_postmortem=mem_cfg.get("record_postmortems", False),
-        success_pattern_requires_evidence=mem_cfg.get("success_pattern_requires_evidence", False),
-        max_entries=mem_cfg.get("max_entries"),
-        eviction_half_life_days=float(_eviction_half_life_ingest),
-        eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
-        producer_agent_id=config.get("agent", {}).get("name"),
-        memory_scope=mem_cfg.get("scope", "agent"),
-    )
+    entries = []
+    if mem_cfg.get("mining_enabled", True):
+        llm = build_llm(config, [])
+        entries = process_trace(
+            args.session_id,
+            store,
+            llm,
+            guideline_max_tokens=mem_cfg["guideline_max_tokens"],
+            similarity_threshold=mem_cfg["similarity_threshold"],
+            promotion_threshold_sessions=mem_cfg["promotion_threshold_sessions"],
+            record_postmortem=mem_cfg.get("record_postmortems", False),
+            success_pattern_requires_evidence=mem_cfg.get("success_pattern_requires_evidence", False),
+            max_entries=mem_cfg.get("max_entries"),
+            eviction_half_life_days=float(_eviction_half_life_ingest),
+            eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
+            producer_agent_id=config.get("agent", {}).get("name"),
+            memory_scope=mem_cfg.get("scope", "agent"),
+        )
     print(json.dumps([e.to_payload() for e in entries], indent=2))
 
 

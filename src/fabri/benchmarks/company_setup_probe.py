@@ -923,11 +923,12 @@ def score_text(
     def normalize(value: str) -> str:
         return " ".join(value.casefold().replace("-", " ").split())
 
-    normalized = normalize(text)
+    normalized = re.sub(r"[^\S\n]+", " ", text.casefold().replace("-", " "))
+    comparison_normalized = normalize(text)
     missing = [
         " | ".join(group)
         for group in required_terms
-        if not any(normalize(phrase) in normalized for phrase in group)
+        if not any(normalize(phrase) in comparison_normalized for phrase in group)
     ]
     negation_pattern = re.compile(
         r"\b(no|not|never|without|nor|neither|cannot|can not|n't|did not|does not|do not|isn't|wasn't|aren't|weren't|absence of|lack of|unable|no evidence)\b",
@@ -936,13 +937,24 @@ def score_text(
     forbidden = []
     for term in forbidden_terms:
         normalized_term = normalize(term)
-        occurrence = normalized.find(normalized_term)
-        while occurrence != -1:
-            preceding = normalized[max(0, occurrence - 60):occurrence]
+        term_pattern = re.compile(re.escape(normalized_term).replace(r"\ ", r"[ \n]+"))
+        match = term_pattern.search(normalized)
+        while match is not None:
+            occurrence = match.start()
+            preceding = normalized[max(0, occurrence - 400):occurrence]
+            boundary = max(
+                preceding.rfind("."),
+                preceding.rfind(";"),
+                preceding.rfind("!"),
+                preceding.rfind("?"),
+                preceding.rfind("\n"),
+            )
+            if boundary != -1:
+                preceding = preceding[boundary + 1:]
             if not negation_pattern.search(preceding):
                 forbidden.append(term)
                 break
-            occurrence = normalized.find(normalized_term, occurrence + 1)
+            match = term_pattern.search(normalized, occurrence + 1)
     return {"passed": not missing and not forbidden, "missing": missing, "forbidden": forbidden}
 
 

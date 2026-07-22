@@ -166,6 +166,10 @@ DEFAULT_CONFIG = {
         "mcp_servers": [],
     },
     "memory": {
+        # Enables mining run traces into reusable memory entries.
+        "mining_enabled": True,
+        # Enables retrieval of reusable memory entries into agent context.
+        "retrieval_enabled": True,
         # "qdrant" (networked) or "sqlite" (in-process, file-backed, no
         # docker). The two are interchangeable from the agent's perspective.
         "backend": "qdrant",

@@ -467,6 +467,33 @@ def test_score_text_ignores_forbidden_phrase_in_negated_context() -> None:
     ) == {"passed": True, "missing": [], "forbidden": []}
 
 
+@pytest.mark.parametrize(
+    ("text", "expected_forbidden"),
+    [
+        (
+            "No crew supplied evidence that a corrective fix was deployed.",
+            [],
+        ),
+        (
+            "…not that a corrected checkout fix was deployed.",
+            [],
+        ),
+        (
+            "The fix was deployed to production.",
+            ["fix was deployed"],
+        ),
+        (
+            "No issues were found. The fix was deployed.",
+            ["fix was deployed"],
+        ),
+    ],
+)
+def test_score_text_scopes_negation_to_the_current_sentence(
+    text: str, expected_forbidden: list[str]
+) -> None:
+    assert score_text(text, (), ("fix was deployed",))["forbidden"] == expected_forbidden
+
+
 def test_score_text_flags_plain_forbidden_phrase() -> None:
     assert score_text(
         "The fix was deployed to production.",

@@ -84,6 +84,7 @@ class RetrievalConfig:
     """
 
     strategy: str = "hybrid"
+    retrieval_enabled: bool = True
     temporal_decay: bool = False
     temporal_half_life_days: float = 30.0
     mmr_lambda: float = 0.7
@@ -115,6 +116,7 @@ class RetrievalConfig:
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
         return cls(
             strategy=mem_cfg.get("retrieval_strategy", "hybrid"),
+            retrieval_enabled=bool(mem_cfg.get("retrieval_enabled", True)),
             temporal_decay=bool(mem_cfg.get("temporal_decay", False)),
             temporal_half_life_days=float(mem_cfg.get("temporal_half_life_days", 30.0)),
             mmr_lambda=float(mem_cfg.get("mmr_lambda", 0.7)),
@@ -537,11 +539,13 @@ def _retrieve_inner(
     retrieval decided (strategy, pool sizes, BM25 fired/fell-back, slot counts,
     MMR, and a lean per-candidate list). Trace-only, never enters the prompt.
     See docs/design/memory-observability-plan.md (unit A)."""
+    rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
+    if not rcfg.retrieval_enabled:
+        return "", []
     if not embeddings_available():
         _log_embeddings_disabled()
         return "", []
 
-    rcfg = retrieval_config if retrieval_config is not None else RetrievalConfig()
     strategy = rcfg.strategy
     if rcfg.verification not in {"any", "verified"}:
         raise ValueError(f"unsupported retrieval verification policy: {rcfg.verification}")
