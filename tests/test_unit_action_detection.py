@@ -9,6 +9,7 @@ from fabri.orchestrator.action_detection import (
     build_current_state,
     derive_scope_from_collection,
     detect_proposed_actions,
+    resolve_action_scope,
 )
 
 pytestmark = pytest.mark.unit
@@ -106,6 +107,16 @@ def test_skips_unloadable_child_config_without_preventing_detection(tmp_path: Pa
 def test_derive_scope_from_collection_is_best_effort() -> None:
     assert derive_scope_from_collection("acme_researcher") == ("acme", "researcher")
     assert derive_scope_from_collection(None) == (None, None)
+
+
+def test_resolve_action_scope_prefers_compiler_metadata() -> None:
+    assert resolve_action_scope({
+        "collection": "revenue_ops_market_research_brief_parent",
+        "action_scope": {
+            "company": "revenue_ops",
+            "agency": "market_research_brief",
+        },
+    }) == ("revenue_ops", "market_research_brief")
 
 
 def test_build_current_state_uses_child_node_names_and_caps(tmp_path: Path) -> None:

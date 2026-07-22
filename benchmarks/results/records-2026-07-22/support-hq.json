@@ -1,0 +1,62 @@
+{
+  "company": "support-hq",
+  "case_id": "support_hq_safe_incident_response",
+  "benchmark": "memory_vs_true_control",
+  "generated_at": "2026-07-22T08:16:01.228656+00:00",
+  "fabri_version": "0.19.1",
+  "roster_revision": null,
+  "replicas": 6,
+  "arms_total": 12,
+  "quality": {
+    "memory": {
+      "n_complete": 5,
+      "raw_pass_pct": 100.0,
+      "corrected_pass_pct": 100.0,
+      "mean_cost_usd": 0.05707
+    },
+    "control": {
+      "n_complete": 6,
+      "raw_pass_pct": 100.0,
+      "corrected_pass_pct": 100.0,
+      "mean_cost_usd": 0.055237
+    }
+  },
+  "cost": {
+    "clean_pairs": 5,
+    "mean_delta_usd": 0.000976,
+    "median_delta_usd": 0.002806,
+    "memory_cheaper_pairs": 2,
+    "sign_test_p": 1.0,
+    "pairs": [
+      {
+        "replica": 2,
+        "delta_usd": 0.005862
+      },
+      {
+        "replica": 3,
+        "delta_usd": -0.00712
+      },
+      {
+        "replica": 4,
+        "delta_usd": 0.007249
+      },
+      {
+        "replica": 5,
+        "delta_usd": 0.002806
+      },
+      {
+        "replica": 6,
+        "delta_usd": -0.003919
+      }
+    ]
+  },
+  "control_memory_free": true,
+  "excluded_arms": [
+    {
+      "replica": 1,
+      "condition": "memory",
+      "reason": "training_failed"
+    }
+  ],
+  "total_spend_usd": 0.6391
+}

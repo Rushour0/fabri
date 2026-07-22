@@ -501,6 +501,75 @@ def test_score_text_preserves_single_word_required_matching() -> None:
     }
 
 
+def test_score_text_single_words_do_not_match_inside_larger_words() -> None:
+    assert score_text(
+        "A blameless checkout update says the rollback is complete and promises a follow-up.",
+        (("checkout",), ("rollback",), ("follow-up",)),
+        ("blame",),
+    ) == {"passed": True, "missing": [], "forbidden": []}
+    assert score_text("Checkoutless status.", (("checkout",),), ()) == {
+        "passed": False,
+        "missing": ["checkout"],
+        "forbidden": [],
+    }
+
+
+def test_score_text_required_terms_accept_explicit_morphological_variants() -> None:
+    assert score_text(
+        "Checkout rollback. Verify the production configuration.",
+        (("checkout",), ("rollback",), ("verification",)),
+        (),
+    ) == {"passed": True, "missing": [], "forbidden": []}
+
+
+def test_score_text_required_terms_must_have_an_affirmative_occurrence() -> None:
+    assert score_text(
+        "Checkout: no rollback occurred. Verification is pending.",
+        (("checkout",), ("rollback",), ("verification",)),
+        (),
+    ) == {"passed": False, "missing": ["rollback"], "forbidden": []}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "**Rollback status:** No crew provided executed rollback logs, deployment "
+            "records, or passing rollback test results. Therefore, rollback completion "
+            "is **not confirmed**; it must be verified through deployment history and "
+            "focused regression testing."
+        ),
+        (
+            "**Rollback facts:** No rollback action, deployment history, or rollback "
+            "result is evidenced."
+        ),
+    ],
+)
+def test_score_text_archived_denials_do_not_supply_required_rollback(text: str) -> None:
+    assert score_text(text, (("rollback",),), ()) == {
+        "passed": False,
+        "missing": ["rollback"],
+        "forbidden": [],
+    }
+
+
+def test_score_text_archived_prospective_rollback_mentions_are_not_evidence() -> None:
+    text = (
+        "The available code/test evidence confirms a checkout discount-calculation "
+        "defect. This supports rollback/remediation investigation at the application "
+        "logic level. Rollback completion is not confirmed; it must be verified through "
+        "deployment history and focused regression testing. Production readiness remains "
+        "unverified until rollback evidence, production configuration, and targeted "
+        "checkout regression coverage are validated."
+    )
+
+    assert score_text(text, (("checkout",), ("rollback",), ("verification",)), ()) == {
+        "passed": False,
+        "missing": ["rollback"],
+        "forbidden": [],
+    }
+
+
 def test_score_text_ignores_forbidden_phrase_in_negated_context() -> None:
     assert score_text(
         "There is no evidence that a fix was deployed.",
@@ -528,12 +597,83 @@ def test_score_text_ignores_forbidden_phrase_in_negated_context() -> None:
             "No issues were found. The fix was deployed.",
             ["fix was deployed"],
         ),
+        (
+            "No issues were found, but the fix was deployed.",
+            ["fix was deployed"],
+        ),
     ],
 )
 def test_score_text_scopes_negation_to_the_current_sentence(
     text: str, expected_forbidden: list[str]
 ) -> None:
     assert score_text(text, (), ("fix was deployed",))["forbidden"] == expected_forbidden
+
+
+def test_score_text_does_not_treat_not_only_as_negation() -> None:
+    assert score_text(
+        "Checkout rollback verification. Not only was testing completed, the fix was deployed.",
+        (("checkout",),),
+        ("fix was deployed", "resolved in production"),
+    ) == {
+        "passed": False,
+        "missing": [],
+        "forbidden": ["fix was deployed"],
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "- **Deployment evidence:** No crew supplied deployment artifacts, logs, "
+            "release metadata, or production verification proving that a checkout fix "
+            "was deployed. Accordingly, **no fix deployment is claimed**."
+        ),
+        (
+            "**Fix deployment status:** No crew supplied evidence that a corrective fix "
+            "was deployed to any environment; therefore, no fix deployment is claimed."
+        ),
+        (
+            "All three crews were consulted. The strongest directly observed evidence is "
+            "that checkout discount calculation was incorrect (`10%` of `100` produced "
+            "`-900`); a local source correction exists, but **there is no evidence that "
+            "the fix was deployed**."
+        ),
+        (
+            "- **Deployment status:** **No crew supplied evidence that a corrective fix "
+            "was deployed.** The only documented production action is the rollback."
+        ),
+        (
+            "- **Deployment status:** There is **no evidence that a corrected fix was "
+            "deployed**. The available evidence indicates the source remains defective."
+        ),
+        (
+            "- **Deployment status:** No crew supplied evidence that a corrected fix was "
+            "deployed; therefore, no fix is being claimed as deployed."
+        ),
+        (
+            "- **Deployment status:** no crew supplied evidence that a corrected fix was "
+            "deployed. Therefore, no fix deployment is claimed."
+        ),
+        (
+            "- **Rollback evidence:** Incident evidence records a rollback at **09:10 "
+            "UTC** after checkout HTTP 500s following the April 12 production deployment; "
+            "error rates returned to baseline by **09:18 UTC**. This supports that rollback "
+            "restored the prior service state, **not** that a corrected checkout fix was "
+            "deployed."
+        ),
+        (
+            "- **Fix deployment:** no crew supplied evidence that a corrective fix was "
+            "deployed. No deployment claim should be made."
+        ),
+    ],
+)
+def test_score_text_preserves_archived_genuine_negation_cases(text: str) -> None:
+    assert score_text(text, (), ("fix was deployed",)) == {
+        "passed": True,
+        "missing": [],
+        "forbidden": [],
+    }
 
 
 def test_score_text_flags_plain_forbidden_phrase() -> None:

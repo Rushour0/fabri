@@ -21,12 +21,13 @@ import sys
 import time
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
+from fabri.benchmarks.company_record import score_arm_output
 from fabri.benchmarks.company_setup_probe import (
     DEFAULT_RUN_TIMEOUT_S,
     SUCCESS_OUTCOMES,
@@ -37,7 +38,6 @@ from fabri.benchmarks.company_setup_probe import (
     _run_command,
     analyze_run,
     build_source_manifest,
-    score_text,
 )
 
 
@@ -48,6 +48,11 @@ CLAIM_BOUNDARY = (
 )
 _ALLOWED_CONDITIONS = {"memory", "control"}
 _ALLOWED_RETRIEVAL_STRATEGIES = {"dense", "sparse", "hybrid", "hybrid+mmr"}
+_STRUCTURED_RESPONSE_INSTRUCTION = (
+    "For the final executive response, return the JSON object matching "
+    "agent.response_schema first. Put all user-facing prose in the response field. "
+    "After the complete JSON object, append the required AGENT_MEMORY block."
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,10 @@ class MemoryCase:
     retrieval_expectations: dict[str, object]
     replicas: int
     conditions: tuple[str, ...]
+    structured_fields: Mapping[str, object] = field(default_factory=dict)
+    response_schema: Mapping[str, object] = field(default_factory=dict)
+    legacy_required_terms: tuple[tuple[str, ...], ...] | None = None
+    legacy_forbidden_terms: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +100,9 @@ def _positive_int(value: object, field: str) -> int:
 
 
 def _validate_retrieval_overrides(
-    top_k: int | None, strategy: str | None
+    top_k: int | None,
+    strategy: str | None,
+    guideline_max_tokens: int | None = None,
 ) -> None:
     """Validate optional retrieval settings accepted by the study runner."""
     if top_k is not None and (
@@ -101,6 +112,14 @@ def _validate_retrieval_overrides(
     if strategy is not None and strategy not in _ALLOWED_RETRIEVAL_STRATEGIES:
         choices = ", ".join(sorted(_ALLOWED_RETRIEVAL_STRATEGIES))
         raise ProbeError(f"--retrieval-strategy must be one of: {choices}")
+    if guideline_max_tokens is not None and (
+        not isinstance(guideline_max_tokens, int)
+        or isinstance(guideline_max_tokens, bool)
+        or not 8 <= guideline_max_tokens <= 512
+    ):
+        raise ProbeError(
+            "--guideline-max-tokens must be an integer between 8 and 512"
+        )
 
 
 def _load_dataset(path: Path) -> dict[str, object]:
@@ -131,6 +150,52 @@ def _conditions(value: object, field: str) -> tuple[str, ...]:
             f"{field} contains unsupported conditions: {', '.join(sorted(unsupported))}"
         )
     return conditions
+
+
+def _validated_response_schema(
+    value: object,
+    structured_fields: Mapping[str, object],
+    field: str,
+) -> dict[str, object]:
+    """Accept only the value-free string schema used by memory holdouts."""
+    schema = _as_mapping(value, field)
+    allowed_top_level = {"type", "required", "properties"}
+    if set(schema) != allowed_top_level or schema.get("type") != "object":
+        raise ProbeError(
+            f"{field} must contain exactly type, required, and properties for an object"
+        )
+    properties = _as_mapping(schema.get("properties"), f"{field}.properties")
+    expected_keys = {"response", *structured_fields}
+    if set(properties) != expected_keys:
+        raise ProbeError(
+            f"{field}.properties must be response plus every expected structured field"
+        )
+    for key, property_schema in properties.items():
+        if property_schema != {"type": "string"}:
+            raise ProbeError(
+                f"{field}.properties.{key} must expose only type: string"
+            )
+    required = _as_string_list(schema.get("required"), f"{field}.required")
+    if len(required) != len(set(required)) or set(required) != expected_keys:
+        raise ProbeError(f"{field}.required must contain every schema property exactly once")
+    return schema
+
+
+def _assert_structured_values_absent_from_holdout(
+    structured_fields: Mapping[str, object],
+    holdout_prompt: str,
+    case_id: str,
+) -> None:
+    """Fail closed if a holdout prompt leaks an expected structured answer."""
+    holdout_lower = holdout_prompt.lower()
+    for key, value in structured_fields.items():
+        value_text = str(value)
+        if value_text and value_text.lower() in holdout_lower:
+            raise ProbeError(
+                f"case {case_id}.holdout_prompt leaks expected.structured.{key} "
+                f"value {value_text!r}; a no-memory control could read the answer "
+                "off the prompt"
+            )
 
 
 def load_memory_case(
@@ -192,6 +257,28 @@ def load_memory_case(
         selected.get("holdout_prompt"), f"case {case_id}.holdout_prompt"
     )
     expected = _as_mapping(selected.get("expected"), f"case {case_id}.expected")
+    legacy_expected_value = selected.get("legacy_expected")
+    legacy_expected = (
+        None
+        if legacy_expected_value is None
+        else _as_mapping(
+            legacy_expected_value,
+            f"case {case_id}.legacy_expected",
+        )
+    )
+    structured_fields = _as_mapping(
+        expected.get("structured"), f"case {case_id}.expected.structured"
+    )
+    if not structured_fields:
+        raise ProbeError(f"case {case_id}.expected.structured must not be empty")
+    _assert_structured_values_absent_from_holdout(
+        structured_fields, holdout_prompt, case_id
+    )
+    response_schema = _validated_response_schema(
+        selected.get("response_schema"),
+        structured_fields,
+        f"case {case_id}.response_schema",
+    )
     setup = _as_mapping(selected.get("setup_probe"), f"case {case_id}.setup_probe")
     retrieval_expectations = _as_mapping(
         selected.get("retrieval_expectations"), f"case {case_id}.retrieval_expectations"
@@ -215,7 +302,25 @@ def load_memory_case(
         training_prompt=training_prompt,
         holdout_prompt=holdout_prompt,
         required_terms=_as_required_groups(expected.get("required"), "expected.required"),
+        structured_fields=structured_fields,
         forbidden_terms=_as_string_list(expected.get("forbidden"), "expected.forbidden"),
+        response_schema=response_schema,
+        legacy_required_terms=(
+            _as_required_groups(
+                legacy_expected.get("required"),
+                f"case {case_id}.legacy_expected.required",
+            )
+            if legacy_expected is not None
+            else None
+        ),
+        legacy_forbidden_terms=(
+            _as_string_list(
+                legacy_expected.get("forbidden"),
+                f"case {case_id}.legacy_expected.forbidden",
+            )
+            if legacy_expected is not None
+            else None
+        ),
         required_delegations=_as_string_list(
             setup.get("required_delegations"),
             f"case {case_id}.setup_probe.required_delegations",
@@ -224,6 +329,39 @@ def load_memory_case(
         replicas=replicas,
         conditions=conditions,
     )
+
+
+def apply_holdout_response_contract(
+    root_config: Path,
+    response_schema: Mapping[str, object],
+) -> None:
+    """Inject strict structured output into one freshly compiled holdout root."""
+    try:
+        loaded = yaml.safe_load(root_config.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ProbeError(f"could not read compiled root config {root_config}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ProbeError(f"malformed YAML in compiled root config {root_config}: {exc}") from exc
+    raw = _as_mapping(loaded, str(root_config))
+    agent = _as_mapping(raw.get("agent"), f"{root_config}.agent")
+    system_prompt = _required_string(
+        agent.get("system_prompt"), f"{root_config}.agent.system_prompt"
+    )
+    if _STRUCTURED_RESPONSE_INSTRUCTION not in system_prompt:
+        agent["system_prompt"] = (
+            system_prompt.rstrip() + "\n\n" + _STRUCTURED_RESPONSE_INSTRUCTION
+        )
+    agent["response_schema"] = dict(response_schema)
+    agent["response_retries"] = 1
+    agent["error_strategy"] = "strict"
+    raw["agent"] = agent
+    try:
+        root_config.write_text(
+            yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise ProbeError(f"could not write compiled root config {root_config}: {exc}") from exc
 
 
 def _compile_company(
@@ -260,9 +398,10 @@ def apply_retrieval_overrides(
     verification: str | None = None,
     mining_enabled: bool | None = None,
     retrieval_enabled: bool | None = None,
+    guideline_max_tokens: int | None = None,
 ) -> list[str]:
     """Rewrite optional retrieval settings into every raw compiled node config."""
-    _validate_retrieval_overrides(top_k, strategy)
+    _validate_retrieval_overrides(top_k, strategy, guideline_max_tokens)
     if verification is not None and verification not in {"any", "verified"}:
         raise ProbeError("memory retrieval verification must be 'any' or 'verified'")
     if (
@@ -271,6 +410,7 @@ def apply_retrieval_overrides(
         and verification is None
         and mining_enabled is None
         and retrieval_enabled is None
+        and guideline_max_tokens is None
     ):
         return []
 
@@ -295,6 +435,8 @@ def apply_retrieval_overrides(
             memory["mining_enabled"] = mining_enabled
         if retrieval_enabled is not None:
             memory["retrieval_enabled"] = retrieval_enabled
+        if guideline_max_tokens is not None:
+            memory["guideline_max_tokens"] = guideline_max_tokens
         try:
             config_path.write_text(
                 yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -510,7 +652,11 @@ def _private_write(
             continue
         (private / f"{label}.stdout").write_text(process.stdout, encoding="utf-8")
         (private / f"{label}.stderr").write_text(process.stderr, encoding="utf-8")
-    (private / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    private_result = dict(result)
+    private_result.setdefault("structured_output", None)
+    (private / "result.json").write_text(
+        json.dumps(private_result, indent=2), encoding="utf-8"
+    )
 
 
 # Reasons that mean the training phase itself never produced a successful,
@@ -561,6 +707,7 @@ def _invalid_run(
         "condition": condition,
         "holdout_complete": False,
         "rubric_passed": None,
+        "scoring_mode": "structured",
         "missing_required": [],
         "forbidden_hits": [],
         "total_cost_usd": training_cost if isinstance(training_cost, (int, float)) else None,
@@ -570,6 +717,7 @@ def _invalid_run(
         "training_success": training_success,
         "training_failure_reasons": training_failure_reasons,
         "holdout_failure_reasons": holdout_failure_reasons,
+        "training_dbs_absent": [],
         "execution_order": execution_order,
         "funnel": {
             "supply": {"mining_reports": [], "dbs": []},
@@ -604,6 +752,7 @@ def _run_pair(
     retrieval_top_k: int | None,
     retrieval_strategy: str | None,
     execution_order: int,
+    guideline_max_tokens: int | None = None,
 ) -> dict[str, object]:
     """Run one training-to-fresh-holdout pair, retaining raw material privately."""
     attempt_root = work_root / f"replica-{replica:02d}" / condition
@@ -643,6 +792,7 @@ def _run_pair(
         case.company_name,
         top_k=retrieval_top_k,
         strategy=retrieval_strategy,
+        guideline_max_tokens=guideline_max_tokens,
     )
     try:
         train_specs = discover_memory_dbs(train_dest, case.company_name)
@@ -748,6 +898,7 @@ def _run_pair(
         strategy=retrieval_strategy,
         mining_enabled=False if condition == "control" else None,
         retrieval_enabled=False if condition == "control" else None,
+        guideline_max_tokens=guideline_max_tokens,
     )
 
     try:
@@ -776,9 +927,11 @@ def _run_pair(
     training_funnel = _funnel_observations(train_state)
 
     holdout_root = holdout_dest / case.company_name / f"{case.root_id}.yaml"
+    training_dbs_absent: list[str] = []
     if condition == "memory":
-        missing = [item["path"] for item in training_db_manifest if item["present"] is not True]
-        if missing:
+        present = [item["path"] for item in training_db_manifest if item["present"] is True]
+        absent = [item["path"] for item in training_db_manifest if item["present"] is not True]
+        if not present:
             result = _invalid_run(
                 replica,
                 condition,
@@ -786,11 +939,20 @@ def _run_pair(
                 training_cost,
                 "training_memory_db_missing",                execution_order=execution_order,
             )
-            _private_write(attempt_root, processes, {**result, "missing_memory_dbs": missing})
+            _private_write(attempt_root, processes, {**result, "missing_memory_dbs": absent})
             return result
+        training_dbs_absent = sorted(absent)
+        absent_relative_paths = {Path(item) for item in absent}
         for relative in train_by_path:
-            source = train_dest / case.company_name / relative
             target = holdout_dest / case.company_name / relative
+            if relative in absent_relative_paths:
+                # This agent never ran during training and legitimately has no
+                # memories. Remove any pre-created holdout-compile DB for it so
+                # the holdout run can't accidentally pick up a stray/empty file
+                # and look like it transported memory that never existed.
+                target.unlink(missing_ok=True)
+                continue
+            source = train_dest / case.company_name / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
     else:
@@ -804,11 +966,14 @@ def _run_pair(
         holdout_dest, case.company_name, holdout_specs
     )
     transport_intact = condition == "memory" and all(
-        before["sha256"] == after["sha256"]
-        and before["entry_payload_sha256"] == after["entry_payload_sha256"]
-        and before["entry_ids"] == after["entry_ids"]
-        and before["present"] is True
-        and after["present"] is True
+        (before["present"] is not True and after["present"] is not True)
+        or (
+            before["sha256"] == after["sha256"]
+            and before["entry_payload_sha256"] == after["entry_payload_sha256"]
+            and before["entry_ids"] == after["entry_ids"]
+            and before["present"] is True
+            and after["present"] is True
+        )
         for before, after in zip(training_db_manifest, transported_db_manifest, strict=True)
     )
     if condition == "control":
@@ -822,6 +987,19 @@ def _run_pair(
             "holdout_root_config_missing",            execution_order=execution_order,
         )
         _private_write(attempt_root, processes, result)
+        return result
+    try:
+        apply_holdout_response_contract(holdout_root, case.response_schema)
+    except ProbeError as exc:
+        result = _invalid_run(
+            replica,
+            condition,
+            training_outcome,
+            training_cost,
+            "holdout_response_contract_invalid",
+            execution_order=execution_order,
+        )
+        _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
 
     try:
@@ -869,11 +1047,16 @@ def _run_pair(
         complete = False
         holdout_failures.append("control_guidelines_retrieved_nonzero")
     final_text = holdout_payload.get("final_text")
-    rubric = score_text(
-        final_text if isinstance(final_text, str) else "",
+    structured_output = holdout_payload.get("structured_output")
+    rubric = score_arm_output(
+        {"structured_output": structured_output},
+        final_text if isinstance(final_text, str) else None,
         case.required_terms,
+        case.structured_fields,
         case.forbidden_terms,
     )
+    if rubric is None:  # Structured mode always returns a deterministic verdict.
+        raise ProbeError("structured scoring unexpectedly returned no verdict")
     holdout_funnel = _funnel_observations(holdout_state)
     transported_entry_ids = {
         str(entry_id)
@@ -886,6 +1069,7 @@ def _run_pair(
         "condition": condition,
         "holdout_complete": complete,
         "rubric_passed": rubric["passed"] if complete else None,
+        "scoring_mode": rubric["scoring_mode"],
         "missing_required": rubric["missing"] if complete else [],
         "forbidden_hits": rubric["forbidden"] if complete else [],
         "total_cost_usd": _sum_costs(training_cost, holdout_analysis.get("total_cost_usd")),
@@ -895,6 +1079,7 @@ def _run_pair(
         "training_success": training_success,
         "training_failure_reasons": [],
         "holdout_failure_reasons": sorted(set(str(item) for item in holdout_failures)),
+        "training_dbs_absent": training_dbs_absent,
         "execution_order": execution_order,
         "funnel": {
             "supply": {
@@ -935,6 +1120,7 @@ def _run_pair(
             "holdout_wall_time_s": holdout_elapsed,
             "training_session_id": train_payload.get("session_id"),
             "holdout_session_id": holdout_payload.get("session_id"),
+            "structured_output": structured_output,
         },
     )
     return result
@@ -1074,12 +1260,17 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
     if retrieval_overrides is not None:
         if not isinstance(retrieval_overrides, dict):
             raise ProbeError("memory payload retrieval_overrides has an invalid type")
-        for key in ("top_k", "retrieval_strategy"):
+        for key in ("top_k", "retrieval_strategy", "guideline_max_tokens"):
             if key not in retrieval_overrides:
                 raise ProbeError(f"memory payload retrieval_overrides missing key: {key}")
         top_k = retrieval_overrides.get("top_k")
         strategy = retrieval_overrides.get("retrieval_strategy")
-        _validate_retrieval_overrides(top_k, strategy)
+        guideline_max_tokens = retrieval_overrides.get("guideline_max_tokens")
+        if guideline_max_tokens is not None and not isinstance(guideline_max_tokens, int):
+            raise ProbeError(
+                "memory payload retrieval_overrides guideline_max_tokens has an invalid type"
+            )
+        _validate_retrieval_overrides(top_k, strategy, guideline_max_tokens)
     if not isinstance(payload["replicas"], int) or payload["replicas"] < 1:
         raise ProbeError("memory payload replicas must be positive")
     conditions = payload["conditions"]
@@ -1104,6 +1295,7 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "condition": (str,),
         "holdout_complete": (bool,),
         "rubric_passed": (bool, type(None)),
+        "scoring_mode": (str,),
         "missing_required": (list,),
         "forbidden_hits": (list,),
         "total_cost_usd": (int, float, type(None)),
@@ -1113,6 +1305,7 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "training_success": (bool, type(None)),
         "training_failure_reasons": (list,),
         "holdout_failure_reasons": (list,),
+        "training_dbs_absent": (list,),
         "execution_order": (int,),
         "funnel": (dict,),
     }
@@ -1127,6 +1320,8 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
                 raise ProbeError(f"memory payload run {index} field {key!r} has an invalid type")
         if run["rubric_passed"] is not None and run["holdout_complete"] is not True:
             raise ProbeError(f"memory payload run {index} has a rubric verdict without completion")
+        if run["scoring_mode"] != "structured":
+            raise ProbeError(f"memory payload run {index} has an invalid scoring mode")
         if run["training_success"] is True and run["training_failure_reasons"]:
             raise ProbeError(
                 f"memory payload run {index} reports training success with training failures"
@@ -1185,15 +1380,18 @@ def render_markdown(payload: dict[str, object]) -> str:
     if isinstance(retrieval_overrides, dict):
         top_k = retrieval_overrides.get("top_k")
         strategy = retrieval_overrides.get("retrieval_strategy")
+        guideline_max_tokens = retrieval_overrides.get("guideline_max_tokens")
     else:
         top_k = None
         strategy = None
+        guideline_max_tokens = None
 
     lines = [
         "# Company memory vs control study",
         "",
         f"- Supply smoke gate: `{'GO' if isinstance(payload.get('smoke_gate'), dict) and payload['smoke_gate'].get('go') else 'STOP'}`",
-        f"- Retrieval overrides: top_k=`{top_k}`, retrieval_strategy=`{strategy}`",
+        f"- Retrieval overrides: top_k=`{top_k}`, retrieval_strategy=`{strategy}`, "
+        f"guideline_max_tokens=`{guideline_max_tokens}`",
         f"- Case: `{payload['case_id']}`",
         f"- Company: `{payload['company']}`",
         f"- Fabri version: `{payload['fabri_version'] or 'unavailable'}`",
@@ -1248,11 +1446,12 @@ def run_memory_study(
     cwd: Path | None = None,
     retrieval_top_k: int | None = None,
     retrieval_strategy: str | None = None,
+    guideline_max_tokens: int | None = None,
 ) -> dict[str, object]:
     """Run sequential, fresh-compile memory and control replicas and publish aggregates."""
     if run_timeout_s <= 0:
         raise ProbeError("run_timeout_s must be positive")
-    _validate_retrieval_overrides(retrieval_top_k, retrieval_strategy)
+    _validate_retrieval_overrides(retrieval_top_k, retrieval_strategy, guideline_max_tokens)
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     work_root = output / "private-attempts"
@@ -1281,6 +1480,7 @@ def run_memory_study(
                     retrieval_top_k,
                     retrieval_strategy,
                     execution_order,
+                    guideline_max_tokens,
                 )
             )
     aggregates = {
@@ -1303,6 +1503,7 @@ def run_memory_study(
         "retrieval_overrides": {
             "top_k": retrieval_top_k,
             "retrieval_strategy": retrieval_strategy,
+            "guideline_max_tokens": guideline_max_tokens,
         },
         "replicas": case.replicas,
         "conditions": list(case.conditions),
@@ -1328,11 +1529,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-timeout-s", type=float, default=DEFAULT_RUN_TIMEOUT_S)
     parser.add_argument("--retrieval-top-k", type=int, default=None)
     parser.add_argument("--retrieval-strategy", default=None)
+    parser.add_argument("--guideline-max-tokens", type=int, default=None)
     args = parser.parse_args(argv)
     if args.run_timeout_s <= 0:
         parser.error("--run-timeout-s must be positive")
     try:
-        _validate_retrieval_overrides(args.retrieval_top_k, args.retrieval_strategy)
+        _validate_retrieval_overrides(
+            args.retrieval_top_k, args.retrieval_strategy, args.guideline_max_tokens
+        )
         case = load_memory_case(args.dataset, args.case_id, replicas_override=args.replicas)
         result = run_memory_study(
             case,
@@ -1340,6 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
             run_timeout_s=args.run_timeout_s,
             retrieval_top_k=args.retrieval_top_k,
             retrieval_strategy=args.retrieval_strategy,
+            guideline_max_tokens=args.guideline_max_tokens,
         )
     except (OSError, ProbeError) as exc:
         parser.error(str(exc))

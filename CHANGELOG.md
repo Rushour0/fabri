@@ -4,6 +4,25 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.19.3 — 2026-07-22
+
+### Fixed
+
+- **Root managers silently dropped the `AGENT_MEMORY` block.** Live benchmark training runs
+  (model `gpt-5.6-terra`) showed the block emitted in **0 of 4 runs**: when a task prompt demanded
+  its own output shape (e.g. "return the ticket response and its compact decision record"), the
+  model treated the memory-stewardship instructions as optional prose and resolved the conflict by
+  dropping the block entirely. Both `_COMPANY_MEMORY_INSTRUCTIONS` and
+  `_COMPANY_STRUCTURED_MEMORY_INSTRUCTIONS` in `company.py` now state plainly that the block is a
+  **required** part of every successful final response regardless of the task's requested format —
+  the task's format governs everything before the marker, the block always comes after (outside the
+  JSON, for the structured variant), and a response missing it is incomplete. `INSIGHTS` guidance
+  also now asks for the **complete** convention when a task establishes one for later work — every
+  branch, with exact identifiers — not just the branch this run happened to take. Marker, field
+  names, and the safety sentence (never store credentials, personal data, transient chatter, or
+  unverified claims) are unchanged, so existing parsing and mining in `memory/output.py` keep
+  working untouched.
+
 ## 0.19.2 — 2026-07-22
 
 ### Fixed

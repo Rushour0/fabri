@@ -2,13 +2,40 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from fabri.orchestrator.action_detection import derive_scope_from_collection
+
+
+def action_candidate_text(candidate: Mapping[str, object]) -> str:
+    """Return stable role-specific text so sibling recoveries cannot collide."""
+    scope = candidate.get("scope")
+    roles = scope.get("roles") if isinstance(scope, Mapping) else None
+    role_names = sorted(role for role in roles or [] if isinstance(role, str) and role)
+    role_label = ", ".join(role_names) if role_names else "affected role"
+    return f"Increase {role_label} token cap after a truncation retry."
+
+
+def observed_max_token_retries(
+    result: Mapping[str, object],
+    post_run_max_token_retries: object = 0,
+) -> int:
+    """Combine retries from the real run and its memory-compression follow-up."""
+    usage = result.get("usage")
+    run_value = usage.get("max_token_retries", 0) if isinstance(usage, Mapping) else 0
+
+    def valid_count(value: object) -> int:
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 0
+
+    return valid_count(run_value) + valid_count(post_run_max_token_retries)
 
 
 def build_truncation_action_candidate(
     config: dict, max_token_retries: int, outcome: str, task: str
 ) -> dict | None:
-    """Build a shadow-only cap-increase recovery for a truncation retry.
+    """Build a typed cap-increase recovery for a truncation retry.
 
     A positive retry count is the deterministic signal, regardless of the
     terminal outcome: a run that recovered after retrying still proves the
@@ -41,10 +68,20 @@ def build_truncation_action_candidate(
     ):
         return None
 
-    company, agency = derive_scope_from_collection(collection)
+    explicit_scope = memory.get("action_scope")
+    explicit_role: str | None = None
+    if isinstance(explicit_scope, dict):
+        company_value = explicit_scope.get("company")
+        agency_value = explicit_scope.get("agency")
+        role_value = explicit_scope.get("role")
+        company = company_value if isinstance(company_value, str) else None
+        agency = agency_value if isinstance(agency_value, str) else None
+        explicit_role = role_value if isinstance(role_value, str) else None
+    else:
+        company, agency = derive_scope_from_collection(collection)
     if not company or not agency:
         return None
-    roles = _affected_roles(config, configured_cap, agency)
+    roles = _affected_roles(config, configured_cap, explicit_role or agency)
     if not roles:
         return None
 

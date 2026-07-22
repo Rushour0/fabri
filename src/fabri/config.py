@@ -190,8 +190,13 @@ DEFAULT_CONFIG = {
         "retrieval_verification": "any",
         # Enables deterministic memory tier classification and core preference.
         "tiering_enabled": False,
-        # Enables shadow-only surfacing of applicable remembered actions.
+        # Enables surfacing of applicable remembered actions.
         "memory_action_enabled": False,
+        # Explicit opt-in for applying the narrow, fail-closed action allowlist
+        # before a run.  Today the only executable capability is increasing a
+        # delegated role's max_tokens to the retry cap recorded after a real
+        # truncation.  False preserves the historical shadow-only behavior.
+        "memory_action_apply_enabled": False,
         # Provenance boundary stamped onto newly mined entries.
         "scope": "agent",
         # M1: when true, every run (any outcome) also writes one deterministic

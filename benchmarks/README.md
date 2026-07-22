@@ -51,6 +51,10 @@ read as a qualification guarantee.
 - `fixtures/company_release_readiness/` is a seeded multi-role fixture for
   fresh-company replica runs.
 - `results/` contains reviewed public aggregates only.
+- [`results/revenue-ops-live-failure-curriculum-2026-07-22.md`](results/revenue-ops-live-failure-curriculum-2026-07-22.md)
+  records an engineering smoke where deterministic token-budget failures
+  progressed to a real generated brief through scoped ActionMemory changes. It
+  is explicitly not a frozen memory-vs-control benchmark.
 - `runs/` is ignored because provisional traces, workspaces, prompts, session
   IDs, and raw model output can be private or misleading before review.
 

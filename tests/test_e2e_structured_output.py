@@ -35,6 +35,14 @@ def _structured_events(session_id: str) -> list[dict]:
             if e.get("type") == EventType.STRUCTURED_OUTPUT.value]
 
 
+def _final_event(session_id: str) -> dict:
+    return next(
+        event
+        for event in read_trace(session_id)
+        if event.get("type") == EventType.FINAL.value
+    )
+
+
 def test_valid_first_try(tmp_path):
     script = [LLMResponse(final_text='{"answer": "42", "confidence": 0.9}')]
     out = run_agent(
@@ -46,6 +54,66 @@ def test_valid_first_try(tmp_path):
     assert out["structured_output"] == {"answer": "42", "confidence": 0.9}
     evs = _structured_events(out["session_id"])
     assert len(evs) == 1 and evs[0]["valid"] is True
+
+
+def test_trailing_agent_memory_validates_but_stays_in_final_trace(tmp_path):
+    full_text = (
+        '{"answer": "42", "confidence": 0.9}\n\n'
+        "<!-- AGENT_MEMORY -->\n"
+        "TASK: answer q\n"
+        "OUTCOME: success\n"
+        "INSIGHTS:\n- exact answer retained\n"
+        "OPEN LOOPS:\n- none"
+    )
+    out = run_agent(
+        "q",
+        ScriptedLLMBackend([LLMResponse(final_text=full_text)]),
+        _tools(tmp_path),
+        _store(),
+        response_schema=SCHEMA,
+    )
+
+    assert out["success"] is True
+    assert out["structured_output"] == {"answer": "42", "confidence": 0.9}
+    assert out["final_text"] == '{"answer": "42", "confidence": 0.9}'
+    assert _final_event(out["session_id"])["text"] == full_text
+
+
+def test_marker_free_structured_answer_is_byte_identical(tmp_path):
+    answer = '  {"answer": "42", "confidence": 0.9}\n'
+    out = run_agent(
+        "q",
+        ScriptedLLMBackend([LLMResponse(final_text=answer)]),
+        _tools(tmp_path),
+        _store(),
+        response_schema=SCHEMA,
+    )
+
+    assert out["success"] is True
+    assert out["final_text"] == answer
+    assert _final_event(out["session_id"])["text"] == answer
+
+
+def test_strict_rejects_invalid_payload_before_trailing_agent_memory(tmp_path):
+    invalid = (
+        '{"answer": "42"}\n'
+        "<!-- AGENT_MEMORY -->\n"
+        "TASK: answer q\nOUTCOME: success"
+    )
+    out = run_agent(
+        "q",
+        ScriptedLLMBackend([LLMResponse(final_text=invalid)]),
+        _tools(tmp_path),
+        _store(),
+        response_schema=SCHEMA,
+        response_retries=0,
+        error_strategy="strict",
+    )
+
+    assert out["success"] is False
+    assert out["outcome"] == Outcome.INVALID_OUTPUT.value
+    assert out["structured_output"] is None
+    assert _structured_events(out["session_id"])[0]["valid"] is False
 
 
 def test_invalid_then_valid_after_one_retry(tmp_path):

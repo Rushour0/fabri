@@ -12,6 +12,15 @@ from fabri.config import load_config
 from fabri.core.agent import run_agent
 from fabri.core.outcome import Outcome
 from fabri.core.run_config import AgentRunConfig
+from fabri.memory.action_mining import (
+    action_candidate_text,
+    build_truncation_action_candidate,
+    observed_max_token_retries,
+)
+from fabri.memory.pruning import ingest_guideline
+from fabri.memory.recurrence import fingerprint
+from fabri.orchestrator.action_detection import detect_proposed_actions, resolve_action_scope
+from fabri.orchestrator.action_execution import apply_safe_memory_actions
 from fabri.orchestrator.pipeline import process_trace
 from fabri.orchestrator.traces import trace_path
 from fabri.runtime import build_llm, build_memory_store, build_run_llms, build_tool_defs, build_tools
@@ -70,13 +79,43 @@ def main() -> int:
             print(json.dumps({"error": f"failed to read --system-prompt-file: {e}"}))
             return 1
 
+    mem_cfg = config["memory"]
+    store = build_memory_store(mem_cfg)
     tools_cfg = config["tools"]
+    applied_memory_actions: list[dict[str, object]] = []
+    if mem_cfg.get("memory_action_enabled", False):
+        try:
+            company, agency = resolve_action_scope(mem_cfg)
+            proposals = detect_proposed_actions(
+                store,
+                tools_cfg.get("agents") or [],
+                args["task"],
+                company=company or "",
+                agency=agency or "",
+                top_n=8,
+            )
+            if proposals and mem_cfg.get("memory_action_apply_enabled", False):
+                applied_memory_actions = [
+                    action.to_dict()
+                    for action in apply_safe_memory_actions(
+                        proposals,
+                        tools_cfg.get("agents") or [],
+                    )
+                ]
+            elif proposals:
+                print(
+                    f"[fabri] shadow ActionMemory proposals detected: {len(proposals)}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"[fabri] ActionMemory preparation failed closed: {exc}", file=sys.stderr)
+
+    # Build delegated tools only after applicable safe actions have updated
+    # their compiled configs. This makes the very next child invocation use the
+    # remembered recovery without mutating source rosters.
     tools = build_tools(tools_cfg)
     decompose_cfg = tools_cfg["decompose"]
     llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
-
-    mem_cfg = config["memory"]
-    store = build_memory_store(mem_cfg)
 
     # agent.subagent.{max_steps,max_cost_usd} override the parent budget
     # for this child only; absent fields fall back to the parent values.
@@ -103,12 +142,17 @@ def main() -> int:
         narrator_llm=llms["narrator_llm"],
         **run_cfg.as_kwargs(),
     )
+    if applied_memory_actions:
+        result["memory_actions_applied"] = applied_memory_actions
 
     # Root-cause fix: mine THIS child's own trace into the same memory store,
     # mirroring cli.py's cmd_run path -- otherwise a delegated sub-agent's
     # trace is discarded and only the parent's thin trace ever gets mined,
     # capping the guidelines a company can ever learn.
-    if os.environ.get("FABRI_DISABLE_SUBAGENT_MINING"):
+    mining_enabled = bool(mem_cfg.get("mining_enabled", True)) and not os.environ.get(
+        "FABRI_DISABLE_SUBAGENT_MINING"
+    )
+    if not mining_enabled:
         pass  # EXPERIMENT-ONLY escape hatch for a mining-off benchmark arm
     else:
         try:
@@ -142,6 +186,32 @@ def main() -> int:
             # -- log to stderr and continue.
             print(f"[fabri] subagent trace mining failed: {e}", file=sys.stderr)
 
+        try:
+            candidate = build_truncation_action_candidate(
+                config,
+                observed_max_token_retries(result),
+                str(result.get("outcome", "unknown")),
+                args["task"],
+            )
+            if candidate is not None:
+                evidence = candidate.get("evidence")
+                if isinstance(evidence, dict):
+                    evidence["source_session_ids"] = [result["session_id"]]
+                ingest_guideline(
+                    store,
+                    action_candidate_text(candidate),
+                    session_id=result["session_id"],
+                    kind="success_pattern",
+                    tier="quarantine",
+                    resolution=candidate,
+                    dedup_key=fingerprint(candidate["problem_signature"]),
+                    similarity_threshold=1.01,
+                    producer_agent_id=config.get("agent", {}).get("name"),
+                    scope=mem_cfg.get("scope", "agent"),
+                )
+        except Exception as exc:
+            print(f"[fabri] subagent ActionMemory mining failed: {exc}", file=sys.stderr)
+
     # Surface session_id + trace path so a parent agent / human reader can
     # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`
     # carries own tokens + grandchildren; the parent's dispatch loop reads
@@ -153,6 +223,7 @@ def main() -> int:
         "session_id": result["session_id"],
         "trace_path": str(trace_path(result["session_id"])),
         "usage": result.get("usage"),
+        "memory_actions_applied": result.get("memory_actions_applied", []),
     }))
     return 0 if result["outcome"] in (Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value) else 1
 

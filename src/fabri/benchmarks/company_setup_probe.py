@@ -920,40 +920,173 @@ def score_text(
     required_terms: tuple[tuple[str, ...], ...],
     forbidden_terms: tuple[str, ...],
 ) -> dict[str, object]:
+    morphological_families = (
+        frozenset({
+            "verify",
+            "verifies",
+            "verified",
+            "verifying",
+            "verification",
+            "verifications",
+        }),
+    )
+    denial_evidence_words = {
+        "available",
+        "completed",
+        "confirmed",
+        "demonstrated",
+        "documented",
+        "established",
+        "evidenced",
+        "executed",
+        "found",
+        "known",
+        "observed",
+        "performed",
+        "proven",
+        "provided",
+        "shown",
+        "supplied",
+        "verified",
+    }
+    denial_status_words = {
+        "absent",
+        "incomplete",
+        "missing",
+        "unavailable",
+        "unconfirmed",
+        "undocumented",
+        "unproven",
+        "unsupported",
+        "unverified",
+    }
+    status_label_words = {"action", "completion", "evidence", "fact", "facts", "status"}
+    polarity_neutral_requirements = {"evidence"}
+
     def normalize(value: str) -> str:
         return " ".join(value.casefold().replace("-", " ").split())
 
     def word_matches(expected: str, actual: str) -> bool:
-        return actual == expected or actual == f"{expected}s" or actual == f"{expected}es"
+        if actual == expected or actual == f"{expected}s" or actual == f"{expected}es":
+            return True
+        return any(expected in family and actual in family for family in morphological_families)
 
-    def required_term_matches(phrase: str) -> bool:
-        """Match multi-word requirements within a short, single-sentence window."""
-        words = normalize(phrase).split()
-        if len(words) <= 1:
-            # Preserve the original normalized-substring behavior for single-word
-            # requirements.
-            return bool(words) and words[0] in comparison_normalized
+    negation_pattern = re.compile(
+        r"\b(no|not(?!\s+only\b)|never|without|nor|neither|cannot|can not|n't|"
+        r"did not|does not|do not|isn't|wasn't|aren't|weren't|absence of|lack of|"
+        r"unable|no evidence)\b",
+        re.IGNORECASE,
+    )
+    negation_scope_reset_pattern = re.compile(
+        r"\b(?:but|however|nevertheless|yet)\b",
+        re.IGNORECASE,
+    )
 
-        # A hyphenated requirement may also be written as one compound word.
-        # The token comparison below covers its hyphenated and space-separated forms.
-        compact = "".join(words)
-        allow_compact = "-" in phrase
+    normalized = re.sub(r"[^\S\n]+", " ", text.casefold().replace("-", " "))
 
-        for sentence in re.split(r"[.!?\n]+", normalized):
-            tokens = re.findall(r"\b\w+\b", sentence)
-            if allow_compact and any(word_matches(compact, token) for token in tokens):
+    def is_negated(start: int, end: int) -> bool:
+        preceding = preceding_clause(start)
+        if negation_pattern.search(preceding):
+            return True
+
+        following_words = following_clause_words(end)
+        if not following_words:
+            return False
+        if following_words[0] in status_label_words and any(
+            word in {"no", "not", "never"} for word in following_words[1:4]
+        ):
+            return True
+        if any(word in denial_status_words for word in following_words[:4]):
+            return True
+        for index, word in enumerate(following_words[:5]):
+            if word == "not" and following_words[index + 1:index + 2] == ["only"]:
+                continue
+            if word in {"not", "never", "cannot"} and any(
+                candidate in denial_evidence_words
+                for candidate in following_words[index + 1:index + 5]
+            ):
                 return True
-            for start, token in enumerate(tokens):
-                if not word_matches(words[0], token):
+        return False
+
+    def preceding_clause(start: int) -> str:
+        preceding = normalized[max(0, start - 400):start]
+        boundary = max(
+            preceding.rfind("."),
+            preceding.rfind(";"),
+            preceding.rfind("!"),
+            preceding.rfind("?"),
+            preceding.rfind("\n"),
+        )
+        if boundary != -1:
+            preceding = preceding[boundary + 1:]
+        scope_resets = list(negation_scope_reset_pattern.finditer(preceding))
+        if scope_resets:
+            preceding = preceding[scope_resets[-1].end():]
+        return preceding
+
+    def following_clause_words(end: int) -> list[str]:
+        following = normalized[end:]
+        following_boundary = min(
+            (
+                index
+                for punctuation in ".;!?\n"
+                if (index := following.find(punctuation)) != -1
+            ),
+            default=len(following),
+        )
+        return re.findall(r"\b\w+\b", following[:following_boundary])[:8]
+
+    def required_occurrence_is_denied(start: int, end: int) -> bool:
+        if is_negated(start, end):
+            return True
+        if re.search(r"\buntil\b", preceding_clause(start)):
+            return True
+        return "investigation" in following_clause_words(end)[:4]
+
+    def required_occurrences(phrase: str) -> list[tuple[int, int]]:
+        words = normalize(phrase).split()
+        if not words:
+            return []
+
+        occurrences: list[tuple[int, int]] = []
+        for sentence_match in re.finditer(r"[^.!?\n]+", normalized):
+            sentence = sentence_match.group()
+            tokens = list(re.finditer(r"\b\w+\b", sentence))
+            if len(words) == 1:
+                occurrences.extend(
+                    (
+                        sentence_match.start() + token.start(),
+                        sentence_match.start() + token.end(),
+                    )
+                    for token in tokens
+                    if word_matches(words[0], token.group())
+                )
+                continue
+
+            # A hyphenated requirement may also be written as one compound word.
+            # Token comparison also covers hyphenated and space-separated forms.
+            compact = "".join(words)
+            if "-" in phrase:
+                occurrences.extend(
+                    (
+                        sentence_match.start() + token.start(),
+                        sentence_match.start() + token.end(),
+                    )
+                    for token in tokens
+                    if word_matches(compact, token.group())
+                )
+
+            for start_index, token in enumerate(tokens):
+                if not word_matches(words[0], token.group()):
                     continue
-                previous = start
+                previous = start_index
                 for word in words[1:]:
                     upper_bound = min(previous + 5, len(tokens))
                     next_index = next(
                         (
                             index
                             for index in range(previous + 1, upper_bound)
-                            if word_matches(word, tokens[index])
+                            if word_matches(word, tokens[index].group())
                         ),
                         None,
                     )
@@ -961,41 +1094,40 @@ def score_text(
                         break
                     previous = next_index
                 else:
-                    return True
-        return False
+                    occurrences.append((
+                        sentence_match.start() + token.start(),
+                        sentence_match.start() + tokens[previous].end(),
+                    ))
+        return occurrences
 
-    normalized = re.sub(r"[^\S\n]+", " ", text.casefold().replace("-", " "))
-    comparison_normalized = normalize(text)
+    def required_term_matches(phrase: str) -> bool:
+        """Match an affirmative requirement within a short, single-sentence window."""
+        if normalize(phrase) in polarity_neutral_requirements:
+            return bool(required_occurrences(phrase))
+        return any(
+            not required_occurrence_is_denied(start, end)
+            for start, end in required_occurrences(phrase)
+        )
+
     missing = [
         " | ".join(group)
         for group in required_terms
         if not any(required_term_matches(phrase) for phrase in group)
     ]
-    negation_pattern = re.compile(
-        r"\b(no|not|never|without|nor|neither|cannot|can not|n't|did not|does not|do not|isn't|wasn't|aren't|weren't|absence of|lack of|unable|no evidence)\b",
-        re.IGNORECASE,
-    )
     forbidden = []
     for term in forbidden_terms:
         normalized_term = normalize(term)
-        term_pattern = re.compile(re.escape(normalized_term).replace(r"\ ", r"[ \n]+"))
+        term_pattern = re.compile(
+            r"(?<!\w)"
+            + re.escape(normalized_term).replace(r"\ ", r"[ \n]+")
+            + r"(?!\w)"
+        )
         match = term_pattern.search(normalized)
         while match is not None:
-            occurrence = match.start()
-            preceding = normalized[max(0, occurrence - 400):occurrence]
-            boundary = max(
-                preceding.rfind("."),
-                preceding.rfind(";"),
-                preceding.rfind("!"),
-                preceding.rfind("?"),
-                preceding.rfind("\n"),
-            )
-            if boundary != -1:
-                preceding = preceding[boundary + 1:]
-            if not negation_pattern.search(preceding):
+            if not is_negated(match.start(), match.end()):
                 forbidden.append(term)
                 break
-            match = term_pattern.search(normalized, occurrence + 1)
+            match = term_pattern.search(normalized, match.start() + 1)
     return {"passed": not missing and not forbidden, "missing": missing, "forbidden": forbidden}
 
 

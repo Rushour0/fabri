@@ -8,6 +8,8 @@ import yaml
 from fabri.company import CompanyError, compile_company, load_company
 from fabri.config import load_config
 
+_RESPONSE_KEYS = {"response_schema", "response_retries", "error_strategy"}
+
 
 def _write_company(tmp_path: Path, nodes: str) -> Path:
     path = tmp_path / "company.toml"
@@ -61,6 +63,11 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
     assert [agent["name"] for agent in root["tools"]["agents"]] == ["vp_eng"]
     assert root["memory"]["collection"] == "acme_eng_company"
     assert root["memory"]["record_postmortems"] is True
+    assert root["memory"]["action_scope"] == {
+        "company": "acme_eng",
+        "agency": "company",
+        "role": "ceo",
+    }
     assert "<!-- AGENT_MEMORY -->" in root["agent"]["system_prompt"]
 
     vp_path = root_config.parent / "vp_eng.yaml"
@@ -74,6 +81,11 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
     writer_config = load_config(str(writer_entry))
     assert bug_config["memory"]["collection"] == "acme_eng_bugs_manager"
     assert writer_config["memory"]["collection"] == "acme_eng_writer_manager"
+    assert bug_config["memory"]["action_scope"] == {
+        "company": "acme_eng",
+        "agency": "bugs",
+        "role": "bug-manager",
+    }
     assert bug_config["memory"]["collection"] != writer_config["memory"]["collection"]
     for specialist in (
         root_config.parent / "agencies" / "bugs" / "specialist.yaml",
@@ -158,3 +170,56 @@ def test_load_company_rejects_bad_node_timeout(tmp_path: Path, value: str) -> No
     )
     with pytest.raises(CompanyError, match="timeout_s"):
         load_company(path)
+
+
+def test_compile_company_emits_structured_config_only_for_root(tmp_path: Path) -> None:
+    path = tmp_path / "company.toml"
+    path.write_text(
+        "[company]\nname = 'c'\nmemory_namespace = 'c'\n\n"
+        "[[node]]\nid = 'root'\nreport_to = ''\nprompt = 'root'\n"
+        "response_schema = { type = 'object', required = ['answer'], "
+        "properties = { answer = { type = 'string' } } }\n"
+        "response_retries = 2\nerror_strategy = 'warn'\n\n"
+        "[[node]]\nid = 'child'\nreport_to = 'root'\nprompt = 'child'\n"
+    )
+
+    root_path = compile_company(path, tmp_path / "out")
+    root = yaml.safe_load(root_path.read_text())
+    child = yaml.safe_load((root_path.parent / "child.yaml").read_text())
+
+    assert root["agent"]["response_schema"] == {
+        "type": "object",
+        "required": ["answer"],
+        "properties": {"answer": {"type": "string"}},
+    }
+    assert root["agent"]["response_retries"] == 2
+    assert root["agent"]["error_strategy"] == "warn"
+    assert "outside the JSON" in root["agent"]["system_prompt"]
+    assert not _RESPONSE_KEYS.intersection(child["agent"])
+
+
+def test_load_company_rejects_response_schema_on_non_root(tmp_path: Path) -> None:
+    path = tmp_path / "company.toml"
+    path.write_text(
+        "[company]\nname = 'c'\nmemory_namespace = 'c'\n\n"
+        "[[node]]\nid = 'root'\nreport_to = ''\nprompt = 'root'\n\n"
+        "[[node]]\nid = 'child'\nreport_to = 'root'\nprompt = 'child'\n"
+        "response_schema = { type = 'object' }\n"
+    )
+
+    with pytest.raises(CompanyError, match="response_schema.*root node"):
+        compile_company(path, tmp_path / "out")
+
+
+def test_load_company_rejects_unsupported_response_schema_key(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "company.toml"
+    path.write_text(
+        "[company]\nname = 'c'\nmemory_namespace = 'c'\n\n"
+        "[[node]]\nid = 'root'\nreport_to = ''\nprompt = 'root'\n"
+        "response_schema = { type = 'object', additionalProperties = false }\n"
+    )
+
+    with pytest.raises(CompanyError, match="additionalProperties"):
+        compile_company(path, tmp_path / "out")

@@ -144,7 +144,10 @@ def propose_actions(
     read as the store grows.
     """
     try:
-        entries = store.iterate(kind="success_pattern", limit=_ACTION_SCAN_LIMIT)
+        # Typed actions may be promoted to ``strategic`` after recurrence. Scan
+        # the bounded store surface and select by ``resolution`` rather than by
+        # a transient memory tier/kind.
+        entries = store.iterate(kind=None, limit=_ACTION_SCAN_LIMIT)
     except Exception:  # noqa: BLE001 -- degrade to no proposal, never abort retrieval
         return []
     ranked: list[tuple[float, dict]] = []

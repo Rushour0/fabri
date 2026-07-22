@@ -23,10 +23,15 @@ from fabri.core.logging_setup import configure_logging
 from fabri.core.outcome import Outcome
 from fabri.core.run_config import AgentRunConfig
 from fabri.events import EventType
-from fabri.memory.action_mining import build_truncation_action_candidate
+from fabri.memory.action_mining import (
+    action_candidate_text,
+    build_truncation_action_candidate,
+    observed_max_token_retries,
+)
 from fabri.memory.pruning import ingest_guideline
 from fabri.memory.recurrence import fingerprint
-from fabri.orchestrator.action_detection import derive_scope_from_collection, detect_proposed_actions
+from fabri.orchestrator.action_detection import detect_proposed_actions, resolve_action_scope
+from fabri.orchestrator.action_execution import apply_safe_memory_actions
 from fabri.orchestrator.pipeline import process_trace
 from fabri.orchestrator.traces import log_event
 from fabri.pricing import cost_for
@@ -224,6 +229,42 @@ def cmd_run(args: argparse.Namespace) -> None:
     store = _open_store(mem_cfg)
 
     tools_cfg = config["tools"]
+    applied_memory_actions: list[dict[str, object]] = []
+    if mem_cfg.get("memory_action_enabled", False):
+        try:
+            company, agency = resolve_action_scope(mem_cfg)
+            proposals = detect_proposed_actions(
+                store,
+                tools_cfg.get("agents") or [],
+                args.task,
+                company=company or "",
+                agency=agency or "",
+                top_n=8,
+            )
+            if proposals and mem_cfg.get("memory_action_apply_enabled", False):
+                applied_memory_actions = [
+                    action.to_dict()
+                    for action in apply_safe_memory_actions(
+                        proposals,
+                        tools_cfg.get("agents") or [],
+                    )
+                ]
+                logger.info(
+                    "applied %d safe ActionMemory recovery change(s)",
+                    len(applied_memory_actions),
+                )
+                log_event(
+                    session_id,
+                    {
+                        "type": "memory_action_applied",
+                        "actions": applied_memory_actions,
+                    },
+                )
+            elif proposals:
+                logger.info("shadow ActionMemory proposals detected: %d", len(proposals))
+        except Exception:
+            logger.warning("ActionMemory preparation failed closed", exc_info=True)
+
     tools = build_tools(tools_cfg)
 
     decompose_cfg = tools_cfg["decompose"]
@@ -241,21 +282,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         narrator_llm=llms["narrator_llm"],
         **run_cfg.as_kwargs(),
     )
+    if applied_memory_actions:
+        result["memory_actions_applied"] = applied_memory_actions
     print(json.dumps(result, indent=2))
-    if mem_cfg.get("memory_action_enabled", False):
-        try:
-            namespace, node_id = derive_scope_from_collection(mem_cfg.get("collection"))
-            proposals = detect_proposed_actions(
-                store,
-                tools_cfg.get("agents") or [],
-                args.task,
-                company=namespace or "",
-                agency=node_id or "",
-            )
-            if proposals:
-                logger.info("shadow ActionMemory proposals detected: %d", len(proposals))
-        except Exception:
-            logger.warning("shadow ActionMemory detection failed", exc_info=True)
     # Surface a non-success outcome via exit code — host services dispatch
     # on `fabri run`'s returncode. Without this, a rate-limit failure exits
     # 0 and downstream ledgers mark the run succeeded.
@@ -313,7 +342,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         try:
             candidate = build_truncation_action_candidate(
                 config,
-                post_run_usage.max_token_retries,
+                observed_max_token_retries(
+                    result,
+                    post_run_usage.max_token_retries,
+                ),
                 str(result.get("outcome", "unknown")),
                 args.task,
             )
@@ -324,12 +356,13 @@ def cmd_run(args: argparse.Namespace) -> None:
                 signature = candidate["problem_signature"]
                 ingest_guideline(
                     store,
-                    "Increase affected role token caps after a truncation retry.",
+                    action_candidate_text(candidate),
                     session_id=session_id,
                     kind="success_pattern",
                     tier="quarantine",
                     resolution=candidate,
                     dedup_key=fingerprint(signature),
+                    similarity_threshold=1.01,
                     producer_agent_id=config.get("agent", {}).get("name"),
                     scope=mem_cfg.get("scope", "agent"),
                 )

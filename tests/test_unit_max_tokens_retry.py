@@ -95,9 +95,13 @@ def test_truncation_retries_once_at_double_cap_then_succeeds():
 
 def test_truncation_twice_fails_loud():
     b = _backend([_resp("max_tokens"), _resp("max_tokens")])
-    with pytest.raises(LLMError, match="even after retry"):
+    with pytest.raises(LLMError, match="even after retry") as caught:
         b.step("sys", [{"role": "user", "content": "go"}])
     assert len(b._client.calls) == 2  # retried exactly once, then gave up
+    assert caught.value.usage is not None
+    assert caught.value.usage.max_token_retries == 1
+    assert caught.value.usage.input_tokens == 20
+    assert caught.value.usage.output_tokens == 4
 
 
 def test_no_truncation_is_a_single_call():

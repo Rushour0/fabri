@@ -1,0 +1,63 @@
+{
+  "company": "revenue-ops",
+  "case_id": "revenue_ops_evidence_backed_outreach",
+  "benchmark": "memory_vs_true_control",
+  "generated_at": "2026-07-22T09:16:49.507597+00:00",
+  "fabri_version": "0.19.1",
+  "roster_revision": null,
+  "replicas": 6,
+  "arms_total": 12,
+  "quality": {
+    "memory": {
+      "n_complete": 4,
+      "raw_pass_pct": 100.0,
+      "corrected_pass_pct": 100.0,
+      "mean_cost_usd": 0.247762
+    },
+    "control": {
+      "n_complete": 6,
+      "raw_pass_pct": 66.7,
+      "corrected_pass_pct": 66.7,
+      "mean_cost_usd": 0.233012
+    }
+  },
+  "cost": {
+    "clean_pairs": 4,
+    "mean_delta_usd": 0.031364,
+    "median_delta_usd": 0.031702,
+    "memory_cheaper_pairs": 0,
+    "sign_test_p": 0.125,
+    "pairs": [
+      {
+        "replica": 2,
+        "delta_usd": 0.023341
+      },
+      {
+        "replica": 3,
+        "delta_usd": 0.00532
+      },
+      {
+        "replica": 4,
+        "delta_usd": 0.040062
+      },
+      {
+        "replica": 5,
+        "delta_usd": 0.056733
+      }
+    ]
+  },
+  "control_memory_free": true,
+  "excluded_arms": [
+    {
+      "replica": 1,
+      "condition": "memory",
+      "reason": "training_failed"
+    },
+    {
+      "replica": 6,
+      "condition": "memory",
+      "reason": "incomplete_holdout"
+    }
+  ],
+  "total_spend_usd": 2.6654
+}

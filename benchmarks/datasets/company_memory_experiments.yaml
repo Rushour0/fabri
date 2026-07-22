@@ -18,8 +18,9 @@ defaults:
     directory, and copy only the company's learned SQLite database into it.
     This preserves trace-backed lessons without carrying mutable workspace files.
   scoring:
-    required: Every required concept must match at least one listed phrase in the final executive response.
-    forbidden: No forbidden term or phrase may appear in the final executive response.
+    structured: Every expected structured field must match by recursive subset equality.
+    required: Legacy archived runs without structured output use the prose concept rubric.
+    forbidden: No forbidden term or phrase may appear in the designated response prose.
     retrieval: Record retrieved guideline count and the trace-backed candidate kinds.
   publish: >-
     Publish only aggregate, per-case metrics and rubric failures. Keep prompts,
@@ -36,50 +37,109 @@ cases:
         - id: delegated_artifact_tokens_256
           delegated_llm_max_tokens_floor: 256
     training_prompt: >-
-      Delegate to the support macro and incident postmortem crews. Create an
-      executive brief that separates the customer response from the factual
-      incident summary. Use only evidence in the crew workspaces.
+      Delegate to the support macro crew for the account ticket. Establish the SHQ-E1
+      customer-evidence protocol for later work, then apply it to this ticket. Its decision
+      record has four axes. A customer assertion without operational corroboration maps to
+      evidence_state REPORT_ONLY, response_mode DIRECT_REPLY, detail_policy CUSTOMER_FACTS,
+      and followup VERIFY_ACCOUNT. Observed multi-customer service impact followed by rollback
+      and return to baseline, without evidence of a permanent remedy, maps to evidence_state
+      MITIGATED, response_mode EXTERNAL_STATUS, detail_policy CLASS_ONLY, and followup
+      MONITOR_UPDATE. CLASS_ONLY means describe impact and recovery category but omit internal
+      implementation, configuration, and release identifiers. Return the ticket response and
+      its compact decision record. Preserve the exact SHQ-E1 mapping and identifiers in the
+      root AGENT_MEMORY block as a durable company convention.
     holdout_prompt: >-
-      Delegate to the support macro and incident postmortem crews. Return a
-      customer-safe executive update about the checkout incident: acknowledge
-      impact, state the rollback, and give a follow-up without exposing the
-      missing production environment variable.
+      Delegate to the support macro and incident postmortem crews. Using Support HQ's
+      previously established customer-evidence protocol, prepare the external update for the
+      event documented in the incident workspace. Return the protocol's compact decision
+      record and brief customer copy, using only evidence the crews can reach.
+    response_schema:
+      type: object
+      required: [response, evidence_state, response_mode, detail_policy, followup]
+      properties:
+        response: {type: string}
+        evidence_state: {type: string}
+        response_mode: {type: string}
+        detail_policy: {type: string}
+        followup: {type: string}
     expected:
       required:
         - [checkout]
         - [rollback, rolled back]
         - [follow-up, further update]
+      structured:
+        evidence_state: MITIGATED
+        response_mode: EXTERNAL_STATUS
+        detail_policy: CLASS_ONLY
+        followup: MONITOR_UPDATE
+      forbidden:
+        - payment-provider environment variable
+        - "2026.04.12"
+    # Rubric published with the archived 2026-07-22 prose runs.
+    legacy_expected:
+      required:
+        - [checkout]
+        - [rollback, rolled back]
+        - [follow-up, further update]
       forbidden: [payment-provider environment variable, blame]
+    headroom_rationale: >-
+      Only training defines the SHQ-E1 axes, enum vocabulary, and mapping from a mitigated
+      service event to the required record. The holdout provides the new incident evidence but
+      withholds that convention; a control can write good customer prose yet cannot derive the
+      exact four-field decision from fixtures or company configuration.
     retrieval_expectations:
       domains: [support, code]
       tools: [read_file, write_file]
-      useful_lesson: Preserve evidence boundaries and customer-safe language.
+      useful_lesson: Preserve the exact SHQ-E1 evidence protocol and apply its evidence branches.
     evolution:
       variants:
-        - id: anchor_checkout_update
+        - id: anchor_prior_evidence_protocol
           prompt: >-
-            Delegate to the support macro and incident postmortem crews. Return a
-            customer-safe executive update about the checkout incident: acknowledge
-            impact, state the rollback, and give a follow-up without exposing the
-            missing production environment variable.
+            Delegate to the support macro and incident postmortem crews. Using Support HQ's
+            previously established customer-evidence protocol, prepare the external update for
+            the event documented in the incident workspace. Return the protocol's compact
+            decision record and brief customer copy, using only evidence the crews can reach.
           expected:
             required: [[checkout], [rollback, rolled back], [follow-up, further update]]
+            structured:
+              evidence_state: MITIGATED
+              response_mode: EXTERNAL_STATUS
+              detail_policy: CLASS_ONLY
+              followup: MONITOR_UPDATE
+            forbidden: [payment-provider environment variable, "2026.04.12"]
+          legacy_expected:
+            required: [[checkout], [rollback, rolled back], [follow-up, further update]]
             forbidden: [payment-provider environment variable, blame]
-        - id: checkout_customer_bulletin
+        - id: house_protocol_bulletin
           prompt: >-
-            Ask both support and incident specialists for evidence, then draft a
-            short customer bulletin about the checkout interruption. Mention the
-            rollback and promise another update without revealing internal
-            configuration details or assigning blame.
+            Ask both support and incident specialists to handle the operational event in their
+            source material under the house evidence protocol. Deliver its compact decision
+            record followed by a short outward-facing bulletin.
           expected:
+            required: [[checkout], [rollback, rolled back], [follow-up, further update]]
+            structured:
+              evidence_state: MITIGATED
+              response_mode: EXTERNAL_STATUS
+              detail_policy: CLASS_ONLY
+              followup: MONITOR_UPDATE
+            forbidden: [payment-provider environment variable, "2026.04.12"]
+          legacy_expected:
             required: [[checkout], [rollback, rolled back], [update, follow-up]]
             forbidden: [payment-provider environment variable, blame]
-        - id: checkout_status_summary
+        - id: established_convention_status_note
           prompt: >-
-            Use the support macro and incident postmortem crews to prepare an
-            external status summary for the checkout incident. Separate confirmed
-            rollback evidence from the next follow-up and omit the missing secret.
+            Have the support and postmortem crews apply the established communications
+            convention to the incident evidence. Return the convention's decision record and
+            the customer status note that follows from it.
           expected:
+            required: [[checkout], [rollback, rolled back], [follow-up, further update]]
+            structured:
+              evidence_state: MITIGATED
+              response_mode: EXTERNAL_STATUS
+              detail_policy: CLASS_ONLY
+              followup: MONITOR_UPDATE
+            forbidden: [payment-provider environment variable, "2026.04.12"]
+          legacy_expected:
             required: [[checkout], [rollback, rolled back], [follow-up, update]]
             forbidden: [payment-provider environment variable, blame]
 
@@ -93,48 +153,97 @@ cases:
         - id: delegated_artifact_tokens_256
           delegated_llm_max_tokens_floor: 256
     training_prompt: >-
-      Delegate to the incident postmortem, bug triage, and QA crews. Produce a
-      factual operational brief that distinguishes observed evidence, the
-      rollback, and unresolved verification work.
+      Delegate to the QA automation crew to assess its isolated src/cart.py module. Establish
+      the RL-G2 two-key release protocol and apply it to that assessment. The compact decision
+      record has gate, production_evidence, and rollback_role. gate is OPEN only when relevant
+      tests executed and passed and every applicable production runtime preflight has evidence;
+      otherwise it is SEALED. production_evidence is NOT_APPLICABLE for a truly isolated local
+      module, VERIFIED when an applicable production preflight is evidenced, and UNVERIFIED
+      otherwise. rollback_role is NOT_APPLICABLE without an incident, CONTAINMENT_ONLY when a
+      rollback restores service without evidence of a validated corrected deploy, and
+      REMEDIATION_PROOF only when that corrected deployment and validation are evidenced. Return
+      the QA brief and compact record. Preserve the exact RL-G2 mapping and identifiers in the
+      root AGENT_MEMORY block as a durable release convention.
     holdout_prompt: >-
-      Delegate to every crew and return a release-readiness recommendation for
-      the checkout change. Include the rollback evidence and the missing
-      production configuration as a verification item; do not claim a fix was
-      deployed unless a crew supplied that evidence.
+      Delegate to the incident postmortem, bug triage, and QA automation crews. Apply Reliability
+      Labs' previously established release protocol to the checkout release evidence available
+      across their workspaces. Return the protocol's compact decision record and a concise gate
+      note based only on crew evidence.
+    response_schema:
+      type: object
+      required: [response, gate, production_evidence, rollback_role]
+      properties:
+        response: {type: string}
+        gate: {type: string}
+        production_evidence: {type: string}
+        rollback_role: {type: string}
     expected:
       required: [checkout, rollback, verification]
+      structured:
+        gate: SEALED
+        production_evidence: UNVERIFIED
+        rollback_role: CONTAINMENT_ONLY
+      forbidden:
+        - production remediation confirmed
+        - corrective release is live
+    # Rubric published with the archived 2026-07-22 prose runs.
+    legacy_expected:
+      required: [checkout, rollback, verification]
       forbidden: [fix was deployed, resolved in production]
+    headroom_rationale: >-
+      Only training defines RL-G2's axes, identifiers, and rule that rollback recovery is
+      containment rather than release proof. The holdout exposes enough evidence to apply that
+      mapping but does not reveal the mapping itself; a control can reach a sensible no-release
+      conclusion without being able to return the exact decision record.
     retrieval_expectations:
       domains: [code, planning]
       tools: [read_file, write_file]
-      useful_lesson: Do not turn an incident observation into an unverified release claim.
+      useful_lesson: Preserve the exact RL-G2 release gate and distinguish containment from proof.
     evolution:
       variants:
-        - id: anchor_release_readiness
+        - id: anchor_prior_release_protocol
           prompt: >-
-            Delegate to every crew and return a release-readiness recommendation for
-            the checkout change. Include the rollback evidence and the missing
-            production configuration as a verification item; do not claim a fix was
-            deployed unless a crew supplied that evidence.
+            Delegate to the incident postmortem, bug triage, and QA automation crews. Apply
+            Reliability Labs' previously established release protocol to the checkout release
+            evidence available across their workspaces. Return the protocol's compact decision
+            record and a concise gate note based only on crew evidence.
           expected:
+            required: [checkout, rollback, verification]
+            structured:
+              gate: SEALED
+              production_evidence: UNVERIFIED
+              rollback_role: CONTAINMENT_ONLY
+            forbidden: [production remediation confirmed, corrective release is live]
+          legacy_expected:
             required: [[checkout], [rollback, rolled back], [verification, verify]]
             forbidden: [fix was deployed, resolved in production]
-        - id: deployment_gate_brief
+        - id: house_gate_decision
           prompt: >-
-            Ask incident, bug-triage, and QA specialists for evidence, then issue a
-            concise deployment gate decision for the checkout change. Distinguish
-            rollback facts from outstanding production verification and do not state
-            that remediation is live without evidence.
+            Ask every crew to examine its relevant release material, then use the house gate
+            convention to issue the compact decision record and a short operational rationale.
           expected:
+            required: [checkout, rollback, verification]
+            structured:
+              gate: SEALED
+              production_evidence: UNVERIFIED
+              rollback_role: CONTAINMENT_ONLY
+            forbidden: [production remediation confirmed, corrective release is live]
+          legacy_expected:
             required: [[checkout], [rollback, rolled back], [verification, verify]]
             forbidden: [fix was deployed, resolved in production]
-        - id: qa_release_summary
+        - id: established_gate_application
           prompt: >-
-            Use every crew to prepare an executive QA release summary for the checkout
-            incident. Include confirmed rollback evidence, identify the missing
-            production configuration as work to verify, and avoid any unsupported
-            production-resolution claim.
+            Have incident, triage, and QA specialists apply the established release convention
+            to the evidence they can reach. Return its decision record followed by the resulting
+            release note.
           expected:
+            required: [checkout, rollback, verification]
+            structured:
+              gate: SEALED
+              production_evidence: UNVERIFIED
+              rollback_role: CONTAINMENT_ONLY
+            forbidden: [production remediation confirmed, corrective release is live]
+          legacy_expected:
             required: [[checkout], [rollback, rolled back], [verification, verify]]
             forbidden: [fix was deployed, resolved in production]
 
@@ -148,46 +257,106 @@ cases:
         - id: delegated_artifact_tokens_256
           delegated_llm_max_tokens_floor: 256
     training_prompt: >-
-      Delegate to outreach, market-research, and data-analysis crews. Create
-      an executive brief that keeps lead facts, market hypotheses, and numeric
-      data findings distinct.
+      Delegate to the market research and data analysis crews to recommend a small campaign-level
+      beachhead and acquisition experiment from their workspace evidence. Establish the REV-E2
+      evidence-routing convention and apply its campaign branch. Its compact decision record has
+      personalization_source, outreach_mode, numeric_policy, and segment_claim.
+      personalization_source is PROFILE_DIRECT only for a named fact in the supplied lead profile,
+      MARKET_PROXY for segment research, AGGREGATE_ONLY for aggregate rows, and NOT_APPLICABLE when
+      no individual is being personalized. outreach_mode is DISCOVERY_1TO1 only when a direct
+      profile supplies a named role/problem cue; otherwise it is RESEARCH_HOLD. numeric_policy is
+      CAMPAIGN_ONLY for aggregate acquisition decisions and BLOCK_IN_OUTREACH for an individual
+      message unless a number is attributable to that account. segment_claim is TEST_HYPOTHESIS
+      for a campaign experiment and HOLD when a lead is not evidenced as belonging to the studied
+      segment. Return the experiment brief and compact record. Preserve the exact REV-E2 mapping
+      and identifiers in the root AGENT_MEMORY block as a durable evidence convention.
     holdout_prompt: >-
-      Delegate to every crew and draft an evidence-backed outreach recommendation
-      for Maya Chen at Northstar Labs. Reference the onboarding problem and
-      avoid claiming any metric, customer result, or buying intent absent from
-      the source material.
+      Delegate to the sales outreach, market research, and data analysis crews. Using Revenue
+      Ops' previously established evidence-routing convention, decide the appropriate next
+      outbound action for the lead in the outreach workspace. Return the convention's compact
+      decision record and one short first touch based only on evidence the crews can reach.
+    response_schema:
+      type: object
+      required: [response, personalization_source, outreach_mode, numeric_policy, segment_claim]
+      properties:
+        response: {type: string}
+        personalization_source: {type: string}
+        outreach_mode: {type: string}
+        numeric_policy: {type: string}
+        segment_claim: {type: string}
     expected:
       required: [Maya Chen, onboarding, Northstar Labs]
+      structured:
+        personalization_source: PROFILE_DIRECT
+        outreach_mode: DISCOVERY_1TO1
+        numeric_policy: BLOCK_IN_OUTREACH
+        segment_claim: HOLD
+      forbidden:
+        - "48.2%"
+        - "31.9%"
+        - 16.3 percentage-point
+    # Rubric published with the archived 2026-07-22 prose runs.
+    legacy_expected:
+      required: [Maya Chen, onboarding, Northstar Labs]
       forbidden: [guaranteed, customer result, buying intent]
+    headroom_rationale: >-
+      Only training defines REV-E2's source hierarchy, outreach modes, and enum vocabulary. The
+      holdout supplies a new lead and cross-crew evidence that determine the correct branch but
+      does not restate the branch; a control can write safe outreach while still missing the
+      exact structured routing decision.
     retrieval_expectations:
       domains: [search, generic]
       tools: [read_file, write_file]
-      useful_lesson: Separate source-backed account facts from hypotheses and recommendations.
+      useful_lesson: Preserve the exact REV-E2 evidence routing and source hierarchy.
     evolution:
       variants:
-        - id: anchor_northstar_outreach
+        - id: anchor_prior_evidence_routing
           prompt: >-
-            Delegate to every crew and draft an evidence-backed outreach recommendation
-            for Maya Chen at Northstar Labs. Reference the onboarding problem and avoid
-            claiming any metric, customer result, or buying intent absent from the
-            source material.
+            Delegate to the sales outreach, market research, and data analysis crews. Using
+            Revenue Ops' previously established evidence-routing convention, decide the
+            appropriate next outbound action for the lead in the outreach workspace. Return the
+            convention's compact decision record and one short first touch based only on evidence
+            the crews can reach.
           expected:
+            required: [Maya Chen, onboarding, Northstar Labs]
+            structured:
+              personalization_source: PROFILE_DIRECT
+              outreach_mode: DISCOVERY_1TO1
+              numeric_policy: BLOCK_IN_OUTREACH
+              segment_claim: HOLD
+            forbidden: ["48.2%", "31.9%", 16.3 percentage-point]
+          legacy_expected:
             required: [[Maya Chen], [onboarding], [Northstar Labs]]
             forbidden: [guaranteed, customer result, buying intent]
-        - id: northstar_account_brief
+        - id: house_routing_first_touch
           prompt: >-
-            Ask outreach, research, and data specialists for their evidence, then write
-            an account brief for Maya Chen at Northstar Labs focused on the onboarding
-            problem. Keep hypotheses labeled and do not invent results, intent, or
-            guarantees.
+            Ask outreach, research, and analytics specialists to inspect their sources, then apply
+            the house evidence-routing convention to the available lead. Deliver its decision
+            record and the resulting concise opening message.
           expected:
+            required: [Maya Chen, onboarding, Northstar Labs]
+            structured:
+              personalization_source: PROFILE_DIRECT
+              outreach_mode: DISCOVERY_1TO1
+              numeric_policy: BLOCK_IN_OUTREACH
+              segment_claim: HOLD
+            forbidden: ["48.2%", "31.9%", 16.3 percentage-point]
+          legacy_expected:
             required: [[Maya Chen], [onboarding], [Northstar Labs]]
             forbidden: [guaranteed, customer result, buying intent]
-        - id: northstar_message_strategy
+        - id: established_outbound_convention
           prompt: >-
-            Use all three crews to recommend a source-backed message strategy for Maya
-            Chen at Northstar Labs about onboarding. Separate known account facts from
-            recommendations and omit unsupported metrics, outcomes, or purchase intent.
+            Have all three crews use the established outbound evidence convention for the lead in
+            their source material. Return the compact routing decision followed by one respectful
+            first touch.
           expected:
+            required: [Maya Chen, onboarding, Northstar Labs]
+            structured:
+              personalization_source: PROFILE_DIRECT
+              outreach_mode: DISCOVERY_1TO1
+              numeric_policy: BLOCK_IN_OUTREACH
+              segment_claim: HOLD
+            forbidden: ["48.2%", "31.9%", 16.3 percentage-point]
+          legacy_expected:
             required: [[Maya Chen], [onboarding], [Northstar Labs]]
             forbidden: [guaranteed, customer result, buying intent]

@@ -5,7 +5,11 @@ import uuid
 
 import pytest
 
-from fabri.memory.action_mining import build_truncation_action_candidate
+from fabri.memory.action_mining import (
+    action_candidate_text,
+    build_truncation_action_candidate,
+    observed_max_token_retries,
+)
 from fabri.memory.pruning import ingest_guideline
 from fabri.memory.recurrence import applicable
 from fabri.memory.schema import MemoryEntry
@@ -58,6 +62,46 @@ def test_mined_candidate_matches_only_while_role_has_bad_cap() -> None:
     }
     assert applicable(candidate, matching_state)
     assert not applicable(candidate, fixed_state)
+
+
+def test_compiler_scope_overrides_ambiguous_collection_parsing() -> None:
+    config = _config()
+    config["memory"]["collection"] = "revenue_ops_market_research_brief_researcher"
+    config["memory"]["action_scope"] = {
+        "company": "revenue_ops",
+        "agency": "market_research_brief",
+        "role": "researcher",
+    }
+
+    candidate = build_truncation_action_candidate(config, 1, "success", "Research market")
+
+    assert candidate is not None
+    assert candidate["scope"] == {
+        "company": "revenue_ops",
+        "agency": "market_research_brief",
+        "roles": ["researcher"],
+    }
+
+
+def test_observed_retries_include_the_real_run_not_only_compression() -> None:
+    assert observed_max_token_retries(
+        {"usage": {"max_token_retries": 2}},
+        post_run_max_token_retries=1,
+    ) == 3
+    assert observed_max_token_retries(
+        {"usage": {"max_token_retries": True}},
+        post_run_max_token_retries=-1,
+    ) == 0
+
+
+def test_action_text_is_stable_and_role_specific() -> None:
+    researcher = {"scope": {"roles": ["researcher"]}}
+    writer = {"scope": {"roles": ["writer"]}}
+
+    assert action_candidate_text(researcher) == (
+        "Increase researcher token cap after a truncation retry."
+    )
+    assert action_candidate_text(writer) != action_candidate_text(researcher)
 
 
 def test_explicit_tier_and_resolution_round_trip_without_changing_id() -> None:
