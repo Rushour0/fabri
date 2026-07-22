@@ -703,6 +703,7 @@ def _invalid_run(
         "training_success": training_success,
         "training_failure_reasons": training_failure_reasons,
         "holdout_failure_reasons": holdout_failure_reasons,
+        "training_dbs_absent": [],
         "execution_order": execution_order,
         "funnel": {
             "supply": {"mining_reports": [], "dbs": []},
@@ -909,9 +910,11 @@ def _run_pair(
     training_funnel = _funnel_observations(train_state)
 
     holdout_root = holdout_dest / case.company_name / f"{case.root_id}.yaml"
+    training_dbs_absent: list[str] = []
     if condition == "memory":
-        missing = [item["path"] for item in training_db_manifest if item["present"] is not True]
-        if missing:
+        present = [item["path"] for item in training_db_manifest if item["present"] is True]
+        absent = [item["path"] for item in training_db_manifest if item["present"] is not True]
+        if not present:
             result = _invalid_run(
                 replica,
                 condition,
@@ -919,11 +922,20 @@ def _run_pair(
                 training_cost,
                 "training_memory_db_missing",                execution_order=execution_order,
             )
-            _private_write(attempt_root, processes, {**result, "missing_memory_dbs": missing})
+            _private_write(attempt_root, processes, {**result, "missing_memory_dbs": absent})
             return result
+        training_dbs_absent = sorted(absent)
+        absent_relative_paths = {Path(item) for item in absent}
         for relative in train_by_path:
-            source = train_dest / case.company_name / relative
             target = holdout_dest / case.company_name / relative
+            if relative in absent_relative_paths:
+                # This agent never ran during training and legitimately has no
+                # memories. Remove any pre-created holdout-compile DB for it so
+                # the holdout run can't accidentally pick up a stray/empty file
+                # and look like it transported memory that never existed.
+                target.unlink(missing_ok=True)
+                continue
+            source = train_dest / case.company_name / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
     else:
@@ -937,11 +949,14 @@ def _run_pair(
         holdout_dest, case.company_name, holdout_specs
     )
     transport_intact = condition == "memory" and all(
-        before["sha256"] == after["sha256"]
-        and before["entry_payload_sha256"] == after["entry_payload_sha256"]
-        and before["entry_ids"] == after["entry_ids"]
-        and before["present"] is True
-        and after["present"] is True
+        (before["present"] is not True and after["present"] is not True)
+        or (
+            before["sha256"] == after["sha256"]
+            and before["entry_payload_sha256"] == after["entry_payload_sha256"]
+            and before["entry_ids"] == after["entry_ids"]
+            and before["present"] is True
+            and after["present"] is True
+        )
         for before, after in zip(training_db_manifest, transported_db_manifest, strict=True)
     )
     if condition == "control":
@@ -1047,6 +1062,7 @@ def _run_pair(
         "training_success": training_success,
         "training_failure_reasons": [],
         "holdout_failure_reasons": sorted(set(str(item) for item in holdout_failures)),
+        "training_dbs_absent": training_dbs_absent,
         "execution_order": execution_order,
         "funnel": {
             "supply": {
@@ -1267,6 +1283,7 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "training_success": (bool, type(None)),
         "training_failure_reasons": (list,),
         "holdout_failure_reasons": (list,),
+        "training_dbs_absent": (list,),
         "execution_order": (int,),
         "funnel": (dict,),
     }

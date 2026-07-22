@@ -103,12 +103,17 @@ class FakeRunner:
         failed_training: str | None = None,
         truncated_training: str | None = None,
         structured_outputs: Mapping[str, object] | None = None,
+        skip_training_dbs: frozenset[str] = frozenset(),
     ) -> None:
         self.roster_root = roster_root
         self.incomplete_holdout = incomplete_holdout
         self.failed_training = failed_training
         self.truncated_training = truncated_training
         self.structured_outputs = structured_outputs
+        # Names ("manager" / "specialist") to omit when compiling the memory
+        # condition's *training* destination only, so a test can simulate an
+        # agent that never ran during training and legitimately has no DB.
+        self.skip_training_dbs = skip_training_dbs
         self.compile_destinations: list[Path] = []
         self.holdout_db_before_run: dict[str, bytes | None] = {}
         self.holdout_dbs_before_run: dict[str, dict[str, bytes | None]] = {}
@@ -162,8 +167,14 @@ class FakeRunner:
                 encoding="utf-8",
             )
             manager_db.parent.mkdir(parents=True)
-            manager_db.write_bytes(f"manager:{destination.name}".encode())
-            specialist_db.write_bytes(f"specialist:{destination.name}".encode())
+            skip_here = (
+                destination.name == "training-compiled"
+                and destination.parent.name == "memory"
+            )
+            if not (skip_here and "manager" in self.skip_training_dbs):
+                manager_db.write_bytes(f"manager:{destination.name}".encode())
+            if not (skip_here and "specialist" in self.skip_training_dbs):
+                specialist_db.write_bytes(f"specialist:{destination.name}".encode())
             return subprocess.CompletedProcess(argv, 0, "compiled", "")
 
         root_config = Path(argv[argv.index("--config") + 1])
@@ -320,6 +331,69 @@ def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     validate_memory_payload(emitted)
     markdown = (tmp_path / "results" / "results.md").read_text(encoding="utf-8")
     assert markdown == render_markdown(emitted)
+
+
+def test_memory_study_proceeds_when_only_some_training_dbs_are_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An agent that never ran during training legitimately has no memory DB —
+    # that is a valid state, not a transport failure. Only the specialist crew
+    # DB is missing here; the manager DB is present and real.
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = load_memory_case(dataset, "support")
+    runner = FakeRunner(roster_root, skip_training_dbs=frozenset({"specialist"}))
+
+    result = run_memory_study(case, tmp_path / "results", command_runner=runner)
+
+    runs = cast(list[dict[str, object]], result["runs"])
+    memory_run = next(run for run in runs if run["condition"] == "memory")
+    assert memory_run["training_outcome"] == "success"
+    assert memory_run["holdout_complete"] is True
+    assert memory_run["training_dbs_absent"] == [".fabri/support_hq_crew.db"]
+    # The present manager DB was still transported into the holdout compile...
+    assert runner.holdout_dbs_before_run["memory"]["manager"] == b"manager:training-compiled"
+    # ...but the absent specialist DB was never copied in.
+    assert runner.holdout_dbs_before_run["memory"]["specialist"] is None
+    supply_dbs = cast(dict[str, object], memory_run["funnel"])["supply"]["dbs"]  # type: ignore[index]
+    supply_present = {item["path"]: item["present"] for item in supply_dbs}
+    assert supply_present[".fabri/support_hq.db"] is True
+    assert supply_present[".fabri/support_hq_crew.db"] is False
+    validate_memory_payload(json.loads((tmp_path / "results" / "results.json").read_text()))
+
+
+def test_memory_study_aborts_when_all_training_dbs_are_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A true transport/infra failure: not even the root memory DB exists after
+    # training, so there is nothing to carry into the holdout compile.
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    case = load_memory_case(dataset, "support")
+    runner = FakeRunner(
+        roster_root, skip_training_dbs=frozenset({"manager", "specialist"})
+    )
+
+    result = run_memory_study(case, tmp_path / "results", command_runner=runner)
+
+    runs = cast(list[dict[str, object]], result["runs"])
+    memory_run = next(run for run in runs if run["condition"] == "memory")
+    assert memory_run["holdout_complete"] is False
+    assert memory_run["holdout_failure_reasons"] == ["training_memory_db_missing"]
+    assert memory_run["training_dbs_absent"] == []
+    private_result = json.loads(
+        (
+            tmp_path
+            / "results/private-attempts/replica-01/memory/private/result.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert sorted(private_result["missing_memory_dbs"]) == [
+        ".fabri/support_hq.db",
+        ".fabri/support_hq_crew.db",
+    ]
+    validate_memory_payload(json.loads((tmp_path / "results" / "results.json").read_text()))
 
 
 def test_load_memory_case_accepts_only_value_free_string_schema(
