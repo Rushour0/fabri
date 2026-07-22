@@ -171,6 +171,23 @@ def _validated_response_schema(
     return schema
 
 
+def _assert_structured_values_absent_from_holdout(
+    structured_fields: Mapping[str, object],
+    holdout_prompt: str,
+    case_id: str,
+) -> None:
+    """Fail closed if a holdout prompt leaks an expected structured answer."""
+    holdout_lower = holdout_prompt.lower()
+    for key, value in structured_fields.items():
+        value_text = str(value)
+        if value_text and value_text.lower() in holdout_lower:
+            raise ProbeError(
+                f"case {case_id}.holdout_prompt leaks expected.structured.{key} "
+                f"value {value_text!r}; a no-memory control could read the answer "
+                "off the prompt"
+            )
+
+
 def load_memory_case(
     dataset_path: str | Path,
     case_id: str,
@@ -244,6 +261,9 @@ def load_memory_case(
     )
     if not structured_fields:
         raise ProbeError(f"case {case_id}.expected.structured must not be empty")
+    _assert_structured_values_absent_from_holdout(
+        structured_fields, holdout_prompt, case_id
+    )
     response_schema = _validated_response_schema(
         selected.get("response_schema"),
         structured_fields,

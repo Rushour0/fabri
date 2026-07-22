@@ -351,6 +351,36 @@ def test_load_memory_case_accepts_only_value_free_string_schema(
         load_memory_case(dataset, "support")
 
 
+def test_load_memory_case_rejects_holdout_prompt_leaking_structured_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+
+    data = yaml.safe_load(dataset.read_text(encoding="utf-8"))
+    data["cases"][0]["holdout_prompt"] = "Hold out privately. The answer is READY."
+    dataset.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ProbeError, match="holdout_prompt leaks expected.structured"):
+        load_memory_case(dataset, "support")
+
+
+def test_load_memory_case_rejects_holdout_prompt_leaking_structured_value_case_insensitively(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset, roster_root = _write_case(tmp_path)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+
+    data = yaml.safe_load(dataset.read_text(encoding="utf-8"))
+    data["cases"][0]["holdout_prompt"] = "Hold out privately. It is ready to ship."
+    dataset.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ProbeError, match="holdout_prompt leaks expected.structured"):
+        load_memory_case(dataset, "support")
+
+
 def test_load_memory_case_allows_structured_case_without_archive_rubric(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
