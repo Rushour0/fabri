@@ -4,6 +4,16 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.19.4
+
+- Revert the AGENT_MEMORY "hard output contract" steward templates (0.19.3).
+  Live benchmark smokes showed the hardened wording did not increase block
+  emission (0 of 2 training runs) and caused a structured-output regression:
+  models embedded the memory block inside the JSON response value, failing
+  schema validation in 3 of 4 arms. Convention capture moves engine-side
+  (see docs/design/convention-mining-research-2026-07-22.md) instead of
+  relying on model prompt compliance.
+
 ## 0.19.3 — 2026-07-22
 
 ### Fixed
