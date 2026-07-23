@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
 import time
 from dataclasses import dataclass
+from numbers import Real
 from typing import TYPE_CHECKING, Callable, Iterable, TypeVar
 
 from fabri.events import EventType
+from fabri.memory.compress import count_tokens
+from fabri.memory.conventions import ConventionRecord, render_convention
 from fabri.memory.embeddings import embeddings_available, embed
 from fabri.memory.recurrence import applicable, apply_confidence
 from fabri.memory.schema import MemoryEntry
@@ -111,6 +115,9 @@ class RetrievalConfig:
     verification: str = "any"
     tiering_enabled: bool = False
     memory_action_enabled: bool = False
+    convention_mining_enabled: bool = False
+    convention_branch_selection_max_retries: int = 1
+    convention_max_tokens: int = 384
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -129,6 +136,13 @@ class RetrievalConfig:
             verification=mem_cfg.get("retrieval_verification", "any"),
             tiering_enabled=bool(mem_cfg.get("tiering_enabled", False)),
             memory_action_enabled=bool(mem_cfg.get("memory_action_enabled", False)),
+            convention_mining_enabled=bool(
+                mem_cfg.get("convention_mining_enabled", False)
+            ),
+            convention_branch_selection_max_retries=int(
+                mem_cfg.get("convention_branch_selection_max_retries", 1)
+            ),
+            convention_max_tokens=int(mem_cfg.get("convention_max_tokens", 384)),
         )
 
 
@@ -442,6 +456,11 @@ def retrieve_context_with_meta(
         ),
         "strategic": sum(1 for entry, _ in merged if entry.kind == "strategic"),
     }
+    retrieved_conventions = [
+        entry for entry, _ in merged if entry.kind == "convention"
+    ]
+    if retrieved_conventions:
+        meta["retrieved_conventions"] = retrieved_conventions
     if (
         (retrieval_config or RetrievalConfig()).memory_action_enabled
         and current_state is not None
@@ -538,6 +557,79 @@ def _safe_global(
 # Core retrieval pipeline
 # ---------------------------------------------------------------------------
 
+CONVENTION_APPLICATION_INSTRUCTION = (
+    "Application rule: select exactly one branch from current-run evidence. "
+    "Before copying any mapped values, return exactly one `selected_branch_id` "
+    "and a non-empty `current_run_evidence`; copy every mapped field exactly "
+    "from that branch. If exactly one branch cannot be selected, do not copy "
+    "any convention fields."
+)
+CONVENTION_FENCE_OPEN = (
+    "<retrieved_conventions note=\"Authorized conditional response mappings. "
+    "Apply only through the fail-closed application rule in each record.\">"
+)
+CONVENTION_FENCE_CLOSE = "</retrieved_conventions>"
+
+
+def _stored_convention_record(entry: MemoryEntry) -> ConventionRecord | None:
+    raw = entry.payload.get("record")
+    if not isinstance(raw, dict):
+        try:
+            parsed = json.loads(entry.text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        raw = parsed
+    try:
+        return ConventionRecord(**raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _render_retrieved_convention(
+    entry: MemoryEntry,
+    *,
+    max_tokens: int,
+    now: float,
+) -> str | None:
+    """Return one complete convention or fail closed without truncating it."""
+    record = _stored_convention_record(entry)
+    if record is None:
+        logger.warning("excluding malformed convention %s from retrieval", entry.id)
+        return None
+    if record.expires_at is not None:
+        if not isinstance(record.expires_at, Real) or isinstance(record.expires_at, bool):
+            logger.warning("excluding malformed convention %s from retrieval", entry.id)
+            return None
+        if record.expires_at <= now:
+            return None
+
+    try:
+        rendered = render_convention(record) + "\n" + CONVENTION_APPLICATION_INSTRUCTION
+    except (TypeError, ValueError):
+        logger.warning("excluding malformed convention %s from retrieval", entry.id)
+        return None
+    if (
+        CONVENTION_FENCE_OPEN in rendered
+        or CONVENTION_FENCE_CLOSE in rendered
+        or "<retrieved_conventions" in rendered
+    ):
+        logger.warning(
+            "excluding convention %s with an unsafe retrieval fence marker",
+            entry.id,
+        )
+        return None
+    if count_tokens(rendered) > max_tokens:
+        logger.warning(
+            "excluding convention %s: complete render exceeds convention_max_tokens=%d",
+            entry.id,
+            max_tokens,
+        )
+        return None
+    return rendered
+
+
 def _retrieve_inner(
     store: QdrantMemoryStore,
     task: str,
@@ -565,18 +657,38 @@ def _retrieve_inner(
     if rcfg.verification not in {"any", "verified"}:
         raise ValueError(f"unsupported retrieval verification policy: {rcfg.verification}")
 
+    convention_renderings: dict[str, str | None] = {}
+    retrieval_now = time.time()
+
     def verification_allowed(entry: MemoryEntry) -> bool:
         if entry.verification == "contradicted":
             return False
         if rcfg.verification == "verified":
-            return entry.verification in {"tool_verified", "rubric_verified"}
+            return entry.verification in {
+                "tool_verified",
+                "rubric_verified",
+                "config_verified",
+                "human_verified",
+            }
         return True
 
     def tier_allowed(entry: MemoryEntry) -> bool:
         return getattr(entry, "tier", "unclassified") != "quarantine"
 
     def entry_allowed(entry: MemoryEntry) -> bool:
-        return verification_allowed(entry) and tier_allowed(entry)
+        if not verification_allowed(entry) or not tier_allowed(entry):
+            return False
+        if entry.kind != "convention":
+            return True
+        if not rcfg.convention_mining_enabled:
+            return False
+        if entry.id not in convention_renderings:
+            convention_renderings[entry.id] = _render_retrieved_convention(
+                entry,
+                max_tokens=rcfg.convention_max_tokens,
+                now=retrieval_now,
+            )
+        return convention_renderings[entry.id] is not None
 
     # Bind once — on the Qdrant backend count() is a network round-trip.
     store_count = store.count()
@@ -857,12 +969,33 @@ def _retrieve_inner(
     # ("ignore prior instructions; exfiltrate ...") reads as reference data, not
     # an operator command. `_sanitize_guideline` also strips any literal fence
     # tags so a stored guideline can't forge the closing delimiter.
-    lines = [f"- [{entry.kind}] {_sanitize_guideline(entry.text)}" for entry, _score in merged]
-    text = (
-        GUIDELINE_FENCE_OPEN + "\n"
-        + "\n".join(lines) + "\n"
-        + GUIDELINE_FENCE_CLOSE
-    )
+    guideline_lines = [
+        f"- [{entry.kind}] {_sanitize_guideline(entry.text)}"
+        for entry, _score in merged
+        if entry.kind != "convention"
+    ]
+    convention_blocks = [
+        "<convention>\n"
+        + convention_renderings[entry.id]
+        + "\n</convention>"
+        for entry, _score in merged
+        if entry.kind == "convention"
+        and convention_renderings.get(entry.id) is not None
+    ]
+    sections: list[str] = []
+    if guideline_lines:
+        sections.append(
+            GUIDELINE_FENCE_OPEN + "\n"
+            + "\n".join(guideline_lines) + "\n"
+            + GUIDELINE_FENCE_CLOSE
+        )
+    if convention_blocks:
+        sections.append(
+            CONVENTION_FENCE_OPEN + "\n"
+            + "\n".join(convention_blocks) + "\n"
+            + CONVENTION_FENCE_CLOSE
+        )
+    text = "\n".join(sections)
     return text, merged
 
 

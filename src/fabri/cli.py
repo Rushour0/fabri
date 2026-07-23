@@ -337,6 +337,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             eviction_strategy=mem_cfg.get("eviction_strategy", "delete"),
             producer_agent_id=config.get("agent", {}).get("name"),
             memory_scope=mem_cfg.get("scope", "agent"),
+            config=config,
         )
     if mem_cfg.get("mining_enabled", True):
         try:

@@ -28,6 +28,7 @@ defaults:
 
 cases:
   - id: support_hq_safe_incident_response
+    convention_mining: true
     company_source: companies/support-hq/company.toml
     setup_probe:
       replicas: 3

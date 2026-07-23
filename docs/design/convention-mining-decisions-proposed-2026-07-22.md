@@ -1,7 +1,7 @@
 # Proposed decisions for convention mining
 
 **Date:** 2026-07-22  
-**Status:** recommended first pass; requires human ratification  
+**Status:** RATIFIED 2026-07-24 by the operator, as recommended (all five answers accepted unchanged; decision 5's numeric core gates flagged as first-to-revisit once shadow telemetry exists)  
 **Scope:** answers the five open questions in
 `convention-mining-research-2026-07-22.md`; no run data is claimed here
 

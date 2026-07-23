@@ -18,6 +18,7 @@ from fabri.core.outcome import Outcome
 from fabri.core.structured import parse_response
 from fabri.memory.store import QdrantMemoryStore
 from fabri.memory.output import split_agent_output
+from fabri.orchestrator.convention_application import validate_branch_selection
 from fabri.orchestrator.retrieval import (
     DEFAULT_TOOL_TOP_K,
     DEFAULT_TOP_K,
@@ -248,6 +249,12 @@ def _run_single_attempt(
         store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
         retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
     )
+    retrieved_conventions = retrieval_meta.get("retrieved_conventions")
+    convention_validation_enabled = bool(
+        retrieval_config is not None
+        and retrieval_config.convention_mining_enabled
+        and retrieved_conventions
+    )
     # When retrieval is on, the filtered subset stays constant for the whole
     # run so the prompt cache still hits across steps. The model is given the
     # exact list the backend will accept calls on — a mismatch would prompt
@@ -287,6 +294,7 @@ def _run_single_attempt(
     # otherwise, or when validation never succeeded). `schema_failed` flips on
     # only under error_strategy="strict" when retries are exhausted.
     structured_output = None
+    convention_application_status = None
     schema_failed = False
     success = False
     failed = False
@@ -489,18 +497,50 @@ def _run_single_attempt(
         `error_strategy` (strict fails the run; warn returns the text as-is;
         fallback substitutes `response_fallback`). Mutates `msgs` in place when
         it retries, matching `_dispatch_tool_calls`' contract."""
+        nonlocal convention_application_status
         if not response_schema:
             return candidate, True, None, None
         text = candidate
         value: object | None = None
+        last_schema_valid_value: object | None = None
         last_errors: list[str] = []
-        for attempt in range(max(0, response_retries) + 1):
+        schema_retries = 0
+        convention_retries = 0
+        convention_retry_limit = (
+            min(
+                1,
+                max(
+                    0,
+                    retrieval_config.convention_branch_selection_max_retries,
+                ),
+            )
+            if convention_validation_enabled and retrieval_config is not None
+            else 0
+        )
+        for attempt in range(max(0, response_retries) + convention_retry_limit + 1):
             # Company root managers append a machine-memory suffix after their
             # answer. Validate only the human-facing answer, but keep `text`
             # whole so the FINAL trace still feeds post-run memory mining. With
             # no marker, split_agent_output returns the original bytes exactly.
             answer, _ = split_agent_output(text)
             value, errors = parse_response(answer, response_schema)
+            convention_validation = None
+            if (
+                not errors
+                and convention_validation_enabled
+                and retrieved_conventions
+            ):
+                last_schema_valid_value = value
+                convention_validation = validate_branch_selection(
+                    value,
+                    retrieved_conventions,
+                    config=retrieval_config,
+                )
+                if not convention_validation.valid:
+                    errors = [
+                        "convention branch selection invalid: "
+                        + (convention_validation.reason or "unknown reason")
+                    ]
             log_event(session_id, {
                 "type": EventType.STRUCTURED_OUTPUT.value,
                 "step": step,
@@ -511,14 +551,52 @@ def _run_single_attempt(
             if not errors:
                 return text, True, None, value
             last_errors = errors
-            if attempt >= max(0, response_retries):
-                break
-            corrective = (
-                "Your previous reply did not match the required response schema.\n"
-                "Validation errors:\n- " + "\n- ".join(errors) + "\n\n"
-                "Return ONLY a JSON value that satisfies this schema "
-                "(no prose, no code fences):\n" + json.dumps(response_schema)
-            )
+            if convention_validation is not None:
+                if convention_retries >= convention_retry_limit:
+                    convention_application_status = "convention_not_applicable"
+                    if isinstance(value, dict):
+                        value = {
+                            key: item
+                            for key, item in value.items()
+                            if key not in convention_validation.convention_fields
+                        }
+                    return text, True, None, value
+                convention_retries += 1
+                corrective = (
+                    "Your previous reply did not make a valid convention branch "
+                    "selection.\nValidation error:\n- "
+                    + "\n- ".join(errors)
+                    + "\n\nReturn ONLY a JSON value that satisfies this schema "
+                    "(no prose, no code fences), with exactly one selected_branch_id, "
+                    "non-empty current_run_evidence, and mapped fields copied exactly "
+                    "from that branch:\n"
+                    + json.dumps(response_schema)
+                )
+            else:
+                if convention_retries:
+                    convention_application_status = "convention_not_applicable"
+                    value = last_schema_valid_value
+                    if isinstance(value, dict) and retrieved_conventions:
+                        prior_validation = validate_branch_selection(
+                            value,
+                            retrieved_conventions,
+                            config=retrieval_config,
+                        )
+                        value = {
+                            key: item
+                            for key, item in value.items()
+                            if key not in prior_validation.convention_fields
+                        }
+                    return text, True, None, value
+                if schema_retries >= max(0, response_retries):
+                    break
+                schema_retries += 1
+                corrective = (
+                    "Your previous reply did not match the required response schema.\n"
+                    "Validation errors:\n- " + "\n- ".join(errors) + "\n\n"
+                    "Return ONLY a JSON value that satisfies this schema "
+                    "(no prose, no code fences):\n" + json.dumps(response_schema)
+                )
             msgs.append({"role": "assistant", "content": text})
             msgs.append({"role": "user", "content": corrective})
             try:
@@ -536,6 +614,21 @@ def _run_single_attempt(
             # Each corrective retry is a real LLM call; stop re-prompting once
             # the run's cost budget is spent rather than burning more on it.
             if _budget_breached():
+                if convention_retries:
+                    convention_application_status = "convention_not_applicable"
+                    value = last_schema_valid_value
+                    if isinstance(value, dict) and retrieved_conventions:
+                        prior_validation = validate_branch_selection(
+                            value,
+                            retrieved_conventions,
+                            config=retrieval_config,
+                        )
+                        value = {
+                            key: item
+                            for key, item in value.items()
+                            if key not in prior_validation.convention_fields
+                        }
+                    return text, True, None, value
                 break
         detail = "; ".join(last_errors)
         if error_strategy == "warn":
@@ -932,7 +1025,7 @@ def _run_single_attempt(
     }
     log_event(session_id, {"type": EventType.USAGE.value, **usage_dict})
 
-    return {
+    result = {
         "session_id": session_id,
         "success": success,
         "final_text": final_text,
@@ -944,6 +1037,9 @@ def _run_single_attempt(
         "outcome": outcome.value,
         "usage": usage_dict,
     }
+    if convention_application_status is not None:
+        result["convention_application"] = convention_application_status
+    return result
 
 
 # Neutral, project-agnostic repair instruction. Used when the host doesn't

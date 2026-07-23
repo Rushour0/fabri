@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 from collections.abc import Mapping
 from dataclasses import replace
@@ -12,10 +13,13 @@ import yaml
 
 from fabri.benchmarks.company_memory_study import (
     CLAIM_BOUNDARY,
+    MemoryDbSpec,
     _invalid_run,
     apply_holdout_response_contract,
     apply_retrieval_overrides,
     discover_memory_dbs,
+    find_quarantined_convention_approvals,
+    grant_convention_approvals,
     load_memory_case,
     main,
     render_markdown,
@@ -23,12 +27,19 @@ from fabri.benchmarks.company_memory_study import (
     validate_memory_payload,
 )
 from fabri.benchmarks.company_setup_probe import ProbeError
+from fabri.memory.conventions import ConventionRecord, ingest_convention
+from fabri.memory.schema import MemoryEntry
 
 
 pytestmark = pytest.mark.integration
 
 
-def _write_case(tmp_path: Path, *, replicas: int = 1) -> tuple[Path, Path]:
+def _write_case(
+    tmp_path: Path,
+    *,
+    replicas: int = 1,
+    convention_mining: bool | None = None,
+) -> tuple[Path, Path]:
     roster_root = tmp_path / "rosters"
     company_dir = roster_root / "companies" / "support-hq"
     company_dir.mkdir(parents=True)
@@ -50,6 +61,33 @@ report_to = "ceo"
         encoding="utf-8",
     )
     dataset = tmp_path / "dataset.yaml"
+    case: dict[str, object] = {
+        "id": "support",
+        "company_source": "companies/support-hq/company.toml",
+        "training_prompt": "Train privately.",
+        "holdout_prompt": "Hold out privately.",
+        "expected": {
+            "required": [["checkout"], ["rollback", "rolled back"]],
+            "structured": {"decision": "READY"},
+            "forbidden": ["blame"],
+        },
+        "legacy_expected": {
+            "required": [["checkout"], ["rollback", "rolled back"]],
+            "forbidden": ["legacy-only"],
+        },
+        "response_schema": {
+            "type": "object",
+            "required": ["response", "decision"],
+            "properties": {
+                "response": {"type": "string"},
+                "decision": {"type": "string"},
+            },
+        },
+        "setup_probe": {"required_delegations": ["crew"]},
+        "retrieval_expectations": {"useful_lesson": "be factual"},
+    }
+    if convention_mining is not None:
+        case["convention_mining"] = convention_mining
     dataset.write_text(
         yaml.safe_dump(
             {
@@ -59,33 +97,7 @@ report_to = "ceo"
                     "replicas": replicas,
                     "conditions": ["memory", "control"],
                 },
-                "cases": [
-                    {
-                        "id": "support",
-                        "company_source": "companies/support-hq/company.toml",
-                        "training_prompt": "Train privately.",
-                        "holdout_prompt": "Hold out privately.",
-                        "expected": {
-                            "required": [["checkout"], ["rollback", "rolled back"]],
-                            "structured": {"decision": "READY"},
-                            "forbidden": ["blame"],
-                        },
-                        "legacy_expected": {
-                            "required": [["checkout"], ["rollback", "rolled back"]],
-                            "forbidden": ["legacy-only"],
-                        },
-                        "response_schema": {
-                            "type": "object",
-                            "required": ["response", "decision"],
-                            "properties": {
-                                "response": {"type": "string"},
-                                "decision": {"type": "string"},
-                            },
-                        },
-                        "setup_probe": {"required_delegations": ["crew"]},
-                        "retrieval_expectations": {"useful_lesson": "be factual"},
-                    }
-                ],
+                "cases": [case],
             },
             sort_keys=False,
         ),
@@ -268,6 +280,62 @@ class FakeRunner:
         return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
 
 
+class ConventionMemoryStore:
+    def __init__(self, entries: list[MemoryEntry] | None = None) -> None:
+        self.entries = {entry.id: entry for entry in entries or []}
+
+    def upsert(self, entry: MemoryEntry) -> str:
+        self.entries[entry.id] = entry
+        return entry.id
+
+    def delete(self, point_id: str) -> None:
+        self.entries.pop(point_id, None)
+
+    def iterate(
+        self,
+        kind: str | None = None,
+        limit: int | None = None,
+    ) -> list[MemoryEntry]:
+        entries = [
+            entry
+            for entry in self.entries.values()
+            if kind is None or entry.kind == kind
+        ]
+        return entries[:limit] if limit is not None else entries
+
+
+def _synthetic_convention() -> ConventionRecord:
+    return ConventionRecord(
+        scope="company",
+        key="incident-response-mode",
+        version="1",
+        effect_class="response_mapping",
+        conditions=[
+            {"branch_id": "external", "condition_text": "customer impact is confirmed"},
+            {"branch_id": "internal", "condition_text": "impact is not confirmed"},
+        ],
+        branches=[
+            {"branch_id": "external", "fields": {"status": "external"}},
+            {"branch_id": "internal", "fields": {"status": "internal"}},
+        ],
+        origin="task",
+        provenance="session:training",
+        response_schema={"status": "string"},
+    )
+
+
+def _convention_config(
+    approvals: list[list[str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "memory": {
+            "convention_mining_enabled": True,
+            "convention_allowed_effect_classes": ["response_mapping"],
+            "convention_approvals": approvals or [],
+        }
+    }
+
+
 def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -280,6 +348,7 @@ def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     result = run_memory_study(case, tmp_path / "results", command_runner=runner)
 
     assert case.namespace == "support_hq"
+    assert case.convention_mining is False
     assert len(runner.compile_destinations) == 4
     assert len(set(runner.compile_destinations)) == 4
     assert runner.holdout_db_before_run["memory"] == b"manager:training-compiled"
@@ -309,6 +378,11 @@ def test_memory_study_copies_every_declared_db_and_emits_safe_public_payload(
     }
     assert all(
         config["top_k"] == 5 and config["backend"] == "sqlite"
+        for config in runner.retrieval_configs_before_run.values()
+    )
+    assert all(
+        "convention_mining_enabled" not in config
+        and "convention_approvals" not in config
         for config in runner.retrieval_configs_before_run.values()
     )
     for condition in ("memory", "control"):
@@ -557,18 +631,136 @@ def test_apply_retrieval_overrides_rewrites_compiled_node_configs(tmp_path: Path
         "support-hq",
         top_k=11,
         strategy="hybrid+mmr",
+        convention_mining_enabled=True,
     )
 
     assert changed == [str(config)]
     assert yaml.safe_load(config.read_text(encoding="utf-8"))["memory"] == {
         "top_k": 11,
         "retrieval_strategy": "hybrid+mmr",
+        "convention_mining_enabled": True,
     }
     before = config.read_text(encoding="utf-8")
     assert apply_retrieval_overrides(
         tmp_path / "compiled", "support-hq", top_k=None, strategy=None
     ) == []
     assert config.read_text(encoding="utf-8") == before
+
+
+def test_convention_approval_scan_uses_stage_one_canonical_key(tmp_path: Path) -> None:
+    record = _synthetic_convention()
+    quarantine = ingest_convention(
+        ConventionMemoryStore(),
+        record,
+        config=_convention_config(),
+    )
+    company = tmp_path / "compiled" / "support-hq"
+    database = company / ".fabri" / "memory.db"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE guidelines "
+            "(id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO guidelines(id, kind, payload) VALUES (?, ?, ?)",
+            (quarantine.id, quarantine.kind, json.dumps(quarantine.to_payload())),
+        )
+    spec = MemoryDbSpec(
+        relative_path=Path(".fabri/memory.db"),
+        agent_ids=("ceo",),
+        config_paths=("ceo.yaml",),
+    )
+
+    approvals = find_quarantined_convention_approvals(
+        tmp_path / "compiled",
+        "support-hq",
+        (spec,),
+    )
+
+    assert approvals == (record.approval_key,)
+
+
+def test_convention_approval_loop_promotes_memory_and_records_only_memory_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fabri.benchmarks.company_memory_study as study
+
+    record = _synthetic_convention()
+    store = ConventionMemoryStore()
+    quarantine = ingest_convention(store, record, config=_convention_config())
+    approval = record.approval_key
+    promoted = grant_convention_approvals(
+        store,
+        (approval,),
+        config=_convention_config([list(approval)]),
+    )
+
+    assert quarantine.tier == "quarantine"
+    assert promoted == 1
+    assert [(entry.tier, entry.verification) for entry in store.iterate()] == [
+        ("retrieve", "human_verified")
+    ]
+
+    dataset, roster_root = _write_case(tmp_path, convention_mining=True)
+    monkeypatch.setenv("FABRI_ROSTERS_ROOT", str(roster_root))
+    monkeypatch.setattr(
+        study,
+        "find_quarantined_convention_approvals",
+        lambda *_args: (approval,),
+    )
+    monkeypatch.setattr(
+        study,
+        "_grant_copied_convention_approvals",
+        lambda *_args: 1,
+    )
+    runner = FakeRunner(roster_root)
+    result = run_memory_study(
+        load_memory_case(dataset, "support"),
+        tmp_path / "results",
+        command_runner=runner,
+    )
+
+    runs = cast(list[dict[str, object]], result["runs"])
+    memory_run = next(run for run in runs if run["condition"] == "memory")
+    control_run = next(run for run in runs if run["condition"] == "control")
+    assert memory_run["convention_approvals_granted"] == [list(approval)]
+    assert control_run["convention_approvals_granted"] == []
+    assert runner.retrieval_configs_before_run[("memory", "training")][
+        "convention_mining_enabled"
+    ] is True
+    assert runner.retrieval_configs_before_run[("control", "training")][
+        "convention_mining_enabled"
+    ] is True
+    memory_holdout = runner.retrieval_configs_before_run[("memory", "holdout")]
+    control_holdout = runner.retrieval_configs_before_run[("control", "holdout")]
+    assert memory_holdout["convention_mining_enabled"] is True
+    assert memory_holdout["convention_approvals"] == [list(approval)]
+    assert control_holdout["convention_mining_enabled"] is False
+    assert control_holdout["convention_approvals"] == []
+    assert json.loads(
+        (tmp_path / "results" / "results.json").read_text(encoding="utf-8")
+    )["runs"][0]["convention_approvals_granted"] == [list(approval)]
+
+
+def test_only_support_hq_dataset_case_opts_into_convention_mining() -> None:
+    dataset_path = (
+        Path(__file__).resolve().parents[1]
+        / "benchmarks/datasets/company_memory_experiments.yaml"
+    )
+    dataset = yaml.safe_load(dataset_path.read_text(encoding="utf-8"))
+    flags = {
+        case["id"]: case.get("convention_mining", False)
+        for case in dataset["cases"]
+    }
+
+    assert flags["support_hq_safe_incident_response"] is True
+    assert all(
+        enabled is False
+        for case_id, enabled in flags.items()
+        if case_id != "support_hq_safe_incident_response"
+    )
 
 
 def test_apply_retrieval_overrides_writes_guideline_max_tokens(tmp_path: Path) -> None:
