@@ -30,6 +30,12 @@ reviewed results for per-replica costs, failed hypotheses, and the release decis
 [Reliability Labs](benchmarks/results/reliability-labs-setup-qualification-2026-07-20.md), and
 [Revenue Ops](benchmarks/results/revenue-ops-setup-qualification-2026-07-20.md).
 
+The [`benchmarks/`](benchmarks/) directory holds the reproducible inputs behind
+those numbers: `datasets/` (frozen fixtures + protocol), `fixtures/`, reviewed
+`results/`, and `agreement/` (blind-labeling tooling for scorer agreement). See
+[`benchmarks/README.md`](benchmarks/README.md) for the runners and what's
+public versus provisional.
+
 fabri is split into two layers: an **engine** (a frugal agent loop, per-role
 LLMs, polyglot tools, and a memory loop that grows the prompt from the agent's
 own traces) and a **builder** that turns intent into a running agent fast.
@@ -93,6 +99,23 @@ On top of it, a **builder** layer (ideator, tool-writer, prompt-kit, skills,
 service) scaffolds a new product onto the engine so building one is faster, not
 slower — see [docs/vision.md](https://github.com/Rushour0/fabri/blob/main/docs/vision.md) and Track B in
 [docs/ROADMAP.md](https://github.com/Rushour0/fabri/blob/main/docs/ROADMAP.md).
+
+Memory isn't a flat bag of guidelines. Entries can be classified into
+severity tiers (`core` / `retrieve` / `quarantine`) — a quarantined entry
+(contradicted, or an unverified generic pattern) is excluded from retrieval
+unconditionally, whether or not tiering is turned on. On top of the
+retrieval loop above, fabri also has an experimental, **default-off**
+action channel (ActionMemory) that lets a recovered failure — e.g. a token
+cap that was too low — propose a fail-closed, allowlisted config fix instead
+of just a retrievable note. It's shadow-only (proposals logged, nothing
+applied) unless explicitly opted into. Status, honestly: the mechanism has
+been live-demonstrated recovering a real truncation failure, but its benefit
+over a frozen control is not yet proven, and a related idea — a hard
+AGENT_MEMORY output contract — was reverted in 0.19.4 after it didn't hold
+up. Tiering and ActionMemory are both off by default; see the `memory:`
+config block below. For the full mechanics — retrieval fusion, mining,
+dedup, promotion, tiering, and the ActionMemory allowlist — see the deep
+dive in [docs/memory.md](https://github.com/Rushour0/fabri/blob/main/docs/memory.md).
 
 Two operating principles fall out of that:
 
@@ -223,15 +246,29 @@ export OPENAI_API_KEY=...                   # the bug-crew template ships OpenAI
 fabri new agency demo                       # scaffolds a bug-triage crew: triager → fixer → tester
 fabri --config demo/agent.openai.yaml run "triage and fix the failing test in workspace/"
 
+# or pull an agency from a catalog instead of the bundled template:
+fabri new agency demo-rosters --from gh:Rushour0/fabri-rosters/agencies/bug-triage-crew
+
 # or watch it live in the browser:
 fabri serve --config demo/agent.openai.yaml
 fabri studio
 ```
 
+`--from` takes a local directory path or a `gh:owner/repo/subpath[@ref]`
+GitHub reference; [fabri-rosters](https://github.com/Rushour0/fabri-rosters) is
+the catalog repo of ready-made agencies, and its gallery is hosted at
+[fabri.rushour0.com](https://fabri.rushour0.com).
+
 Each run mines guidelines from its own trace, so the crew avoids its own repeat
 mistakes on the next run. Prefer a single agent? `fabri init demo` scaffolds one
 (an `agent.yaml`, an example tool under `tools/agent_tools/`, and a
 `docker-compose.yml`) — you edit those, not the library.
+
+`fabri studio` serves the bundled UI with four surfaces: **Conversation** (a
+live thread with follow-ups), **Company** (an org chart with live per-agent
+handoffs and COGS), **Fleet** (parallel batch runs with rolled-up status and
+summed COGS), and **History** (a persisted, read-only run index). See
+[`examples/studio/README.md`](examples/studio/README.md) for details.
 
 ## Commands
 
@@ -320,6 +357,9 @@ memory:
   similarity_threshold: 0.85     # dedup threshold for guideline merging
   promotion_threshold_sessions: 3
   guideline_max_tokens: 30
+  tiering_enabled: false         # off by default; classifies entries into core/retrieve/quarantine
+  memory_action_enabled: false   # off by default; surfaces proposed executable actions (shadow-only)
+  memory_action_apply_enabled: false  # off by default; opt-in to actually apply proposed actions
 ```
 
 Paths in `manifest_dir` and `sandbox_root` resolve relative to **the

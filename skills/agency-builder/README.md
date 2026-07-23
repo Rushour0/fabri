@@ -68,6 +68,22 @@ fabri serve --config my-agency/agent.yaml
 fabri studio
 ```
 
+To scaffold from a catalog agency instead of a bundled template, pass
+`--from` a local directory or a `gh:owner/repo/subpath[@ref]` GitHub
+reference — for example the fabri-rosters catalog:
+
+```bash
+fabri new agency my-agency --from ../fabri-rosters/agencies/bug-triage-crew --dest .
+# or, without a local clone:
+fabri new agency my-agency --from gh:Rushour0/fabri-rosters/agencies/bug-triage-crew --dest .
+```
+
+`--from` only accepts those two source shapes (a filesystem path or a `gh:`
+reference) — it does not take a bare agency name or an arbitrary URL. The
+source directory must contain an `agency.toml` with an `[agency]` table;
+`fabri new agency` reads its files (and a top-level `README.md`, if present)
+straight into the new agency directory.
+
 To inspect the assembled tools and roles in the worked repository example
 without credentials:
 

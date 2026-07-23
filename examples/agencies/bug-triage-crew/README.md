@@ -1,5 +1,13 @@
 # Bug triage-fix-test crew
 
+> **This copy has diverged from the canonical version.** The canonical
+> `bug-triage-crew` now lives in the `fabri-rosters` repo
+> (`agencies/bug-triage-crew`), where it carries the
+> `__AGENCY_ROOT__`/`__RUN_FROM__`/`__AGENCY_SLUG__` template placeholders and
+> an `agency.toml` (COGS/wedge metadata) that this copy lacks. For new work,
+> scaffold from there instead of copying this directory — e.g.
+> `fabri new agency <name> --from <path-to-fabri-rosters>/agencies/bug-triage-crew`.
+
 A three-specialist agency that fixes a real failing test end-to-end:
 
 ```text

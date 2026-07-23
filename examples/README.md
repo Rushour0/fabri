@@ -17,6 +17,16 @@ OpenClaw), mapped to real fabri mechanisms in
 | 03 | [`03-pipeline-verifier`](03-pipeline-verifier/) | Compose fixed specialist agents (`tools.agents[]`) into a draft→verify loop | Adversarial verification |
 | 04 | [`04-docker-sandbox`](04-docker-sandbox/) | fabri's layered isolation, from path-jail to a locked-down container | Bounded, disposable execution contexts |
 
+## Multi-agent crew examples
+
+[`examples/agencies/`](agencies/) holds full multi-agent crews (a manager
+agent plus specialists), one directory each: `bug-triage-crew`,
+`changelog-release-notes`, `code-review-crew`, `personal-brand-crew`. These
+are heavier than 01-04 above — real "little companies" of agents rather than
+a single mechanism demo. Serve one and open it in
+[Fabri Studio](#related-docs)'s Company view to watch the agents hand off
+work to each other live.
+
 ## Prerequisites
 
 ```bash
@@ -52,6 +62,7 @@ Before fanning out, prefer the cheap primitives:
 
 ## Related docs
 
+- [`examples/studio/`](studio/) — the Studio UI (React + Vite); run it with `fabri studio`.
 - [`docs/using-fabri-well.md`](../docs/using-fabri-well.md) — the cross-run learning loop and memory hygiene.
 - [`docs/optimization-methodologies.md`](../docs/optimization-methodologies.md) — the methodology behind each example.
 - [`docs/retrieval-tuning.md`](../docs/retrieval-tuning.md) — memory retrieval knobs.
