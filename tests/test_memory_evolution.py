@@ -157,6 +157,72 @@ def test_verified_retrieval_is_not_starved_by_higher_unverified_candidates(
     assert meta["retrieved"] == 1
 
 
+def test_first_cross_session_reuse_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retrieval, "embeddings_available", lambda: True)
+    monkeypatch.setattr(retrieval, "embed", lambda text: [1.0])
+    monkeypatch.setattr(retrieval, "_emit_retrieval_event", lambda *_args: None)
+    entry = MemoryEntry(
+        text="lesson mined in session A",
+        kind="tactical",
+        session_ids=["session-a"],
+        hit_count=1,
+    )
+
+    _, meta = retrieve_context_with_meta(
+        MemoryStore([entry]),
+        "reuse lesson",
+        session_id="session-b",
+        retrieval_config=RetrievalConfig(strategy="dense", importance_weight=0),
+    )
+
+    assert meta["from_prior_sessions"] == 1
+
+
+def test_same_session_retrieval_does_not_count_as_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retrieval, "embeddings_available", lambda: True)
+    monkeypatch.setattr(retrieval, "embed", lambda text: [1.0])
+    monkeypatch.setattr(retrieval, "_emit_retrieval_event", lambda *_args: None)
+    entry = MemoryEntry(
+        text="lesson mined in current session",
+        kind="tactical",
+        session_ids=["session-a"],
+        hit_count=2,
+    )
+
+    _, meta = retrieve_context_with_meta(
+        MemoryStore([entry]),
+        "reuse lesson",
+        session_id="session-a",
+        retrieval_config=RetrievalConfig(strategy="dense", importance_weight=0),
+    )
+
+    assert meta["from_prior_sessions"] == 0
+
+
+def test_reuse_metric_falls_back_to_hit_count_without_current_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retrieval, "embeddings_available", lambda: True)
+    monkeypatch.setattr(retrieval, "embed", lambda text: [1.0])
+    entry = MemoryEntry(
+        text="legacy recurring lesson",
+        kind="tactical",
+        hit_count=2,
+    )
+
+    _, meta = retrieve_context_with_meta(
+        MemoryStore([entry]),
+        "reuse lesson",
+        retrieval_config=RetrievalConfig(strategy="dense", importance_weight=0),
+    )
+
+    assert meta["from_prior_sessions"] == 1
+
+
 def test_apply_session_verification_updates_only_matching_success_patterns() -> None:
     matching = MemoryEntry(
         text="worked", kind="success_pattern", source_session_ids=["s1"]

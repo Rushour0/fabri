@@ -902,8 +902,8 @@ def _run_single_attempt(
             own_cost += c
     own_cost = round(own_cost, 6)
     subagent_cost = round(subagent_cost_total[0], 6)
-    # Fraction of retrieved guidelines already confirmed by a prior session
-    # (hit_count>=2 or len(session_ids)>=2) — the cross-session reuse signal.
+    # Fraction of retrieved guidelines originating in a session other than the
+    # current one, with the legacy recurrence heuristic as a provenance fallback.
     # None when nothing was retrieved.
     g_retrieved = retrieval_meta.get("retrieved", 0)
     g_from_prior = retrieval_meta.get("from_prior_sessions", 0)

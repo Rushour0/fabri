@@ -94,19 +94,110 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
         assert load_config(str(specialist))["llm"]["provider"] == "openai"
 
 
-def test_compile_company_can_anchor_memory_outside_ephemeral_output(
+def test_compile_company_anchors_all_sqlite_memory_outside_ephemeral_output(
     tmp_path: Path,
 ) -> None:
     fixture = Path(__file__).parent / "fixtures" / "company_3level" / "company.toml"
     durable_root = tmp_path / "durable"
 
-    root_config = compile_company(fixture, tmp_path / "compiled", run_from=durable_root)
-    root = yaml.safe_load(root_config.read_text())
-    vp = yaml.safe_load((root_config.parent / "vp_eng.yaml").read_text())
+    first_root = compile_company(
+        fixture, tmp_path / "compiled-first", run_from=durable_root
+    )
+    second_root = compile_company(
+        fixture, tmp_path / "compiled-second", run_from=durable_root
+    )
 
-    expected = str((durable_root / ".fabri" / "acme_eng.db").resolve())
-    assert root["memory"]["sqlite_path"] == expected
-    assert vp["memory"]["sqlite_path"] == expected
+    expected_paths = {
+        Path("ceo.yaml"): durable_root / ".fabri" / "acme_eng.db",
+        Path("vp_eng.yaml"): durable_root / ".fabri" / "acme_eng.db",
+        Path("agencies/bugs/agent.openai.yaml"): (
+            durable_root / ".fabri" / "acme_eng_bugs.db"
+        ),
+        Path("agencies/bugs/specialist.yaml"): (
+            durable_root / ".fabri" / "acme_eng_bugs.db"
+        ),
+        Path("agencies/writer/agent.openai.yaml"): (
+            durable_root / ".fabri" / "acme_eng_writer.db"
+        ),
+        Path("agencies/writer/specialist.yaml"): (
+            durable_root / ".fabri" / "acme_eng_writer.db"
+        ),
+    }
+    for relative_path, expected_path in expected_paths.items():
+        first_config = yaml.safe_load((first_root.parent / relative_path).read_text())
+        second_config = yaml.safe_load((second_root.parent / relative_path).read_text())
+        first_sqlite_path = Path(first_config["memory"]["sqlite_path"])
+        second_sqlite_path = Path(second_config["memory"]["sqlite_path"])
+
+        assert first_sqlite_path == expected_path.resolve()
+        assert first_sqlite_path.name == expected_path.name
+        assert not first_sqlite_path.is_relative_to(first_root.parent)
+        assert second_sqlite_path == first_sqlite_path
+
+
+def test_compile_company_defaults_memory_root_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = (
+        Path(__file__).parent / "fixtures" / "company_3level" / "company.toml"
+    ).resolve()
+    run_from = tmp_path / "run-from"
+    run_from.mkdir()
+    monkeypatch.chdir(run_from)
+
+    root_config = compile_company(fixture, tmp_path / "compiled")
+    root = yaml.safe_load(root_config.read_text())
+    specialist = yaml.safe_load(
+        (
+            root_config.parent / "agencies" / "bugs" / "specialist.yaml"
+        ).read_text()
+    )
+
+    assert Path(root["memory"]["sqlite_path"]) == (
+        run_from / ".fabri" / "acme_eng.db"
+    )
+    assert Path(specialist["memory"]["sqlite_path"]) == (
+        run_from / ".fabri" / "acme_eng_bugs.db"
+    )
+
+
+def test_compile_company_leaves_qdrant_memory_without_sqlite_path(
+    tmp_path: Path,
+) -> None:
+    agency_dir = tmp_path / "qdrant-agency"
+    agency_dir.mkdir()
+    (agency_dir / "agency.toml").write_text(
+        "[agency]\nname = 'qdrant-agency'\nentry = 'agent.yaml'\n"
+    )
+    (agency_dir / "agent.yaml").write_text(
+        "agent:\n"
+        "  name: qdrant-role\n"
+        "memory:\n"
+        "  backend: qdrant\n"
+        "  collection: durable_vectors\n"
+        "  qdrant_url: http://localhost:6333\n"
+    )
+    company = _write_company(
+        tmp_path,
+        "[[node]]\n"
+        "id = 'root'\n"
+        "report_to = ''\n\n"
+        "[[node]]\n"
+        "id = 'crew'\n"
+        "report_to = 'root'\n"
+        "agency = 'qdrant-agency'\n",
+    )
+
+    root_config = compile_company(
+        company, tmp_path / "compiled", run_from=tmp_path / "durable"
+    )
+    role = yaml.safe_load(
+        (root_config.parent / "agencies" / "crew" / "agent.yaml").read_text()
+    )
+
+    assert role["memory"]["backend"] == "qdrant"
+    assert role["memory"]["qdrant_url"] == "http://localhost:6333"
+    assert "sqlite_path" not in role["memory"]
 
 
 def _compile_manager_tree(

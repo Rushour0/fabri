@@ -130,6 +130,29 @@ def _apply_company_action_scope(
         )
 
 
+def _anchored_sqlite_path(sqlite_path: str, memory_dir: Path) -> str:
+    """Keep a SQLite filename while moving it below the durable company root."""
+    return str(memory_dir / Path(sqlite_path).name)
+
+
+def _apply_company_memory_root(agency_dir: Path, memory_dir: Path) -> None:
+    """Anchor installed agency SQLite memory outside the compiled tree."""
+    for config_path in agency_dir.rglob("*.yaml"):
+        data = yaml.safe_load(config_path.read_text())
+        if not isinstance(data, dict):
+            continue
+        memory = data.get("memory")
+        if not isinstance(memory, dict) or "sqlite_path" not in memory:
+            continue
+        sqlite_path = memory["sqlite_path"]
+        if not isinstance(sqlite_path, str) or not sqlite_path:
+            continue
+        memory["sqlite_path"] = _anchored_sqlite_path(sqlite_path, memory_dir)
+        config_path.write_text(
+            yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+        )
+
+
 def _require_positive_number(value: object, label: str) -> None:
     """A call timeout must be a positive, finite number (never a bool, which is
     an int subclass and would silently pass an isinstance check). An invalid
@@ -364,8 +387,8 @@ def compile_company(
 
     ``run_from`` anchors the company's SQLite memory outside ephemeral compile
     directories. Catalog and Studio callers pass their durable working
-    directory; direct ``company compile`` calls retain the historical behavior
-    of keeping memory beside the compiled company.
+    directory; direct ``company compile`` calls default to the current working
+    directory.
     """
     company_path = Path(path).resolve()
     data = load_company(company_path)
@@ -382,8 +405,9 @@ def compile_company(
         raise FileExistsError(f"destination already exists: {output_dir}")
     output_dir.mkdir(parents=True)
     namespace = company["memory_namespace"]
-    memory_root = Path(run_from).resolve() if run_from is not None else output_dir
-    memory_path = memory_root / ".fabri" / f"{namespace}.db"
+    memory_root = Path(run_from).resolve() if run_from is not None else Path.cwd()
+    memory_dir = memory_root / ".fabri"
+    memory_path = _anchored_sqlite_path(f"{namespace}.db", memory_dir)
 
     config_paths: dict[str, Path] = {}
     for node in nodes:
@@ -409,6 +433,7 @@ def compile_company(
             company_namespace=namespace,
             agency_id=node["id"],
         )
+        _apply_company_memory_root(agency_dir, memory_dir)
         config_paths[node["id"]] = _entry_path(agency_dir, entry).resolve()
 
     root_id = next(node["id"] for node in nodes if node["report_to"] == "")
@@ -467,7 +492,7 @@ def compile_company(
                 "collection": (
                     f"{namespace}_company" if node_id == root_id else f"{namespace}_{node_id}"
                 ),
-                "sqlite_path": str(memory_path),
+                "sqlite_path": memory_path,
                 "top_k": 5 if node_id == root_id else 3,
                 "record_postmortems": node_id == root_id,
                 "action_scope": {
