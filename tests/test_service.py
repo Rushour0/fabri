@@ -25,8 +25,12 @@ import pytest
 from fabri.config import load_config
 from fabri.service.binding import bind_run_config, merge_overrides
 from fabri.service.launcher import build_run_command, launch_run
-from fabri.service.service import FabriService, serve_stdio
-from fabri.service.tailer import extract_cost, tail_events
+from fabri.service.service import (
+    FabriService,
+    PersistedRunUnavailableError,
+    serve_stdio,
+)
+from fabri.service.tailer import extract_cost, run_trace_path, tail_events
 
 
 # --- fake agent script -------------------------------------------------------
@@ -95,6 +99,41 @@ def _builder_for(script: Path):
     def _build(task, config_path, session_id, fabri_home):
         return [sys.executable, str(script)]
     return _build
+
+
+def _persist_finished_run(service: FabriService, session_id: str) -> list[dict]:
+    """Fabricate the durable store row + trace left by a finished run."""
+    events = [
+        {"type": "start", "task": "persisted task"},
+        {"type": "tool_call", "name": "noop", "ok": True},
+        {"type": "final", "text": "persisted answer", "outcome": "success"},
+        {
+            "type": "usage",
+            "input_tokens": 12,
+            "output_tokens": 7,
+            "cost_usd": 0.002,
+            "subagent_cost_usd": 0.001,
+            "total_cost_usd": 0.003,
+        },
+        {"type": "post_run_usage", "cost_usd": 0.0002},
+    ]
+    trace_path = run_trace_path(service.home_root / session_id, session_id)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    service.run_store.record_submit(
+        session_id=session_id,
+        agency="default",
+        task="persisted task",
+        submitted_at=1.0,
+    )
+    service.run_store.record_terminal(
+        session_id=session_id,
+        finished_at=2.0,
+        event="result",
+        outcome="success",
+        cost=extract_cost(events),
+    )
+    return events
 
 
 # A fake that writes a `start` event then sleeps well past a test's patience, so
@@ -364,7 +403,9 @@ def test_service_result_survives_stdout_trailer(tmp_path: Path, fake_agent_with_
 
 def test_service_unknown_session_raises(tmp_path: Path):
     svc = FabriService(home_root=tmp_path / "runs")
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="unknown session_id"):
+        svc.stream("nope")
+    with pytest.raises(KeyError, match="unknown session_id"):
         svc.result("nope")
 
 
@@ -403,6 +444,69 @@ def test_service_history_survives_restart(tmp_path: Path, fake_agent: Path):
     assert session_id in sessions
     assert sessions[session_id]["status"] == "done"
     assert sessions[session_id]["cost"]["total_cost_usd"] == 0.0015
+
+
+def test_service_stream_replays_persisted_trace_after_restart(tmp_path: Path):
+    home = tmp_path / "runs"
+    original = FabriService(home_root=home)
+    session_id = "persisted-stream"
+    expected = _persist_finished_run(original, session_id)
+    original.close()
+
+    reborn = FabriService(home_root=home)
+    assert list(reborn.stream(session_id, timeout=0.1)) == expected
+    reborn.close()
+
+
+def test_service_result_reconstructs_envelope_after_restart(tmp_path: Path):
+    home = tmp_path / "runs"
+    original = FabriService(home_root=home)
+    session_id = "persisted-result"
+    _persist_finished_run(original, session_id)
+    original.close()
+
+    reborn = FabriService(home_root=home)
+    assert reborn.result(session_id) == {
+        "session_id": session_id,
+        "success": True,
+        "outcome": "success",
+        "final_text": "persisted answer",
+        "structured_output": None,
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 7,
+            "cost_usd": 0.002,
+            "subagent_cost_usd": 0.001,
+            "total_cost_usd": 0.003,
+        },
+        "cost": {
+            "cost_usd": 0.002,
+            "subagent_cost_usd": 0.001,
+            "total_cost_usd": 0.003,
+            "post_run_cost_usd": 0.0002,
+            "cost_by_model": {},
+            "metrics": {"input_tokens": 12, "output_tokens": 7},
+        },
+        "error": None,
+    }
+    assert reborn.cancel(session_id) == {
+        "session_id": session_id,
+        "status": "already_ended",
+    }
+    reborn.close()
+
+
+def test_service_known_run_without_trace_has_typed_error(tmp_path: Path):
+    svc = FabriService(home_root=tmp_path / "runs")
+    svc.run_store.record_submit(
+        session_id="missing-trace",
+        agency="default",
+        task="gone",
+        submitted_at=1.0,
+    )
+    with pytest.raises(PersistedRunUnavailableError, match="trace is unavailable"):
+        svc.result("missing-trace")
+    svc.close()
 
 
 def test_service_cancel_terminates_running_run(tmp_path: Path, fake_agent_sleepy: Path):
@@ -703,6 +807,28 @@ def test_http_unknown_route_404(tmp_path: Path):
     try:
         status, _ = _http_get(host, port, "/nope")
         assert status == 404
+    finally:
+        server.shutdown()
+        svc.close()
+
+
+def test_http_unknown_run_events_and_result_are_json_404(tmp_path: Path):
+    from fabri.service.http_server import serve_http
+
+    svc = FabriService(home_root=tmp_path / "runs")
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    host, port = server.server_address[0], server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        expected = {"error": "unknown session_id 'does-not-exist'"}
+        status, body = _http_get(host, port, "/runs/does-not-exist/events")
+        assert status == 404
+        assert json.loads(body) == expected
+
+        status, body = _http_get(host, port, "/runs/does-not-exist/result")
+        assert status == 404
+        assert json.loads(body) == expected
     finally:
         server.shutdown()
         svc.close()
