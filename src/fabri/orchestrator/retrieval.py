@@ -407,14 +407,16 @@ def retrieve_context_with_meta(
     Metadata shape:
       {
         "retrieved": int,             # total guidelines surfaced
-        "from_prior_sessions": int,   # subset confirmed by >1 session (hit_count>=2 OR len(session_ids)>=2)
+        "from_prior_sessions": int,   # subset originating in another session
         "strategic": int,             # subset already promoted to strategic
       }
 
     "Reuse rate" is then `from_prior_sessions / retrieved`. We deliberately do
     NOT count "guidelines that exist in the store" as reuse — that's just "we
     had data". Reuse means "the retrieved data was already validated by a
-    different session", which is the cross-session learning signal.
+    different session", which is the cross-session learning signal. When the
+    current session or entry provenance is unavailable, hit_count >= 2 or
+    multiple recorded sessions remains the compatibility fallback.
     """
     text, merged = _retrieve_inner(
         store, task, top_k=top_k, tool_names=tool_names,
@@ -426,7 +428,17 @@ def retrieve_context_with_meta(
         "retrieved": len(merged),
         "from_prior_sessions": sum(
             1 for entry, _ in merged
-            if (entry.hit_count or 0) >= 2 or len(entry.session_ids or []) >= 2
+            if (
+                any(
+                    provenance_session != session_id
+                    for provenance_session in entry.session_ids
+                )
+                if session_id is not None and entry.session_ids
+                else (
+                    (entry.hit_count or 0) >= 2
+                    or len(entry.session_ids or []) >= 2
+                )
+            )
         ),
         "strategic": sum(1 for entry, _ in merged if entry.kind == "strategic"),
     }
