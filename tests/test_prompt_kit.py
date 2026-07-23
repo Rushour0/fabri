@@ -3,6 +3,8 @@ machine-memory output splitter. All pure functions -- no LLM, no store, no
 network."""
 from __future__ import annotations
 
+import pytest
+
 from fabri.builder import (
     AGENT_MEMORY_MARKER,
     format_agent_memory,
@@ -15,6 +17,15 @@ from fabri.core.agent import run_agent
 from fabri.core.llm import LLMResponse, ScriptedLLMBackend
 from fabri.orchestrator.traces import read_trace
 from fabri.tools.registry import ToolRegistry
+
+
+_LIVE_AGENT_MEMORY_LEAK = """<!-- AGENTMEMORY --> TASK: Triage and fix the failing workspace store test in teststore.py. OUTCOME: success INSIGHTS:
+
+store.py's cart_total() accepts discount values in percentage points (for example, 10 means 10%), so it must divide by 100 before applying the discount.
+OPEN LOOPS:
+
+none
+-->"""
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +107,59 @@ def test_split_without_marker_returns_text_and_none():
     assert memory is None
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        pytest.param("<!-- AGENT_MEMORY -->", id="legacy-comment"),
+        pytest.param("<!--agentmemory-->", id="compact-comment"),
+        pytest.param("<!--  Agent Memory  -->", id="spaced-comment"),
+    ],
+)
+def test_split_accepts_legacy_comment_variants(marker: str) -> None:
+    prose, memory = split_agent_output(
+        f"Visible answer.\n{marker}\nTASK: retain compatibility\nOUTCOME: success"
+    )
+
+    assert prose == "Visible answer."
+    assert memory == {"TASK": "retain compatibility", "OUTCOME": "success"}
+
+
+def test_split_accepts_case_insensitive_spaced_tag_pair() -> None:
+    text = (
+        "Before.\n"
+        "<  agent memory  >\n"
+        "TASK: parse tagged memory\n"
+        "OUTCOME: success\n"
+        "</ Agent_Memory >\n"
+        "After."
+    )
+
+    prose, memory = split_agent_output(text)
+
+    assert prose == "Before.\n\nAfter."
+    assert memory == {"TASK": "parse tagged memory", "OUTCOME": "success"}
+
+
+def test_split_live_sloppy_comment_leak_is_hidden_and_parsed() -> None:
+    prose, memory = split_agent_output(
+        f"The workspace store test is fixed.\n\n{_LIVE_AGENT_MEMORY_LEAK}"
+    )
+
+    assert prose == "The workspace store test is fixed."
+    assert "AGENTMEMORY" not in prose
+    assert "cart_total" not in prose
+    assert memory is not None
+    assert memory["TASK"] == (
+        "Triage and fix the failing workspace store test in teststore.py."
+    )
+    assert memory["OUTCOME"] == "success"
+    assert memory["INSIGHTS"] == (
+        "store.py's cart_total() accepts discount values in percentage points "
+        "(for example, 10 means 10%), so it must divide by 100 before applying "
+        "the discount."
+    )
+
+
 def test_split_with_marker_parses_keys_and_nested_list():
     text = (
         "Done. The dataset is cleaned.\n\n"
@@ -133,7 +197,11 @@ def test_split_round_trips_via_format_agent_memory():
         "OUTCOME": "success",
         "CHANGES": ["added a cache", "tightened the schema"],
     }
-    text = "Prose answer.\n\n" + format_agent_memory(memory)
+    rendered = format_agent_memory(memory)
+    assert rendered.startswith("<AGENT_MEMORY>\n")
+    assert rendered.endswith("\n</AGENT_MEMORY>")
+
+    text = "Prose answer.\n\n" + rendered
     prose, parsed = split_agent_output(text)
     assert prose == "Prose answer."
     assert parsed == memory
