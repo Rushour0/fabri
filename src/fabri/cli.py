@@ -976,7 +976,8 @@ def cmd_new_agency(args: argparse.Namespace) -> None:
 def cmd_company_compile(args: argparse.Namespace) -> None:
     """Compile a company.toml into nested manager and agency configs."""
     try:
-        root_config = compile_company(args.company_toml, args.dest)
+        run_from = Path(args.run_from) if getattr(args, "run_from", None) else None
+        root_config = compile_company(args.company_toml, args.dest, run_from=run_from)
     except (OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1740,6 +1741,9 @@ def main() -> None:
         "compile", help="Compile company.toml into nested agent configs")
     p_company_compile.add_argument("company_toml", help="Path to company.toml")
     p_company_compile.add_argument("--dest", default=".", help="Output parent directory (default: current directory)")
+    p_company_compile.add_argument(
+        "--run-from", dest="run_from", default=None,
+        help="Anchor directory for durable memory DB paths (<run-from>/.fabri/; default: current directory)")
     p_company_compile.set_defaults(func=cmd_company_compile)
 
     # B5: prompt-kit — scaffold a new agent prompt from the proven skeleton.

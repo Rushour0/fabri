@@ -382,6 +382,13 @@ def _compile_company(
             str(case.company_source),
             "--dest",
             str(destination),
+            # Anchor memory DBs inside the compiled company tree: replicas and
+            # arms must never share a durable store (compile_company otherwise
+            # anchors sqlite paths at the invocation cwd since the durable-
+            # memory fix, which both escapes the manifest's company root and
+            # would cross-contaminate replicas).
+            "--run-from",
+            str(destination / case.company_name),
         ],
         command_cwd,
         environment,
