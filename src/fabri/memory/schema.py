@@ -12,6 +12,7 @@ EMBEDDING_MODEL_VERSION = "minilm-l6-v2"
 _ID_NAMESPACE = {
     "success_pattern": "success",
     "postmortem": "postmortem",
+    "convention": "convention",
 }
 
 
@@ -39,6 +40,7 @@ class MemoryEntry:
     source_event_ids: list[str] = field(default_factory=list)
     applicability: list[str] = field(default_factory=list)
     do_not_reuse_when: list[str] = field(default_factory=list)
+    payload: dict[str, object] = field(default_factory=dict)  # kind-specific data
 
     def __post_init__(self) -> None:
         """Keep legacy provenance aliases synchronized during the transition."""
@@ -91,6 +93,7 @@ class MemoryEntry:
             "source_event_ids": self.source_event_ids,
             "applicability": self.applicability,
             "do_not_reuse_when": self.do_not_reuse_when,
+            "payload": self.payload,
         }
 
     @classmethod
@@ -120,4 +123,5 @@ class MemoryEntry:
             source_event_ids=list(payload.get("source_event_ids", [])),
             applicability=list(payload.get("applicability", [])),
             do_not_reuse_when=list(payload.get("do_not_reuse_when", [])),
+            payload=dict(payload.get("payload", {})),
         )

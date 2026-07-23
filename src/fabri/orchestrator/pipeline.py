@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -13,6 +14,11 @@ from fabri.memory.compress import (
     synthesize_guideline,
     synthesize_success_pattern,
 )
+from fabri.memory.convention_extraction import (
+    convention_candidate_gate_reason,
+    extract_convention_candidates,
+)
+from fabri.memory.conventions import ingest_convention
 from fabri.memory.output import split_agent_output
 from fabri.memory.embeddings import embeddings_available
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD, ingest_guideline
@@ -276,6 +282,7 @@ def process_trace(
     producer_agent_id: str | None = None,
     memory_scope: str = "agent",
     on_report: Callable[[MiningReport], None] | None = None,
+    config: Mapping[str, object] | None = None,
 ) -> list[MemoryEntry]:
     """Mine a session's trace for failures, synthesize each into a compressed
     guideline, and ingest it into memory (dedup/promote per pruning rules).
@@ -293,9 +300,9 @@ def process_trace(
     trace file off disk — `session_id` is then only used to tag provenance on
     the resulting entries. `synthesize=False` swaps the two LLM miners (failure
     guideline, success pattern) for deterministic, keyed text so ingesting an
-    arbitrarily large external log costs $0; `llm` is never invoked in that
-    mode. Both default to today's behaviour (read from disk, LLM synthesis) so
-    every existing caller is byte-identical."""
+    arbitrarily large external log costs $0 unless convention mining is
+    separately enabled. Both default to today's behaviour (read from disk, LLM
+    synthesis) so every existing caller is byte-identical."""
     if memory_scope not in _MEMORY_SCOPES:
         raise ValueError(f"unsupported memory scope: {memory_scope}")
     report = MiningReport(session_id=session_id, producer_agent_id=producer_agent_id)
@@ -327,6 +334,51 @@ def process_trace(
     logger.info("processing trace %s: %d failure(s) found", session_id, len(failures))
 
     new_entries: list[MemoryEntry] = []
+
+    convention_config: dict[str, object] = dict(config or {})
+    raw_memory_config = convention_config.get("memory")
+    if isinstance(raw_memory_config, Mapping):
+        memory_config = dict(raw_memory_config)
+        convention_config["memory"] = memory_config
+    else:
+        memory_config = convention_config
+    convention_mining_enabled = bool(
+        memory_config.get("convention_mining_enabled", False)
+    )
+    if convention_mining_enabled:
+        memory_config["_convention_provenance_prefix"] = f"session:{session_id}"
+        try:
+            convention_candidates = extract_convention_candidates(
+                events,
+                llm,
+                config=convention_config,
+            )
+            for candidate in convention_candidates:
+                gate_reason = convention_candidate_gate_reason(
+                    candidate,
+                    config=convention_config,
+                )
+                ingest_config = convention_config
+                if gate_reason in {
+                    "missing_conditions",
+                    "unresolved_referent",
+                    "duplicate_conditions",
+                }:
+                    quarantining_memory = dict(memory_config)
+                    quarantining_memory["convention_mining_enabled"] = False
+                    ingest_config = {"memory": quarantining_memory}
+                entry = ingest_convention(
+                    store,
+                    candidate,
+                    config=ingest_config,
+                )
+                new_entries.append(entry)
+        except Exception:  # noqa: BLE001 -- convention mining must never fail the run
+            logger.warning(
+                "convention extraction/ingestion failed for %s",
+                session_id,
+                exc_info=True,
+            )
 
     def _ingest(
         text: str,

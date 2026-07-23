@@ -39,6 +39,12 @@ from fabri.benchmarks.company_setup_probe import (
     analyze_run,
     build_source_manifest,
 )
+from fabri.memory.conventions import (
+    ConventionRecord,
+    ConventionStore,
+    ingest_convention,
+)
+from fabri.memory.schema import MemoryEntry
 
 
 CLAIM_BOUNDARY = (
@@ -53,6 +59,7 @@ _STRUCTURED_RESPONSE_INSTRUCTION = (
     "agent.response_schema first. Put all user-facing prose in the response field. "
     "After the complete JSON object, append the required AGENT_MEMORY block."
 )
+ConventionApproval = tuple[str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,7 @@ class MemoryCase:
     retrieval_expectations: dict[str, object]
     replicas: int
     conditions: tuple[str, ...]
+    convention_mining: bool = False
     structured_fields: Mapping[str, object] = field(default_factory=dict)
     response_schema: Mapping[str, object] = field(default_factory=dict)
     legacy_required_terms: tuple[tuple[str, ...], ...] | None = None
@@ -293,6 +301,9 @@ def load_memory_case(
         selected.get("conditions", defaults.get("conditions", ["memory", "control"])),
         f"case {case_id}.conditions",
     )
+    convention_mining = selected.get("convention_mining", False)
+    if not isinstance(convention_mining, bool):
+        raise ProbeError(f"case {case_id}.convention_mining must be a boolean")
     return MemoryCase(
         case_id=case_id,
         company_source=company_source,
@@ -328,6 +339,7 @@ def load_memory_case(
         retrieval_expectations=retrieval_expectations,
         replicas=replicas,
         conditions=conditions,
+        convention_mining=convention_mining,
     )
 
 
@@ -406,6 +418,8 @@ def apply_retrieval_overrides(
     mining_enabled: bool | None = None,
     retrieval_enabled: bool | None = None,
     guideline_max_tokens: int | None = None,
+    convention_mining_enabled: bool | None = None,
+    convention_approvals: tuple[ConventionApproval, ...] | None = None,
 ) -> list[str]:
     """Rewrite optional retrieval settings into every raw compiled node config."""
     _validate_retrieval_overrides(top_k, strategy, guideline_max_tokens)
@@ -418,6 +432,8 @@ def apply_retrieval_overrides(
         and mining_enabled is None
         and retrieval_enabled is None
         and guideline_max_tokens is None
+        and convention_mining_enabled is None
+        and convention_approvals is None
     ):
         return []
 
@@ -444,6 +460,12 @@ def apply_retrieval_overrides(
             memory["retrieval_enabled"] = retrieval_enabled
         if guideline_max_tokens is not None:
             memory["guideline_max_tokens"] = guideline_max_tokens
+        if convention_mining_enabled is not None:
+            memory["convention_mining_enabled"] = convention_mining_enabled
+        if convention_approvals is not None:
+            memory["convention_approvals"] = [
+                list(approval) for approval in convention_approvals
+            ]
         try:
             config_path.write_text(
                 yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -452,6 +474,119 @@ def apply_retrieval_overrides(
             raise ProbeError(f"could not write compiled config {config_path}: {exc}") from exc
         changed.append(str(config_path))
     return changed
+
+
+def _convention_record(entry: MemoryEntry, *, source: str) -> ConventionRecord:
+    raw_record = entry.payload.get("record")
+    if not isinstance(raw_record, dict):
+        raise ProbeError(f"malformed convention record in {source}: {entry.id}")
+    try:
+        return ConventionRecord(**raw_record)
+    except (TypeError, ValueError) as exc:
+        raise ProbeError(
+            f"malformed convention record in {source}: {entry.id}: {exc}"
+        ) from exc
+
+
+def find_quarantined_convention_approvals(
+    compiled_destination: Path,
+    company_name: str,
+    specs: tuple[MemoryDbSpec, ...],
+) -> tuple[ConventionApproval, ...]:
+    """Read quarantined conventions and return their stage-1 canonical keys."""
+    company_root = compiled_destination / company_name
+    approvals: set[ConventionApproval] = set()
+    for spec in specs:
+        path = company_root / spec.relative_path
+        if not path.is_file():
+            continue
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+                rows = connection.execute(
+                    "SELECT payload FROM guidelines "
+                    "WHERE kind = 'convention' ORDER BY id"
+                ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise ProbeError(f"could not scan convention approvals in {path}: {exc}") from exc
+        for (payload_json,) in rows:
+            try:
+                payload = json.loads(str(payload_json))
+                entry = MemoryEntry.from_payload(payload)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ProbeError(
+                    f"malformed convention payload in {path}: {exc}"
+                ) from exc
+            if entry.kind == "convention" and entry.tier == "quarantine":
+                approvals.add(_convention_record(entry, source=str(path)).approval_key)
+    return tuple(sorted(approvals))
+
+
+def grant_convention_approvals(
+    store: ConventionStore,
+    approvals: tuple[ConventionApproval, ...],
+    *,
+    config: Mapping[str, object],
+) -> int:
+    """Re-evaluate copied quarantined records through stage-1 ingestion."""
+    approved = set(approvals)
+    promoted = 0
+    for entry in store.iterate(kind="convention"):
+        if entry.tier != "quarantine":
+            continue
+        record = _convention_record(entry, source="copied memory store")
+        if record.approval_key not in approved:
+            continue
+        active = ingest_convention(store, record, config=config)
+        if active.tier != "retrieve" or active.verification != "human_verified":
+            reason = active.payload.get("quarantine_reason", "unknown")
+            raise ProbeError(
+                "approved convention did not become human-verified retrieval memory: "
+                f"{record.approval_key}: {reason}"
+            )
+        if active.id != entry.id:
+            store.delete(entry.id)
+        promoted += 1
+    return promoted
+
+
+def _grant_copied_convention_approvals(
+    compiled_destination: Path,
+    company_name: str,
+    specs: tuple[MemoryDbSpec, ...],
+    approvals: tuple[ConventionApproval, ...],
+) -> int:
+    if not approvals:
+        return 0
+    from fabri.memory.embedded_store import SqliteMemoryStore
+
+    company_root = compiled_destination / company_name
+    promoted = 0
+    for spec in specs:
+        path = company_root / spec.relative_path
+        if not path.is_file():
+            continue
+        config_path = company_root / spec.config_paths[0]
+        try:
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ProbeError(f"could not read compiled config {config_path}: {exc}") from exc
+        except yaml.YAMLError as exc:
+            raise ProbeError(f"malformed YAML in compiled config {config_path}: {exc}") from exc
+        config = _as_mapping(loaded, str(config_path))
+        memory = _as_mapping(config.get("memory"), f"{config_path}.memory")
+        store = SqliteMemoryStore(
+            path=path,
+            collection=str(memory.get("collection", "fabri")),
+        )
+        try:
+            promoted += grant_convention_approvals(
+                store,
+                approvals,
+                config=config,
+            )
+        finally:
+            store.conn.close()
+    return promoted
 
 
 def discover_memory_dbs(
@@ -725,6 +860,7 @@ def _invalid_run(
         "training_failure_reasons": training_failure_reasons,
         "holdout_failure_reasons": holdout_failure_reasons,
         "training_dbs_absent": [],
+        "convention_approvals_granted": [],
         "execution_order": execution_order,
         "funnel": {
             "supply": {"mining_reports": [], "dbs": []},
@@ -800,6 +936,8 @@ def _run_pair(
         top_k=retrieval_top_k,
         strategy=retrieval_strategy,
         guideline_max_tokens=guideline_max_tokens,
+        convention_mining_enabled=True if case.convention_mining else None,
+        convention_approvals=() if case.convention_mining else None,
     )
     try:
         train_specs = discover_memory_dbs(train_dest, case.company_name)
@@ -906,6 +1044,14 @@ def _run_pair(
         mining_enabled=False if condition == "control" else None,
         retrieval_enabled=False if condition == "control" else None,
         guideline_max_tokens=guideline_max_tokens,
+        convention_mining_enabled=(
+            case.convention_mining if condition == "memory" else False
+        )
+        if case.convention_mining
+        else None,
+        convention_approvals=()
+        if case.convention_mining and condition == "control"
+        else None,
     )
 
     try:
@@ -929,6 +1075,33 @@ def _run_pair(
         )
         _private_write(attempt_root, processes, result)
         return result
+
+    convention_approvals: tuple[ConventionApproval, ...] = ()
+    if case.convention_mining and condition == "memory":
+        try:
+            convention_approvals = find_quarantined_convention_approvals(
+                train_dest,
+                case.company_name,
+                train_specs,
+            )
+            apply_retrieval_overrides(
+                holdout_dest,
+                case.company_name,
+                top_k=None,
+                strategy=None,
+                convention_approvals=convention_approvals,
+            )
+        except ProbeError as exc:
+            result = _invalid_run(
+                replica,
+                condition,
+                training_outcome,
+                training_cost,
+                "convention_approval_scan_failed",
+                execution_order=execution_order,
+            )
+            _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
+            return result
 
     training_db_manifest = _manifest_for_specs(train_dest, case.company_name, train_specs)
     training_funnel = _funnel_observations(train_state)
@@ -969,7 +1142,7 @@ def _run_pair(
         for relative in holdout_by_path:
             (holdout_dest / case.company_name / relative).unlink(missing_ok=True)
 
-    transported_db_manifest = _manifest_for_specs(
+    copied_db_manifest = _manifest_for_specs(
         holdout_dest, case.company_name, holdout_specs
     )
     transport_intact = condition == "memory" and all(
@@ -981,10 +1154,35 @@ def _run_pair(
             and before["present"] is True
             and after["present"] is True
         )
-        for before, after in zip(training_db_manifest, transported_db_manifest, strict=True)
+        for before, after in zip(training_db_manifest, copied_db_manifest, strict=True)
     )
     if condition == "control":
-        transport_intact = all(item["present"] is False for item in transported_db_manifest)
+        transport_intact = all(item["present"] is False for item in copied_db_manifest)
+    if convention_approvals:
+        try:
+            _grant_copied_convention_approvals(
+                holdout_dest,
+                case.company_name,
+                holdout_specs,
+                convention_approvals,
+            )
+        except (ProbeError, RuntimeError) as exc:
+            result = _invalid_run(
+                replica,
+                condition,
+                training_outcome,
+                training_cost,
+                "convention_approval_application_failed",
+                execution_order=execution_order,
+            )
+            result["convention_approvals_granted"] = [
+                list(approval) for approval in convention_approvals
+            ]
+            _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
+            return result
+    transported_db_manifest = _manifest_for_specs(
+        holdout_dest, case.company_name, holdout_specs
+    )
     if not holdout_root.is_file():
         result = _invalid_run(
             replica,
@@ -993,6 +1191,9 @@ def _run_pair(
             training_cost,
             "holdout_root_config_missing",            execution_order=execution_order,
         )
+        result["convention_approvals_granted"] = [
+            list(approval) for approval in convention_approvals
+        ]
         _private_write(attempt_root, processes, result)
         return result
     try:
@@ -1006,6 +1207,9 @@ def _run_pair(
             "holdout_response_contract_invalid",
             execution_order=execution_order,
         )
+        result["convention_approvals_granted"] = [
+            list(approval) for approval in convention_approvals
+        ]
         _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
 
@@ -1032,6 +1236,9 @@ def _run_pair(
             training_cost,
             "holdout_run_timeout",            execution_order=execution_order,
         )
+        result["convention_approvals_granted"] = [
+            list(approval) for approval in convention_approvals
+        ]
         _private_write(attempt_root, processes, result)
         return result
     except ProbeError as exc:
@@ -1042,6 +1249,9 @@ def _run_pair(
             training_cost,
             "holdout_result_unreadable",            execution_order=execution_order,
         )
+        result["convention_approvals_granted"] = [
+            list(approval) for approval in convention_approvals
+        ]
         _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
 
@@ -1087,6 +1297,9 @@ def _run_pair(
         "training_failure_reasons": [],
         "holdout_failure_reasons": sorted(set(str(item) for item in holdout_failures)),
         "training_dbs_absent": training_dbs_absent,
+        "convention_approvals_granted": [
+            list(approval) for approval in convention_approvals
+        ],
         "execution_order": execution_order,
         "funnel": {
             "supply": {
@@ -1313,6 +1526,7 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         "training_failure_reasons": (list,),
         "holdout_failure_reasons": (list,),
         "training_dbs_absent": (list,),
+        "convention_approvals_granted": (list,),
         "execution_order": (int,),
         "funnel": (dict,),
     }
@@ -1332,6 +1546,20 @@ def validate_memory_payload(payload: dict[str, object]) -> None:
         if run["training_success"] is True and run["training_failure_reasons"]:
             raise ProbeError(
                 f"memory payload run {index} reports training success with training failures"
+            )
+        approvals = run["convention_approvals_granted"]
+        if not all(
+            isinstance(approval, list)
+            and len(approval) == 4
+            and all(isinstance(part, str) for part in approval)
+            for approval in approvals
+        ):
+            raise ProbeError(
+                f"memory payload run {index} has malformed convention approvals"
+            )
+        if run["condition"] == "control" and approvals:
+            raise ProbeError(
+                f"memory payload run {index} grants convention approvals to control"
             )
     aggregates = payload["condition_aggregates"]
     if not isinstance(aggregates, dict):

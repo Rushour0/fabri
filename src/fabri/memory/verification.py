@@ -6,12 +6,20 @@ from typing import Protocol
 from fabri.memory.schema import MemoryEntry
 
 _VERDICTS = frozenset({"tool_verified", "rubric_verified", "contradicted"})
+_VERIFIED_VALUES = frozenset(
+    {"tool_verified", "rubric_verified", "human_verified", "config_verified"}
+)
 
 
 class MutableMemoryStore(Protocol):
     def iterate(self, kind: str | None = None, limit: int | None = None) -> list[MemoryEntry]: ...
 
     def upsert(self, entry: MemoryEntry) -> str: ...
+
+
+def verification_allowed(entry: MemoryEntry) -> bool:
+    """Return whether an entry carries an affirmative verification value."""
+    return entry.verification in _VERIFIED_VALUES
 
 
 def apply_session_verification(

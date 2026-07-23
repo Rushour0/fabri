@@ -180,6 +180,27 @@ DEFAULT_CONFIG = {
         "similarity_threshold": SIMILARITY_THRESHOLD,
         "promotion_threshold_sessions": PROMOTION_THRESHOLD_SESSIONS,
         "guideline_max_tokens": DEFAULT_MAX_TOKENS,
+        # Convention mining is a separate, fail-closed path. It remains off
+        # until an operator explicitly enables it and names trusted config
+        # sources or exact, hash-specific approvals.
+        "convention_mining_enabled": False,
+        "convention_trusted_sources": [],
+        "convention_approvals": [],
+        # Stage-one conventions are atomic response-field mappings only.
+        "convention_allowed_effect_classes": ["response_mapping"],
+        "convention_ambiguous_condition_policy": "clarify",
+        "convention_branch_selection_max_retries": 1,
+        "convention_max_tokens": 384,
+        "convention_max_branches": 8,
+        "convention_max_entries": 256,
+        "convention_default_ttl_days": 180,
+        # Core placement stays disabled and requires later offline/canary
+        # evidence plus an explicit human tier change.
+        "convention_core_enabled": False,
+        "convention_core_min_sessions": 5,
+        "convention_core_require_all_branches": True,
+        "convention_core_offline_min_delta_pp": 5,
+        "convention_core_canary_min_uses": 100,
         # When enabled, only success traces with deterministic recovery
         # evidence may create a reusable success pattern. This avoids paying
         # retrieval/prompt cost for generic "the tools worked" summaries.
