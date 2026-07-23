@@ -30,6 +30,7 @@ from threading import Lock
 
 from fabri.config import ConfigError, load_config
 from fabri.events import EventType
+from fabri.memory.output import split_agent_output
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.auth import UserStore
 from fabri.service.binding import bind_run_config, merge_overrides
@@ -47,6 +48,10 @@ _LOG = logging.getLogger("fabri")
 # A host may swap how the agent is launched (tests point this at a fake script).
 # Signature: (task, config_path, session_id, fabri_home) -> argv.
 CommandBuilder = Callable[[str, Path, str, Path], Sequence[str]]
+
+
+class PersistedRunUnavailableError(RuntimeError):
+    """A known persisted run cannot be reconstructed from its trace."""
 
 
 class FabriService:
@@ -385,12 +390,39 @@ class FabriService:
             raise KeyError(f"unknown session_id {session_id!r}")
         return handle
 
-    def stream(self, session_id: str, *, timeout: float | None = None) -> Iterator[dict]:
-        """Yield the run's trace events live until it ends."""
-        handle = self._handle(session_id)
-        yield from tail_events(
-            handle.trace_path, is_running=handle.is_running, timeout=timeout
+    def _persisted_run(self, session_id: str) -> dict | None:
+        """Return the durable summary for *session_id*, if the store knows it."""
+        return next(
+            (
+                run
+                for run in self.run_store.list_runs()
+                if run["session_id"] == session_id
+            ),
+            None,
         )
+
+    def _persisted_trace_path(self, session_id: str) -> Path:
+        """Rebuild the trace path using the launcher's per-run home convention."""
+        run_home = (self.home_root / session_id).resolve()
+        return run_trace_path(run_home, session_id)
+
+    def stream(self, session_id: str, *, timeout: float | None = None) -> Iterator[dict]:
+        """Yield a live run's events, or replay a persisted run to EOF."""
+        handle = self._runs.get(session_id)
+        if handle is not None:
+            return tail_events(
+                handle.trace_path, is_running=handle.is_running, timeout=timeout
+            )
+
+        persisted = self._persisted_run(session_id)
+        if persisted is None:
+            raise KeyError(f"unknown session_id {session_id!r}")
+        trace_path = self._persisted_trace_path(session_id)
+        if not trace_path.is_file():
+            raise PersistedRunUnavailableError(
+                f"trace is unavailable for persisted session {session_id!r}"
+            )
+        return tail_events(trace_path, is_running=lambda: False, timeout=timeout)
 
     def result(self, session_id: str, *, timeout: float | None = None) -> dict:
         """Block for the run and return its result envelope plus a cost surface.
@@ -399,7 +431,10 @@ class FabriService:
         even if the child's stdout was lost) and merges the agent's stdout
         envelope (``outcome`` / ``final_text`` / ``structured_output``).
         """
-        handle = self._handle(session_id)
+        handle = self._runs.get(session_id)
+        if handle is None:
+            return self._persisted_result(session_id)
+
         envelope = handle.result(timeout=timeout)
         # The run has ended: no more questions can arrive, so release the bridge.
         self._close_ask(session_id)
@@ -426,6 +461,75 @@ class FabriService:
         )
         return result
 
+    def _persisted_result(self, session_id: str) -> dict:
+        """Reconstruct a known, non-live run's result from its durable trace."""
+        persisted = self._persisted_run(session_id)
+        if persisted is None:
+            raise KeyError(f"unknown session_id {session_id!r}")
+
+        trace_path = self._persisted_trace_path(session_id)
+        if not trace_path.is_file():
+            raise PersistedRunUnavailableError(
+                f"trace is unavailable for persisted session {session_id!r}"
+            )
+        events = _read_trace_at(trace_path)
+        terminal = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("type")
+                in {
+                    EventType.FINAL.value,
+                    EventType.FAILED.value,
+                    EventType.INCOMPLETE.value,
+                }
+            ),
+            None,
+        )
+        outcome = (
+            terminal.get("outcome") if terminal is not None else None
+        ) or persisted.get("outcome")
+        if terminal is None or not outcome:
+            raise PersistedRunUnavailableError(
+                f"result is unavailable for persisted session {session_id!r}"
+            )
+
+        usage_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("type") == EventType.USAGE.value
+            ),
+            None,
+        )
+        usage = (
+            {key: value for key, value in usage_event.items() if key != "type"}
+            if usage_event is not None
+            else None
+        )
+        final_text = terminal.get("text")
+        if terminal.get("type") == EventType.FINAL.value and isinstance(final_text, str):
+            final_text, _ = split_agent_output(final_text)
+        structured_output = None
+        if any(
+            event.get("type") == EventType.STRUCTURED_OUTPUT.value
+            for event in events
+        ):
+            try:
+                structured_output = json.loads(final_text)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {
+            "session_id": session_id,
+            "success": outcome in _SUCCESS_OUTCOMES,
+            "outcome": outcome,
+            "final_text": final_text,
+            "structured_output": structured_output,
+            "usage": usage,
+            "cost": extract_cost(events),
+            "error": None,
+        }
+
     def cancel(self, session_id: str) -> dict:
         """Terminate a still-running agent + release its ask_user bridge.
 
@@ -433,7 +537,16 @@ class FabriService:
         returns its recorded status. Records a terminal ``cancel`` index line so
         history reflects the interruption after a restart.
         """
-        handle = self._handle(session_id)  # KeyError -> 404 at the HTTP layer
+        handle = self._runs.get(session_id)
+        if handle is None:
+            persisted = self._persisted_run(session_id)
+            if persisted is None:
+                raise KeyError(f"unknown session_id {session_id!r}")
+            if persisted.get("status") != "running":
+                return {"session_id": session_id, "status": "already_ended"}
+            raise PersistedRunUnavailableError(
+                f"cannot cancel non-live persisted session {session_id!r}"
+            )
         was_running = handle.is_running()
         handle.terminate()
         self._close_ask(session_id)
