@@ -191,7 +191,15 @@ def convention_quarantine_reason(
 ) -> str | None:
     """Validate one whole candidate and return its fail-closed reason, if any."""
     memory = _memory_config(config)
-    allowed_effects = set(_configured_list(memory, "convention_allowed_effect_classes"))
+    if "convention_allowed_effect_classes" in memory:
+        allowed_effects = set(
+            _configured_list(memory, "convention_allowed_effect_classes")
+        )
+    else:
+        # Raw compiled configs bypass DEFAULT_CONFIG merging; an absent key
+        # means the ratified default (response_mapping only), while an
+        # explicit empty list stays a deliberate operator lockdown.
+        allowed_effects = {"response_mapping"}
     if (
         record.effect_class not in _HARD_ALLOWED_EFFECT_CLASSES
         or record.effect_class not in allowed_effects

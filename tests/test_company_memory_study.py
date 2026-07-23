@@ -672,13 +672,14 @@ def test_convention_approval_scan_uses_stage_one_canonical_key(tmp_path: Path) -
         config_paths=("ceo.yaml",),
     )
 
-    approvals = find_quarantined_convention_approvals(
+    approvals, skipped = find_quarantined_convention_approvals(
         tmp_path / "compiled",
         "support-hq",
         (spec,),
     )
 
     assert approvals == (record.approval_key,)
+    assert skipped == ()
 
 
 def test_convention_approval_loop_promotes_memory_and_records_only_memory_provenance(
@@ -708,7 +709,7 @@ def test_convention_approval_loop_promotes_memory_and_records_only_memory_proven
     monkeypatch.setattr(
         study,
         "find_quarantined_convention_approvals",
-        lambda *_args: (approval,),
+        lambda *_args: ((approval,), ()),
     )
     monkeypatch.setattr(
         study,
