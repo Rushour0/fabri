@@ -1,0 +1,51 @@
+{
+  "name": "slack_post",
+  "description": "Post a message to a Slack channel, optionally as a reply in an existing thread.",
+  "command": ["python3", "slack_post.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "channel": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Slack channel ID to post into."
+      },
+      "text": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Message text."
+      },
+      "thread_ts": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Optional parent message timestamp for a threaded reply."
+      },
+      "credential": {
+        "type": "string",
+        "default": "slack:default",
+        "description": "Slack bot-token credential reference."
+      }
+    },
+    "required": ["channel", "text"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "ok": {"type": "boolean"},
+      "result": {
+        "type": "object",
+        "properties": {
+          "ts": {"type": "string"},
+          "channel": {"type": "string"}
+        },
+        "required": ["ts", "channel"],
+        "additionalProperties": false
+      },
+      "error": {"type": "string"}
+    },
+    "required": ["ok"],
+    "additionalProperties": false
+  },
+  "timeout_s": 10
+}

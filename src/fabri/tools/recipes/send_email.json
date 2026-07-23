@@ -1,0 +1,78 @@
+{
+  "name": "send_email",
+  "description": "Send a plain-text email through SMTP. The credential ref defaults to smtp:default (FABRI_CRED_SMTP_DEFAULT) and must resolve to one JSON-encoded secret: {\"user\":\"...\",\"password\":\"...\"}. from_addr falls back to FABRI_SMTP_FROM_ADDR, then to the SMTP user. STARTTLS is enabled by default; set use_tls=false only for port-25 or local test servers.",
+  "command": ["python3", "send_email.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "to": {
+        "oneOf": [
+          {"type": "string", "minLength": 1},
+          {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1
+          }
+        ],
+        "description": "One recipient address or a list of recipient addresses."
+      },
+      "subject": {
+        "type": "string",
+        "minLength": 1
+      },
+      "body": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Plain-text message body."
+      },
+      "from_addr": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Sender address. Defaults to FABRI_SMTP_FROM_ADDR, then the SMTP user."
+      },
+      "host": {
+        "type": "string",
+        "minLength": 1
+      },
+      "port": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "default": 587
+      },
+      "credential": {
+        "type": "string",
+        "minLength": 1,
+        "default": "smtp:default",
+        "description": "Credential-store ref resolving to JSON: {\"user\":\"...\",\"password\":\"...\"}."
+      },
+      "use_tls": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable STARTTLS before authentication."
+      }
+    },
+    "required": ["to", "subject", "body", "host"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "ok": {"type": "boolean"},
+      "result": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "message_id": {"type": "string"}
+        },
+        "required": ["accepted", "message_id"]
+      },
+      "error": {"type": "string"}
+    },
+    "required": ["ok"]
+  },
+  "timeout_s": 30
+}

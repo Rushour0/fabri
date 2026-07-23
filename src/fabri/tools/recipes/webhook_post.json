@@ -1,0 +1,53 @@
+{
+  "name": "webhook_post",
+  "description": "POST a JSON payload to an HTTP(S) webhook and return its status, selected response headers, and response body capped at 64 KiB.",
+  "command": ["python3", "webhook_post.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "url": {"type": "string"},
+      "payload": {},
+      "headers": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "auth": {
+        "type": "string",
+        "description": "A provider:handle credential reference resolved to a Bearer token."
+      },
+      "timeout_s": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 60,
+        "default": 15
+      }
+    },
+    "required": ["url", "payload"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "ok": {"type": "boolean"},
+      "error": {"type": "string"},
+      "result": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "integer"},
+          "body": {
+            "type": "string",
+            "description": "Response body decoded as UTF-8 and capped at 65,536 source bytes."
+          },
+          "truncated": {"type": "boolean"},
+          "headers": {
+            "type": "object",
+            "description": "Safe subset of response headers.",
+            "additionalProperties": {"type": "string"}
+          }
+        },
+        "required": ["status", "body", "truncated", "headers"]
+      }
+    },
+    "required": ["ok"]
+  },
+  "timeout_s": 65
+}
