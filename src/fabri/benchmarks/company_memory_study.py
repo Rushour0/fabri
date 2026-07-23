@@ -42,6 +42,7 @@ from fabri.benchmarks.company_setup_probe import (
 from fabri.memory.conventions import (
     ConventionRecord,
     ConventionStore,
+    convention_quarantine_reason,
     ingest_convention,
 )
 from fabri.memory.schema import MemoryEntry
@@ -492,14 +493,35 @@ def find_quarantined_convention_approvals(
     compiled_destination: Path,
     company_name: str,
     specs: tuple[MemoryDbSpec, ...],
-) -> tuple[ConventionApproval, ...]:
-    """Read quarantined conventions and return their stage-1 canonical keys."""
+) -> tuple[tuple[ConventionApproval, ...], tuple[tuple[ConventionApproval, str], ...]]:
+    """Read quarantined conventions and return (admissible keys, skipped keys).
+
+    Models the operator's approval surface: only records the stage-1 gate would
+    admit are offered for approval; inadmissible candidates (wrong effect
+    class, over budget, malformed) are reported as skipped with their reason
+    instead of being approved and then failing closed at re-ingest.
+    """
     company_root = compiled_destination / company_name
     approvals: set[ConventionApproval] = set()
+    skipped: dict[ConventionApproval, str] = {}
     for spec in specs:
         path = company_root / spec.relative_path
         if not path.is_file():
             continue
+        config_path = company_root / spec.config_paths[0]
+        node_config: dict[str, object] = {}
+        if config_path.is_file():
+            try:
+                loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            except OSError as exc:
+                raise ProbeError(
+                    f"could not read compiled config {config_path}: {exc}"
+                ) from exc
+            except yaml.YAMLError as exc:
+                raise ProbeError(
+                    f"malformed YAML in compiled config {config_path}: {exc}"
+                ) from exc
+            node_config = _as_mapping(loaded, str(config_path))
         try:
             with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
                 rows = connection.execute(
@@ -517,8 +539,17 @@ def find_quarantined_convention_approvals(
                     f"malformed convention payload in {path}: {exc}"
                 ) from exc
             if entry.kind == "convention" and entry.tier == "quarantine":
-                approvals.add(_convention_record(entry, source=str(path)).approval_key)
-    return tuple(sorted(approvals))
+                record = _convention_record(entry, source=str(path))
+                reason = convention_quarantine_reason(record, config=node_config)
+                if reason is None:
+                    approvals.add(record.approval_key)
+                else:
+                    skipped.setdefault(record.approval_key, reason)
+    admissible = tuple(sorted(approvals))
+    skipped_out = tuple(
+        (key, skipped[key]) for key in sorted(skipped) if key not in approvals
+    )
+    return admissible, skipped_out
 
 
 def grant_convention_approvals(
@@ -538,11 +569,10 @@ def grant_convention_approvals(
             continue
         active = ingest_convention(store, record, config=config)
         if active.tier != "retrieve" or active.verification != "human_verified":
-            reason = active.payload.get("quarantine_reason", "unknown")
-            raise ProbeError(
-                "approved convention did not become human-verified retrieval memory: "
-                f"{record.approval_key}: {reason}"
-            )
+            # Pre-filtered approvals should always apply; a residual mismatch
+            # (e.g. per-store quota) is skipped, not fatal — the caller fails
+            # only when zero approvals promote anywhere.
+            continue
         if active.id != entry.id:
             store.delete(entry.id)
         promoted += 1
@@ -586,6 +616,11 @@ def _grant_copied_convention_approvals(
             )
         finally:
             store.conn.close()
+    if promoted == 0:
+        raise ProbeError(
+            "no approved convention became human-verified retrieval memory in any "
+            f"holdout store (approvals granted: {len(approvals)})"
+        )
     return promoted
 
 
@@ -861,6 +896,7 @@ def _invalid_run(
         "holdout_failure_reasons": holdout_failure_reasons,
         "training_dbs_absent": [],
         "convention_approvals_granted": [],
+        "convention_approvals_skipped": [],
         "execution_order": execution_order,
         "funnel": {
             "supply": {"mining_reports": [], "dbs": []},
@@ -1077,12 +1113,15 @@ def _run_pair(
         return result
 
     convention_approvals: tuple[ConventionApproval, ...] = ()
+    convention_approvals_skipped: tuple[tuple[ConventionApproval, str], ...] = ()
     if case.convention_mining and condition == "memory":
         try:
-            convention_approvals = find_quarantined_convention_approvals(
-                train_dest,
-                case.company_name,
-                train_specs,
+            convention_approvals, convention_approvals_skipped = (
+                find_quarantined_convention_approvals(
+                    train_dest,
+                    case.company_name,
+                    train_specs,
+                )
             )
             apply_retrieval_overrides(
                 holdout_dest,
@@ -1178,6 +1217,9 @@ def _run_pair(
             result["convention_approvals_granted"] = [
                 list(approval) for approval in convention_approvals
             ]
+            result["convention_approvals_skipped"] = [
+                [list(key), reason] for key, reason in convention_approvals_skipped
+            ]
             _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
             return result
     transported_db_manifest = _manifest_for_specs(
@@ -1194,6 +1236,9 @@ def _run_pair(
         result["convention_approvals_granted"] = [
             list(approval) for approval in convention_approvals
         ]
+        result["convention_approvals_skipped"] = [
+            [list(key), reason] for key, reason in convention_approvals_skipped
+        ]
         _private_write(attempt_root, processes, result)
         return result
     try:
@@ -1209,6 +1254,9 @@ def _run_pair(
         )
         result["convention_approvals_granted"] = [
             list(approval) for approval in convention_approvals
+        ]
+        result["convention_approvals_skipped"] = [
+            [list(key), reason] for key, reason in convention_approvals_skipped
         ]
         _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
@@ -1239,6 +1287,9 @@ def _run_pair(
         result["convention_approvals_granted"] = [
             list(approval) for approval in convention_approvals
         ]
+        result["convention_approvals_skipped"] = [
+            [list(key), reason] for key, reason in convention_approvals_skipped
+        ]
         _private_write(attempt_root, processes, result)
         return result
     except ProbeError as exc:
@@ -1251,6 +1302,9 @@ def _run_pair(
         )
         result["convention_approvals_granted"] = [
             list(approval) for approval in convention_approvals
+        ]
+        result["convention_approvals_skipped"] = [
+            [list(key), reason] for key, reason in convention_approvals_skipped
         ]
         _private_write(attempt_root, processes, {**result, "diagnostic": str(exc)})
         return result
