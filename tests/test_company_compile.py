@@ -68,7 +68,7 @@ def test_compile_company_builds_valid_three_level_tree(tmp_path: Path) -> None:
         "agency": "company",
         "role": "ceo",
     }
-    assert "<!-- AGENT_MEMORY -->" in root["agent"]["system_prompt"]
+    assert "<AGENT_MEMORY>" in root["agent"]["system_prompt"]
 
     vp_path = root_config.parent / "vp_eng.yaml"
     vp = yaml.safe_load(vp_path.read_text())

@@ -18,6 +18,13 @@ function money(v: number): string {
   return `$${v.toFixed(4)}`;
 }
 
+function kindLabel(kind: string): string {
+  if (kind === "manager") return "Manager";
+  if (kind === "crew") return "Crew";
+  if (kind === "role") return "Role";
+  return kind || "Agent";
+}
+
 function NodeCard({ node, activity }: { node: CompanyNode; activity?: NodeActivity }) {
   const status: NodeStatus = activity?.status ?? "idle";
   const live = activity && (activity.costUsd > 0 || status === "running" || status === "done");
@@ -25,7 +32,7 @@ function NodeCard({ node, activity }: { node: CompanyNode; activity?: NodeActivi
     <div className={`org2-node org2-node--${node.kind} org2-node--${status}`}>
       <div className="org2-node__role">
         <span className="org2-node__dot" aria-hidden />
-        {node.kind === "manager" ? "Manager" : "Crew"}
+        {kindLabel(node.kind)}
       </div>
       <div className="org2-node__title">{node.title}</div>
       {node.agency && <div className="org2-node__agency">{node.agency}</div>}
