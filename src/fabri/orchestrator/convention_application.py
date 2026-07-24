@@ -1,6 +1,7 @@
 """Deterministic validation for applying retrieved response conventions."""
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -80,13 +81,41 @@ def _branches(
     return branches, frozenset(convention_fields)
 
 
+_MARKED_SELECTION_RE = re.compile(
+    r"^\s*SELECTED_BRANCH\s*:\s*(?P<branch>\S+)\s*$", re.MULTILINE
+)
+_MARKED_EVIDENCE_RE = re.compile(
+    r"^\s*BRANCH_EVIDENCE\s*:\s*(?P<evidence>\S.*)$", re.MULTILINE
+)
+
+
+def _marked_selections(structured_output: Mapping[str, object]) -> list[str]:
+    """Selections declared as marked lines inside the response prose.
+
+    Closed response schemas (benchmark holdouts validate `response` plus the
+    mapped fields and nothing else) leave the model no legal field for
+    `selected_branch_id` — a live smoke showed it declaring the correct branch
+    in prose while the field-only validator read nothing. The marked-line
+    channel is deterministic: one `SELECTED_BRANCH: <id>` line per selection.
+    """
+    response = structured_output.get("response")
+    if not isinstance(response, str):
+        return []
+    return [m.group("branch") for m in _MARKED_SELECTION_RE.finditer(response)]
+
+
 def _has_current_run_evidence(structured_output: Mapping[str, object]) -> bool:
     evidence = structured_output.get("current_run_evidence")
     if isinstance(evidence, str):
         return bool(evidence.strip())
     if isinstance(evidence, (Mapping, list, tuple, set)):
         return bool(evidence)
-    return evidence is not None and evidence is not False
+    if evidence is None:
+        response = structured_output.get("response")
+        if isinstance(response, str) and _MARKED_EVIDENCE_RE.search(response):
+            return True
+        return False
+    return evidence is not False
 
 
 def validate_branch_selection(
@@ -114,6 +143,12 @@ def validate_branch_selection(
     selected = structured_output.get("selected_branch_id")
     if isinstance(selected, (list, tuple, set)):
         return invalid("multiple_branch_selection")
+    if selected is None:
+        marked = _marked_selections(structured_output)
+        if len(marked) > 1:
+            return invalid("multiple_branch_selection")
+        if marked:
+            selected = marked[0]
     if not isinstance(selected, str) or not selected.strip():
         return invalid("selected_branch_id_missing")
     if "selected_branch_ids" in structured_output:
