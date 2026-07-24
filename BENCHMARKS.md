@@ -392,6 +392,25 @@ _Gate floors (measured − 0.05) live in `tests/test_retrieval_eval_gate.py`; bu
 them only with a new row here. See `docs/retrieval-tuning.md` for how to tune
 these knobs on your own corpus._
 
+### Convention loop — first end-to-end pass (2026-07-24)
+
+The convention-mining loop (engine-side typed extraction → exact-hash operator
+approval → scope-aware placement → deterministic branch application; shipped as
+convention mining v1 + fixes #84–#89, bundled in `memory.profile: evolving`)
+closed live for the first time on the rewritten Support HQ holdout:
+
+| run | memory | control | read |
+|---|---|---|---|
+| 2-replica smoke (pre-registered) | **2/2 pass**, 4/4 fields, 0 leaks | 0/2, with leaks | first end-to-end pass |
+| 6-replica confirmation | **2/6 pass** (+1 infra timeout) | **0/6**, leaks in 4 | mechanism proven; reliability is the open front |
+
+2/6 vs 0/6 is not statistically resolved (Fisher p ≈ 0.45); the defensible claim
+is mechanism-works-under-pre-registered-conditions, not a rate. The failures
+localize to extraction admissibility and the model omitting its branch
+selection — both are capture/declaration reliability, not retrieval or
+application correctness. Full autopsy:
+[convention-loop-first-pass-2026-07-24](benchmarks/results/convention-loop-first-pass-2026-07-24.md).
+
 ## Honest gaps
 
 The biggest open question Fabri has not answered yet:
