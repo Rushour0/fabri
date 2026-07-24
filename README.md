@@ -362,12 +362,27 @@ memory:
   memory_action_apply_enabled: false  # off by default; opt-in to actually apply proposed actions
 ```
 
-Enable the guarded evolving-agent bundle with one line; see [docs/memory.md](https://github.com/Rushour0/fabri/blob/main/docs/memory.md) for its exact switches and fail-closed gates:
+### Recommended default: the evolving profile
+
+For an agent that should get better with every run, start from the evolving
+profile instead of tuning switches by hand:
 
 ```yaml
 memory:
   profile: evolving
 ```
+
+One line turns on the guarded self-improvement bundle: 120-token mined
+lessons (the stock 30-token cap truncates protocol-shaped knowledge),
+severity tiering, convention mining (declared multi-branch protocols
+captured engine-side, applied through a deterministic branch-selection
+validator), postmortems, evidence-gated success patterns, and shadow-only
+ActionMemory. Anything you set explicitly wins over the profile, and the
+human-authority gates are never profile-set: convention approvals stay
+exact-hash and human, action-apply stays opt-in, core prompt placement
+stays off. This is the configuration behind the convention-loop benchmark
+result (see [BENCHMARKS.md](BENCHMARKS.md)); exact switches and fail-closed
+gates are in [docs/memory.md](https://github.com/Rushour0/fabri/blob/main/docs/memory.md).
 
 Paths in `manifest_dir` and `sandbox_root` resolve relative to **the
 directory you run the command from**, not the config file's location —
