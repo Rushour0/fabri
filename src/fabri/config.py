@@ -360,6 +360,46 @@ class ConfigError(ValueError):
     message + exit 1, rather than letting the raw yaml/KeyError traceback out."""
 
 
+_MEMORY_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "evolving": {
+        "guideline_max_tokens": 120,
+        "tiering_enabled": True,
+        "convention_mining_enabled": True,
+        "record_postmortems": True,
+        "success_pattern_requires_evidence": True,
+        "memory_action_enabled": True,
+        # Applying proposed actions remains an explicit operator opt-in.
+        "memory_action_apply_enabled": False,
+    },
+}
+_ALLOWED_MEMORY_PROFILES = ("standard", "evolving")
+_PROFILE_ABSENT = object()
+
+
+def _expand_memory_profile(user_config: dict[str, object]) -> dict[str, object]:
+    """Expand memory.profile into missing user keys before defaults merge.
+
+    The profile selector is load-time syntax only, so downstream consumers see
+    the same plain memory mapping they did before profiles existed.
+    """
+    raw_memory = user_config.get("memory")
+    if not isinstance(raw_memory, dict) or "profile" not in raw_memory:
+        return user_config
+
+    memory = dict(raw_memory)
+    profile = memory.pop("profile", _PROFILE_ABSENT)
+    if profile not in _ALLOWED_MEMORY_PROFILES:
+        allowed = ", ".join(repr(value) for value in _ALLOWED_MEMORY_PROFILES)
+        raise ConfigError(
+            f"config key 'memory.profile' must be one of {allowed} "
+            f"(got {profile!r})."
+        )
+
+    for key, value in _MEMORY_PROFILE_DEFAULTS.get(profile, {}).items():
+        memory.setdefault(key, value)
+    return {**user_config, "memory": memory}
+
+
 def _deep_merge(base: dict, override: dict, *, path: str = "") -> dict:
     merged = dict(base)
     for key, value in override.items():
@@ -621,4 +661,5 @@ def load_config(path: str | None) -> dict:
         raise ConfigError(
             f"top-level of {path} must be a mapping (got {type(user_config).__name__})."
         )
+    user_config = _expand_memory_profile(user_config)
     return _apply_env_overrides(_normalize_llm_roles(_deep_merge(DEFAULT_CONFIG, user_config)))

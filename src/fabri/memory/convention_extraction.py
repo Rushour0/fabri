@@ -14,6 +14,43 @@ from fabri.memory.conventions import ConventionRecord, convention_quarantine_rea
 logger = get_logger()
 
 _MINED_ORIGINS = frozenset({"task", "model", "tool"})
+_CONVENTION_SCOPES = frozenset({"agent", "agency", "company"})
+# Intentionally dumb and conservative: retry only when the text contains either
+# a declaration verb plus a convention/branch noun, or a protocol noun plus an
+# explicit branch/mapping noun. This avoids spending a second LLM call on prose
+# that merely uses "if" or "when".
+_DECLARATION_SIGNAL_KEYWORDS = {
+    "declaration": (
+        "declare",
+        "declared",
+        "declares",
+        "decree",
+        "decreed",
+        "decrees",
+        "establish",
+        "established",
+        "establishes",
+        "define",
+        "defined",
+        "defines",
+    ),
+    "protocol": (
+        "protocol",
+        "protocols",
+        "convention",
+        "conventions",
+        "policy",
+        "policies",
+    ),
+    "structure": ("branch", "branches", "mapping", "mappings"),
+}
+_DECLARATION_SIGNAL_PATTERNS = {
+    category: re.compile(
+        rf"\b(?:{'|'.join(re.escape(keyword) for keyword in keywords)})\b",
+        re.IGNORECASE,
+    )
+    for category, keywords in _DECLARATION_SIGNAL_KEYWORDS.items()
+}
 _UNRESOLVED_REFERENT = re.compile(
     r"""
     (?:
@@ -112,7 +149,11 @@ def _validate_exact_keys(value: object, expected: set[str], *, path: str) -> Map
     return value
 
 
-def _validate_response(value: object) -> list[Mapping[str, object]]:
+def _validate_response(
+    value: object,
+    *,
+    default_scope: str | None = None,
+) -> list[Mapping[str, object]]:
     root = _validate_exact_keys(value, {"candidates"}, path="$")
     candidates = root["candidates"]
     if not isinstance(candidates, list):
@@ -131,6 +172,14 @@ def _validate_response(value: object) -> list[Mapping[str, object]]:
     validated: list[Mapping[str, object]] = []
     for candidate_index, raw_candidate in enumerate(candidates):
         path = f"$.candidates[{candidate_index}]"
+        if isinstance(raw_candidate, Mapping):
+            candidate_with_scope = dict(raw_candidate)
+            raw_scope = candidate_with_scope.get("scope")
+            if default_scope is not None and (
+                not isinstance(raw_scope, str) or raw_scope not in _CONVENTION_SCOPES
+            ):
+                candidate_with_scope["scope"] = default_scope
+            raw_candidate = candidate_with_scope
         candidate = _validate_exact_keys(
             raw_candidate,
             expected_candidate_keys,
@@ -140,7 +189,7 @@ def _validate_response(value: object) -> list[Mapping[str, object]]:
         _validate_string(
             candidate["scope"],
             path=f"{path}.scope",
-            allowed=frozenset({"agent", "agency", "company"}),
+            allowed=_CONVENTION_SCOPES,
         )
         for field_name in ("key", "version", "effect_class"):
             _validate_string(
@@ -254,6 +303,37 @@ def _provenance_prefix(config: Mapping[str, object]) -> str:
     return value if isinstance(value, str) and value else "convention_extraction"
 
 
+def _action_scope_context(config: Mapping[str, object]) -> dict[str, str]:
+    """Return only the non-sensitive scope labels useful to the extractor."""
+    action_scope = _memory_config(config).get("action_scope")
+    if not isinstance(action_scope, Mapping):
+        return {}
+    return {
+        key: value
+        for key in ("company", "agency", "role")
+        if isinstance((value := action_scope.get(key)), str) and value
+    }
+
+
+def _root_manager_default_scope(config: Mapping[str, object]) -> str | None:
+    """Company compiles stamp their root manager with agency='company'."""
+    action_scope = _action_scope_context(config)
+    if action_scope.get("company") and action_scope.get("agency") == "company":
+        return "company"
+    return None
+
+
+def _has_declared_protocol_signal(sources: Sequence[Mapping[str, str]]) -> bool:
+    """Cheap retry gate; keyword co-occurrence is deliberate, not semantic."""
+    text = "\n".join(source["content"] for source in sources)
+    has_declaration = bool(_DECLARATION_SIGNAL_PATTERNS["declaration"].search(text))
+    has_protocol = bool(_DECLARATION_SIGNAL_PATTERNS["protocol"].search(text))
+    has_structure = bool(_DECLARATION_SIGNAL_PATTERNS["structure"].search(text))
+    return (has_declaration and (has_protocol or has_structure)) or (
+        has_protocol and has_structure
+    )
+
+
 def _normalized_condition(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).casefold()
     return " ".join(normalized.split()).strip(" \t\r\n.,;:")
@@ -291,38 +371,62 @@ def extract_convention_candidates(
     *,
     config: Mapping[str, object],
 ) -> list[ConventionRecord]:
-    """Extract typed candidates in one call; malformed output fails closed."""
+    """Extract typed candidates with at most one declaration-triggered retry."""
     sources = _source_documents(trace_events_or_task_texts)
     if not sources:
         return []
     sources_by_id = {source["source_id"]: source for source in sources}
-    prompt = (
+    action_scope = _action_scope_context(config)
+    default_scope = _root_manager_default_scope(config)
+    base_prompt = (
         "Extract only explicit, reusable conditional response-mapping protocols "
         "supported by the source documents. Return JSON only, with no markdown. "
         "Each candidate must cite exactly one source_id that contains the protocol. "
-        "Do not infer missing branches or conditions. Return an empty candidates "
-        "array when no complete protocol is present.\n\n"
+        "A protocol that is DECLARED, decreed, or established in a task or trace "
+        "must be captured even when this run exercised only one branch or no branch. "
+        "Preserve EVERY explicitly declared branch verbatim, including its condition "
+        "and response fields; never emit only the branch that was applied. Do not "
+        "infer branches or conditions that the source does not declare. When the "
+        "declaring agent manages a company or agency, emit the candidate at that "
+        "company or agency scope using the config scope context below. Return an "
+        "empty candidates array only when no complete declared protocol is present."
+        f"\n\nCONFIG SCOPE CONTEXT:\n{json.dumps(action_scope, sort_keys=True)}\n\n"
         f"STRICT JSON SCHEMA:\n{json.dumps(CONVENTION_EXTRACTION_SCHEMA, sort_keys=True)}"
         f"\n\nSOURCE DOCUMENTS:\n{json.dumps(sources, ensure_ascii=False, sort_keys=True)}"
     )
-    try:
-        response = extraction_llm.step(
-            "You perform typed, evidence-anchored convention extraction.",
-            [{"role": "user", "content": prompt}],
+
+    def request_candidates(prompt: str) -> list[Mapping[str, object]]:
+        try:
+            response = extraction_llm.step(
+                "You perform typed, evidence-anchored convention extraction.",
+                [{"role": "user", "content": prompt}],
+            )
+        except Exception:  # noqa: BLE001 -- best-effort mining side effect
+            logger.warning("convention extraction LLM call failed", exc_info=True)
+            return []
+        final_text = getattr(response, "final_text", None)
+        if not isinstance(final_text, str) or not final_text.strip():
+            logger.warning("convention extraction returned no JSON text")
+            return []
+        try:
+            payload = json.loads(final_text)
+            return _validate_response(payload, default_scope=default_scope)
+        except (json.JSONDecodeError, _SchemaMismatch):
+            logger.warning(
+                "convention extraction response failed strict validation",
+                exc_info=True,
+            )
+            return []
+
+    candidates = request_candidates(base_prompt)
+    if not candidates and _has_declared_protocol_signal(sources):
+        retry_instruction = (
+            "RETRY CORRECTION: You missed a declared protocol. Re-scan every source "
+            "for a protocol that was declared or decreed but only partly exercised. "
+            "Return every explicitly declared branch verbatim, not merely the applied "
+            "branch. Do not invent undeclared content.\n\n"
         )
-    except Exception:  # noqa: BLE001 -- extraction is a best-effort mining side effect
-        logger.warning("convention extraction LLM call failed", exc_info=True)
-        return []
-    final_text = getattr(response, "final_text", None)
-    if not isinstance(final_text, str) or not final_text.strip():
-        logger.warning("convention extraction returned no JSON text")
-        return []
-    try:
-        payload = json.loads(final_text)
-        candidates = _validate_response(payload)
-    except (json.JSONDecodeError, _SchemaMismatch):
-        logger.warning("convention extraction response failed strict validation", exc_info=True)
-        return []
+        candidates = request_candidates(retry_instruction + base_prompt)
 
     records: list[ConventionRecord] = []
     for candidate in candidates:

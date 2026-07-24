@@ -325,6 +325,32 @@ best-effort, not enforced.
 
 All keys live under `memory:` in agent/company config (`src/fabri/config.py:168-278`).
 
+### One-switch evolving profile
+
+Use the evolving profile to turn on the guarded self-improvement bundle without setting each switch
+individually:
+
+```yaml
+memory:
+  profile: evolving
+```
+
+Explicit values in the same `memory:` mapping always win over the profile.
+
+| Key | Evolving value |
+|---|---|
+| `guideline_max_tokens` | `120` |
+| `tiering_enabled` | `True` |
+| `convention_mining_enabled` | `True` |
+| `record_postmortems` | `True` |
+| `success_pattern_requires_evidence` | `True` |
+| `memory_action_enabled` | `True` (shadow/propose only) |
+| `memory_action_apply_enabled` | `False` |
+
+The profile deliberately does **not** grant convention approvals or trusted sources, enable action
+application, or enable convention core placement. Those human-authority gates remain explicit
+because fabri uses a fail-closed authority model.
+
 | Key | Default | What it does |
 |---|---|---|
 | `mining_enabled` | `True` | Mine run traces into reusable memory entries. |
