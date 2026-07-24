@@ -87,7 +87,7 @@ CONVENTION_EXTRACTION_SCHEMA: dict[str, object] = {
                     "scope": {"type": "string", "enum": ["agent", "agency", "company"]},
                     "key": {"type": "string", "minLength": 1},
                     "version": {"type": "string", "minLength": 1},
-                    "effect_class": {"type": "string", "minLength": 1},
+                    "effect_class": {"type": "string", "enum": ["response_mapping"]},
                     "conditions": {
                         "type": "array",
                         "items": {
@@ -122,6 +122,22 @@ CONVENTION_EXTRACTION_SCHEMA: dict[str, object] = {
 
 class _SchemaMismatch(ValueError):
     """The extraction response did not match the closed JSON shape."""
+
+
+def _normalize_effect_class(value: str) -> str:
+    """Coerce model-authored effect-class prose to the canonical literal.
+
+    The extraction schema enums this to "response_mapping", but providers that
+    ignore enum constraints still free-text it (live smoke: a perfect two-
+    branch record quarantined over "customer-evidence response mapping").
+    Deterministic and conservative: any string whose word set contains both
+    "response" and "mapping" collapses to the literal; everything else passes
+    through unchanged for the gate to reject.
+    """
+    words = set(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+    if {"response", "mapping"} <= words:
+        return "response_mapping"
+    return value
 
 
 def _is_string(value: object, *, nonempty: bool = False) -> bool:
@@ -449,7 +465,7 @@ def extract_convention_candidates(
             scope=str(candidate["scope"]),
             key=str(candidate["key"]),
             version=str(candidate["version"]),
-            effect_class=str(candidate["effect_class"]),
+            effect_class=_normalize_effect_class(str(candidate["effect_class"])),
             conditions=[dict(condition) for condition in conditions],
             branches=[dict(branch) for branch in branches],
             origin=source["origin"],
