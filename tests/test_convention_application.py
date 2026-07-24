@@ -152,7 +152,10 @@ def test_clear_branch_selection_is_valid(
     assert result.max_retries == 1
 
 
-def test_blended_branch_fields_are_invalid() -> None:
+def test_blended_branch_fields_are_repaired_by_engine_copy() -> None:
+    # A unique, evidenced selection is valid even when the model hand-copied
+    # a value from the other branch — the caller applies selected_fields
+    # verbatim, so blending can no longer reach the final output.
     blended = {**BRANCH_A, "response_mode": BRANCH_B["response_mode"]}
 
     result = validate_branch_selection(
@@ -161,8 +164,9 @@ def test_blended_branch_fields_are_invalid() -> None:
         config={"memory": {"convention_branch_selection_max_retries": 1}},
     )
 
-    assert result.valid is False
-    assert result.reason == "mapped_field_mismatch:response_mode"
+    assert result.valid is True
+    assert result.selected_branch_id == "report_only"
+    assert result.selected_fields == BRANCH_A
 
 
 def test_correct_mapping_without_selected_branch_id_is_invalid() -> None:
@@ -210,13 +214,10 @@ def test_no_match_retries_once_then_returns_convention_not_applicable(
     assert backend._i == 2
     assert result["success"] is True
     assert result["convention_application"] == "convention_not_applicable"
-    assert result["structured_output"] == {
-        "response": "Customer-safe incident update.",
-        "selected_branch_id": "no_matching_branch",
-        "current_run_evidence": (
-            "The incident workspace shows current multi-customer impact and rollback."
-        ),
-    }
+    # Fail-closed means the engine copies nothing — the model's schema-valid
+    # answer is preserved untouched, never stripped (stripping turned wrong
+    # answers into schema-invalid ones in live smoke r8).
+    assert result["structured_output"] == invalid
 
 
 def test_convention_mining_off_does_not_add_validation_or_retry(

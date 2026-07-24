@@ -538,7 +538,16 @@ def _run_single_attempt(
                     retrieved_conventions,
                     config=retrieval_config,
                 )
-                if not convention_validation.valid:
+                if convention_validation.valid:
+                    # Deterministic application: the model made the judgment
+                    # call (branch + evidence); the engine performs the copy.
+                    if isinstance(value, dict) and convention_validation.selected_fields:
+                        value = {**value, **convention_validation.selected_fields}
+                    convention_application_status = (
+                        "convention_applied:"
+                        + (convention_validation.selected_branch_id or "")
+                    )
+                else:
                     errors = [
                         "convention branch selection invalid: "
                         + (convention_validation.reason or "unknown reason")
@@ -555,13 +564,12 @@ def _run_single_attempt(
             last_errors = errors
             if convention_validation is not None:
                 if convention_retries >= convention_retry_limit:
+                    # Fail closed WITHOUT mutating the model's schema-valid
+                    # answer: "apply no convention fields" means the engine
+                    # copies nothing — stripping the model's own fields just
+                    # converts wrong answers into schema-invalid ones (live
+                    # smoke r8 scored missing:* for exactly that reason).
                     convention_application_status = "convention_not_applicable"
-                    if isinstance(value, dict):
-                        value = {
-                            key: item
-                            for key, item in value.items()
-                            if key not in convention_validation.convention_fields
-                        }
                     return text, True, None, value
                 convention_retries += 1
                 corrective = (
@@ -569,27 +577,19 @@ def _run_single_attempt(
                     "selection.\nValidation error:\n- "
                     + "\n- ".join(errors)
                     + "\n\nReturn ONLY a JSON value that satisfies this schema "
-                    "(no prose, no code fences), with exactly one selected_branch_id, "
-                    "non-empty current_run_evidence, and mapped fields copied exactly "
-                    "from that branch:\n"
+                    "(no prose, no code fences). Inside the `response` string, "
+                    "include two marked lines: `SELECTED_BRANCH: <branch_id>` "
+                    "naming exactly one branch from the retrieved convention, and "
+                    "`BRANCH_EVIDENCE: <current-run evidence>`. Do not add fields "
+                    "the schema does not define:\n"
                     + json.dumps(response_schema)
                 )
             else:
                 if convention_retries:
+                    # Same fail-closed rule as above: keep the last schema-
+                    # valid answer untouched rather than stripping fields.
                     convention_application_status = "convention_not_applicable"
-                    value = last_schema_valid_value
-                    if isinstance(value, dict) and retrieved_conventions:
-                        prior_validation = validate_branch_selection(
-                            value,
-                            retrieved_conventions,
-                            config=retrieval_config,
-                        )
-                        value = {
-                            key: item
-                            for key, item in value.items()
-                            if key not in prior_validation.convention_fields
-                        }
-                    return text, True, None, value
+                    return text, True, None, last_schema_valid_value
                 if schema_retries >= max(0, response_retries):
                     break
                 schema_retries += 1
@@ -617,20 +617,10 @@ def _run_single_attempt(
             # the run's cost budget is spent rather than burning more on it.
             if _budget_breached():
                 if convention_retries:
+                    # Same fail-closed rule as above: keep the last schema-
+                    # valid answer untouched rather than stripping fields.
                     convention_application_status = "convention_not_applicable"
-                    value = last_schema_valid_value
-                    if isinstance(value, dict) and retrieved_conventions:
-                        prior_validation = validate_branch_selection(
-                            value,
-                            retrieved_conventions,
-                            config=retrieval_config,
-                        )
-                        value = {
-                            key: item
-                            for key, item in value.items()
-                            if key not in prior_validation.convention_fields
-                        }
-                    return text, True, None, value
+                    return text, True, None, last_schema_valid_value
                 break
         detail = "; ".join(last_errors)
         if error_strategy == "warn":
