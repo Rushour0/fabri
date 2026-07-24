@@ -557,10 +557,30 @@ def grant_convention_approvals(
     approvals: tuple[ConventionApproval, ...],
     *,
     config: Mapping[str, object],
+    company_scope_records: Mapping[ConventionApproval, ConventionRecord] | None = None,
 ) -> int:
-    """Re-evaluate copied quarantined records through stage-1 ingestion."""
+    """Re-evaluate copied quarantined records through stage-1 ingestion.
+
+    ``company_scope_records`` distributes approved company-scope records into
+    stores that never mined them: scope is metadata but placement is physical
+    (one collection per store), so without distribution an approved
+    company-wide policy stays visible only to the collection of whichever
+    role happened to mine it — live smokes showed the response-schema owner's
+    store staying empty while its crew's store held the approved record.
+    """
     approved = set(approvals)
     promoted = 0
+    present: set[ConventionApproval] = set()
+    for entry in store.iterate(kind="convention"):
+        try:
+            present.add(_convention_record(entry, source="copied memory store").approval_key)
+        except ProbeError:
+            continue
+    for key, record in (company_scope_records or {}).items():
+        if key in approved and key not in present:
+            active = ingest_convention(store, record, config=config)
+            if active.tier == "retrieve" and active.verification == "human_verified":
+                promoted += 1
     for entry in store.iterate(kind="convention"):
         if entry.tier != "quarantine":
             continue
@@ -590,11 +610,12 @@ def _grant_copied_convention_approvals(
     from fabri.memory.embedded_store import SqliteMemoryStore
 
     company_root = compiled_destination / company_name
-    promoted = 0
-    for spec in specs:
+    approved = set(approvals)
+
+    def _store_for(spec: MemoryDbSpec) -> tuple[SqliteMemoryStore, Mapping[str, object]] | None:
         path = company_root / spec.relative_path
         if not path.is_file():
-            continue
+            return None
         config_path = company_root / spec.config_paths[0]
         try:
             loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -604,15 +625,42 @@ def _grant_copied_convention_approvals(
             raise ProbeError(f"malformed YAML in compiled config {config_path}: {exc}") from exc
         config = _as_mapping(loaded, str(config_path))
         memory = _as_mapping(config.get("memory"), f"{config_path}.memory")
-        store = SqliteMemoryStore(
-            path=path,
-            collection=str(memory.get("collection", "fabri")),
-        )
+        return SqliteMemoryStore(
+            path=path, collection=str(memory.get("collection", "fabri"))
+        ), config
+
+    # Pass 1: collect approved company-scope records from wherever they were
+    # mined, so pass 2 can place them in every store (scope covers the whole
+    # company; placement is per-collection).
+    company_scope_records: dict[ConventionApproval, ConventionRecord] = {}
+    for spec in specs:
+        opened = _store_for(spec)
+        if opened is None:
+            continue
+        store, _ = opened
+        try:
+            for entry in store.iterate(kind="convention"):
+                try:
+                    record = _convention_record(entry, source="copied memory store")
+                except ProbeError:
+                    continue
+                if record.scope == "company" and record.approval_key in approved:
+                    company_scope_records.setdefault(record.approval_key, record)
+        finally:
+            store.conn.close()
+
+    promoted = 0
+    for spec in specs:
+        opened = _store_for(spec)
+        if opened is None:
+            continue
+        store, config = opened
         try:
             promoted += grant_convention_approvals(
                 store,
                 approvals,
                 config=config,
+                company_scope_records=company_scope_records,
             )
         finally:
             store.conn.close()

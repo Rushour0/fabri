@@ -559,10 +559,13 @@ def _safe_global(
 
 CONVENTION_APPLICATION_INSTRUCTION = (
     "Application rule: select exactly one branch from current-run evidence. "
-    "Before copying any mapped values, return exactly one `selected_branch_id` "
-    "and a non-empty `current_run_evidence`; copy every mapped field exactly "
-    "from that branch. If exactly one branch cannot be selected, do not copy "
-    "any convention fields."
+    "Declare the selection inside your `response` field as two marked lines — "
+    "`SELECTED_BRANCH: <branch_id>` and `BRANCH_EVIDENCE: <current-run evidence>` "
+    "— then fill every mapped response field with that branch's exact values. "
+    "(If your output format allows extra fields, `selected_branch_id` and "
+    "`current_run_evidence` fields are also accepted.) Do not answer the mapped "
+    "fields in prose; they must be set as their own fields. If exactly one "
+    "branch cannot be selected, do not copy any convention fields."
 )
 CONVENTION_FENCE_OPEN = (
     "<retrieved_conventions note=\"Authorized conditional response mappings. "
