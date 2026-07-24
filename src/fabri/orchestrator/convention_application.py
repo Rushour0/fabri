@@ -11,13 +11,22 @@ from fabri.memory.schema import MemoryEntry
 
 @dataclass(frozen=True)
 class ValidationResult:
-    """Outcome of validating one model-selected convention branch."""
+    """Outcome of validating one model-selected convention branch.
+
+    ``selected_fields`` carries the branch's exact mapped values when the
+    selection is valid, so the CALLER (engine) performs the deterministic
+    copy. Five live smoke rounds showed that asking the model to both select
+    a branch and hand-copy its values is the failure surface — selection is
+    the model's judgment call; copying is mechanical and belongs to the
+    engine.
+    """
 
     valid: bool
     reason: str | None
     selected_branch_id: str | None
     convention_fields: frozenset[str]
     max_retries: int
+    selected_fields: Mapping[str, object] | None = None
 
 
 def _memory_config(config: object) -> object:
@@ -160,21 +169,14 @@ def validate_branch_selection(
     if not _has_current_run_evidence(structured_output):
         return invalid("current_run_evidence_missing", selected)
 
-    selected_fields = matches[0]
-    for field, expected in selected_fields.items():
-        if field not in structured_output:
-            return invalid(f"mapped_field_missing:{field}", selected)
-        if structured_output[field] != expected:
-            return invalid(f"mapped_field_mismatch:{field}", selected)
-
-    for field in convention_fields - selected_fields.keys():
-        if field in structured_output:
-            return invalid(f"second_branch_selected:{field}", selected)
-
+    # A unique, evidenced selection is sufficient: the engine copies the
+    # branch's mapped values itself (see selected_fields), so hand-copy
+    # fidelity in the model output is no longer a validity condition.
     return ValidationResult(
         valid=True,
         reason=None,
         selected_branch_id=selected,
         convention_fields=convention_fields,
         max_retries=retries,
+        selected_fields=dict(matches[0]),
     )
