@@ -1354,6 +1354,9 @@ def _run_pair(
         "convention_approvals_granted": [
             list(approval) for approval in convention_approvals
         ],
+        "convention_approvals_skipped": [
+            [list(key), reason] for key, reason in convention_approvals_skipped
+        ],
         "execution_order": execution_order,
         "funnel": {
             "supply": {
