@@ -362,6 +362,13 @@ memory:
   memory_action_apply_enabled: false  # off by default; opt-in to actually apply proposed actions
 ```
 
+Enable the guarded evolving-agent bundle with one line; see [docs/memory.md](https://github.com/Rushour0/fabri/blob/main/docs/memory.md) for its exact switches and fail-closed gates:
+
+```yaml
+memory:
+  profile: evolving
+```
+
 Paths in `manifest_dir` and `sandbox_root` resolve relative to **the
 directory you run the command from**, not the config file's location —
 run from your project root. `builtin` resolves to the framework's

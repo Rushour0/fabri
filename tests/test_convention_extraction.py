@@ -40,17 +40,21 @@ class MemoryStore:
 
 
 class MockLLM:
-    def __init__(self, final_text: str) -> None:
-        self.final_text = final_text
+    def __init__(self, final_text: str | list[str]) -> None:
+        self.final_texts = (
+            list(final_text) if isinstance(final_text, list) else [final_text]
+        )
         self.calls = 0
         self.system = ""
-        self.messages: list[dict] = []
+        self.messages: list[dict[str, str]] = []
+        self.message_history: list[list[dict[str, str]]] = []
 
-    def step(self, system: str, messages: list[dict]) -> LLMResponse:
+    def step(self, system: str, messages: list[dict[str, str]]) -> LLMResponse:
         self.calls += 1
         self.system = system
         self.messages = messages
-        return LLMResponse(final_text=self.final_text)
+        self.message_history.append(messages)
+        return LLMResponse(final_text=self.final_texts[self.calls - 1])
 
 
 def _config(*, enabled: bool = True) -> dict[str, object]:
@@ -170,6 +174,96 @@ def test_well_formed_two_branch_protocol_is_extracted_and_ingested_quarantined()
         "update": "MONITOR_UPDATE",
     }
     assert "STRICT JSON SCHEMA" in llm.messages[0]["content"]
+
+
+def test_declared_protocol_preserves_unexercised_branch() -> None:
+    candidate = _candidate()
+    llm = MockLLM(_response(candidate))
+    events = [
+        {
+            "type": "start",
+            "task": (
+                "Declare SHQ-E1 with report-only and mitigated branches; preserve "
+                "both branches even when only report-only is exercised."
+            ),
+        },
+        {
+            "type": "final",
+            "text": "Applied report-only because impact was limited to one customer.",
+        },
+    ]
+
+    records = extract_convention_candidates(events, llm, config=_config())
+
+    assert len(records) == 1
+    assert records[0].branches == candidate["branches"]
+    extraction_prompt = llm.messages[0]["content"]
+    assert "only one branch or no branch" in extraction_prompt
+    assert "Preserve EVERY explicitly declared branch verbatim" in extraction_prompt
+    assert "never emit only the branch that was applied" in extraction_prompt
+
+
+def test_declared_protocol_with_zero_candidates_retries_exactly_once() -> None:
+    candidate = _candidate()
+    candidate["source_id"] = "task_text:0"
+    llm = MockLLM(
+        [
+            json.dumps({"candidates": []}),
+            _response(candidate),
+        ]
+    )
+
+    records = extract_convention_candidates(
+        ["Establish the SHQ-E1 protocol and preserve both branches."],
+        llm,
+        config=_config(),
+    )
+
+    assert len(records) == 1
+    assert llm.calls == 2
+    assert llm.message_history[0][0]["content"].startswith("Extract only explicit")
+    assert llm.message_history[1][0]["content"].startswith(
+        "RETRY CORRECTION: You missed a declared protocol."
+    )
+
+
+def test_zero_candidates_without_declaration_does_not_retry() -> None:
+    llm = MockLLM(json.dumps({"candidates": []}))
+
+    records = extract_convention_candidates(
+        ["Summarize the customer impact from today's incident."],
+        llm,
+        config=_config(),
+    )
+
+    assert records == []
+    assert llm.calls == 1
+
+
+def test_root_manager_scope_defaults_from_action_scope_when_omitted() -> None:
+    candidate = _candidate()
+    candidate.pop("scope")
+    candidate["source_id"] = "task_text:0"
+    config = _config()
+    memory = config["memory"]
+    assert isinstance(memory, dict)
+    memory["action_scope"] = {
+        "company": "support_hq",
+        "agency": "company",
+        "role": "root-manager",
+    }
+    llm = MockLLM(_response(candidate))
+
+    records = extract_convention_candidates(
+        ["SHQ-E1 defines report-only and mitigated response branches."],
+        llm,
+        config=config,
+    )
+
+    assert len(records) == 1
+    assert records[0].scope == "company"
+    assert '"agency": "company"' in llm.messages[0]["content"]
+    assert '"company": "support_hq"' in llm.messages[0]["content"]
 
 
 def test_malformed_json_returns_no_candidate_without_exception() -> None:

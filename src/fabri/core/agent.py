@@ -250,11 +250,13 @@ def _run_single_attempt(
         retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
     )
     retrieved_conventions = retrieval_meta.get("retrieved_conventions")
-    convention_validation_enabled = bool(
-        retrieval_config is not None
-        and retrieval_config.convention_mining_enabled
-        and retrieved_conventions
-    )
+    # Validation arms on RETRIEVAL, not on the mining flag: an approved
+    # convention can only reach this run's prompt deliberately (mined,
+    # exact-hash approved, retrieve-tier), and the validator is deterministic
+    # — so a consumer-only agent (e.g. a benchmark holdout that never mines)
+    # still gets branch-selection enforcement. The smoke round that motivated
+    # this had the convention in-prompt and the validator dark.
+    convention_validation_enabled = bool(retrieved_conventions)
     # When retrieval is on, the filtered subset stays constant for the whole
     # run so the prompt cache still hits across steps. The model is given the
     # exact list the backend will accept calls on — a mismatch would prompt
