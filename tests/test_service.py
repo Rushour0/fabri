@@ -95,6 +95,35 @@ def fake_agent_with_trailer(tmp_path: Path) -> Path:
     return p
 
 
+def test_display_events_strips_agent_memory_from_final_only():
+    """FINAL events reach display consumers as human prose only: the
+    machine-readable ``<AGENT_MEMORY>`` block a run may append is stripped here
+    (so it never leaks into a chat UI) while the source trace dict stays raw for
+    post-run mining. Non-final events and marker-free answers pass through
+    byte-identical."""
+    raw_final = {
+        "type": "final",
+        "text": "Here is the answer.\n<AGENT_MEMORY>\nTASK: t\nOUTCOME: success\n</AGENT_MEMORY>",
+        "outcome": "success",
+    }
+    other = {"type": "tool_call", "name": "noop", "ok": True}
+    plain_final = {"type": "final", "text": "no marker here", "outcome": "success"}
+    source = [dict(raw_final), other, plain_final]
+
+    out = list(FabriService._display_events(iter(source)))
+
+    # FINAL bubble carries prose only, with its other fields intact.
+    assert out[0]["text"] == "Here is the answer."
+    assert "AGENT_MEMORY" not in out[0]["text"]
+    assert out[0]["outcome"] == "success"
+    # Non-final events are forwarded untouched (same object).
+    assert out[1] is other
+    # Marker-free FINAL text is unchanged.
+    assert out[2]["text"] == "no marker here"
+    # The source event dict is never mutated (mining still sees the raw block).
+    assert "<AGENT_MEMORY>" in source[0]["text"]
+
+
 def _builder_for(script: Path):
     def _build(task, config_path, session_id, fabri_home):
         return [sys.executable, str(script)]

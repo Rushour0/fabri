@@ -407,11 +407,20 @@ class FabriService:
         return run_trace_path(run_home, session_id)
 
     def stream(self, session_id: str, *, timeout: float | None = None) -> Iterator[dict]:
-        """Yield a live run's events, or replay a persisted run to EOF."""
+        """Yield a live run's events, or replay a persisted run to EOF.
+
+        FINAL events are surfaced with their human-facing prose only: the
+        machine-readable ``<AGENT_MEMORY>`` block a run may append to its answer
+        is stripped here so it never reaches a display consumer, while the
+        on-disk trace keeps it verbatim for post-run mining. This mirrors the
+        already-stripped ``result`` envelope (see :meth:`result`).
+        """
         handle = self._runs.get(session_id)
         if handle is not None:
-            return tail_events(
-                handle.trace_path, is_running=handle.is_running, timeout=timeout
+            return self._display_events(
+                tail_events(
+                    handle.trace_path, is_running=handle.is_running, timeout=timeout
+                )
             )
 
         persisted = self._persisted_run(session_id)
@@ -422,7 +431,26 @@ class FabriService:
             raise PersistedRunUnavailableError(
                 f"trace is unavailable for persisted session {session_id!r}"
             )
-        return tail_events(trace_path, is_running=lambda: False, timeout=timeout)
+        return self._display_events(
+            tail_events(trace_path, is_running=lambda: False, timeout=timeout)
+        )
+
+    @staticmethod
+    def _display_events(events: Iterator[dict]) -> Iterator[dict]:
+        """Strip the AGENT_MEMORY block from FINAL events for display consumers.
+
+        Yields a shallow copy for FINAL events so the source trace dict is never
+        mutated; all other events pass through untouched. ``split_agent_output``
+        is byte-identical for marker-free text, so ordinary answers are unchanged.
+        """
+        for event in events:
+            if event.get("type") == EventType.FINAL.value and isinstance(
+                event.get("text"), str
+            ):
+                prose, _ = split_agent_output(event["text"])
+                yield {**event, "text": prose}
+            else:
+                yield event
 
     def result(self, session_id: str, *, timeout: float | None = None) -> dict:
         """Block for the run and return its result envelope plus a cost surface.
