@@ -5,9 +5,12 @@ import json
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
+from fabri.tools.security.ssrf import ValidatingRedirect, validate_url
 from .base import push_branch_with_url, token_url
+
+_opener = build_opener(ValidatingRedirect)
 
 
 class GitHubError(RuntimeError):
@@ -35,8 +38,9 @@ def _http(
             "Content-Type": "application/json",
         },
     )
+    validate_url(url)
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
             return response.status, json.loads(raw) if raw else None
     except HTTPError as error:

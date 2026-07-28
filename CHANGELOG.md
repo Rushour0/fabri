@@ -4,6 +4,36 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.21.0
+
+- Add `fabri repo run --from-linear <ID> --repo <owner/name>`: a real
+  software-workflow driver that turns a Linear issue into a GitHub pull
+  request announced in Slack, driven by a fabri engineering agency running
+  against a real git checkout. The orchestrator (`fabri/repo/run.py`) runs a
+  ten-gate, fail-closed machine (resolve_creds → fetch_issue → clone → setup →
+  agency_run → verified_tests → branch_push → open_pr → comment_linear →
+  notify_slack); the `verified_tests` gate re-runs the target repo's own test
+  command in the clone and its captured exit status is the sole authority for
+  whether any external write happens. No PR, Slack post, or Linear comment is
+  made unless the tests genuinely passed.
+- New connectors, each SSRF-guarded and secret-store-backed:
+  - Linear GraphQL client (`fabri/integrations/linear.py`): `fetch_issue`,
+    `comment_issue`, `set_state`; fails closed on GraphQL `errors`.
+  - GitHub auth seam (`fabri/repo/github_auth.py`): `AppAuth` mints and caches
+    a short-lived installation token from a GitHub App id + key (RS256 JWT →
+    installation access token), with a `PatAuth` fallback. PyJWT is an opt-in
+    `fabri[repo-github]` extra, imported lazily only when App auth is used.
+  - Multi-file branch push (`fabri/repo/git_local.py`): commits a real working
+    tree and pushes to a bot-owned branch via a tokenized URL kept out of
+    `.git/config`.
+  - Slack `slack_post` builtin tool + a `notify_slack` post-run step.
+- Every connector ships offline mock tests plus an env-gated live smoke
+  (`@pytest.mark.live`, run only with `FABRI_LIVE_TESTS=1`). Bot/credential
+  setup is covered by `scripts/setup_bots.py` and `docs/repo-run.md`.
+- The bundled `bug-triage-crew` is hardened to operate on a real cloned
+  checkout (fail-closed, anti-fabrication prompts; its tester's verdict gates
+  the PR) and `runtime.build_tools` honours a `FABRI_SANDBOX_ROOT_OVERRIDE`.
+
 ## 0.19.4
 
 - Revert the AGENT_MEMORY "hard output contract" steward templates (0.19.3).

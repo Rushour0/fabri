@@ -1,6 +1,6 @@
 [project]
 name = "fabri"
-version = "0.20.0"
+version = "0.21.0"
 description = "Ever-evolving prompting and context engineering for LLM agents through active memory and result analysis."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,6 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 embeddings = ["sentence-transformers>=3.0"]
+repo-github = ["PyJWT[crypto]>=2.8"]
 sqlite = ["sqlite-vec>=0.1.6"]         # G16: embedded vector store (no docker)
 bm25 = ["rank-bm25>=0.2.2"]            # client-side BM25 for Qdrant hybrid retrieval
 # One-command install for the self-improving stack — memory (sqlite-vec store +
@@ -132,4 +133,5 @@ include = ["fabri*"]
 markers = [
     "unit: fast tests with no external services or credentials",
     "integration: exercises multiple fabri components without external credentials",
+    "live: hits real external services/credentials; skipped unless FABRI_LIVE_TESTS=1",
 ]
