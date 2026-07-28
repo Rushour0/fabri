@@ -17,7 +17,9 @@ if not __package__:
 
 from fabri.service.slack_notify import _CHAT_POST_MESSAGE_URL
 from fabri.tools.secret_refs import resolve_secret
+from fabri.tools.security.ssrf import ValidatingRedirect, validate_url
 
+_opener = urllib.request.build_opener(ValidatingRedirect)
 _REQUEST_TIMEOUT_S = 5
 
 
@@ -65,7 +67,8 @@ def post_message(args: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_S) as response:
+        validate_url(_CHAT_POST_MESSAGE_URL)
+        with _opener.open(request, timeout=_REQUEST_TIMEOUT_S) as response:
             raw_result = response.read().decode("utf-8")
         result = json.loads(raw_result)
     except Exception as exc:

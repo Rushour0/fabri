@@ -251,7 +251,7 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
     # sandbox_root is threaded to each tool spawn via env= (see
     # registry.invoke) rather than os.environ, so a parent registry and a
     # sub-agent registry with a tighter sandbox can coexist.
-    sandbox_root = str(Path(tools_cfg["sandbox_root"]).resolve())
+    sandbox_root = str(Path(os.environ.get("FABRI_SANDBOX_ROOT_OVERRIDE") or tools_cfg["sandbox_root"]).resolve())
     manifest_dirs = tools_cfg["manifest_dir"]
     if isinstance(manifest_dirs, str):
         manifest_dirs = [manifest_dirs]

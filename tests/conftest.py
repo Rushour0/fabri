@@ -1,3 +1,4 @@
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -97,3 +98,13 @@ def pytest_report_header():
             f"qdrant: UNREACHABLE at {QDRANT_URL} — memory/store tests will fail. "
             f"Start it with `docker compose up -d`."
         )
+
+
+def pytest_collection_modifyitems(config, items):
+    if os.environ.get("FABRI_LIVE_TESTS") == "1":
+        return
+
+    skip_live = pytest.mark.skip(reason="live test skipped; set FABRI_LIVE_TESTS=1 to run")
+    for item in items:
+        if item.get_closest_marker("live"):
+            item.add_marker(skip_live)

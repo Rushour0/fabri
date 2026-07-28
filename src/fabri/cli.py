@@ -741,6 +741,22 @@ def cmd_repo_open_pr(args: argparse.Namespace) -> None:
     print(url)
 
 
+def cmd_repo_run(args: argparse.Namespace) -> None:
+    from fabri.repo.run import run_repo_flow
+
+    result = run_repo_flow(
+        issue_id=args.from_linear,
+        repo=args.repo,
+        base=args.base,
+        config=args.config,
+        test_cmd=args.test_cmd,
+        setup_cmd=args.setup_cmd,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    if not result.get("ok"):
+        sys.exit(1)
+
+
 def cmd_memory_diff(args: argparse.Namespace) -> None:
     """G3: compare what the memory store learned between two sessions.
 
@@ -1642,6 +1658,20 @@ def main() -> None:
     p_repo_open_pr.add_argument("--base", default="main")
     p_repo_open_pr.add_argument("--branch", default="fabri/self-improve")
     p_repo_open_pr.set_defaults(func=cmd_repo_open_pr)
+
+    p_repo_run = repo_sub.add_parser(
+        "run", help="Run a Linear issue end-to-end into a verified GitHub PR (10 fail-closed gates)")
+    p_repo_run.add_argument("--from-linear", required=True, help="Linear issue id or identifier")
+    p_repo_run.add_argument("--repo", required=True, help="Target repository (owner/name)")
+    p_repo_run.add_argument("--base", default="main", help="Base branch")
+    p_repo_run.add_argument("--config", default=None, help="Path to the agency entry yaml")
+    p_repo_run.add_argument(
+        "--test-cmd", default=None,
+        help="Authoritative verify command (overrides env/agency.toml default)")
+    p_repo_run.add_argument(
+        "--setup-cmd", default=None,
+        help="Optional setup command run in the clone before the crew")
+    p_repo_run.set_defaults(func=cmd_repo_run)
 
     p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
     p_replay.add_argument("session_id")

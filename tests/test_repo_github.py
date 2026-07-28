@@ -117,7 +117,7 @@ def test_http_error_includes_truncated_github_body(monkeypatch):
     def fake_urlopen(request, timeout=30):
         raise HTTPError(request.full_url, 422, "unprocessable", {}, io.BytesIO(body))
 
-    monkeypatch.setattr(github, "urlopen", fake_urlopen)
+    monkeypatch.setattr(github._opener, "open", fake_urlopen)
     with pytest.raises(github.GitHubError) as error:
         github._http("POST", "https://api.github.com/repos/acme/widget/issues", "secret", {})
     assert str(error.value) == f"GitHub API 422: {'x' * 300}"

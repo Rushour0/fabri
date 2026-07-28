@@ -45,6 +45,7 @@ def test_happy_path_posts_with_slack_notify_request_shape(
     requests: list[urllib.request.Request] = []
     token = "xoxb-happy-path-secret"
     monkeypatch.setenv("FABRI_CRED_SLACK_DEFAULT", token)
+    monkeypatch.setattr(slack_post, "validate_url", lambda url: url)
 
     def fake_urlopen(
         request: urllib.request.Request, timeout: int
@@ -53,7 +54,7 @@ def test_happy_path_posts_with_slack_notify_request_shape(
         requests.append(request)
         return _Response({"ok": True, "ts": "171234.5678", "channel": "C123"})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(slack_post._opener, "open", fake_urlopen)
 
     exit_code, result = _invoke(
         monkeypatch, {"channel": "C123", "text": "Deploy complete"}
@@ -80,6 +81,7 @@ def test_threaded_reply_includes_thread_ts(
 ) -> None:
     bodies: list[dict[str, str]] = []
     monkeypatch.setenv("FABRI_CRED_SLACK_DEFAULT", "xoxb-thread-secret")
+    monkeypatch.setattr(slack_post, "validate_url", lambda url: url)
 
     def fake_urlopen(
         request: urllib.request.Request, timeout: int
@@ -87,7 +89,7 @@ def test_threaded_reply_includes_thread_ts(
         bodies.append(json.loads(request.data.decode("utf-8")))
         return _Response({"ok": True, "ts": "171234.9999", "channel": "C456"})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(slack_post._opener, "open", fake_urlopen)
 
     exit_code, result = _invoke(
         monkeypatch,
@@ -113,11 +115,12 @@ def test_missing_default_credential_names_typed_env_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("FABRI_CRED_SLACK_DEFAULT", raising=False)
+    monkeypatch.setattr(slack_post, "validate_url", lambda url: url)
 
     def fail_urlopen(*_: object, **__: object) -> _Response:
         pytest.fail("Slack must not be called without a resolved credential")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(slack_post._opener, "open", fail_urlopen)
 
     exit_code, result = _invoke(
         monkeypatch, {"channel": "C123", "text": "Hello"}
@@ -134,9 +137,10 @@ def test_slack_side_error_is_propagated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FABRI_CRED_SLACK_DEFAULT", "xoxb-api-error-secret")
+    monkeypatch.setattr(slack_post, "validate_url", lambda url: url)
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        slack_post._opener,
+        "open",
         lambda *_args, **_kwargs: _Response(
             {"ok": False, "error": "channel_not_found"}
         ),
@@ -156,6 +160,7 @@ def test_token_never_leaks_through_errors_logs_or_repr(
 ) -> None:
     token = "xoxb-never-leak-this-token"
     monkeypatch.setenv("FABRI_CRED_SLACK_DEFAULT", token)
+    monkeypatch.setattr(slack_post, "validate_url", lambda url: url)
     caplog.set_level(logging.DEBUG)
 
     def fail_with_request_details(
@@ -164,7 +169,7 @@ def test_token_never_leaks_through_errors_logs_or_repr(
         raise OSError(f"request failed: {request.headers!r}")
 
     monkeypatch.setattr(
-        urllib.request, "urlopen", fail_with_request_details
+        slack_post._opener, "open", fail_with_request_details
     )
 
     exit_code, result = _invoke(
