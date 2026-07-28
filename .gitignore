@@ -41,3 +41,6 @@ session-notes/
 
 # local env / secrets (AWS creds, API keys) — never commit
 .env*
+
+# bot/OAuth setup output: GitHub App private key (PEM) + captured tokens
+secrets/
