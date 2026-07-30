@@ -178,9 +178,11 @@ def handle_slack_event(
         return 400, "invalid request JSON", {}
     if not isinstance(payload, dict):
         return 400, "invalid request JSON", {}
+    # URL verification intentionally remains before signature verification.
     if payload.get("type") == "url_verification":
         return 200, str(payload.get("challenge", "")), {"Content-Type": "text/plain"}
 
+    # Signature verification intentionally precedes deduplication and dispatch.
     secret_env = slack_cfg.get("signing_secret_env", "SLACK_SIGNING_SECRET")
     signing_secret = os.environ.get(secret_env)
     timestamp = headers.get("X-Slack-Request-Timestamp", "")
@@ -192,11 +194,27 @@ def handle_slack_event(
     if _is_duplicate(payload.get("event_id")):
         return 200, "", {}
 
+    team_id = payload.get("team_id")
+    if not isinstance(team_id, str) or not team_id:
+        team_id = None
+
     event = payload.get("event")
     if not isinstance(event, dict):
         return 200, "", {}
+    etype = event.get("type")
+    if etype in ("app_uninstalled", "tokens_revoked"):
+        if team_id:
+            service.install_store.delete(team_id)
+        return 200, "", {}
+
+    token = service.install_store.get_token(team_id) if team_id else None
+    if token:
+        tenant_cfg = {**slack_cfg, "bot_token": token, "enabled": True}
+    else:
+        tenant_cfg = slack_cfg  # legacy env path — single-tenant fallback preserved
+
     if event.get("type") == "message":
-        handle_message_event(event, service, slack_cfg)
+        handle_message_event(event, service, tenant_cfg)
         return 200, "", {}
     if event.get("type") != "app_mention":
         return 200, "", {}
@@ -209,7 +227,7 @@ def handle_slack_event(
     task = _MENTION_RE.sub("", text, count=1).strip() if isinstance(text, str) else ""
     Thread(
         target=_run_mention,
-        args=(service, slack_cfg, task, channel, thread_ts),
+        args=(service, tenant_cfg, task, channel, thread_ts),
         daemon=True,
     ).start()
     return 200, "", {}

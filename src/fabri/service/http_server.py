@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +44,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
+from fabri.service import slack_oauth
 from fabri.service.slack_events import handle_slack_event
 from fabri.service.service import FabriService
 from fabri.service.auth import (
@@ -62,6 +64,7 @@ _RESULT_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/result/?$")
 _ANSWER_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/answer/?$")
 _CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/cancel/?$")
 _FLEET_RE = re.compile(r"^/fleets/([A-Za-z0-9_.-]+)/?$")
+_SLACK_UNINSTALL_RE = re.compile(r"^/slack/installs/([A-Za-z0-9_.-]+)/delete/?$")
 _AUTH_BODY_MAX_BYTES = 8 * 1024
 _AUTH_EMAIL_MAX_LENGTH = 254
 _AUTH_PASSWORD_MAX_LENGTH = 1024
@@ -212,6 +215,28 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_result(m.group(1))
             return
+        if path in ("/slack/install", "/slack/install/"):
+            url = slack_oauth.build_install_redirect()
+            if url is None:
+                self._send_json(500, {"error": "Slack install is not configured"})
+                return
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path in ("/slack/oauth/callback", "/slack/oauth/callback/"):
+            self._slack_oauth_callback(parse_qs(parsed.query))
+            return
+        if path in ("/slack/installs", "/slack/installs/"):
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            self._send_json(200, {"installs": [
+                {"team_id": r["team_id"], "team_name": r["team_name"], "installed_at": r["installed_at"]}
+                for r in self.service.install_store.list()
+            ]})
+            return
         if self.serve_studio and not self._is_api_path(self.path):
             self._send_studio_asset()
             return
@@ -272,6 +297,14 @@ class _Handler(BaseHTTPRequestHandler):
             if self.service.auth_enabled and user_id is None:
                 return
             self._submit_fleet(user_id=user_id)
+            return
+        m = _SLACK_UNINSTALL_RE.match(urlsplit(self.path).path)
+        if m:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            ok = self.service.install_store.delete(m.group(1))
+            self._send_json(200, {"deleted": ok})
             return
         if self.path not in ("/runs", "/runs/"):
             self._send_json(404, {"error": f"no route for POST {self.path}"})
@@ -470,6 +503,44 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
             return
         self._send_json(200, result)
+
+    def _redirect_studio(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _slack_oauth_callback(self, q: dict) -> None:
+        secret = os.environ.get("SLACK_SIGNING_SECRET", "")
+        state = (q.get("state") or [""])[0]
+        if q.get("error") or not slack_oauth.verify_state(state, secret):
+            self._redirect_studio("/?slack=error#settings")
+            return
+        code = (q.get("code") or [""])[0]
+        if not code:
+            self._redirect_studio("/?slack=error#settings")
+            return
+        try:
+            tok = slack_oauth.exchange_code(code)
+        except Exception:
+            logger.warning("Slack OAuth code exchange failed")
+            self._redirect_studio("/?slack=error#settings")
+            return
+        if not tok.get("ok"):
+            logger.warning("Slack OAuth rejected: %s", tok.get("error"))
+            self._redirect_studio("/?slack=error#settings")
+            return
+        team = tok.get("team") or {}
+        if not team.get("id"):
+            self._redirect_studio("/?slack=error#settings")
+            return
+        self.service.install_store.upsert(
+            team_id=team["id"],
+            bot_token=tok["access_token"],
+            team_name=team.get("name"),
+            scopes=tok.get("scope"),
+        )
+        self._redirect_studio("/?slack=connected#settings")
 
     @staticmethod
     def _is_api_path(raw_path: str) -> bool:

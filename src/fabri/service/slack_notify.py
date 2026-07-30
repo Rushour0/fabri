@@ -17,7 +17,7 @@ def _post_message(slack_cfg: dict, payload: dict[str, str]) -> dict | None:
         return None
 
     token_env = slack_cfg.get("bot_token_env", "SLACK_BOT_TOKEN")
-    token = os.environ.get(token_env)
+    token = slack_cfg.get("bot_token") or os.environ.get(token_env)
     if not token:
         _LOG.warning("Slack notification skipped: token environment variable %s is unset", token_env)
         return None
