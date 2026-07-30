@@ -281,44 +281,119 @@ SLACK_MANIFEST = {
 }
 
 
-def setup_slack() -> None:
-    print("\n== Slack bot ==")
-    print("  1) Create the app from a manifest: https://api.slack.com/apps?new_app=1")
-    print("     → 'From a manifest' → your workspace → paste the JSON below:")
-    print("     " + json.dumps(SLACK_MANIFEST))
-    print("  2) On the app's 'Basic Information' page copy these:")
+def slack_manifest(public_base: str | None) -> dict:
+    if public_base is None:
+        return SLACK_MANIFEST
+
+    from fabri.service.slack_oauth import SLACK_BOT_SCOPES
+
+    base = public_base.rstrip("/")
+    return {
+        "display_information": dict(SLACK_MANIFEST["display_information"]),
+        "features": {"bot_user": dict(SLACK_MANIFEST["features"]["bot_user"])},
+        "oauth_config": {
+            "redirect_urls": [f"{base}/slack/oauth/callback"],
+            "scopes": {"bot": SLACK_BOT_SCOPES.split(",")},
+        },
+        "settings": {
+            "event_subscriptions": {
+                "request_url": f"{base}/slack/events",
+                "bot_events": [
+                    "app_mention",
+                    "message.channels",
+                    "app_uninstalled",
+                    "tokens_revoked",
+                ],
+            },
+            "org_deploy_enabled": False,
+            "socket_mode_enabled": False,
+        },
+    }
+
+
+def setup_slack(public: bool = False) -> None:
+    if not public:
+        print("\n== Slack bot ==")
+        print("  1) Create the app from a manifest: https://api.slack.com/apps?new_app=1")
+        print("     → 'From a manifest' → your workspace → paste the JSON below:")
+        print("     " + json.dumps(SLACK_MANIFEST))
+        print("  2) On the app's 'Basic Information' page copy these:")
+        client_id = input("     Client ID: ").strip()
+        client_secret = input("     Client Secret: ").strip()
+        signing_secret = input("     Signing Secret (for inbound events): ").strip()
+
+        authorize = "https://slack.com/oauth/v2/authorize?" + urllib.parse.urlencode({
+            "client_id": client_id,
+            "scope": "chat:write,channels:read",
+            "redirect_uri": f"{CALLBACK_BASE}/callback/slack",
+            "state": pysecrets.token_urlsafe(12),
+        })
+        got = capture_redirect("/callback/slack", open_url=authorize)
+        code = got.get("code")
+        if not code:
+            sys.exit("  ✗ no OAuth code returned.")
+        tok = _http_json("POST", "https://slack.com/api/oauth.v2.access", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": f"{CALLBACK_BASE}/callback/slack",
+        })
+        if not tok.get("ok"):
+            sys.exit(f"  ✗ Slack token exchange failed: {tok.get('error')}")
+        bot_token = tok["access_token"]
+        print(f"  ✓ bot token: {_mask(bot_token)} (team {tok.get('team', {}).get('name')})")
+
+        channel = input("  channel id to post in (e.g. C0123ABCD): ").strip()
+        write_env({
+            _cred_var("slack", "default"): bot_token,
+            "SLACK_BOT_TOKEN": bot_token,      # fabri config compat (slack_notify)
+            "SLACK_SIGNING_SECRET": signing_secret,
+            "FABRI_SLACK_CHANNEL": channel,
+        })
+        return
+
+    from fabri.service.slack_oauth import SLACK_BOT_SCOPES
+
+    public_base = os.environ.get("FABRI_PUBLIC_BASE_URL") or input(
+        "  Public HTTPS base URL (e.g. https://fabri.example.com): "
+    ).strip()
+    if not public_base.startswith("https"):
+        print("  ⚠ public base URL should start with https")
+    base = public_base.rstrip("/")
+
+    print("\n== Slack public/distributable app ==")
+    print("  Paste this JSON in the Slack app manifest editor:")
+    print(json.dumps(slack_manifest(public_base)))
+    print("  On the app's 'Basic Information' page copy these:")
     client_id = input("     Client ID: ").strip()
     client_secret = input("     Client Secret: ").strip()
     signing_secret = input("     Signing Secret (for inbound events): ").strip()
 
+    write_env({
+        "SLACK_CLIENT_ID": client_id,
+        "SLACK_CLIENT_SECRET": client_secret,
+        "SLACK_SIGNING_SECRET": signing_secret,
+        "FABRI_PUBLIC_BASE_URL": public_base,
+    })
+
     authorize = "https://slack.com/oauth/v2/authorize?" + urllib.parse.urlencode({
         "client_id": client_id,
-        "scope": "chat:write,channels:read",
-        "redirect_uri": f"{CALLBACK_BASE}/callback/slack",
-        "state": pysecrets.token_urlsafe(12),
+        "scope": SLACK_BOT_SCOPES,
+        "redirect_uri": f"{base}/slack/oauth/callback",
     })
-    got = capture_redirect("/callback/slack", open_url=authorize)
-    code = got.get("code")
-    if not code:
-        sys.exit("  ✗ no OAuth code returned.")
-    tok = _http_json("POST", "https://slack.com/api/oauth.v2.access", data={
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": code,
-        "redirect_uri": f"{CALLBACK_BASE}/callback/slack",
-    })
-    if not tok.get("ok"):
-        sys.exit(f"  ✗ Slack token exchange failed: {tok.get('error')}")
-    bot_token = tok["access_token"]
-    print(f"  ✓ bot token: {_mask(bot_token)} (team {tok.get('team', {}).get('name')})")
-
-    channel = input("  channel id to post in (e.g. C0123ABCD): ").strip()
-    write_env({
-        _cred_var("slack", "default"): bot_token,
-        "SLACK_BOT_TOKEN": bot_token,      # fabri config compat (slack_notify)
-        "SLACK_SIGNING_SECRET": signing_secret,
-        "FABRI_SLACK_CHANNEL": channel,
-    })
+    print(f"  Install URL: {base}/slack/install")
+    print(f"  Authorize URL (reference only; use the install URL for signed state): {authorize}")
+    print("  (1) api.slack.com → Manage Distribution → Activate Public Distribution.")
+    print(f"  (2) OAuth & Permissions → Redirect URLs → add {base}/slack/oauth/callback.")
+    print(f"  (3) Event Subscriptions → Request URL {base}/slack/events + subscribe to the bot events.")
+    print(
+        "  (4) Set FABRI_PUBLIC_BASE_URL, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, "
+        "SLACK_SIGNING_SECRET, then restart `fabri serve`."
+    )
+    print(
+        "  (5) PERSISTENCE: the install DB is at <home-root>/installs.db — it MUST be on "
+        "a persistent volume, or every redeploy logs out all workspaces."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -406,6 +481,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("target", nargs="?", choices=["all", "github", "slack", "linear", "doctor"])
     p.add_argument("--self-test", action="store_true", help="offline safety-plumbing check")
+    p.add_argument("--public", action="store_true", help="set up Slack for public/distributable multi-workspace install (OAuth-per-workspace) instead of single-tenant localhost")
     args = p.parse_args()
 
     if args.self_test:
@@ -419,9 +495,15 @@ def main() -> None:
     if args.target == "doctor":
         doctor()
     elif args.target == "all":
-        for fn in steps.values():
-            fn()
+        for name, fn in steps.items():
+            if name == "slack":
+                setup_slack(public=False)
+            else:
+                fn()
         print("\nAll done. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")
+    elif args.target == "slack":
+        setup_slack(public=args.public)
+        print(f"\nDone. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")
     else:
         steps[args.target]()
         print(f"\nDone. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")

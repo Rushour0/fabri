@@ -10,6 +10,7 @@ export const SURFACES = [
   "history",
   "fleet",
   "replay",
+  "settings",
 ] as const;
 export type Surface = (typeof SURFACES)[number];
 

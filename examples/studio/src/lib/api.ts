@@ -207,6 +207,23 @@ export async function getCatalog(): Promise<Catalog | null> {
   return body.catalog ?? null;
 }
 
+export interface SlackInstall {
+  team_id: string;
+  team_name: string | null;
+  installed_at: number | null;
+}
+
+export async function listSlackInstalls(): Promise<SlackInstall[]> {
+  const res = await apiFetch("/slack/installs");
+  if (!res.ok) throw new Error(`list slack installs failed (${res.status})`);
+  return (await res.json()).installs ?? [];
+}
+
+export async function disconnectSlack(teamId: string): Promise<void> {
+  const res = await apiFetch(`/slack/installs/${encodeURIComponent(teamId)}/delete`, { method: "POST" });
+  if (!res.ok) throw new Error(`disconnect slack failed (${res.status})`);
+}
+
 // ---- fleets (POST/GET /fleets) ----
 
 export interface FleetItem {

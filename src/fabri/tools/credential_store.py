@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 ENV_CREDENTIAL_PREFIX = "FABRI_CRED_"
@@ -56,3 +58,37 @@ class EnvCredentialStore:
 
     def __repr__(self) -> str:
         return "EnvCredentialStore()"
+
+
+class SqliteInstallCredentialStore:
+    """Read per-workspace Slack credentials from the install database."""
+
+    def __init__(self, db_path=None, fallback=None) -> None:
+        self._db_path = db_path or os.environ.get("FABRI_INSTALL_DB")
+        self._fallback = fallback or EnvCredentialStore()
+
+    def get(self, provider: str, handle: str) -> str:
+        if (
+            provider == "slack"
+            and handle != "default"
+            and self._db_path
+            and Path(self._db_path).exists()
+        ):
+            connection = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro", uri=True, timeout=30
+            )
+            try:
+                row = connection.execute(
+                    "SELECT bot_token FROM installs WHERE team_id=?", (handle,)
+                ).fetchone()
+            finally:
+                connection.close()
+            if row is not None and row[0]:
+                return row[0]
+            raise CredentialNotFoundError(
+                "no Slack install for this workspace"
+            )
+        return self._fallback.get(provider, handle)
+
+    def __repr__(self) -> str:
+        return "SqliteInstallCredentialStore()"

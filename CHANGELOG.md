@@ -4,6 +4,36 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.22.0
+
+- Multi-tenant Slack: any workspace can now install the fabri Slack app via
+  "Connect Slack" (OAuth v2 distribution) and fabri posts using **that
+  workspace's own bot token**. A durable per-team SQLite install store
+  (`service/install_store.py`, WAL) holds each `team_id`'s token; a
+  `SqliteInstallCredentialStore` resolves `resolve_secret("slack:<team_id>")`
+  transparently, so `slack_post`/`notify_slack` are unchanged. `slack:default`
+  still falls through to the env token, so single-tenant deployments keep
+  working byte-for-byte.
+  - New server routes on the service HTTP server: `GET /slack/install`
+    (signed-state CSRF → Slack authorize), `GET /slack/oauth/callback`
+    (verify-state-before-exchange, fail closed, upsert the install),
+    `GET /slack/installs` (auth-guarded, tokens never returned), and
+    `POST /slack/installs/<team_id>/delete`.
+  - Inbound events are tenant-aware: each event resolves its team's token;
+    `app_uninstalled`/`tokens_revoked` delete the install. Signature
+    verification is unchanged.
+  - `scripts/setup_bots.py slack --public` scaffolds the distributable app
+    (hosted redirect + event subscriptions with the correct scopes) and writes
+    the server env contract (`FABRI_PUBLIC_BASE_URL`, `SLACK_CLIENT_ID`,
+    `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET`).
+  - Studio gains a "Connect Slack" settings tab listing connected workspaces
+    (names only) with a disconnect action.
+- Deploy note: the install DB lives at `<home-root>/installs.db`; mount a
+  persistent volume at the home-root or installs are lost on redeploy. Tokens
+  are plaintext-at-rest in this version (encryption-at-rest is a follow-up).
+  GitHub multi-tenant install and per-tenant outbound `ask_user` remain
+  single-tenant / deferred.
+
 ## 0.21.0
 
 - Add `fabri repo run --from-linear <ID> --repo <owner/name>`: a real
