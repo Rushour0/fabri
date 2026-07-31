@@ -13,6 +13,8 @@ import { QuestionsInbox } from "./components/QuestionsInbox";
 import { CompanyOrgChart } from "./components/CompanyOrgChart";
 import { CatalogView, type CatalogSelection } from "./components/CatalogView";
 import ConnectSlack from "./components/ConnectSlack";
+import ConnectGitHub from "./components/ConnectGitHub";
+import ConnectLinear from "./components/ConnectLinear";
 import { useHashRoute, type Surface } from "./hooks/useHashRoute";
 import { listQuestions, getCompany, getCatalog, onUnauthorized, type Company, type Catalog } from "./lib/api";
 import { getMe, logout, type AuthState } from "./lib/auth";
@@ -329,6 +331,8 @@ export default function App() {
             {hasAccountAccess && surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
             {hasAccountAccess && surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
             {hasAccountAccess && surface === "settings" && <ConnectSlack />}
+            {hasAccountAccess && surface === "settings" && <ConnectGitHub />}
+            {hasAccountAccess && surface === "settings" && <ConnectLinear />}
             {hasAccountAccess && surface === "replay" && replayId && (
               <RunReplay key={replayId} sessionId={replayId} onBack={() => go(replayFrom)} />
             )}

@@ -87,7 +87,7 @@ def test_app_auth_caches_and_refreshes_installation_token(
     assert auth.get_token() == "ghs_faketoken"
     assert len(requests) == 1
 
-    auth._expires_at = time.time() + 30
+    auth._cache["456"] = ("ghs_faketoken", time.time() + 30)
     assert auth.get_token() == "ghs_faketoken"
     assert len(requests) == 2
 
@@ -184,8 +184,10 @@ def test_app_auth_redacts_tokens_from_errors(
 
     monkeypatch.setattr(github_auth._opener, "open", fake_open)
     auth = github_auth.AppAuth()
-    auth._token = "ghs_sensitive_cached_token"
-    auth._expires_at = time.time() + 30
+    auth._cache["456"] = (
+        "ghs_sensitive_cached_token",
+        time.time() + 30,
+    )
 
     with pytest.raises(RuntimeError) as caught:
         auth.get_token()
@@ -194,3 +196,124 @@ def test_app_auth_redacts_tokens_from_errors(
     assert "fake.jwt" not in detail
     assert "ghs_sensitive_cached_token" not in detail
     assert detail.count("[REDACTED]") == 2
+
+
+def test_app_auth_caches_independently_per_explicit_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pem_path = _configure_app_credentials(monkeypatch, tmp_path)
+    _install_fake_jwt(monkeypatch)
+    secret_calls: list[str] = []
+    requests: list[urllib.request.Request] = []
+    values = {
+        "github:app_id": "123",
+        "github:private_key": str(pem_path),
+    }
+
+    def fake_resolve_secret(ref: str, store: object | None) -> str:
+        secret_calls.append(ref)
+        return values[ref]
+
+    def fake_open(
+        request: urllib.request.Request,
+        timeout: int,
+    ) -> io.BytesIO:
+        assert timeout == 30
+        requests.append(request)
+        return _fake_response()
+
+    monkeypatch.setattr(github_auth, "resolve_secret", fake_resolve_secret)
+    monkeypatch.setattr(github_auth, "validate_url", lambda url: url)
+    monkeypatch.setattr(github_auth._opener, "open", fake_open)
+
+    auth_456 = github_auth.AppAuth(installation_id="456")
+    auth_789 = github_auth.AppAuth(installation_id="789")
+
+    assert auth_456.get_token() == "ghs_faketoken"
+    assert auth_456.get_token() == "ghs_faketoken"
+    assert auth_789.get_token() == "ghs_faketoken"
+    assert auth_789.get_token() == "ghs_faketoken"
+
+    assert len(requests) == 2
+    assert [request.full_url for request in requests] == [
+        "https://api.github.com/app/installations/456/access_tokens",
+        "https://api.github.com/app/installations/789/access_tokens",
+    ]
+    assert secret_calls == [
+        "github:app_id",
+        "github:private_key",
+        "github:app_id",
+        "github:private_key",
+    ]
+    assert "456" in auth_456._cache
+    assert "789" in auth_789._cache
+
+
+def test_app_auth_single_tenant_fallback_resolves_and_caches_installation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pem_path = _configure_app_credentials(monkeypatch, tmp_path)
+    _install_fake_jwt(monkeypatch)
+    calls: list[str] = []
+    requests: list[urllib.request.Request] = []
+    values = {
+        "github:app_id": "123",
+        "github:installation_id": "456",
+        "github:private_key": str(pem_path),
+    }
+
+    def fake_resolve_secret(ref: str, store: object | None) -> str:
+        calls.append(ref)
+        return values[ref]
+
+    def fake_open(
+        request: urllib.request.Request,
+        timeout: int,
+    ) -> io.BytesIO:
+        assert timeout == 30
+        requests.append(request)
+        return _fake_response()
+
+    monkeypatch.setattr(github_auth, "resolve_secret", fake_resolve_secret)
+    monkeypatch.setattr(github_auth, "validate_url", lambda url: url)
+    monkeypatch.setattr(github_auth._opener, "open", fake_open)
+
+    auth = github_auth.AppAuth()
+    assert auth.get_token() == "ghs_faketoken"
+    assert auth.get_token() == "ghs_faketoken"
+
+    assert calls[:3] == [
+        "github:app_id",
+        "github:installation_id",
+        "github:private_key",
+    ]
+    assert calls.count("github:installation_id") == 2
+    assert len(requests) == 1
+    assert auth._cache["456"][0] == "ghs_faketoken"
+
+
+def test_installation_resolver_matches_install_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from fabri.service.install_store import GitHubInstallStore
+
+    store = GitHubInstallStore(tmp_path / "installs.db")
+    store.upsert(
+        installation_id="456",
+        account_login="acme",
+        account_type="Organization",
+        repos=["different-owner/project"],
+    )
+    monkeypatch.setenv("FABRI_INSTALL_DB", str(store.path))
+
+    assert github_auth.installation_id_for_repo("acme") == (
+        store.get_installation("acme")
+    )
+    assert github_auth.installation_id_for_repo(
+        "different-owner/project"
+    ) == store.get_installation("different-owner/project")
+    assert github_auth.installation_id_for_repo("unknown") is None
+    assert store.get_installation("unknown") is None

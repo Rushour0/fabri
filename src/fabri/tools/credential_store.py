@@ -61,7 +61,7 @@ class EnvCredentialStore:
 
 
 class SqliteInstallCredentialStore:
-    """Read per-workspace Slack credentials from the install database."""
+    """Read per-workspace Slack/Linear credentials from the install database."""
 
     def __init__(self, db_path=None, fallback=None) -> None:
         self._db_path = db_path or os.environ.get("FABRI_INSTALL_DB")
@@ -87,6 +87,21 @@ class SqliteInstallCredentialStore:
                 return row[0]
             raise CredentialNotFoundError(
                 "no Slack install for this workspace"
+            )
+        if provider == "linear" and handle != "default" and self._db_path and Path(self._db_path).exists():
+            connection = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro", uri=True, timeout=30
+            )
+            try:
+                row = connection.execute(
+                    "SELECT access_token FROM linear_installs WHERE workspace_id=?", (handle,)
+                ).fetchone()
+            finally:
+                connection.close()
+            if row is not None and row[0]:
+                return row[0]
+            raise CredentialNotFoundError(
+                "no Linear install for this workspace"
             )
         return self._fallback.get(provider, handle)
 

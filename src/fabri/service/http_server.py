@@ -44,7 +44,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
+from fabri.service import github_app, linear_oauth
 from fabri.service import slack_oauth
+from fabri.service.github_events import handle_github_event
 from fabri.service.slack_events import handle_slack_event
 from fabri.service.service import FabriService
 from fabri.service.auth import (
@@ -65,6 +67,8 @@ _ANSWER_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/answer/?$")
 _CANCEL_RE = re.compile(r"^/runs/([A-Za-z0-9_.-]+)/cancel/?$")
 _FLEET_RE = re.compile(r"^/fleets/([A-Za-z0-9_.-]+)/?$")
 _SLACK_UNINSTALL_RE = re.compile(r"^/slack/installs/([A-Za-z0-9_.-]+)/delete/?$")
+_GITHUB_UNINSTALL_RE = re.compile(r"^/github/installs/([A-Za-z0-9_.-]+)/delete/?$")
+_LINEAR_UNINSTALL_RE = re.compile(r"^/linear/installs/([A-Za-z0-9_.-]+)/delete/?$")
 _AUTH_BODY_MAX_BYTES = 8 * 1024
 _AUTH_EMAIL_MAX_LENGTH = 254
 _AUTH_PASSWORD_MAX_LENGTH = 1024
@@ -237,6 +241,54 @@ class _Handler(BaseHTTPRequestHandler):
                 for r in self.service.install_store.list()
             ]})
             return
+        if path in ("/github/app-info", "/github/app-info/"):
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            self._send_json(200, {"install_url": github_app.install_url()})
+            return
+        if path in ("/github/setup", "/github/setup/"):
+            q = parse_qs(parsed.query)
+            installation_id = (q.get("installation_id") or [""])[0]
+            if not installation_id:
+                self._redirect_studio("/?github=error#settings")
+                return
+            self.service.github_install_store.upsert(installation_id=installation_id)
+            self._redirect_studio("/?github=connected#settings")
+            return
+        if path in ("/github/installs", "/github/installs/"):
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            self._send_json(200, {"installs": [
+                {"installation_id": r["installation_id"], "account_login": r["account_login"],
+                 "account_type": r["account_type"], "installed_at": r["installed_at"]}
+                for r in self.service.github_install_store.list()
+            ]})
+            return
+        if path in ("/linear/install", "/linear/install/"):
+            url = linear_oauth.build_install_redirect()
+            if url is None:
+                self._send_json(500, {"error": "Linear install is not configured"})
+                return
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path in ("/linear/oauth/callback", "/linear/oauth/callback/"):
+            self._linear_oauth_callback(parse_qs(parsed.query))
+            return
+        if path in ("/linear/installs", "/linear/installs/"):
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            self._send_json(200, {"installs": [
+                {"workspace_id": r["workspace_id"], "workspace_name": r["workspace_name"],
+                 "installed_at": r["installed_at"]}
+                for r in self.service.linear_install_store.list()
+            ]})
+            return
         if self.serve_studio and not self._is_api_path(self.path):
             self._send_studio_asset()
             return
@@ -280,6 +332,20 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(encoded)
             return
+        if self.path in ("/github/webhook", "/github/webhook/"):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            status, body, extra_headers = handle_github_event(
+                raw, self.headers, self.service
+            )
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         m = _ANSWER_RE.match(self.path)
         if m:
             if self.service.auth_enabled and not self._authorize_run(m.group(1)):
@@ -304,6 +370,22 @@ class _Handler(BaseHTTPRequestHandler):
             if self.service.auth_enabled and user_id is None:
                 return
             ok = self.service.install_store.delete(m.group(1))
+            self._send_json(200, {"deleted": ok})
+            return
+        m = _GITHUB_UNINSTALL_RE.match(urlsplit(self.path).path)
+        if m:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            ok = self.service.github_install_store.delete(m.group(1))
+            self._send_json(200, {"deleted": ok})
+            return
+        m = _LINEAR_UNINSTALL_RE.match(urlsplit(self.path).path)
+        if m:
+            user_id = self._require_user() if self.service.auth_enabled else None
+            if self.service.auth_enabled and user_id is None:
+                return
+            ok = self.service.linear_install_store.delete(m.group(1))
             self._send_json(200, {"deleted": ok})
             return
         if self.path not in ("/runs", "/runs/"):
@@ -542,11 +624,42 @@ class _Handler(BaseHTTPRequestHandler):
         )
         self._redirect_studio("/?slack=connected#settings")
 
+    def _linear_oauth_callback(self, q: dict) -> None:
+        secret = os.environ.get("LINEAR_CLIENT_SECRET", "")
+        state = (q.get("state") or [""])[0]
+        if q.get("error") or not slack_oauth.verify_state(state, secret):
+            self._redirect_studio("/?linear=error#settings")
+            return
+        code = (q.get("code") or [""])[0]
+        if not code:
+            self._redirect_studio("/?linear=error#settings")
+            return
+        try:
+            tok = linear_oauth.exchange_code(code)
+            access = tok.get("access_token")
+            if not access:
+                raise ValueError("no access_token")
+            ws = linear_oauth.fetch_workspace(access)
+        except Exception:
+            logger.warning("Linear OAuth exchange failed")
+            self._redirect_studio("/?linear=error#settings")
+            return
+        if not ws.get("id"):
+            self._redirect_studio("/?linear=error#settings")
+            return
+        self.service.linear_install_store.upsert(
+            workspace_id=ws["id"],
+            access_token=access,
+            workspace_name=ws.get("name"),
+            scopes=tok.get("scope"),
+        )
+        self._redirect_studio("/?linear=connected#settings")
+
     @staticmethod
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")

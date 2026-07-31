@@ -22,15 +22,28 @@ from fabri.pricing import (
     _CACHE_READ_MULT,
     _CACHE_WRITE_MULT,
     _PER_MTOK,
+    _rates_for,
     cost_for,
 )
+
+
+def _rate_pair(model):
+    """The rate pair cost_for actually resolves for `model`.
+
+    Rates come from litellm's live `model_cost` map first, falling back to the
+    static PRICING table only when litellm doesn't know the model. New models
+    can be re-priced upstream over time, so the parametrized arithmetic tests
+    pin against the RESOLVED rate (what cost_for uses) rather than the static
+    fallback — otherwise a legitimate upstream price change reads as a failure.
+    """
+    return _rates_for(model)
 
 M = 1_000_000
 
 
 def _expected(model, inp=0, out=0, cc=0, cr=0):
-    """Re-derive the expected USD straight from the published rate pair."""
-    in_rate, out_rate = PRICING[model]
+    """Re-derive the expected USD straight from the resolved rate pair."""
+    in_rate, out_rate = _rate_pair(model)
     return round(
         (
             inp * in_rate
@@ -47,23 +60,20 @@ def _expected(model, inp=0, out=0, cc=0, cr=0):
 
 @pytest.mark.parametrize("model", list(PRICING.keys()))
 def test_input_only_priced_at_input_rate(model):
-    in_rate, _ = PRICING[model]
     u = LLMUsage(input_tokens=M, model=model)
-    assert cost_for(u) == in_rate  # 1M @ in_rate/MTok == in_rate dollars
+    assert cost_for(u) == _expected(model, inp=M)  # 1M @ in_rate/MTok
 
 
 @pytest.mark.parametrize("model", list(PRICING.keys()))
 def test_output_only_priced_at_output_rate(model):
-    _, out_rate = PRICING[model]
     u = LLMUsage(output_tokens=M, model=model)
-    assert cost_for(u) == out_rate
+    assert cost_for(u) == _expected(model, out=M)
 
 
 @pytest.mark.parametrize("model", list(PRICING.keys()))
 def test_input_plus_output_combined(model):
-    in_rate, out_rate = PRICING[model]
     u = LLMUsage(input_tokens=M, output_tokens=M, model=model)
-    assert cost_for(u) == round(in_rate + out_rate, 6)
+    assert cost_for(u) == _expected(model, inp=M, out=M)
 
 
 # ---- specific tier sanity checks (named values from the spec) --------------

@@ -196,33 +196,105 @@ def _http_json(method: str, url: str, *, data=None, headers=None) -> dict:
 # --------------------------------------------------------------------------- #
 # GitHub App (bot) — manifest + setup-URL flow (fully automated, no JWT)
 # --------------------------------------------------------------------------- #
-def setup_github() -> None:
-    print("\n== GitHub App (bot) ==")
-    print("  (creating the App is repo-agnostic — you pick the repo in the browser at")
-    print("   the Install step. The prompt below is optional and only saves a default")
-    print("   target repo for the later `fabri repo run`.)")
-    repo = input("  default repo for runs (owner/name) [skip]: ").strip()
+def setup_github(public: bool = False) -> None:
+    if not public:
+        print("\n== GitHub App (bot) ==")
+        print("  (creating the App is repo-agnostic — you pick the repo in the browser at")
+        print("   the Install step. The prompt below is optional and only saves a default")
+        print("   target repo for the later `fabri repo run`.)")
+        repo = input("  default repo for runs (owner/name) [skip]: ").strip()
+        app_name = input(f"  app name [fabri-run-bot-{pysecrets.token_hex(2)}]: ").strip() \
+            or f"fabri-run-bot-{pysecrets.token_hex(2)}"
+        # public=True → app gets a github.com/apps/<slug> page ANYONE can install
+        # (the Vercel model). private → only you can install it (fine for first proof).
+        public = input("  make it PUBLIC so anyone can install it (Vercel-style)? [y/N]: ").strip().lower() == "y"
+        state = pysecrets.token_urlsafe(16)
+
+        manifest = {
+            "name": app_name,
+            "url": "https://github.com/Rushour0/fabri",
+            "redirect_url": f"{CALLBACK_BASE}/callback/github",
+            "setup_url": f"{CALLBACK_BASE}/callback/github-setup",
+            "setup_on_update": True,
+            "public": public,
+            "default_permissions": {
+                "contents": "write",
+                "pull_requests": "write",
+                "issues": "write",
+                "metadata": "read",
+            },
+            "default_events": [],
+        }
+        # GitHub requires the manifest submitted as a POST form. Auto-submit it.
+        form = f"""<!doctype html><body onload="document.forms[0].submit()">
+          <p>Creating the GitHub App… if nothing happens, click the button.</p>
+          <form method="post" action="https://github.com/settings/apps/new?state={state}">
+            <input type="hidden" name="manifest" value='{json.dumps(manifest).replace("'", "&#39;")}'>
+            <button type="submit">Create GitHub App</button>
+          </form></body>"""
+        got = capture_redirect("/callback/github", serve_html=form)
+        code = got.get("code")
+        if not code:
+            sys.exit("  ✗ no manifest code returned.")
+
+        conv = _http_json(
+            "POST", f"https://api.github.com/app-manifests/{code}/conversions",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        app_id = str(conv["id"])
+        SECRETS_DIR.mkdir(exist_ok=True)
+        _refuse_if_trackable(PEM_PATH)
+        PEM_PATH.write_text(conv["pem"])
+        PEM_PATH.chmod(0o600)
+        print(f"  ✓ app '{app_name}' created (id {app_id}); PEM → secrets/{PEM_PATH.name}")
+
+        # Install on the repo; the setup_url redirect carries installation_id.
+        install_url = f"{conv['html_url']}/installations/new"
+        print("  → now INSTALL the app on your repo (select just the one repo).")
+        inst = capture_redirect("/callback/github-setup", open_url=install_url)
+        installation_id = inst.get("installation_id", "")
+
+        env_updates = {
+            _cred_var("github", "app_id"): app_id,
+            _cred_var("github", "installation_id"): installation_id,
+            _cred_var("github", "private_key"): str(PEM_PATH),
+            "GITHUB_APP_CLIENT_ID": conv.get("client_id", ""),
+            "GITHUB_APP_CLIENT_SECRET": conv.get("client_secret", ""),
+            "GITHUB_APP_WEBHOOK_SECRET": conv.get("webhook_secret") or "",
+        }
+        if repo:
+            env_updates["FABRI_REPO"] = repo
+        write_env(env_updates)
+        print(f"  installation_id: {_mask(installation_id)}")
+        return
+
+    public_base = os.environ.get("FABRI_PUBLIC_BASE_URL") or input(
+        "  Public HTTPS base URL (e.g. https://fabri.example.com): "
+    ).strip()
+    if not public_base.startswith("https"):
+        print("  ⚠ public base URL should start with https")
+    base = public_base.rstrip("/")
+
+    print("\n== GitHub public/distributable App (bot) ==")
     app_name = input(f"  app name [fabri-run-bot-{pysecrets.token_hex(2)}]: ").strip() \
         or f"fabri-run-bot-{pysecrets.token_hex(2)}"
-    # public=True → app gets a github.com/apps/<slug> page ANYONE can install
-    # (the Vercel model). private → only you can install it (fine for first proof).
-    public = input("  make it PUBLIC so anyone can install it (Vercel-style)? [y/N]: ").strip().lower() == "y"
     state = pysecrets.token_urlsafe(16)
 
     manifest = {
         "name": app_name,
         "url": "https://github.com/Rushour0/fabri",
-        "redirect_url": f"{CALLBACK_BASE}/callback/github",
-        "setup_url": f"{CALLBACK_BASE}/callback/github-setup",
+        "redirect_url": f"{base}/github/setup",
+        "setup_url": f"{base}/github/setup",
+        "hook_attributes": {"url": f"{base}/github/webhook", "active": True},
         "setup_on_update": True,
-        "public": public,
+        "public": True,
         "default_permissions": {
             "contents": "write",
             "pull_requests": "write",
             "issues": "write",
             "metadata": "read",
         },
-        "default_events": [],
+        "default_events": ["installation", "installation_repositories"],
     }
     # GitHub requires the manifest submitted as a POST form. Auto-submit it.
     form = f"""<!doctype html><body onload="document.forms[0].submit()">
@@ -247,24 +319,23 @@ def setup_github() -> None:
     PEM_PATH.chmod(0o600)
     print(f"  ✓ app '{app_name}' created (id {app_id}); PEM → secrets/{PEM_PATH.name}")
 
-    # Install on the repo; the setup_url redirect carries installation_id.
-    install_url = f"{conv['html_url']}/installations/new"
-    print("  → now INSTALL the app on your repo (select just the one repo).")
-    inst = capture_redirect("/callback/github-setup", open_url=install_url)
-    installation_id = inst.get("installation_id", "")
-
-    env_updates = {
+    slug = conv.get("slug") or conv["html_url"].rstrip("/").split("/")[-1]
+    write_env({
         _cred_var("github", "app_id"): app_id,
-        _cred_var("github", "installation_id"): installation_id,
         _cred_var("github", "private_key"): str(PEM_PATH),
         "GITHUB_APP_CLIENT_ID": conv.get("client_id", ""),
         "GITHUB_APP_CLIENT_SECRET": conv.get("client_secret", ""),
         "GITHUB_APP_WEBHOOK_SECRET": conv.get("webhook_secret") or "",
-    }
-    if repo:
-        env_updates["FABRI_REPO"] = repo
-    write_env(env_updates)
-    print(f"  installation_id: {_mask(installation_id)}")
+        "GITHUB_APP_SLUG": slug,
+        "FABRI_PUBLIC_BASE_URL": public_base,
+    })
+    print(f"  Public install URL: https://github.com/apps/{slug}/installations/new")
+    print(f"  Setup URL: {base}/github/setup")
+    print(f"  Webhook URL: {base}/github/webhook")
+    print(
+        "  PERSISTENCE: the install DB is at <home-root>/installs.db — it MUST be on "
+        "a persistent volume, or every redeploy loses all installs."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -399,38 +470,66 @@ def setup_slack(public: bool = False) -> None:
 # --------------------------------------------------------------------------- #
 # Linear OAuth (actor=application → posts as the bot)
 # --------------------------------------------------------------------------- #
-def setup_linear() -> None:
-    print("\n== Linear OAuth app ==")
-    print("  1) Create an OAuth application:")
-    print("     https://linear.app/settings/api/applications/new")
-    print(f"     Set the redirect URI to exactly: {CALLBACK_BASE}/callback/linear")
+def setup_linear(public: bool = False) -> None:
+    if not public:
+        print("\n== Linear OAuth app ==")
+        print("  1) Create an OAuth application:")
+        print("     https://linear.app/settings/api/applications/new")
+        print(f"     Set the redirect URI to exactly: {CALLBACK_BASE}/callback/linear")
+        client_id = input("  Client ID: ").strip()
+        client_secret = input("  Client Secret: ").strip()
+
+        authorize = "https://linear.app/oauth/authorize?" + urllib.parse.urlencode({
+            "client_id": client_id,
+            "redirect_uri": f"{CALLBACK_BASE}/callback/linear",
+            "response_type": "code",
+            "scope": "read,write",
+            "state": pysecrets.token_urlsafe(12),
+            "actor": "application",   # PRs/comments attributed to the bot, not you
+        })
+        got = capture_redirect("/callback/linear", open_url=authorize)
+        code = got.get("code")
+        if not code:
+            sys.exit("  ✗ no OAuth code returned.")
+        tok = _http_json("POST", "https://api.linear.app/oauth/token", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": f"{CALLBACK_BASE}/callback/linear",
+            "grant_type": "authorization_code",
+        })
+        access = tok.get("access_token")
+        if not access:
+            sys.exit(f"  ✗ Linear token exchange failed: {tok}")
+        print(f"  ✓ access token: {_mask(access)}")
+        write_env({_cred_var("linear", "default"): access})
+        return
+
+    public_base = os.environ.get("FABRI_PUBLIC_BASE_URL") or input(
+        "  Public HTTPS base URL (e.g. https://fabri.example.com): "
+    ).strip()
+    if not public_base.startswith("https"):
+        print("  ⚠ public base URL should start with https")
+    base = public_base.rstrip("/")
+
+    print("\n== Linear public OAuth app ==")
+    print("  Create a Linear OAuth application:")
+    print("  https://linear.app/settings/api/applications/new")
+    print(f"  Set the redirect URI to exactly: {base}/linear/oauth/callback")
     client_id = input("  Client ID: ").strip()
     client_secret = input("  Client Secret: ").strip()
 
-    authorize = "https://linear.app/oauth/authorize?" + urllib.parse.urlencode({
-        "client_id": client_id,
-        "redirect_uri": f"{CALLBACK_BASE}/callback/linear",
-        "response_type": "code",
-        "scope": "read,write",
-        "state": pysecrets.token_urlsafe(12),
-        "actor": "application",   # PRs/comments attributed to the bot, not you
+    write_env({
+        "LINEAR_CLIENT_ID": client_id,
+        "LINEAR_CLIENT_SECRET": client_secret,
+        "FABRI_PUBLIC_BASE_URL": public_base,
     })
-    got = capture_redirect("/callback/linear", open_url=authorize)
-    code = got.get("code")
-    if not code:
-        sys.exit("  ✗ no OAuth code returned.")
-    tok = _http_json("POST", "https://api.linear.app/oauth/token", data={
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": code,
-        "redirect_uri": f"{CALLBACK_BASE}/callback/linear",
-        "grant_type": "authorization_code",
-    })
-    access = tok.get("access_token")
-    if not access:
-        sys.exit(f"  ✗ Linear token exchange failed: {tok}")
-    print(f"  ✓ access token: {_mask(access)}")
-    write_env({_cred_var("linear", "default"): access})
+    print(f"  Redirect URI: {base}/linear/oauth/callback")
+    print(f"  Install URL: {base}/linear/install")
+    print(
+        "  PERSISTENCE: the install DB is at <home-root>/installs.db — it MUST be on "
+        "a persistent volume, or every redeploy loses all installs."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -503,6 +602,12 @@ def main() -> None:
         print("\nAll done. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")
     elif args.target == "slack":
         setup_slack(public=args.public)
+        print(f"\nDone. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")
+    elif args.target == "github":
+        setup_github(public=args.public)
+        print(f"\nDone. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")
+    elif args.target == "linear":
+        setup_linear(public=args.public)
         print(f"\nDone. Next:  source .env.fabri.local  &&  python scripts/setup_bots.py doctor")
     else:
         steps[args.target]()

@@ -224,6 +224,47 @@ export async function disconnectSlack(teamId: string): Promise<void> {
   if (!res.ok) throw new Error(`disconnect slack failed (${res.status})`);
 }
 
+export interface GitHubInstall {
+  installation_id: string;
+  account_login: string | null;
+  account_type: string | null;
+  installed_at: number | null;
+}
+
+export async function getGitHubAppInfo(): Promise<{ install_url: string | null }> {
+  const res = await apiFetch("/github/app-info");
+  if (!res.ok) throw new Error(`get github app info failed (${res.status})`);
+  return res.json();
+}
+
+export async function listGitHubInstalls(): Promise<GitHubInstall[]> {
+  const res = await apiFetch("/github/installs");
+  if (!res.ok) throw new Error(`list github installs failed (${res.status})`);
+  return (await res.json()).installs ?? [];
+}
+
+export async function disconnectGitHub(installationId: string): Promise<void> {
+  const res = await apiFetch(`/github/installs/${encodeURIComponent(installationId)}/delete`, { method: "POST" });
+  if (!res.ok) throw new Error(`disconnect github failed (${res.status})`);
+}
+
+export interface LinearInstall {
+  workspace_id: string;
+  workspace_name: string | null;
+  installed_at: number | null;
+}
+
+export async function listLinearInstalls(): Promise<LinearInstall[]> {
+  const res = await apiFetch("/linear/installs");
+  if (!res.ok) throw new Error(`list linear installs failed (${res.status})`);
+  return (await res.json()).installs ?? [];
+}
+
+export async function disconnectLinear(workspaceId: string): Promise<void> {
+  const res = await apiFetch(`/linear/installs/${encodeURIComponent(workspaceId)}/delete`, { method: "POST" });
+  if (!res.ok) throw new Error(`disconnect linear failed (${res.status})`);
+}
+
 // ---- fleets (POST/GET /fleets) ----
 
 export interface FleetItem {
