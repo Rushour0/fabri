@@ -4,6 +4,34 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.23.0
+
+- Multi-tenant **GitHub** and **Linear**, mirroring the 0.22.0 Slack pattern so
+  any org can connect its own account/workspace and fabri acts with that
+  tenant's own credentials. Single-tenant (`github:default` App-from-env,
+  `linear:default` token-from-env) keeps working byte-for-byte.
+  - **GitHub App** (per-installation): `GitHubInstallStore` (shared
+    `installs.db`, `repos` as a JSON array, COALESCE-per-column upsert so the
+    id-only `/github/setup` write never clobbers webhook data). `AppAuth` now
+    mints and caches a token per `installation_id`, selected per repo via
+    `installation_id_for_repo`. New routes: `GET /github/setup` (capture
+    installation_id), `POST /github/webhook` (HMAC-SHA256 over the raw body,
+    fail-closed; `installation` + `installation_repositories` lifecycle),
+    `GET /github/installs`, `POST /github/installs/<id>/delete`,
+    `GET /github/app-info`.
+  - **Linear OAuth** (per-workspace): `LinearInstallStore` +
+    `SqliteInstallCredentialStore` resolving `resolve_secret("linear:<ws>")`.
+    New `linear_oauth.py` reuses the signed-state helpers. Routes:
+    `GET /linear/install`, `GET /linear/oauth/callback` (verify-state →
+    exchange → resolve workspace → store), `GET /linear/installs`,
+    `POST /linear/installs/<id>/delete`.
+  - `scripts/setup_bots.py github --public` / `linear --public` scaffold the
+    distributable app + server env contract.
+  - Studio gains "Connect GitHub" and "Connect Linear" settings tabs.
+- Deploy: install stores live in `<home-root>/installs.db` — mount a persistent
+  volume at the home-root. Tokens plaintext-at-rest (encryption-at-rest is a
+  follow-up).
+
 ## 0.22.0
 
 - Multi-tenant Slack: any workspace can now install the fabri Slack app via

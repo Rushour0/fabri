@@ -106,7 +106,7 @@ def run_repo_flow(
 
     # 1. resolve_creds
     try:
-        linear_token, github_auth = _gate_resolve_creds(store, known_tokens)
+        linear_token, github_auth = _gate_resolve_creds(store, known_tokens, repo)
         gate = GateResult(
             "resolve_creds",
             True,
@@ -364,13 +364,14 @@ def materialize_crew(
 def _gate_resolve_creds(
     store: object | None,
     known_tokens: list[str],
+    repo: str | None,
 ) -> tuple[str, object]:
     token = resolve_secret("linear:default", store)
     if not isinstance(token, str) or not token:
         raise RepoRunFailed("resolve_creds", "Linear credential was empty")
     known_tokens.append(token)
 
-    auth = build_github_auth(store)
+    auth = build_github_auth(store, repo=repo)
     if auth is None or not callable(getattr(auth, "get_token", None)):
         raise RepoRunFailed(
             "resolve_creds",
