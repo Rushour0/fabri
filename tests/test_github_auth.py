@@ -317,3 +317,41 @@ def test_installation_resolver_matches_install_store(
     ) == store.get_installation("different-owner/project")
     assert github_auth.installation_id_for_repo("unknown") is None
     assert store.get_installation("unknown") is None
+
+
+def test_app_auth_accepts_inline_pem_content(monkeypatch):
+    """The private key may be inline PEM content (env-only container deploys),
+    with literal \\n expanded — no file path required."""
+    import io
+    import json as _json
+    import sys as _sys
+    import urllib.request
+    from types import ModuleType
+
+    monkeypatch.setenv("FABRI_CRED_GITHUB_APP_ID", "123")
+    monkeypatch.setenv("FABRI_CRED_GITHUB_INSTALLATION_ID", "456")
+    monkeypatch.setenv(
+        "FABRI_CRED_GITHUB_PRIVATE_KEY",
+        "-----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----\\n",
+    )
+
+    seen = {}
+    fake_jwt = ModuleType("jwt")
+
+    def encode(claims, private_key, algorithm):
+        seen["key"] = private_key
+        return "fake.jwt"
+
+    fake_jwt.encode = encode
+    monkeypatch.setitem(_sys.modules, "jwt", fake_jwt)
+    monkeypatch.setattr(github_auth, "validate_url", lambda url: url)
+    monkeypatch.setattr(
+        github_auth._opener, "open",
+        lambda request, timeout: io.BytesIO(
+            _json.dumps({"token": "ghs_x", "expires_at": "2999-01-01T00:00:00Z"}).encode()
+        ),
+    )
+
+    assert github_auth.AppAuth().get_token() == "ghs_x"
+    # literal \n expanded to real newlines, no file was read
+    assert seen["key"] == "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"
