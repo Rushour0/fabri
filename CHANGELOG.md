@@ -4,6 +4,21 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.23.1
+
+- `fabri repo run` can now act as the *connecting* Linear workspace: a new
+  `--linear-workspace <id>` flag resolves `resolve_secret("linear:<id>")` — the
+  per-workspace token stored by the "Connect Linear" OAuth flow — instead of the
+  single-tenant `linear:default`. This closes the multi-tenant Linear loop:
+  before this, connected workspace tokens were stored but never consumed by any
+  run. Omitting the flag keeps the single-tenant default behavior unchanged.
+  (GitHub multi-tenant already selects per-installation tokens via `--repo`;
+  Slack multi-tenant routes inbound events per workspace. Linear now matches.)
+- Also fixes the `setup_bots.py github --public` manifest (drop the
+  auto-delivered `installation`/`installation_repositories` from
+  `default_events`, and capture the manifest-conversion code on the localhost
+  callback) — see PR #96.
+
 ## 0.23.0
 
 - Multi-tenant **GitHub** and **Linear**, mirroring the 0.22.0 Slack pattern so

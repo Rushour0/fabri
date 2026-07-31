@@ -751,6 +751,7 @@ def cmd_repo_run(args: argparse.Namespace) -> None:
         config=args.config,
         test_cmd=args.test_cmd,
         setup_cmd=args.setup_cmd,
+        linear_workspace=args.linear_workspace,
     )
     print(json.dumps(result, indent=2, default=str))
     if not result.get("ok"):
@@ -1671,6 +1672,10 @@ def main() -> None:
     p_repo_run.add_argument(
         "--setup-cmd", default=None,
         help="Optional setup command run in the clone before the crew")
+    p_repo_run.add_argument(
+        "--linear-workspace", default=None,
+        help="Linear workspace id to use its connected token (resolve_secret 'linear:<id>'); "
+             "defaults to the single-tenant 'linear:default' env token")
     p_repo_run.set_defaults(func=cmd_repo_run)
 
     p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
