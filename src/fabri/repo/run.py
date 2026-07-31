@@ -56,6 +56,7 @@ def run_repo_flow(
     config: str | os.PathLike[str],
     test_cmd: str | None = None,
     setup_cmd: str | None = None,
+    linear_workspace: str | None = None,
     session_id: str | None = None,
     workspace: str | os.PathLike[str] | None = None,
     store: object | None = None,
@@ -106,7 +107,9 @@ def run_repo_flow(
 
     # 1. resolve_creds
     try:
-        linear_token, github_auth = _gate_resolve_creds(store, known_tokens, repo)
+        linear_token, github_auth = _gate_resolve_creds(
+            store, known_tokens, repo, linear_workspace
+        )
         gate = GateResult(
             "resolve_creds",
             True,
@@ -365,8 +368,12 @@ def _gate_resolve_creds(
     store: object | None,
     known_tokens: list[str],
     repo: str | None,
+    linear_workspace: str | None = None,
 ) -> tuple[str, object]:
-    token = resolve_secret("linear:default", store)
+    # Select the connecting workspace's own Linear token when a workspace is
+    # given (multi-tenant), otherwise the single-tenant default from env.
+    linear_ref = f"linear:{linear_workspace}" if linear_workspace else "linear:default"
+    token = resolve_secret(linear_ref, store)
     if not isinstance(token, str) or not token:
         raise RepoRunFailed("resolve_creds", "Linear credential was empty")
     known_tokens.append(token)

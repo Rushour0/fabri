@@ -391,3 +391,41 @@ def test_happy_path_pushes_idempotent_branch_and_opens_pr_without_token_leaks(
     assert "1712345678.900" in bundle_text
     assert "https://slack.example/archives/C-REPO-RUN/p1712345678900" in bundle_text
     assert "diff --git a/widget.py b/widget.py" in bundle_text
+
+
+# --- multi-tenant Linear token selection ------------------------------------
+
+def _stub_gh_auth(monkeypatch):
+    monkeypatch.setattr(
+        repo_run, "build_github_auth",
+        lambda store, repo=None: SimpleNamespace(get_token=lambda: GITHUB_TOKEN),
+    )
+
+
+def _record_resolve(monkeypatch, seen, returns):
+    def _resolve(ref, store=None):
+        seen["ref"] = ref
+        return returns
+    monkeypatch.setattr(repo_run, "resolve_secret", _resolve)
+
+
+def test_resolve_creds_uses_per_workspace_linear_token(monkeypatch):
+    seen = {}
+    _record_resolve(monkeypatch, seen, "lin-ws-token")
+    _stub_gh_auth(monkeypatch)
+
+    token, _ = repo_run._gate_resolve_creds(None, [], "acme/widgets", "ws-9")
+
+    assert seen["ref"] == "linear:ws-9"
+    assert token == "lin-ws-token"
+
+
+def test_resolve_creds_defaults_to_single_tenant_linear_token(monkeypatch):
+    seen = {}
+    _record_resolve(monkeypatch, seen, "lin-default")
+    _stub_gh_auth(monkeypatch)
+
+    token, _ = repo_run._gate_resolve_creds(None, [], "acme/widgets", None)
+
+    assert seen["ref"] == "linear:default"
+    assert token == "lin-default"
