@@ -4,6 +4,14 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.23.2
+
+- GitHub App auth accepts the private key as **inline PEM content**, not only a
+  file path: if `FABRI_CRED_GITHUB_PRIVATE_KEY` contains `-----BEGIN` it is used
+  directly (with literal `\n` expanded), otherwise it is treated as a path. This
+  makes container/env-only deployments (e.g. Coolify) work without mounting a
+  key file — the whole GitHub-App config can live in environment variables.
+
 ## 0.23.1
 
 - `fabri repo run` can now act as the *connecting* Linear workspace: a new

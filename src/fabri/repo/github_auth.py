@@ -92,12 +92,18 @@ class AppAuth:
                 if cached:
                     sensitive_values.append(cached[0])
 
-            pem_path = resolve_secret("github:private_key", self._store)
+            pem = resolve_secret("github:private_key", self._store)
 
             if not inst.isdecimal():
                 raise ValueError("GitHub installation ID must be numeric")
 
-            private_key = Path(pem_path).read_text(encoding="utf-8")
+            # Accept the key either as inline PEM content (container-friendly:
+            # the whole value lives in an env var, with literal "\n" allowed) or
+            # as a path to a PEM file on disk (the setup_bots.py local flow).
+            if "-----BEGIN" in pem:
+                private_key = pem.replace("\\n", "\n")
+            else:
+                private_key = Path(pem).read_text(encoding="utf-8")
             jwt_token = _encode_app_jwt(app_id, private_key, now)
             sensitive_values.append(jwt_token)
 
