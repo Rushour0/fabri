@@ -283,7 +283,11 @@ def setup_github(public: bool = False) -> None:
     manifest = {
         "name": app_name,
         "url": "https://github.com/Rushour0/fabri",
-        "redirect_url": f"{base}/github/setup",
+        # redirect_url captures the one-time manifest-conversion `code` — it must
+        # hit the LOCAL capture server (localhost:8976) that setup_bots runs.
+        "redirect_url": f"{CALLBACK_BASE}/callback/github",
+        # setup_url is the post-install redirect that carries installation_id to
+        # the running fabri server.
         "setup_url": f"{base}/github/setup",
         "hook_attributes": {"url": f"{base}/github/webhook", "active": True},
         "setup_on_update": True,
@@ -294,7 +298,11 @@ def setup_github(public: bool = False) -> None:
             "issues": "write",
             "metadata": "read",
         },
-        "default_events": ["installation", "installation_repositories"],
+        # `installation` / `installation_repositories` are app-lifecycle events
+        # GitHub delivers to every App's webhook automatically; they are not
+        # permission-gated subscribable events, so listing them in default_events
+        # makes GitHub reject the manifest. Leave empty — they still arrive.
+        "default_events": [],
     }
     # GitHub requires the manifest submitted as a POST form. Auto-submit it.
     form = f"""<!doctype html><body onload="document.forms[0].submit()">
