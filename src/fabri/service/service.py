@@ -40,6 +40,8 @@ from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, 
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
+from fabri.service.surfaces.github import GitHubAdapter
+from fabri.service.surfaces.linear import LinearAdapter
 from fabri.service.surfaces.registry import SurfaceRegistry
 from fabri.service.surfaces.slack import SlackAdapter
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
@@ -171,6 +173,10 @@ class FabriService:
         self.surfaces = SurfaceRegistry()
         if self._slack_cfg.get("events_enabled"):
             self.surfaces.register(SlackAdapter(self._slack_cfg, self))
+        if os.environ.get("GITHUB_APP_WEBHOOK_SECRET"):
+            self.surfaces.register(GitHubAdapter(self))
+        if os.environ.get("LINEAR_WEBHOOK_SECRET"):
+            self.surfaces.register(LinearAdapter(self))
         self.sync_hook: FileSyncHook = sync_hook or NoOpSyncHook()
         self.command_builder = command_builder
         self._runs: dict[str, RunHandle] = {}

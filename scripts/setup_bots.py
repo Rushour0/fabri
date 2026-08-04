@@ -223,7 +223,9 @@ def setup_github(public: bool = False) -> None:
                 "issues": "write",
                 "metadata": "read",
             },
-            "default_events": [],
+            # issue_comment carries `/fabri run <ref> <task>`; the installation
+            # lifecycle events arrive without being listed.
+            "default_events": ["issue_comment"],
         }
         # GitHub requires the manifest submitted as a POST form. Auto-submit it.
         form = f"""<!doctype html><body onload="document.forms[0].submit()">
@@ -300,9 +302,12 @@ def setup_github(public: bool = False) -> None:
         },
         # `installation` / `installation_repositories` are app-lifecycle events
         # GitHub delivers to every App's webhook automatically; they are not
-        # permission-gated subscribable events, so listing them in default_events
-        # makes GitHub reject the manifest. Leave empty — they still arrive.
-        "default_events": [],
+        # permission-gated subscribable events, so listing them here makes
+        # GitHub reject the manifest. `issue_comment` IS subscribable, and is
+        # what carries `/fabri run <ref> <task>` from an issue or PR thread.
+        # An App that already exists flips this in its own settings page —
+        # events, unlike permissions, need no reinstall.
+        "default_events": ["issue_comment"],
     }
     # GitHub requires the manifest submitted as a POST form. Auto-submit it.
     form = f"""<!doctype html><body onload="document.forms[0].submit()">

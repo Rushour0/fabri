@@ -7,6 +7,12 @@ from fabri.service import github_app
 
 
 def handle_github_event(raw_body: bytes, headers, service) -> tuple[int, str, dict]:
+    """Verify a GitHub delivery and apply it.
+
+    Kept as the install-lifecycle entry point that predates the surface layer;
+    command dispatch from issue comments goes through
+    :class:`fabri.service.surfaces.github.GitHubAdapter`.
+    """
     secret = os.environ.get("GITHUB_APP_WEBHOOK_SECRET")
     signature_header = headers.get("X-Hub-Signature-256", "")
     if not secret or not github_app.verify_webhook_signature(
@@ -19,7 +25,16 @@ def handle_github_event(raw_body: bytes, headers, service) -> tuple[int, str, di
     except (TypeError, ValueError):
         return (400, "", {})
 
-    event = headers.get("X-GitHub-Event", "")
+    apply_install_lifecycle(headers.get("X-GitHub-Event", ""), payload, service)
+    return (200, "", {})
+
+
+def apply_install_lifecycle(event: str, payload: dict, service) -> None:
+    """Record what an installation event says about which repos we can reach.
+
+    Shared by the legacy handler and the GitHub adapter so the two can never
+    drift on what an install means.
+    """
     inst = payload.get("installation") or {}
     iid = str(inst.get("id"))
     acct = inst.get("account") or {}
@@ -38,13 +53,13 @@ def handle_github_event(raw_body: bytes, headers, service) -> tuple[int, str, di
                 account_type=acct.get("type"),
                 repos=repos,
             )
-            return (200, "", {})
+            return
 
         if action in {"deleted", "suspend"}:
             service.github_install_store.delete(iid)
-            return (200, "", {})
+            return
 
-        return (200, "", {})
+        return
 
     if event == "installation_repositories":
         row = service.github_install_store.get(iid)
@@ -76,6 +91,6 @@ def handle_github_event(raw_body: bytes, headers, service) -> tuple[int, str, di
             account_type=acct.get("type"),
             repos=merged,
         )
-        return (200, "", {})
+        return
 
-    return (200, "", {})
+    return
