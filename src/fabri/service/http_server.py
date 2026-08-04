@@ -47,7 +47,7 @@ from fabri.catalog import catalog_listing
 from fabri.service import github_app, linear_oauth
 from fabri.service import slack_oauth
 from fabri.service.github_events import handle_github_event
-from fabri.service.slack_events import handle_slack_event
+from fabri.service.surfaces import pipeline as surface_pipeline
 from fabri.service.service import FabriService
 from fabri.service.auth import (
     build_clear_cookie,
@@ -315,14 +315,18 @@ class _Handler(BaseHTTPRequestHandler):
         }:
             self._auth_post(self.path.rstrip("/"))
             return
-        if self.path in ("/slack/events", "/slack/events/"):
-            if not self.slack_cfg.get("events_enabled"):
-                self._send_json(404, {"error": f"no route for POST {self.path}"})
-                return
+        # Surface webhooks route from the registry, so landing a new integration
+        # never means editing this server. Slack still 404s when its events
+        # endpoint is disabled -- an unconfigured surface simply has no route.
+        # An embedder may pass a minimal service object with no registry at all;
+        # that means "no surfaces", not a 500.
+        surfaces = getattr(self.service, "surfaces", None)
+        adapter = surfaces.routes().get(self.path) if surfaces is not None else None
+        if adapter is not None:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
-            status, body, extra_headers = handle_slack_event(
-                raw, self.headers, self.service, self.slack_cfg
+            status, body, extra_headers = surface_pipeline.dispatch(
+                adapter, self.service, raw, self.headers
             )
             encoded = body.encode("utf-8")
             self.send_response(status)
@@ -331,6 +335,9 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
             self.wfile.write(encoded)
+            return
+        if self.path in ("/slack/events", "/slack/events/"):
+            self._send_json(404, {"error": f"no route for POST {self.path}"})
             return
         if self.path in ("/github/webhook", "/github/webhook/"):
             length = int(self.headers.get("Content-Length") or 0)

@@ -11,6 +11,8 @@ import pytest
 
 from fabri.service import slack_events
 from fabri.service.slack_events import handle_slack_event, verify_slack_signature
+from fabri.service.surfaces import pipeline
+from fabri.service.surfaces import slack as slack_surface
 
 
 def _signature(secret: str, timestamp: str, body: bytes) -> str:
@@ -19,9 +21,7 @@ def _signature(secret: str, timestamp: str, body: bytes) -> str:
 
 
 def _clear_thread_state() -> None:
-    slack_events._thread_by_session.clear()
-    slack_events._session_by_thread.clear()
-    slack_events._pending.clear()
+    pipeline.reset_state()
 
 
 def test_verify_slack_signature_rejects_tampering_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,12 +43,20 @@ def test_url_verification_needs_no_signature() -> None:
 def test_app_mention_dispatches_once(monkeypatch: pytest.MonkeyPatch) -> None:
     secret = "test-secret"
     monkeypatch.setenv("SLACK_SIGNING_SECRET", secret)
-    slack_events._event_ids.clear()
+    pipeline.reset_state()
     dispatched = threading.Event()
     calls: list[object] = []
 
     class Service:
-        def submit(self, task: str, *, catalog_ref: str | None = None) -> str:
+        def submit(
+            self,
+            task: str,
+            overrides: dict | None = None,
+            *,
+            catalog_ref: str | None = None,
+            origin: dict | None = None,
+            **kwargs: object,
+        ) -> str:
             calls.append(("submit", task, catalog_ref))
             return "session-1"
 
@@ -62,7 +70,7 @@ def test_app_mention_dispatches_once(monkeypatch: pytest.MonkeyPatch) -> None:
             dispatched.set()
         return True
 
-    monkeypatch.setattr(slack_events, "post_slack_message", fake_post)
+    monkeypatch.setattr(slack_surface, "post_slack_message", fake_post)
     payload = {
         "event_id": "Ev-1",
         "event": {
@@ -98,7 +106,7 @@ def test_route_question_posts_to_registered_thread(monkeypatch: pytest.MonkeyPat
         calls.append((cfg, text, channel, thread_ts))
         return True
 
-    monkeypatch.setattr(slack_events, "post_slack_message", fake_post)
+    monkeypatch.setattr(slack_surface, "post_slack_message", fake_post)
 
     assert slack_events.route_question_to_thread(
         {"enabled": True},
@@ -110,7 +118,7 @@ def test_route_question_posts_to_registered_thread(monkeypatch: pytest.MonkeyPat
     )
     assert calls[0][2:] == ("C123", "100.01")
     assert "Reply with one of: Brief / Detailed" in calls[0][1]
-    assert slack_events._pending["session-1"] == {
+    assert pipeline.take_pending_question("session-1") == {
         "question_id": "question-1",
         "options": ["Brief", "Detailed"],
     }
@@ -128,8 +136,8 @@ def test_route_question_opens_owned_channel_thread(monkeypatch: pytest.MonkeyPat
         calls.append(("post", cfg, text, channel, thread_ts))
         return True
 
-    monkeypatch.setattr(slack_events, "open_slack_thread", fake_open)
-    monkeypatch.setattr(slack_events, "post_slack_message", fake_post)
+    monkeypatch.setattr(slack_surface, "open_slack_thread", fake_open)
+    monkeypatch.setattr(slack_surface, "post_slack_message", fake_post)
 
     assert slack_events.route_question_to_thread(
         {"enabled": True, "owned_channel": "COWNED"},
@@ -145,8 +153,10 @@ def test_route_question_opens_owned_channel_thread(monkeypatch: pytest.MonkeyPat
         "New run: write a release note",
     )
     assert calls[1][3:] == ("COWNED", "200.02")
-    assert slack_events._thread_by_session["session-2"] == ("COWNED", "200.02")
-    assert slack_events._session_by_thread[("COWNED", "200.02")] == "session-2"
+    surface, target = pipeline.target_for_session("session-2")
+    assert surface == "slack"
+    assert target.locator == {"channel": "COWNED", "thread_ts": "200.02"}
+    assert pipeline.session_for_target(target) == "session-2"
 
 
 def test_thread_reply_answers_pending_question_and_ignores_other_messages(
@@ -155,10 +165,9 @@ def test_thread_reply_answers_pending_question_and_ignores_other_messages(
     _clear_thread_state()
     acknowledgements: list[tuple[str, str, str | None]] = []
     slack_events.register_thread("session-3", "C123", "300.03")
-    slack_events._pending["session-3"] = {
-        "question_id": "question-3",
-        "options": ["Brief", "Detailed"],
-    }
+    pipeline.set_pending_question(
+        "session-3", {"question_id": "question-3", "options": ["Brief", "Detailed"]}
+    )
 
     class Service:
         def __init__(self) -> None:
@@ -177,13 +186,13 @@ def test_thread_reply_answers_pending_question_and_ignores_other_messages(
         acknowledgements.append((text, channel, thread_ts))
         return True
 
-    monkeypatch.setattr(slack_events, "post_slack_message", fake_post)
+    monkeypatch.setattr(slack_surface, "post_slack_message", fake_post)
     service = Service()
     slack_events.handle_message_event(
         {"channel": "C123", "thread_ts": "300.03", "text": "detailed"}, service
     )
     assert service.calls == [("session-3", "question-3", "detailed", "Detailed")]
-    assert "session-3" not in slack_events._pending
+    assert pipeline.take_pending_question("session-3") is None
     assert acknowledgements == [("Got it.", "C123", "300.03")]
 
     slack_events.handle_message_event(

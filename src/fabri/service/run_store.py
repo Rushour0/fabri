@@ -46,7 +46,8 @@ class RunStore:
                     fleet_id TEXT,
                     label TEXT,
                     user_id TEXT,
-                    terminal_event TEXT
+                    terminal_event TEXT,
+                    origin TEXT
                 )
                 """
             )
@@ -54,6 +55,9 @@ class RunStore:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
             if "user_id" not in columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN user_id TEXT")
+            # Which surface asked for the run (JSON), for existing databases.
+            if "origin" not in columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN origin TEXT")
 
     def is_empty(self) -> bool:
         with self._connect() as connection:
@@ -63,13 +67,14 @@ class RunStore:
         self, *, session_id: str, agency: str, task: str, submitted_at: float,
         thread_id: str | None = None, fleet_id: str | None = None, label: str | None = None,
         user_id: str | None = None,
+        origin: str | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO runs
-                (session_id, agency, task, submitted_at, thread_id, fleet_id, label, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (session_id, agency, task, submitted_at, thread_id, fleet_id, label, user_id),
+                (session_id, agency, task, submitted_at, thread_id, fleet_id, label, user_id, origin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, agency, task, submitted_at, thread_id, fleet_id, label, user_id, origin),
             )
 
     def record_terminal(

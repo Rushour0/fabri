@@ -40,6 +40,8 @@ from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, 
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
+from fabri.service.surfaces.registry import SurfaceRegistry
+from fabri.service.surfaces.slack import SlackAdapter
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
 from fabri.service.tailer import extract_cost, run_trace_path, tail_events
 
@@ -162,6 +164,13 @@ class FabriService:
             self.auth_secret = secret
             db_path = self.auth_cfg.get("db_path") or self.home_root / "auth.db"
             self.user_store = UserStore(db_path)
+        # Which surfaces this server speaks. Slack registers when its events
+        # endpoint is enabled; other adapters register the same way as they
+        # land, and the HTTP layer routes from here rather than from a list of
+        # hardcoded webhook paths.
+        self.surfaces = SurfaceRegistry()
+        if self._slack_cfg.get("events_enabled"):
+            self.surfaces.register(SlackAdapter(self._slack_cfg, self))
         self.sync_hook: FileSyncHook = sync_hook or NoOpSyncHook()
         self.command_builder = command_builder
         self._runs: dict[str, RunHandle] = {}
@@ -215,6 +224,7 @@ class FabriService:
         label: str | None = None,
         catalog_ref: str | None = None,
         user_id: str | None = None,
+        origin: dict | None = None,
     ) -> str:
         """Bind a per-run config, launch the agent, return its ``session_id``.
 
@@ -222,7 +232,9 @@ class FabriService:
         one fan-out batch; ``label`` is a human name for this run within a fleet
         (e.g. an account name). All are opaque tags recorded in the index so
         ``list_sessions`` / fleet roll-ups can reconstruct the grouping; the agent
-        loop itself is unaware of them. When ``catalog_ref`` is supplied, its
+        loop itself is unaware of them. ``origin`` records which surface asked
+        for the run (Slack workspace, GitHub installation, ...) so a result and
+        any mid-run question can find their way back to it. When ``catalog_ref`` is supplied, its
         pre-installed catalog config replaces ``self.template_config`` for this run.
         """
         session_id = str(uuid.uuid4())
@@ -271,6 +283,7 @@ class FabriService:
             "started_ts": round(time.time(), 3),
             "agency": agency,
             "user_id": user_id,
+            "origin": origin,
         }
         self._meta[session_id] = meta
         self._append_index({"event": "submit", **meta})
@@ -283,6 +296,7 @@ class FabriService:
             fleet_id=fleet_id,
             label=label,
             user_id=user_id,
+            origin=json.dumps(origin) if origin else None,
         )
         return session_id
 
@@ -357,6 +371,43 @@ class FabriService:
             )
         return sorted(out, key=lambda f: f.get("started_ts") or 0, reverse=True)
 
+    def _route_question_to_surface(self, session_id: str, question: dict) -> bool:
+        """Ask the run's own surface, whichever that is.
+
+        The service must not know what Slack is: it asks the registry which
+        adapter owns this run and hands the question over. A run started in
+        Studio has no surface, which is what the caller's fallback is for.
+        """
+        from fabri.service import slack_events
+        from fabri.service.surfaces import pipeline
+
+        owner = pipeline.target_for_session(session_id)
+        if owner is not None:
+            adapter = self.surfaces.get(owner[0])
+            if adapter is not None and adapter.capabilities().hitl:
+                if adapter.deliver_question(owner[1], question):
+                    pipeline.set_pending_question(
+                        session_id,
+                        {
+                            "question_id": question.get("question_id", ""),
+                            "options": question.get("options"),
+                        },
+                    )
+                    return True
+                return False
+
+        # No surface owns this run (it started in the browser). Slack keeps its
+        # owned-channel escape hatch, which predates surfaces.
+        return slack_events.route_question_to_thread(
+            self._slack_cfg,
+            session_id,
+            self._meta.get(session_id, {}).get("task", ""),
+            question_id=question.get("question_id", ""),
+            question=question.get("question", ""),
+            options=question.get("options"),
+            default=question.get("default"),
+        )
+
     def _start_ask_listener(self, session_id: str, trace_path: Path) -> AskUserListener:
         _ASK_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
         sock_path = str(_ASK_SOCKET_DIR / f"{session_id[:12]}.sock")
@@ -365,18 +416,7 @@ class FabriService:
             event = {"type": EventType.ASK_USER.value}
             event.update({k: v for k, v in q.items() if v is not None})
             append_trace_event(trace_path, event)
-            from fabri.service import slack_events
-
-            task = self._meta.get(session_id, {}).get("task", "")
-            routed = slack_events.route_question_to_thread(
-                self._slack_cfg,
-                session_id,
-                task,
-                question_id=q.get("question_id", ""),
-                question=q.get("question", ""),
-                options=q.get("options"),
-                default=q.get("default"),
-            )
+            routed = self._route_question_to_surface(session_id, q)
             if not routed:
                 post_ask_user_question(
                     self._slack_cfg,
