@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback } from "react";
-import { SquareKanban } from "lucide-react";
 import { listLinearInstalls, disconnectLinear, type LinearInstall } from "../lib/api";
 import IntegrationSection from "./IntegrationSection";
 
@@ -60,7 +59,7 @@ export default function ConnectLinear({
     <IntegrationSection
       name="Linear"
       blurb="Hand an agency a ticket. It reads the issue, works it, and reports back on the same issue where your team already looks."
-      icon={SquareKanban}
+      brand="linear"
       hue="#5e6ad2"
       handoff={["Assign an issue", "Agency works the ticket", "Issue updated in place"]}
       locked={locked}

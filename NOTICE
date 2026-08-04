@@ -8,3 +8,13 @@ License is provided in the LICENSE file in this distribution.
 Versions 0.6.0 through 0.12.0 were released under the Business Source
 License 1.1; as of this release, all versions of fabri (including those
 retroactively) are governed by the Apache License, Version 2.0.
+
+Third-party assets
+------------------
+
+Fabri Studio's Settings surface renders the Slack, GitHub, and Linear brand
+marks (examples/studio/src/components/BrandMark.tsx). The path data comes from
+Simple Icons (https://github.com/simple-icons/simple-icons), released under
+CC0-1.0. The marks themselves remain trademarks of their respective owners and
+are used solely to identify the service each integration connects to, rendered
+monochrome and unmodified per those owners' brand guidelines.

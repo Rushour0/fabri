@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback } from "react";
-import { MessageSquareText } from "lucide-react";
 import { listSlackInstalls, disconnectSlack, type SlackInstall } from "../lib/api";
 import IntegrationSection from "./IntegrationSection";
 
@@ -60,7 +59,7 @@ export default function ConnectSlack({
     <IntegrationSection
       name="Slack"
       blurb="Run an agency from a channel. When an agent needs a decision it can't make, it asks in the thread and waits for you."
-      icon={MessageSquareText}
+      brand="slack"
       hue="#36c5f0"
       handoff={["Message the bot", "Agency runs, cost shown", "Answer lands in thread"]}
       locked={locked}

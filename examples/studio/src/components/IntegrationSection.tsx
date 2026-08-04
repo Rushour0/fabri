@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { ArrowRight, type LucideIcon } from "lucide-react";
+import { ArrowRight } from "lucide-react";
+import BrandMark, { type BrandId } from "./BrandMark";
 
 /** The three beats of a handoff: where it starts, what fabri does, what lands back. */
 export type Handoff = [string, string, string];
@@ -15,7 +16,7 @@ export type Handoff = [string, string, string];
 export default function IntegrationSection({
   name,
   blurb,
-  icon: Icon,
+  brand,
   hue,
   handoff,
   locked,
@@ -25,8 +26,9 @@ export default function IntegrationSection({
 }: {
   name: string;
   blurb: string;
-  icon: LucideIcon;
-  /** The provider's hue, used for its mark and handoff line only. */
+  /** Which brand mark to render — the provider's own, monochrome. */
+  brand: BrandId;
+  /** The provider's hue, used for the card's edge and handoff line only. */
   hue: string;
   handoff: Handoff;
   locked: boolean;
@@ -40,7 +42,7 @@ export default function IntegrationSection({
     <section className="integration" style={{ ["--brand" as string]: hue }}>
       <div className="integration__head">
         <span className="integration__mark" aria-hidden>
-          <Icon size={17} strokeWidth={1.8} />
+          <BrandMark brand={brand} size={16} />
         </span>
         <h3 className="integration__name">{name}</h3>
       </div>

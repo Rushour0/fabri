@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback } from "react";
-import { GitPullRequest } from "lucide-react";
 import { getGitHubAppInfo, listGitHubInstalls, disconnectGitHub, type GitHubInstall } from "../lib/api";
 import IntegrationSection from "./IntegrationSection";
 
@@ -76,7 +75,7 @@ export default function ConnectGitHub({
     <IntegrationSection
       name="GitHub"
       blurb="Point an agency at a repo. It reads the code, does the work on a branch, and comes back with a pull request to review."
-      icon={GitPullRequest}
+      brand="github"
       hue="#9d8cff"
       handoff={["Give it a repo task", "Agency edits a branch", "Pull request opened"]}
       locked={locked}
