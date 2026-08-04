@@ -4,6 +4,45 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.24.0
+
+**Run a roster entry from the tools your team already uses.**
+
+- New **surface layer** (`fabri.service.surfaces`): one adapter contract, one
+  shared pipeline. An adapter knows how to talk to its own service — verify a
+  delivery, classify it, deliver a result — and nothing else. Replay protection,
+  the command grammar, catalog validation, quota, cost clamping, run-origin
+  recording, and disabling `ask_user` where there is no one to ask all live in
+  the pipeline, so a new integration cannot ship without them.
+- **Slack**: `@fabri run <ref> <task>` runs that catalog entry, `@fabri list`
+  shows what is available, and the result comes back in-thread with its cost.
+  Previously every mention ran one server-configured agency with the whole
+  message as its prompt — and in catalog mode that agency was unset, so mentions
+  ran the framework default. A mention with no verb keeps the old behaviour.
+- **GitHub**: `/fabri run <ref> <task>` in an issue or pull-request comment runs
+  the entry and replies on the thread. The App manifest now subscribes to
+  `issue_comment`; it previously subscribed to nothing, so content events were
+  never delivered. Existing Apps flip this in their settings — events, unlike
+  permissions, need no reinstall.
+- **Linear**: label an issue `fabri:<ref>` and that entry runs with the issue as
+  its task, reporting back as a comment. Set `LINEAR_WEBHOOK_SECRET` and point a
+  Linear webhook at `/linear/webhook`.
+- **Limits, enforced before a run launches**: per-tenant concurrency, runs per
+  day, spend per day, and a global daily budget, all counted from the run store
+  so a restart is not a fresh budget. Surface-started runs are clamped to the
+  lower of the entry's own ceiling and a per-run cap, so a $20 company run
+  started from a chat message cannot happen. Tune with
+  `FABRI_SURFACE_MAX_CONCURRENT`, `FABRI_SURFACE_MAX_RUNS_PER_DAY`,
+  `FABRI_SURFACE_MAX_USD_PER_DAY`, `FABRI_SURFACE_GLOBAL_USD_PER_DAY`,
+  `FABRI_SURFACE_MAX_COST_PER_RUN`.
+- Runs record their **origin** (surface, tenant, reply locator) in the run store.
+- A Linear workspace with no stored install now fails closed rather than falling
+  back to the server's own credential, which would have posted one tenant's run
+  into another tenant's workspace.
+- `slack_events` keeps its public names as a shim, and the HTTP server routes
+  webhooks from the registry instead of hardcoded paths, so adding a surface
+  means registering an adapter.
+
 ## 0.23.5
 
 - **Security: a run no longer inherits the service's environment.** `launch_run`
