@@ -1,7 +1,15 @@
 import { useEffect, useState, useCallback } from "react";
+import { MessageSquareText } from "lucide-react";
 import { listSlackInstalls, disconnectSlack, type SlackInstall } from "../lib/api";
+import IntegrationSection from "./IntegrationSection";
 
-export default function ConnectSlack() {
+export default function ConnectSlack({
+  locked = false,
+  onRequireAuth = () => {},
+}: {
+  locked?: boolean;
+  onRequireAuth?: () => void;
+}) {
   const [installs, setInstalls] = useState<SlackInstall[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -20,8 +28,10 @@ export default function ConnectSlack() {
   }, []);
 
   useEffect(() => {
+    // Signed-out visitors see the pitch, not a 401.
+    if (locked) return;
     void refetch();
-  }, [refetch]);
+  }, [locked, refetch]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -47,13 +57,18 @@ export default function ConnectSlack() {
   };
 
   return (
-    <section>
-      <h2>Slack</h2>
+    <IntegrationSection
+      name="Slack"
+      blurb="Run an agency from a channel. When an agent needs a decision it can't make, it asks in the thread and waits for you."
+      icon={MessageSquareText}
+      hue="#36c5f0"
+      handoff={["Message the bot", "Agency runs, cost shown", "Answer lands in thread"]}
+      locked={locked}
+      onRequireAuth={onRequireAuth}
+      connect={<a href="/slack/install">Connect Slack</a>}
+    >
       {banner === "connected" && <div role="status">Workspace connected</div>}
       {banner === "error" && <div className="error-banner">Could not connect workspace</div>}
-      <p>
-        <a href="/slack/install">Connect Slack</a>
-      </p>
       {loading ? (
         <p>Loading Slack workspaces…</p>
       ) : error ? (
@@ -72,6 +87,6 @@ export default function ConnectSlack() {
           ))}
         </div>
       )}
-    </section>
+    </IntegrationSection>
   );
 }

@@ -4,6 +4,20 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.23.3
+
+- Studio's **Settings surface is now visible signed-out**. It previously
+  rendered only for an authenticated user, so a visitor had no way to learn that
+  fabri connects to Slack, GitHub, and Linear at all — the capability was hidden
+  behind the thing it was meant to sell. Each integration now shows its name,
+  what it does, and the handoff it performs: where a task starts, what the agency
+  does, and what lands back. Only the connect action is gated, and it opens the
+  sign-in screen with integration-specific copy instead of the
+  save-your-history pitch.
+- Signed-out cards skip their authenticated API calls instead of rendering a
+  failed fetch, and a server with no `GITHUB_APP_SLUG` now says the GitHub App
+  is unconfigured rather than silently rendering no connect link.
+
 ## 0.23.2
 
 - GitHub App auth accepts the private key as **inline PEM content**, not only a

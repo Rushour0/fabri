@@ -2092,6 +2092,238 @@ body {
   border-radius: 4px;
 }
 
+/* ---------- settings / integrations ----------
+   Signed-out visitors get the same cards, minus the connect action, so the
+   integrations read as product surface rather than a hidden account feature. */
+.settings {
+  width: 100%;
+  padding: 8px 28px 56px;
+}
+.settings__head {
+  position: relative;
+  margin-bottom: 26px;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  background: radial-gradient(
+      120% 160% at 0% 0%,
+      color-mix(in srgb, var(--accent) 12%, transparent) 0%,
+      transparent 62%
+    ),
+    var(--surface);
+}
+/* A single hairline traced across the header: the handoff, at page scale. */
+.settings__head::after {
+  content: "";
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, var(--accent) 0%, transparent 70%);
+  opacity: 0.5;
+}
+.settings__eyebrow {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.settings__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+.settings__sub {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  max-width: 62ch;
+}
+.settings__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.integration {
+  --brand: var(--accent);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  overflow: hidden;
+  transition: border-color 0.18s var(--ease), transform 0.18s var(--ease),
+    box-shadow 0.18s var(--ease);
+}
+/* The provider's hue enters only here — a thin cap on the card, never a fill. */
+.integration::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--brand) 0%, transparent 78%);
+  opacity: 0.75;
+}
+.integration:hover {
+  border-color: color-mix(in srgb, var(--brand) 34%, var(--border));
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.integration__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.integration__mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand) 26%, transparent);
+}
+.integration__name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.settings__note {
+  margin: 14px 0 0;
+  padding-left: 11px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+/* One quiet action per card: the header already carries the pitch, so the CTA
+   states the next step instead of shouting it three times. */
+.integration__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.integration__cta svg {
+  transition: transform 0.18s var(--ease);
+}
+.integration__cta:hover svg {
+  transform: translateX(2px);
+}
+.integration__cta:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  border-radius: 4px;
+}
+.integration__blurb {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* ---------- handoff route ----------
+   Three beats — start, work, result — connected by the provider's hue. This is
+   the mechanism the integration exists for, so it gets the card's structure. */
+.handoff {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+.handoff__step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 0 14px 0;
+  font-size: 12px;
+  color: var(--text);
+}
+.handoff__step:last-child {
+  padding-bottom: 0;
+}
+.handoff__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 16%, transparent);
+}
+.handoff__step:last-child .handoff__dot {
+  background: transparent;
+  border: 1.5px solid var(--brand);
+  box-shadow: none;
+}
+.handoff__line {
+  position: absolute;
+  left: 3px;
+  top: 13px;
+  width: 1px;
+  height: calc(100% - 13px);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--brand) 70%, transparent) 0%,
+    color-mix(in srgb, var(--brand) 28%, transparent) 100%
+  );
+}
+.handoff__label {
+  line-height: 1.4;
+}
+
+.integration__foot {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.integration__connect {
+  font-size: 13px;
+}
+.integration__connect a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.integration__connect a:hover {
+  border-bottom-color: var(--accent);
+}
+.integration__unavailable,
+.integration__foot p {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+@media (max-width: 720px) {
+  .settings {
+    padding: 8px 16px 48px;
+  }
+  .settings__head {
+    padding: 16px;
+  }
+}
+
 /* ---------- polish pass: depth, hover, motion (the little things) ---------- */
 
 /* Elevated list rows lift a touch on hover so History/Fleet/Questions feel alive. */

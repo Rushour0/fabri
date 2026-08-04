@@ -1,7 +1,15 @@
 import { useEffect, useState, useCallback } from "react";
+import { SquareKanban } from "lucide-react";
 import { listLinearInstalls, disconnectLinear, type LinearInstall } from "../lib/api";
+import IntegrationSection from "./IntegrationSection";
 
-export default function ConnectLinear() {
+export default function ConnectLinear({
+  locked = false,
+  onRequireAuth = () => {},
+}: {
+  locked?: boolean;
+  onRequireAuth?: () => void;
+}) {
   const [installs, setInstalls] = useState<LinearInstall[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -20,8 +28,10 @@ export default function ConnectLinear() {
   }, []);
 
   useEffect(() => {
+    // Signed-out visitors see the pitch, not a 401.
+    if (locked) return;
     void refetch();
-  }, [refetch]);
+  }, [locked, refetch]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -47,13 +57,18 @@ export default function ConnectLinear() {
   };
 
   return (
-    <section>
-      <h2>Linear</h2>
+    <IntegrationSection
+      name="Linear"
+      blurb="Hand an agency a ticket. It reads the issue, works it, and reports back on the same issue where your team already looks."
+      icon={SquareKanban}
+      hue="#5e6ad2"
+      handoff={["Assign an issue", "Agency works the ticket", "Issue updated in place"]}
+      locked={locked}
+      onRequireAuth={onRequireAuth}
+      connect={<a href="/linear/install">Connect Linear</a>}
+    >
       {banner === "connected" && <div role="status">Linear workspace connected</div>}
       {banner === "error" && <div className="error-banner">Could not connect Linear workspace</div>}
-      <p>
-        <a href="/linear/install">Connect Linear</a>
-      </p>
       {loading ? (
         <p>Loading Linear workspaces…</p>
       ) : error ? (
@@ -72,6 +87,6 @@ export default function ConnectLinear() {
           ))}
         </div>
       )}
-    </section>
+    </IntegrationSection>
   );
 }

@@ -2,13 +2,34 @@ import { useState, type CSSProperties, type FormEvent } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { login, signup } from "../lib/auth";
 
+/** Why the visitor landed here, so the pitch matches the action they took. */
+export type AuthReason = "history" | "integrations";
+
+const REASON_COPY: Record<AuthReason, { title: string; blurb: string; skip: string }> = {
+  history: {
+    title: "Save your history",
+    blurb:
+      "Sign in to save conversations and reopen them later. You can keep using Studio without an account.",
+    skip: "Continue without saving",
+  },
+  integrations: {
+    title: "Connect your workspace",
+    blurb:
+      "Integrations attach to an account, so Slack, GitHub, and Linear need one. Studio itself stays usable without signing in.",
+    skip: "Not now",
+  },
+};
+
 export function LoginScreen({
   onAuthed,
   onContinueAsGuest,
+  reason = "history",
 }: {
   onAuthed: (email: string) => void;
   onContinueAsGuest: () => void;
+  reason?: AuthReason;
 }) {
+  const copy = REASON_COPY[reason];
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -56,10 +77,10 @@ export function LoginScreen({
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 20, fontSize: 16, fontWeight: 600 }}>
           <span className="header__logo" aria-hidden />
-          <span>Save your history</span>
+          <span>{copy.title}</span>
         </div>
         <p style={{ margin: "-8px 0 18px", color: "var(--text-dim)", fontSize: 12.5, lineHeight: 1.5, textAlign: "center" }}>
-          Sign in to save conversations and reopen them later. You can keep using Studio without an account.
+          {copy.blurb}
         </p>
         <div className="tabs" aria-label="Authentication mode" style={{ marginBottom: 18 }}>
           <button
@@ -125,7 +146,7 @@ export function LoginScreen({
           {submitting ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
         </button>
         <button className="btn" style={{ width: "100%", marginTop: 8 }} type="button" onClick={onContinueAsGuest}>
-          Continue without saving
+          {copy.skip}
         </button>
       </form>
     </main>

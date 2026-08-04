@@ -1,7 +1,15 @@
 import { useEffect, useState, useCallback } from "react";
+import { GitPullRequest } from "lucide-react";
 import { getGitHubAppInfo, listGitHubInstalls, disconnectGitHub, type GitHubInstall } from "../lib/api";
+import IntegrationSection from "./IntegrationSection";
 
-export default function ConnectGitHub() {
+export default function ConnectGitHub({
+  locked = false,
+  onRequireAuth = () => {},
+}: {
+  locked?: boolean;
+  onRequireAuth?: () => void;
+}) {
   const [installs, setInstalls] = useState<GitHubInstall[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -21,10 +29,15 @@ export default function ConnectGitHub() {
   }, []);
 
   useEffect(() => {
+    // Signed-out visitors see the pitch, not a 401.
+    if (locked) return;
     void refetch();
-  }, [refetch]);
+  }, [locked, refetch]);
 
   useEffect(() => {
+    // The install URL comes from an authenticated endpoint, so signed-out
+    // visitors never have one — the section shows the sign-in prompt instead.
+    if (locked) return;
     const loadAppInfo = async () => {
       try {
         const info = await getGitHubAppInfo();
@@ -34,7 +47,7 @@ export default function ConnectGitHub() {
       }
     };
     void loadAppInfo();
-  }, []);
+  }, [locked]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -60,15 +73,26 @@ export default function ConnectGitHub() {
   };
 
   return (
-    <section>
-      <h2>GitHub</h2>
+    <IntegrationSection
+      name="GitHub"
+      blurb="Point an agency at a repo. It reads the code, does the work on a branch, and comes back with a pull request to review."
+      icon={GitPullRequest}
+      hue="#9d8cff"
+      handoff={["Give it a repo task", "Agency edits a branch", "Pull request opened"]}
+      locked={locked}
+      onRequireAuth={onRequireAuth}
+      connect={
+        installUrl ? (
+          <a href={installUrl}>Connect GitHub</a>
+        ) : (
+          <span className="integration__unavailable">
+            GitHub App not configured on this server.
+          </span>
+        )
+      }
+    >
       {banner === "connected" && <div role="status">GitHub installation connected</div>}
       {banner === "error" && <div className="error-banner">Could not connect GitHub installation</div>}
-      {installUrl && (
-        <p>
-          <a href={installUrl}>Connect GitHub</a>
-        </p>
-      )}
       {loading ? (
         <p>Loading GitHub installations…</p>
       ) : error ? (
@@ -87,6 +111,6 @@ export default function ConnectGitHub() {
           ))}
         </div>
       )}
-    </section>
+    </IntegrationSection>
   );
 }

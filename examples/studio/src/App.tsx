@@ -18,7 +18,7 @@ import ConnectLinear from "./components/ConnectLinear";
 import { useHashRoute, type Surface } from "./hooks/useHashRoute";
 import { listQuestions, getCompany, getCatalog, onUnauthorized, type Company, type Catalog } from "./lib/api";
 import { getMe, logout, type AuthState } from "./lib/auth";
-import { LoginScreen } from "./components/LoginScreen";
+import { LoginScreen, type AuthReason } from "./components/LoginScreen";
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -73,6 +73,12 @@ export default function App() {
   const run = useRunEvents();
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [showAuth, setShowAuth] = useState(false);
+  // Which prompt sent the visitor to the login screen, so its copy matches.
+  const [authReason, setAuthReason] = useState<AuthReason>("history");
+  const requireAuthForIntegrations = () => {
+    setAuthReason("integrations");
+    setShowAuth(true);
+  };
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Tab state lives in the URL hash (#conversation, #questions, #replay/<id>),
   // so tabs are deep-linkable and browser Back/Forward works.
@@ -223,8 +229,11 @@ export default function App() {
         onContinueAsGuest={() => {
           setAuthState("anon");
           setShowAuth(false);
-          go("conversation");
+          // From the integrations prompt, "not now" should leave the visitor
+          // where they were rather than yanking them into the thread.
+          if (authReason !== "integrations") go("conversation");
         }}
+        reason={authReason}
       />
     );
   }
@@ -282,14 +291,14 @@ export default function App() {
                 Fleet
               </button>
             )}
-            {hasAccountAccess && (
-              <button
-                className={"tab" + (surface === "settings" ? " tab--on" : "")}
-                onClick={() => go("settings")}
-              >
-                Settings
-              </button>
-            )}
+            {/* Settings stays visible signed-out: the integrations are part of
+                the pitch, and each one gates its own connect action. */}
+            <button
+              className={"tab" + (surface === "settings" ? " tab--on" : "")}
+              onClick={() => go("settings")}
+            >
+              Settings
+            </button>
             </nav>
             {authEmail && (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -330,9 +339,29 @@ export default function App() {
           <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>
             {hasAccountAccess && surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
             {hasAccountAccess && surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
-            {hasAccountAccess && surface === "settings" && <ConnectSlack />}
-            {hasAccountAccess && surface === "settings" && <ConnectGitHub />}
-            {hasAccountAccess && surface === "settings" && <ConnectLinear />}
+            {surface === "settings" && (
+              <div className="settings">
+                <div className="settings__head">
+                  <p className="settings__eyebrow">Integrations</p>
+                  <h2 className="settings__title">Put an agency where the work already is</h2>
+                  <p className="settings__sub">
+                    The agents you run here can also work in the tools your team already uses. Each
+                    one keeps the same behaviour: it shows its plan, tracks its cost, and asks you
+                    when it needs a decision.
+                  </p>
+                  {!hasAccountAccess && (
+                    <p className="settings__note">
+                      Connecting a workspace needs an account. Everything below is what you get.
+                    </p>
+                  )}
+                </div>
+                <div className="settings__grid">
+                  <ConnectSlack locked={!hasAccountAccess} onRequireAuth={requireAuthForIntegrations} />
+                  <ConnectGitHub locked={!hasAccountAccess} onRequireAuth={requireAuthForIntegrations} />
+                  <ConnectLinear locked={!hasAccountAccess} onRequireAuth={requireAuthForIntegrations} />
+                </div>
+              </div>
+            )}
             {hasAccountAccess && surface === "replay" && replayId && (
               <RunReplay key={replayId} sessionId={replayId} onBack={() => go(replayFrom)} />
             )}
