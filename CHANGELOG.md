@@ -4,6 +4,14 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.23.4
+
+- Studio's integration cards render the real **Slack, GitHub, and Linear brand
+  marks** instead of generic glyphs, so the surface that exists to say "fabri
+  connects to these tools" actually shows them. Path data comes from Simple
+  Icons (CC0-1.0, attributed in `NOTICE`); the marks render monochrome and
+  unmodified, with the provider hue kept on the tile and handoff line.
+
 ## 0.23.3
 
 - Studio's **Settings surface is now visible signed-out**. It previously
