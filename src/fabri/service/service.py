@@ -28,6 +28,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from threading import Lock
 
+import yaml
+
 from fabri.config import ConfigError, load_config
 from fabri.events import EventType
 from fabri.memory.output import split_agent_output
@@ -49,6 +51,47 @@ _LOG = logging.getLogger("fabri")
 # A host may swap how the agent is launched (tests point this at a fake script).
 # Signature: (task, config_path, session_id, fabri_home) -> argv.
 CommandBuilder = Callable[[str, Path, str, Path], Sequence[str]]
+
+
+def _api_key_envs(config: Mapping | None) -> tuple[str, ...]:
+    """Every ``api_key_env`` named anywhere in a config mapping.
+
+    A config declares its provider credential per role (``llm.api_key_env``, and
+    again under each agent/specialist), so walking it is the only reliable way
+    to know which variables a run needs. Used to re-admit exactly those names
+    into the run's otherwise-allowlisted environment.
+    """
+    found: list[str] = []
+
+    def walk(node) -> None:
+        if isinstance(node, Mapping):
+            value = node.get("api_key_env")
+            if isinstance(value, str) and value:
+                found.append(value)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+
+    walk(config)
+    return tuple(dict.fromkeys(found))
+
+
+def _bound_api_key_envs(config_path: Path) -> tuple[str, ...]:
+    """``_api_key_envs`` over the run's own bound config on disk.
+
+    The template is a *path*, and overrides merge onto its raw YAML, so the
+    written ``run.yaml`` is the only place the run's effective provider keys are
+    all visible. A malformed file is not this function's problem -- the child
+    will fail loudly on it -- so we degrade to "no extra keys" rather than
+    breaking the launch here.
+    """
+    try:
+        with open(config_path) as fh:
+            return _api_key_envs(yaml.safe_load(fh) or {})
+    except (OSError, yaml.YAMLError):
+        return ()
 
 
 class PersistedRunUnavailableError(RuntimeError):
@@ -213,6 +256,10 @@ class FabriService:
             session_id=session_id,
             command=command,
             env={"FABRI_ASK_USER_SOCKET": listener.socket_path},
+            # The child env is an allowlist (launcher.build_child_env), so a crew
+            # naming a provider key the launcher has never heard of would lose
+            # it. Re-admit exactly the keys this run's own config asks for.
+            allow_env=_bound_api_key_envs(config_path),
         )
         self._runs[session_id] = handle
         meta = {

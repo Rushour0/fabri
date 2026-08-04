@@ -4,6 +4,29 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.23.5
+
+- **Security: a run no longer inherits the service's environment.** `launch_run`
+  built the child env as `{**os.environ}`, so every agent subprocess — including
+  the bundled agencies that enable `bash` — could read `FABRI_AUTH_SECRET`,
+  `FABRI_ADMIN_TOKEN`, `FABRI_INSTALL_DB` (the path to every connected tenant's
+  token, stored in plaintext), `FABRI_CRED_*`, and the Slack / GitHub App /
+  Linear client secrets. The service talks to those providers; an agent never
+  does. The child env is now built from an allowlist in
+  `launcher.build_child_env`: interpreter runtime, TLS trust, proxies,
+  model/embedding caches, the vector store, provider credentials, and the
+  `FABRI_*` knobs that shape a run.
+- An allowlist rather than a denylist, deliberately: a denylist leaks every
+  variable nobody thought of, and deployments add secrets far more often than
+  this file changes. `FabriService.submit` additionally re-admits whatever
+  `api_key_env` names appear in the run's own bound config, so a crew pointing
+  at an unusual provider variable keeps working.
+- Operators who genuinely need a variable in their runs (a self-hosted crew
+  posting to its own Slack via `FABRI_CRED_*`) re-admit it with
+  `FABRI_RUN_ENV_ALLOW=FABRI_CRED_*,MY_TOKEN` — comma-separated, trailing `*`
+  for a prefix. `launch_run(..., scrub_env=False)` restores the old behavior for
+  embedders who are not exposing runs to untrusted input.
+
 ## 0.23.4
 
 - Studio's integration cards render the real **Slack, GitHub, and Linear brand
