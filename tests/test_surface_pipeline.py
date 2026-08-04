@@ -268,8 +268,8 @@ def test_surface_without_hitl_disables_ask_user():
     _post(adapter, service, {"id": "d1", "kind": "command", "tenant": "T1",
                              "room": "R1", "text": "run triage the login bug"})
 
-    assert service.submissions[0]["overrides"] == {
-        "tools": {"ask_user": {"enabled": False}}
+    assert service.submissions[0]["overrides"]["tools"] == {
+        "ask_user": {"enabled": False}
     }
 
 
@@ -279,7 +279,9 @@ def test_hitl_surface_leaves_ask_user_alone():
     _post(adapter, service, {"id": "d1", "kind": "command", "tenant": "T1",
                              "room": "R1", "text": "run triage the login bug"})
 
-    assert service.submissions[0]["overrides"] is None
+    # A HITL surface keeps ask_user; the cost clamp still applies (see
+    # tests/test_surface_quota.py).
+    assert "tools" not in service.submissions[0]["overrides"]
 
 
 def test_a_failing_run_reports_back_instead_of_going_silent():

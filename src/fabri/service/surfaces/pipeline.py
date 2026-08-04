@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from threading import Lock, Thread
 from typing import Any
 
+from fabri.service.surfaces import quota
 from fabri.service.surfaces.base import SurfaceAdapter
 from fabri.service.surfaces.types import (
     Command,
@@ -208,11 +209,13 @@ def _run_and_deliver(
 ) -> None:
     adapter.deliver_ack(target, "On it...")
     try:
-        overrides = None
+        # Whatever the entry declares, a run started by a message from a
+        # connected workspace spends no more than the surface cap.
+        overrides = quota.cost_clamp(service, command.catalog_ref)
         if not adapter.capabilities().hitl:
             # No channel to ask a question on: a run that stops to ask would
             # hang until the process exits, so it must not be able to.
-            overrides = {"tools": {"ask_user": {"enabled": False}}}
+            overrides["tools"] = {"ask_user": {"enabled": False}}
         session_id = service.submit(
             command.task,
             overrides,
@@ -280,6 +283,13 @@ def dispatch(
                 service, intro=f"I don't know `{command.catalog_ref}`."
             ),
         )
+        return _OK
+
+    # Quota is checked here, before anything is launched, so no adapter can
+    # forget it and no surface can spend past its share.
+    verdict = quota.check(service, (adapter.name, target.tenant.tenant_id))
+    if not verdict.allowed:
+        adapter.deliver_error(target, verdict.reason)
         return _OK
 
     if run_in_background:
