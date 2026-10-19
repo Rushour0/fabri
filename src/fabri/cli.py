@@ -1478,6 +1478,21 @@ def cmd_decide(args: argparse.Namespace) -> None:
     print(f"cost: {result.cost_text()}  latency: {result.latency_ms:.0f} ms")
 
 
+def _setups_api(args: argparse.Namespace):
+    """Build the Setups API from --setups-root/--setups-config, or None."""
+    root, config = getattr(args, "setups_root", None), getattr(args, "setups_config", None)
+    if root is None and config is None:
+        return None
+    from fabri.service.setups_routes import SetupsApi
+    from fabri.setups import SetupError
+
+    try:
+        return SetupsApi.from_files(root, config)
+    except (SetupError, OSError, ValueError) as exc:
+        print(f"setups error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     """B7: start the embeddable HTTP service. A non-Python host POSTs a task and
     streams events (SSE) without importing fabri. Blocks until Ctrl-C."""
@@ -1485,7 +1500,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
     from fabri.service.service import FabriService
 
     service = FabriService(template_config=args.config, home_root=args.home_root)
-    server = serve_http(service, host=args.host, port=args.port)
+    server = serve_http(service, host=args.host, port=args.port, setups_api=_setups_api(args))
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(
         f"fabri serve listening on http://{bound_host}:{bound_port} "
@@ -1532,7 +1547,8 @@ def cmd_studio(args: argparse.Namespace) -> None:
             sys.exit(1)
         service = FabriService(catalog=catalog, home_root=args.home_root)
         server = serve_http(
-            service, host=args.host, port=args.port, serve_studio=True, catalog=catalog
+            service, host=args.host, port=args.port, serve_studio=True, catalog=catalog,
+            setups_api=_setups_api(args),
         )
     else:
         company = None
@@ -1559,6 +1575,7 @@ def cmd_studio(args: argparse.Namespace) -> None:
             port=args.port,
             serve_studio=True,
             company=company,
+            setups_api=_setups_api(args),
         )
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)
@@ -1957,6 +1974,10 @@ def main() -> None:
     p_serve.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080; 0 = OS-assigned)")
     p_serve.add_argument("--home-root", dest="home_root", default=None,
                          help="Parent dir for per-run FABRI_HOME workspaces (default: $FABRI_HOME/serve or ~/.fabri/serve)")
+    p_serve.add_argument("--setups-root", dest="setups_root", default=None, metavar="DIR",
+                     help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
+    p_serve.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
+                     help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_studio = sub.add_parser(
@@ -1992,6 +2013,10 @@ def main() -> None:
         default=None,
         help="Parent dir for per-run FABRI_HOME workspaces (default: $FABRI_HOME/serve or ~/.fabri/serve)",
     )
+    p_studio.add_argument("--setups-root", dest="setups_root", default=None, metavar="DIR",
+                     help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
+    p_studio.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
+                     help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
     p_studio.set_defaults(func=cmd_studio)
 
     args = parser.parse_args()

@@ -141,7 +141,25 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _setups_dispatch(self, method: str) -> bool:
+        """Serve /setups/* and /tools/* when the server has a SetupsApi."""
+        api = getattr(self.server, "setups_api", None)
+        if api is None or not api.matches(self.path):
+            return False
+        api.handle(self, method)
+        return True
+
+    def do_PUT(self) -> None:  # noqa: N802
+        if not self._setups_dispatch("PUT"):
+            self._send_json(404, {"error": f"no route for PUT {self.path}"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._setups_dispatch("DELETE"):
+            self._send_json(404, {"error": f"no route for DELETE {self.path}"})
+
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
+        if self._setups_dispatch("GET"):
+            return
         parsed = urlsplit(self.path)
         path = parsed.path
         if self.service.auth_enabled and path in ("/auth/me", "/auth/me/"):
@@ -308,6 +326,8 @@ class _Handler(BaseHTTPRequestHandler):
         return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
+        if self._setups_dispatch("POST"):
+            return
         if self.service.auth_enabled and self.path.rstrip("/") in {
             "/auth/signup",
             "/auth/login",
@@ -666,7 +686,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
@@ -704,8 +724,10 @@ class FabriHTTPServer(ThreadingHTTPServer):
         serve_studio: bool = False,
         company: dict | None = None,
         catalog: Mapping[str, dict] | None = None,
+        setups_api: object | None = None,
     ) -> None:
         super().__init__(address, _Handler)
+        self.setups_api = setups_api
         self.service = service
         self.serve_studio = serve_studio
         self.company = company
@@ -720,6 +742,7 @@ def serve_http(
     serve_studio: bool = False,
     company: dict | None = None,
     catalog: Mapping[str, dict] | None = None,
+    setups_api: object | None = None,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
@@ -727,5 +750,6 @@ def serve_http(
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
     """
     return FabriHTTPServer(
-        (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog
+        (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog,
+        setups_api=setups_api,
     )
