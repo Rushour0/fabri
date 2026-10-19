@@ -182,3 +182,24 @@ def test_priced_model_cost_known(monkeypatch):
     usage = LLMUsage(input_tokens=1000, output_tokens=100, model="gpt-5-mini")
     decider, _, _ = _decider(monkeypatch, json.dumps({"intent": "canvas", "urgency": "low", "risky": True}), usage)
     assert all(a.cost_known for a in decider.decide("s", QUESTIONS).values())
+
+
+def test_default_key_env_is_the_one_sent_and_redacted(monkeypatch):
+    # provider openai with no api_key_env: the backend must read OPENAI_API_KEY
+    # (not runtime's GEMINI_API_KEY fallback) and errors must redact that value.
+    from fabri.decide.llm import LLMDecider
+    from fabri.decide import DecideError, Question
+
+    monkeypatch.setenv("OPENAI_API_KEY", "plain-secret-value-123")
+    monkeypatch.setenv("GEMINI_API_KEY", "other-value-456")
+    decider = LLMDecider({"provider": "openai", "model": "gpt-5-mini"})
+    assert decider.llm_cfg["api_key_env"] == "OPENAI_API_KEY"
+
+    class _Boom:
+        def step(self, system, messages):
+            raise RuntimeError("bad key plain-secret-value-123 rejected")
+
+    decider._backend = _Boom()
+    with pytest.raises(DecideError) as info:
+        decider.decide("s", [Question("q", "yesno", "ok?")])
+    assert "plain-secret-value-123" not in str(info.value)

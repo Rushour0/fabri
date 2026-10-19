@@ -52,6 +52,14 @@ that ships.
   common AI-writing tells. The `jev-router` specialists carry the rules as
   their `system_prompt_prefix`. On 24 gpt-5-mini answers the rules cut tells
   from 8.54 to 0.08 per answer (`benchmarks/style/slop_eval.py`).
+- OpenAI backend: gpt-5, gpt-5-mini and gpt-5-nano with function tools now
+  send `reasoning_effort: minimal` instead of `none`, which those models
+  reject with a 400. Dotted GPT-5.x models keep `none`. A new
+  `llm.reasoning_effort` setting overrides the default per config or role.
+- Transient LLM errors are logged with type and status only, never provider
+  text. `LLMDecider` resolves its provider's default key env once, so the key
+  it sends is the key it redacts. A Jev score legend that disagrees with the
+  declared level order now errors the answer instead of being trusted.
 - Agency templates may declare `ENTRY`, the config file named in the
   post-scaffold hint.
 - `benchmarks/jev/`: a 420-item decision benchmark (routing, tool selection,

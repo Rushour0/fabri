@@ -391,8 +391,14 @@ def _score_probabilities(
         if not isinstance(raw_legend, dict):
             raise ValueError(f"legend must be an object, got {type(raw_legend).__name__}")
         for index, label in raw_legend.items():
-            if _level_index(index, len(levels)) is None or label not in levels:
+            level_index = _level_index(index, len(levels))
+            if level_index is None or label not in levels:
                 unknown += 1
+            elif levels[level_index] != label:
+                # We send levels in order, so Jev's legend must echo that order.
+                # A legend that disagrees (e.g. swapped) would silently flip the
+                # decision if we trusted either side, so reject the answer.
+                raise ValueError("score legend does not match the declared level order")
 
     probs: dict[str, float] = {}
     for index, probability in raw_probs.items():

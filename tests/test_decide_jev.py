@@ -829,3 +829,14 @@ def test_real_reconnect_after_server_closes(key):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_score_legend_out_of_order_is_errored(monkeypatch, key):
+    payload = {"model": "typesafe/jev-1.13", "answers": {"u": {
+        "type": "score", "score": 0.1, "legend": {"0": "high", "1": "low"},
+        "probabilities": {"0": 0.9, "1": 0.1}, "confidence": 0.8}},
+        "usage": {"input_tokens": 10, "output_tokens": 1, "cost": 1e-06}}
+    _install(monkeypatch, [payload])
+    q = Question("u", "score", "How urgent?", levels=["low", "high"])
+    out = JevDecider().decide("s", [q])["u"]
+    assert out.value is None and "legend" in out.error

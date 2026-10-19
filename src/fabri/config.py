@@ -482,6 +482,8 @@ def _normalize_llm_roles(cfg: dict) -> dict:
         # other providers; falls back to AWS_REGION / AWS_DEFAULT_REGION at
         # client-build time.
         "aws_region": llm.get("aws_region"),
+        # OpenAI GPT-5 family only: overrides the per-model default effort.
+        "reasoning_effort": llm.get("reasoning_effort"),
     }
 
     # Lift legacy flat keys into a synthetic role override, only when the
@@ -542,6 +544,7 @@ def _normalize_llm_roles(cfg: dict) -> dict:
             "cache_messages": bool(raw.get("cache_messages", parent_defaults["cache_messages"])),
             "base_url": raw.get("base_url") or parent_defaults["base_url"],
             "aws_region": raw.get("aws_region") or parent_defaults["aws_region"],
+            "reasoning_effort": raw.get("reasoning_effort") or parent_defaults["reasoning_effort"],
         }
 
     # `main` is always present; it's the parent llm.* defaults verbatim.
