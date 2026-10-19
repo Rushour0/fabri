@@ -280,6 +280,32 @@ def _run_single_attempt(
             logger.warning("backend %s lacks set_tools(); tool-list filtering will not propagate to the provider", type(llm).__name__)
     else:
         visible_tools = tools.list()
+    visible_tools = list(visible_tools)
+
+    def _refresh_exposed_tools() -> None:
+        # A discovery tool (find_tools / describe_tool) can ask for tools the
+        # retrieval step hid. Add them to the provider tool list so the model
+        # can call them later in this same run.
+        pop = getattr(tools, "pop_exposed", None)
+        if pop is None:
+            return
+        names = pop()
+        if not tool_retrieval_enabled or not names:
+            return
+        shown = {t.name for t in visible_tools}
+        added = [tools.tools[n] for n in names if n in tools.tools and n not in shown]
+        if not added:
+            return
+        visible_tools.extend(added)
+        try:
+            llm.set_tools([
+                {"name": t.name, "description": t.description, "input_schema": t.input_schema or {"type": "object"}}
+                for t in visible_tools
+            ])
+        except AttributeError:
+            pass
+        log_event(session_id, {"type": "tools_exposed", "tools": [t.name for t in added]})
+
     tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in visible_tools)
     system = build_system_prompt(
         context_block,
@@ -710,6 +736,7 @@ def _run_single_attempt(
                         dispatch_stats=dispatch_stats,
                     )
                     item_had_failure |= step_had_failure
+                    _refresh_exposed_tools()
                     item_total_tool_calls += len(response.tool_calls)
                     item_failed_tool_calls += dispatch_stats["failed_calls"]
                     log_event(session_id, {
@@ -1478,6 +1505,15 @@ def _dispatch_tool_calls(
             "args": call.args,
             "result": result,
         }
+        # Log both names when a tool was called by an alias (for example an
+        # OpenAPI operation_id) or when the tool has aliases of its own.
+        canonical_fn = getattr(tools, "canonical_name", None)
+        canonical = canonical_fn(call.name) if canonical_fn else None
+        if canonical:
+            aliases = list(getattr(tools.tools[canonical], "aliases", None) or [])
+            if canonical != call.name or aliases:
+                event["canonical_name"] = canonical
+                event["aliases"] = aliases
         if i in parallel_index_set and call.args.get("parallel_group"):
             event["parallel_group"] = call.args["parallel_group"]
         log_event(session_id, event)

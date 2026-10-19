@@ -1,6 +1,6 @@
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Tokens we'll rewrite to absolute paths if they match a sibling file.
@@ -25,6 +25,13 @@ class ToolManifest:
     input_schema: dict
     output_schema: dict
     timeout_s: float = 10.0
+    # Optional metadata for dynamic tools. `approval` is one of
+    # fabri.tools.approval.APPROVAL_CLASSES (None = the host decides);
+    # `aliases` are extra names the registry resolves to this tool (for
+    # example an OpenAPI operation_id); `title` is a short human label.
+    approval: str | None = None
+    aliases: list[str] = field(default_factory=list)
+    title: str | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> "ToolManifest":
@@ -48,4 +55,7 @@ class ToolManifest:
             input_schema=data.get("input_schema", {}),
             output_schema=data.get("output_schema", {}),
             timeout_s=data.get("timeout_s", 10.0),
+            approval=data.get("approval"),
+            aliases=list(data.get("aliases") or []),
+            title=data.get("title"),
         )
