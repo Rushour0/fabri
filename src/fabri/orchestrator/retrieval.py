@@ -118,6 +118,9 @@ class RetrievalConfig:
     convention_mining_enabled: bool = False
     convention_branch_selection_max_retries: int = 1
     convention_max_tokens: int = 384
+    # `memory.scoped` mapping (budgets, global_collection, default_scope,
+    # llm_classifier). Only read when run_agent receives a memory_scope.
+    scoped: dict | None = None
 
     @classmethod
     def from_mem_cfg(cls, mem_cfg: dict) -> "RetrievalConfig":
@@ -143,6 +146,7 @@ class RetrievalConfig:
                 mem_cfg.get("convention_branch_selection_max_retries", 1)
             ),
             convention_max_tokens=int(mem_cfg.get("convention_max_tokens", 384)),
+            scoped=mem_cfg.get("scoped"),
         )
 
 

@@ -35,6 +35,8 @@ _ORG_PATTERNS = [
     r"\b(?:tool|api|endpoint|service|command)\b.*\b(?:fail|fails|failed|error|timeout|returns?)\b",
     r"\b(?:fail|fails|failed|error|timeout)\b.*\b(?:tool|api|endpoint|service|command)\b",
     r"\b(?:retry|re-read|verify|confirm|check)\b.*\b(?:before|after)\b",
+    r"\b(?:before|after)\b.*\b(?:retry|re-read|verify|confirm|check)\b",
+    r"\b(?:write_file|edit_file|read_file|bash|grep)\b",
 ]
 _USER_RE = [re.compile(p, re.I) for p in _USER_PATTERNS]
 # Org patterns are case-insensitive; the user patterns keep "I" case-insensitive too,

@@ -29,6 +29,7 @@ from fabri.memory.action_mining import (
     observed_max_token_retries,
 )
 from fabri.memory.pruning import ingest_guideline
+from fabri.memory.scopes import MemoryScope, ScopedMemory
 from fabri.memory.recurrence import fingerprint
 from fabri.orchestrator.action_detection import detect_proposed_actions, resolve_action_scope
 from fabri.orchestrator.action_execution import apply_safe_memory_actions
@@ -212,6 +213,31 @@ def _print_dry_run(config: dict, task: str) -> None:
     print(render_dry_run_plan(plan, task=task))
 
 
+def _resolve_memory_scope(args: argparse.Namespace, mem_cfg: dict) -> MemoryScope | None:
+    """Scope for this run: --user-id/--org-id/--project-id override memory.scoped.
+    Returns None (legacy single-collection memory) when neither is set."""
+    flags = {
+        "user_id": getattr(args, "user_id", None),
+        "org_id": getattr(args, "org_id", None),
+        "project_id": getattr(args, "project_id", None),
+    }
+    cfg_scope = MemoryScope.from_config(mem_cfg)
+    if not any(flags.values()):
+        return cfg_scope
+    cfg = mem_cfg.get("scoped") or {}
+    user_id = flags["user_id"] or (cfg_scope.user_id if cfg_scope else cfg.get("user_id"))
+    org_id = flags["org_id"] or (cfg_scope.org_id if cfg_scope else cfg.get("org_id"))
+    if not user_id or not org_id:
+        print("scoped memory needs both --user-id and --org-id (or memory.scoped ids)", file=sys.stderr)
+        sys.exit(2)
+    return MemoryScope(
+        user_id=str(user_id),
+        org_id=str(org_id),
+        project_id=flags["project_id"] or (cfg_scope.project_id if cfg_scope else cfg.get("project_id")),
+        aliases=tuple(cfg_scope.aliases) if cfg_scope else tuple(cfg.get("aliases") or ()),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     # B3: --dry-run inspects the plan with no network — resolve and print before
@@ -227,6 +253,10 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
+    memory_scope = _resolve_memory_scope(args, mem_cfg)
+    scoped_memory = (
+        ScopedMemory.from_config(mem_cfg, memory_scope, store) if memory_scope is not None else None
+    )
 
     tools_cfg = config["tools"]
     applied_memory_actions: list[dict[str, object]] = []
@@ -280,6 +310,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         decompose_llm=llms["decompose_llm"],
         planner_llm=llms["planner_llm"],
         narrator_llm=llms["narrator_llm"],
+        memory_scope=scoped_memory,
         **run_cfg.as_kwargs(),
     )
     if applied_memory_actions:
@@ -322,6 +353,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     entries = []
     if mem_cfg.get("mining_enabled", True):
         compress_llm = build_llm(config, [])
+        if scoped_memory is not None:
+            scoped_memory.classifier_llm = compress_llm
         entries = process_trace(
             session_id,
             store,
@@ -338,6 +371,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             producer_agent_id=config.get("agent", {}).get("name"),
             memory_scope=mem_cfg.get("scope", "agent"),
             config=config,
+            scoped_memory=scoped_memory,
         )
     if mem_cfg.get("mining_enabled", True):
         try:
@@ -356,7 +390,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                     evidence["source_session_ids"] = [session_id]
                 signature = candidate["problem_signature"]
                 ingest_guideline(
-                    store,
+                    scoped_memory.store("org") if scoped_memory is not None else store,
                     action_candidate_text(candidate),
                     session_id=session_id,
                     kind="success_pattern",
@@ -851,6 +885,77 @@ def cmd_memory_stale(args: argparse.Namespace) -> None:
             results.extend({"tier": "global", **d} for d in _report(global_store))
 
     print(json.dumps(results, indent=2))
+
+
+def cmd_memory_promote(args: argparse.Namespace) -> None:
+    """GLOBAL promotion queue. Output carries the de-identified text and a source
+    count only: no org ids, no raw org text."""
+    from fabri.memory import global_promotion as gp
+
+    config = load_config(args.config)
+    mem_cfg = config["memory"]
+    scoped_cfg = mem_cfg.get("scoped") or {}
+    min_orgs = args.min_orgs or int(scoped_cfg.get("min_orgs", gp.DEFAULT_MIN_ORGS))
+    global_collection = scoped_cfg.get("global_collection") or "fabri_global"
+    base = _open_store(mem_cfg)
+
+    if args.approve or args.reject:
+        try:
+            if args.approve:
+                entry = gp.approve(base, args.approve, min_orgs=min_orgs, global_collection=global_collection)
+                print(f"approved: now in {global_collection}: {entry.text}")
+            else:
+                gp.reject(base, args.reject)
+                print("rejected")
+        except (KeyError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.scan:
+        llm = None
+        if args.llm_rewrite or scoped_cfg.get("llm_rewrite"):
+            llm = build_llm(config, [])
+        report = gp.scan_orgs(base, min_orgs=min_orgs, llm=llm, rewrite=llm is not None)
+        print(
+            f"scanned {report.orgs_scanned} org(s): {report.ingested} lesson(s) queued, "
+            f"{report.skipped_unclean} skipped as not clean, {report.skipped_other} skipped as not generic",
+            file=sys.stderr,
+        )
+    candidates = gp.list_candidates(
+        base, min_orgs=min_orgs, status=None if args.show_all else gp.STATUS_PENDING
+    )
+    if not candidates:
+        print(f"no candidates with at least {min_orgs} source orgs")
+        return
+    for c in candidates:
+        print(f"{c.id[:8]}  orgs={c.source_count}  {c.status}  {c.text}")
+
+
+def cmd_memory_forget(args: argparse.Namespace) -> None:
+    """Delete a scope's collection. --org also withdraws the org from GLOBAL
+    candidates; candidates that no longer meet N are dropped."""
+    from fabri.memory import global_promotion as gp
+
+    config = load_config(args.config)
+    mem_cfg = config["memory"]
+    min_orgs = int((mem_cfg.get("scoped") or {}).get("min_orgs", gp.DEFAULT_MIN_ORGS))
+    base = _open_store(mem_cfg)
+    if args.user:
+        dropped = gp.forget_user(base, user_id=args.user)
+        print("user collection deleted" if dropped else "no collection for that user")
+        return
+    report = gp.forget_org(base, org_id=args.org, min_orgs=min_orgs)
+    print("org collection deleted" if report.collection_dropped else "no collection for that org")
+    print(
+        f"candidates: {report.candidates_updated} updated, {report.candidates_dropped} dropped"
+    )
+    if report.approved_below_min:
+        print(
+            f"warning: {report.approved_below_min} approved global lesson(s) now have fewer than "
+            f"{min_orgs} source orgs. Review them.",
+            file=sys.stderr,
+        )
 
 
 def cmd_replay(args: argparse.Namespace) -> None:
@@ -1627,6 +1732,12 @@ def main() -> None:
                        help="Print the resolved config + the tool defs that would be "
                             "sent to the model, then exit without any LLM call (B3). "
                             "Requires no API key.")
+    p_run.add_argument("--user-id", dest="user_id", default=None,
+                       help="Scoped memory: private USER scope id (hashed into the collection name)")
+    p_run.add_argument("--org-id", dest="org_id", default=None,
+                       help="Scoped memory: shared ORG scope id (hashed into the collection name)")
+    p_run.add_argument("--project-id", dest="project_id", default=None,
+                       help="Scoped memory: optional project id (used to strip project names)")
     p_run.set_defaults(func=cmd_run)
 
     p_ingest = sub.add_parser("ingest-traces", help="Synthesize guidelines from a session's trace")
@@ -1690,6 +1801,31 @@ def main() -> None:
                              help="Restrict to this kind (repeatable; default: tactical + strategic)")
     p_mem_stale.add_argument("--limit", type=int, default=None)
     p_mem_stale.set_defaults(func=cmd_memory_stale)
+
+    p_mem_promote = mem_sub.add_parser(
+        "promote",
+        help="List GLOBAL candidates (de-identified, with source-org counts); approve or reject one")
+    p_mem_promote.add_argument("--scan", action="store_true",
+                               help="Read the org collections, de-identify, and update the candidate queue first")
+    p_mem_promote.add_argument("--min-orgs", dest="min_orgs", type=int, default=None,
+                               help="Distinct orgs a lesson must recur in (default memory.scoped.min_orgs, 3)")
+    p_mem_promote.add_argument("--llm-rewrite", dest="llm_rewrite", action="store_true",
+                               help="With --scan: rewrite scrubbed lessons to a generic form with the LLM")
+    p_mem_promote.add_argument("--all", dest="show_all", action="store_true",
+                               help="List approved and rejected candidates too")
+    promote_action = p_mem_promote.add_mutually_exclusive_group()
+    promote_action.add_argument("--approve", metavar="ID", default=None,
+                                help="Write this candidate to the GLOBAL collection")
+    promote_action.add_argument("--reject", metavar="ID", default=None,
+                                help="Reject this candidate; it will not resurface")
+    p_mem_promote.set_defaults(func=cmd_memory_promote)
+
+    p_mem_forget = mem_sub.add_parser(
+        "forget", help="Delete one user's or one org's memory collection")
+    forget_target = p_mem_forget.add_mutually_exclusive_group(required=True)
+    forget_target.add_argument("--user", metavar="USER_ID", default=None)
+    forget_target.add_argument("--org", metavar="ORG_ID", default=None)
+    p_mem_forget.set_defaults(func=cmd_memory_forget)
 
     p_repo = sub.add_parser("repo", help="File issues and draft PRs from a fabri run")
     repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)

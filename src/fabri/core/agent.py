@@ -16,6 +16,7 @@ from fabri.events import EventType, StepReason
 from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
 from fabri.core.structured import parse_response
+from fabri.memory.scopes import MemoryScope, ScopedMemory
 from fabri.memory.store import QdrantMemoryStore
 from fabri.memory.output import split_agent_output
 from fabri.orchestrator.convention_application import validate_branch_selection
@@ -208,6 +209,7 @@ def _run_single_attempt(
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
+    memory_scope: "MemoryScope | ScopedMemory | None" = None,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -245,10 +247,28 @@ def _run_single_attempt(
             },
             "task": task,
         }
-    context_block, retrieval_meta = retrieve_context_with_meta(
-        store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
-        retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
-    )
+    if memory_scope is not None:
+        # Scoped run: merge USER, ORG and GLOBAL top-k (per-scope budgets, every
+        # line tagged). `store` only locates the backend; its own collection is
+        # not read.
+        scoped_memory = (
+            memory_scope
+            if isinstance(memory_scope, ScopedMemory)
+            else ScopedMemory.from_config(
+                {"scoped": (retrieval_config.scoped if retrieval_config else None) or {}},
+                memory_scope,
+                store,
+            )
+        )
+        context_block, retrieval_meta = scoped_memory.retrieve(
+            task, tool_names=[t.name for t in tools.list()],
+            retrieval_config=retrieval_config, session_id=session_id,
+        )
+    else:
+        context_block, retrieval_meta = retrieve_context_with_meta(
+            store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
+            retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
+        )
     retrieved_conventions = retrieval_meta.get("retrieved_conventions")
     # Validation arms on RETRIEVAL, not on the mining flag: an approved
     # convention can only reach this run's prompt deliberately (mined,
@@ -1220,6 +1240,7 @@ def run_agent(
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
+    memory_scope: "MemoryScope | ScopedMemory | None" = None,
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
@@ -1259,6 +1280,7 @@ def run_agent(
         max_parallel_spawns=max_parallel_spawns,
         retrieval_config=retrieval_config,
         retrieved_guidelines_task_precedence=retrieved_guidelines_task_precedence,
+        memory_scope=memory_scope,
     )
     result = _run_single_attempt(task, **base_kwargs)
     if not (repair and repair.get("enabled")):

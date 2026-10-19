@@ -266,6 +266,29 @@ DEFAULT_CONFIG = {
         # (fabri.orchestrator.retrieval); build_memory_store's single-store
         # return contract used by cli/mcp/ingest tooling is unaffected.
         "global_collection": None,
+        # Scoped memory (fabri.memory.scopes): USER / ORG / GLOBAL collections
+        # named from hashed ids. Off by default. The ids can be set here or
+        # passed per run (`fabri run --user-id/--org-id`, or
+        # run_agent(memory_scope=MemoryScope(...))).
+        "scoped": {
+            "enabled": False,
+            "user_id": None,
+            "org_id": None,
+            "project_id": None,
+            # Display names the de-identifier should strip (person, org, project).
+            "aliases": [],
+            # Top-k per scope when retrieval merges the three collections.
+            "budgets": {"user": 2, "org": 3, "global": 2},
+            "global_collection": "fabri_global",
+            # Where a write lands when no rule matches: "org" or "user".
+            "default_scope": "org",
+            # Cheap LLM classifier for writes the rules cannot place.
+            "llm_classifier": False,
+            # Distinct orgs a lesson must recur in before it can be a global candidate.
+            "min_orgs": 3,
+            # Optional LLM rewrite to a generic form, run on already scrubbed text.
+            "llm_rewrite": False,
+        },
         # Memory eviction: cap the total number of stored entries so the
         # collection doesn't grow unboundedly. When set, after each ingest
         # the N lowest-scoring entries are deleted to bring the count back
