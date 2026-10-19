@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 
 from fabri.core.llm import LLMError, LLMUsage
 from fabri.core.structured import parse_response
-from fabri.decide.types import Answer, DecideError, Question, split_evenly
+from fabri.decide.types import Answer, DecideError, Question, sanitize, split_evenly
 
 logger = logging.getLogger(__name__)
 _warned_unpriced: set[str] = set()
@@ -76,18 +77,20 @@ class LLMDecider:
         if not questions:
             return {}
         system, messages = self.build_messages(state, questions)
+        secrets = self._secrets()
         t0 = time.monotonic()
         try:
             resp = self.backend.step(system, messages)
         except LLMError as e:
-            raise DecideError(f"llm decider: {e}") from None
+            raise DecideError(f"llm decider: {sanitize(e, secrets)}") from None
         except Exception as e:  # provider SDK errors (auth, bad request) are not LLMError
-            raise DecideError(f"llm decider: {type(e).__name__}: {e}") from None
+            detail = sanitize(f"{type(e).__name__}: {e}", secrets)
+            raise DecideError(f"llm decider: {detail}") from None
         latency_ms = (time.monotonic() - t0) * 1000.0
 
         usage = resp.usage or LLMUsage()
-        model = usage.model or str(self.llm_cfg["model"])
-        if usage.model is None:
+        model = sanitize(usage.model or str(self.llm_cfg["model"]), secrets)
+        if usage.model != model:
             usage = LLMUsage(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
@@ -102,7 +105,10 @@ class LLMDecider:
         total_cost = priced if priced is not None else 0.0
         if not cost_known and model not in _warned_unpriced:
             _warned_unpriced.add(model)
-            logger.warning("llm decider: cannot price model %r; its cost is unknown and recorded as 0.0", model)
+            logger.warning(
+                "llm decider: cannot price model %r; its cost is unknown and recorded as 0.0",
+                sanitize(model, secrets),
+            )
         n = len(questions)
         in_shares = split_evenly(usage.input_tokens, n)
         out_shares = split_evenly(usage.output_tokens, n)
@@ -116,7 +122,7 @@ class LLMDecider:
             elif q.key not in value:
                 answer.error = "llm response has no answer for this question"
             else:
-                answer.value, answer.error = _coerce(q, value[q.key])
+                answer.value, answer.error = _coerce(q, value[q.key], secrets)
             answer.latency_ms = latency_ms
             answer.input_tokens = in_shares[i]
             answer.output_tokens = out_shares[i]
@@ -125,6 +131,11 @@ class LLMDecider:
             answer.model = model
             out[q.key] = answer
         return out
+
+    def _secrets(self) -> tuple[str, ...]:
+        api_key_env = self.llm_cfg.get("api_key_env")
+        key = os.environ.get(api_key_env) if isinstance(api_key_env, str) else None
+        return (key,) if key else ()
 
 
 def _schema(questions: list[Question]) -> dict:
@@ -137,7 +148,9 @@ def _schema(questions: list[Question]) -> dict:
     return {"type": "object", "required": [q.key for q in questions], "properties": props}
 
 
-def _coerce(q: Question, raw: object) -> tuple[str | bool | None, str | None]:
+def _coerce(
+    q: Question, raw: object, secrets: tuple[str, ...] = ()
+) -> tuple[str | bool | None, str | None]:
     """Accept only a value in the question's allowed set. A yesno answer may
     come back as the strings "true"/"false"; anything else is rejected."""
     if q.kind == "yesno":
@@ -145,8 +158,8 @@ def _coerce(q: Question, raw: object) -> tuple[str | bool | None, str | None]:
             return raw, None
         if isinstance(raw, str) and raw.strip().lower() in ("true", "false"):
             return raw.strip().lower() == "true", None
-        return None, f"llm answered {raw!r}, expected true or false"
+        return None, sanitize(f"llm answered {raw!r}, expected true or false", secrets)
     allowed = q.allowed_values()
     if isinstance(raw, str) and raw in allowed:
         return raw, None
-    return None, f"llm answered {raw!r}, which is not one of {allowed!r}"
+    return None, sanitize(f"llm answered {raw!r}, which is not one of {allowed!r}", secrets)

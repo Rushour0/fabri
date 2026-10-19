@@ -356,6 +356,20 @@ def test_noul_must_be_finite_probability(monkeypatch, key, noul):
     assert a.confidence is None and a.probabilities == {}
 
 
+def test_malformed_provider_value_and_provider_log_redact_api_key(monkeypatch, key, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="fabri.decide.jev"):
+        answer = _one(monkeypatch, YESNO, {"noul": key})
+        payload = {"model": key, "answers": {"q": {"noul": 0.9}}, "usage": {}}
+        _install(monkeypatch, [payload])
+        JevDecider(model=key).decide("s", [YESNO])
+
+    assert key not in (answer.error or "")
+    assert "got str" in (answer.error or "")
+    assert all(key not in record.getMessage() for record in caplog.records)
+
+
 def test_bad_noul_is_escalated_by_cascade(monkeypatch, key):
     from fabri.decide import Answer, CascadeDecider
 
@@ -458,6 +472,19 @@ def test_yesno_threshold_08_means_p_at_least_09(monkeypatch, key):
         assert cascade.needs_fallback(YESNO, a) is escalate, p
 
 
+def test_missing_confidence_uses_normalized_choice_confidence(monkeypatch, key):
+    from fabri.decide import CascadeDecider
+
+    question = Question("c", "choice", "Which?", options={"a": None, "b": None, "c": None})
+    answer = _one(monkeypatch, question, {
+        "choice": "a", "probabilities": {"a": 0.6, "b": 0.2, "c": 0.2},
+    })
+    cascade = CascadeDecider(JevDecider(), JevDecider(), thresholds={"choice": 0.6})
+
+    assert answer.confidence == pytest.approx(0.4)
+    assert cascade.needs_fallback(question, answer) is True
+
+
 def test_template_readme_states_yesno_threshold_as_probability():
     from fabri.agency_templates.jev_router import README
 
@@ -544,6 +571,21 @@ def test_separate_connection_per_thread(monkeypatch, key):
     assert not errors
     assert len(fake.connections) == 4
     assert all(len(c.requests) == 2 for c in fake.connections)  # each thread reused its own
+
+
+def test_acquire_closes_connections_owned_by_finished_threads(monkeypatch, key):
+    fake = _install(monkeypatch, [YESNO_OK] * 21)
+    decider = JevDecider()
+    threads = [threading.Thread(target=decider.decide, args=("s", [YESNO])) for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    decider.decide("s", [YESNO])
+
+    assert len(decider._conns) <= 1
+    assert all(connection.closed for connection in fake.connections[:-1])
 
 
 def test_response_asking_to_close_drops_the_connection(monkeypatch, key):

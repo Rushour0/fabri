@@ -107,6 +107,30 @@ def test_leaf_is_a_copy_and_flag_survives_repeat_runs():
     assert tree.run("s").leaf["requires_approval"] is True
 
 
+def test_mapping_input_and_aliased_leaves_are_copied():
+    shared_leaf = {"agent": "tasks", "requires_approval": True}
+    cfg = {
+        "name": "aliased",
+        "start": "intent",
+        "nodes": {
+            "intent": {
+                "question": {"kind": "choice", "instructions": "Which?", "options": {"a": None, "b": None}},
+                "branches": {"a": {"leaf": shared_leaf}, "b": {"leaf": shared_leaf}},
+            },
+        },
+        "decider": {"kind": "jev"},
+    }
+    tree = DecisionTree.from_yaml(cfg, decider=_Scripted({"intent": ("a", 0.9)}))
+    cfg["nodes"]["intent"]["branches"]["a"]["leaf"]["requires_approval"] = False
+    shared_leaf["agent"] = "compromised"
+
+    a_leaf = tree.nodes["intent"].branches["a"]
+    b_leaf = tree.nodes["intent"].branches["b"]
+    assert a_leaf == {"agent": "tasks", "requires_approval": True}
+    assert b_leaf == {"agent": "tasks", "requires_approval": True}
+    assert a_leaf is not b_leaf
+
+
 def test_false_branch_and_single_node_path():
     tree = DecisionTree.from_yaml(_cfg(), decider=_Scripted({"intent": ("task_create", 0.9),
                                                              "risky_check": (False, 0.9)}))
@@ -257,6 +281,22 @@ def test_cli_decide_invalid_tree_exits_1(tmp_path, monkeypatch, capsys):
         _run_cli(monkeypatch, capsys, ["decide", "--tree", str(tree_path), "--state", "x"])
     assert exc.value.code == 1
     assert "missing node 'ghost'" in capsys.readouterr().err
+
+
+def test_cli_decide_sanitizes_provider_error(tmp_path, monkeypatch, capsys):
+    secret = "sk-cli-SECRET-123"
+
+    class _Boom:
+        def decide(self, state, questions):
+            raise DecideError(f"Authorization: Bearer {secret}")
+
+    monkeypatch.setattr("fabri.decide.tree.build_decider", lambda cfg: _Boom())
+    tree_path = tmp_path / "tree.yaml"
+    tree_path.write_text(TREE_YAML)
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(monkeypatch, capsys, ["decide", "--tree", str(tree_path), "--state", "x"])
+    assert exc.value.code == 1
+    assert secret not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------- review fixes

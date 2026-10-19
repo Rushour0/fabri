@@ -144,7 +144,7 @@ class DecisionTree:
         """Load from a YAML path or an already-parsed mapping. `decider`
         overrides the config's ``decider`` block (handy in tests)."""
         if isinstance(source, dict):
-            data = source
+            data = copy.deepcopy(source)
         else:
             try:
                 data = yaml.safe_load(Path(source).read_text())
@@ -233,7 +233,7 @@ def _parse_branches(name: str, question: Question, raw: object) -> dict[str, str
         if isinstance(target, str):
             branches[k] = target
         elif isinstance(target, dict) and set(target) == {"leaf"} and isinstance(target["leaf"], dict):
-            branches[k] = target["leaf"]
+            branches[k] = copy.deepcopy(target["leaf"])
         else:
             raise TreeError(
                 f"node {name!r}: branch {k!r} must be a node name or {{leaf: {{...}}}}"

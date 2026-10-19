@@ -69,10 +69,11 @@ decider:
 start: intent
 
 # Non-acting options come first: Jev leans toward the first option it sees.
-# Approval is three narrow yes/no checks in a row. Any "yes" ends at an
-# approval leaf; only three confident "no" answers skip approval. With the
-# yesno threshold at 0.8, an answer is accepted only at P >= 0.9, so an
-# unsure check goes to the LLM instead of quietly skipping approval.
+# Approval uses narrow yes/no checks. Canvas checks shared impact and whether
+# the edit is hard to undo; tasks also checks bulk change. Any "yes" ends at
+# an approval leaf. With the yesno threshold at 0.8, an answer is accepted
+# only at P >= 0.9, so an unsure check goes to the LLM instead of quietly
+# skipping approval.
 nodes:
   intent:
     question:
@@ -87,11 +88,31 @@ nodes:
         leaf:
           agent: chat
           config: __AGENCY_ROOT__/chat.openai.yaml
-      canvas:
+      canvas: canvas_affects_others
+      tasks: affects_others
+
+  canvas_affects_others:
+    question:
+      kind: yesno
+      instructions: Would doing this change a shared canvas document for people other than the requester?
+    branches:
+      "true": &canvas_needs_approval
         leaf:
           agent: canvas
           config: __AGENCY_ROOT__/canvas.openai.yaml
-      tasks: affects_others
+          requires_approval: true
+      "false": canvas_hard_to_undo
+
+  canvas_hard_to_undo:
+    question:
+      kind: yesno
+      instructions: Would doing this be hard to undo, such as deleting most or all of a canvas document?
+    branches:
+      "true": *canvas_needs_approval
+      "false":
+        leaf:
+          agent: canvas
+          config: __AGENCY_ROOT__/canvas.openai.yaml
 
   affects_others:
     question:
@@ -159,10 +180,11 @@ A decision tree in `tree.yaml` picks which specialist handles a request:
   confidence is |2P - 1|), or Jev fails, the question is re-asked on
   `gpt-5-mini`. The
   output marks those answers as escalated.
-- **Act or no-act decisions end at approval leaves.** Jev is weak at deciding
-  whether to act at all, so the risky-task branch ends at a leaf with
-  `requires_approval: true`. fabri passes that flag through untouched; your
-  host must hold the run for a human before starting the `tasks` agent.
+- **Canvas and tasks both pass approval checks.** Jev is weak at deciding
+  whether to act at all, so every mutating specialist reaches approval leaves
+  for shared or hard-to-undo changes. fabri passes `requires_approval: true`
+  through untouched; your host must hold the run for a human before starting
+  the `canvas` or `tasks` agent.
 
 Run fabri from `__RUN_FROM__`, because paths in the generated configs are
 relative to that directory:

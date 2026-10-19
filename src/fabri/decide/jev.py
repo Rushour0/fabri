@@ -28,7 +28,8 @@ Connections are kept alive and reused: each decider holds one connection per
 thread, so repeat calls skip the TCP and TLS handshake. When the server has
 closed a pooled connection, the request is resent once on a fresh one; that
 reconnect does not use up the 429/5xx retry. `close()` (or a `with` block)
-closes every connection the decider opened.
+closes every connection the decider opened. Acquires also close connections
+owned by threads that have ended.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ import time
 import urllib.parse
 
 from fabri.core.llm import LLMUsage
-from fabri.decide.types import Answer, DecideError, Question, split_evenly
+from fabri.decide.types import Answer, DecideError, Question, sanitize, split_evenly
 
 BASE_URLS: dict[str, str] = {
     "typesafe": "https://api.typesafe.ai/v1",
@@ -115,12 +116,12 @@ class JevDecider:
         self._path = parts.path or "/"
         if parts.query:
             self._path += f"?{parts.query}"
-        # One keep-alive connection per thread. `_conns` tracks every live one
-        # so close() can reach connections owned by other threads; `_generation`
-        # tells a thread its cached connection was closed under it.
+        # One keep-alive connection per thread. `_conns` tracks them by thread
+        # id so an acquire can close sockets left behind by finished threads;
+        # `_generation` tells a thread its cached connection was closed under it.
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._conns: set[http.client.HTTPConnection] = set()
+        self._conns: dict[int, http.client.HTTPConnection] = {}
         self._generation = 0
 
     @property
@@ -131,13 +132,9 @@ class JevDecider:
         """Close every pooled connection. The decider stays usable: the next
         call opens a fresh connection."""
         with self._lock:
-            conns, self._conns = self._conns, set()
+            conns, self._conns = list(self._conns.values()), {}
             self._generation += 1
-        for conn in conns:
-            try:
-                conn.close()
-            except Exception:  # pragma: no cover - close never matters
-                pass
+        self._close_connections(conns)
 
     def __enter__(self) -> JevDecider:
         return self
@@ -172,11 +169,12 @@ class JevDecider:
         payload = self._post(body, key)
         latency_ms = (time.monotonic() - t0) * 1000.0
         try:
-            return self._parse(payload, questions, latency_ms)
+            return self._parse(payload, questions, latency_ms, (key,))
         except DecideError:
             raise
         except Exception as e:  # never let a surprising payload escape as a bare exception
-            raise DecideError(f"jev: could not parse response: {type(e).__name__}: {e}") from None
+            detail = sanitize(f"{type(e).__name__}: {e}", (key,))
+            raise DecideError(f"jev: could not parse response: {detail}") from None
 
     def _post(self, body: bytes, key: str) -> dict:
         headers = {
@@ -193,20 +191,20 @@ class JevDecider:
                 reason = getattr(e, "reason", e)
                 text = str(reason) or type(e).__name__
                 raise DecideError(
-                    f"jev: request to {self.url} failed: {_redact(text, key)}"
+                    f"jev: request to {self.url} failed: {sanitize(text, (key,))}"
                 ) from None
             if 200 <= status < 300:
                 break
             if attempt == 1 and (status == 429 or status >= 500):
                 time.sleep(self.retry_backoff_s)
                 continue
-            snippet = _redact(raw[:_BODY_SNIPPET].decode("utf-8", errors="replace"), key)
+            snippet = sanitize(raw[:_BODY_SNIPPET].decode("utf-8", errors="replace"), (key,))
             hint = " (check the API key)" if status in (401, 403) else ""
             raise DecideError(f"jev: HTTP {status} from {self.url}{hint}: {snippet}") from None
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise DecideError(f"jev: response is not valid JSON: {e}") from None
+            raise DecideError(f"jev: response is not valid JSON: {sanitize(e, (key,))}") from None
         if not isinstance(payload, dict) or not isinstance(payload.get("answers"), dict):
             raise DecideError("jev: response has no 'answers' object")
         return payload
@@ -245,14 +243,20 @@ class JevDecider:
     def _connection(self) -> tuple[http.client.HTTPConnection, bool]:
         """This thread's connection, opening one if needed. The flag says
         whether it has already carried a request (so it may have gone stale)."""
+        self._reap_dead_connections()
         local = self._local
         conn = getattr(local, "conn", None)
         if conn is not None and getattr(local, "generation", None) == self._generation:
             return conn, bool(getattr(local, "used", False))
         conn = _open_connection(self._scheme, self._host, self._port, self.timeout_s)
+        replaced: http.client.HTTPConnection | None = None
+        ident = threading.get_ident()
         with self._lock:
-            self._conns.add(conn)
+            replaced = self._conns.get(ident)
+            self._conns[ident] = conn
             local.generation = self._generation
+        if replaced is not None and replaced is not conn:
+            self._close_connections([replaced])
         local.conn = conn
         local.used = False
         return conn, False
@@ -263,14 +267,31 @@ class JevDecider:
             self._local.conn = None
             self._local.used = False
         with self._lock:
-            self._conns.discard(conn)
-        try:
-            conn.close()
-        except Exception:  # pragma: no cover - close never matters
-            pass
+            ident = threading.get_ident()
+            if self._conns.get(ident) is conn:
+                del self._conns[ident]
+        self._close_connections([conn])
 
-    def _parse(self, payload: dict, questions: list[Question], latency_ms: float) -> dict[str, Answer]:
-        model = str(payload.get("model") or self.model)
+    def _reap_dead_connections(self) -> None:
+        """Close connections owned by threads that have already terminated."""
+        live = {thread.ident for thread in threading.enumerate() if thread.ident is not None}
+        with self._lock:
+            stale = [ident for ident in self._conns if ident not in live]
+            conns = [self._conns.pop(ident) for ident in stale]
+        self._close_connections(conns)
+
+    @staticmethod
+    def _close_connections(conns: list[http.client.HTTPConnection]) -> None:
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover - close never matters
+                pass
+
+    def _parse(
+        self, payload: dict, questions: list[Question], latency_ms: float, secrets: tuple[str, ...]
+    ) -> dict[str, Answer]:
+        model = sanitize(str(payload.get("model") or self.model), secrets)
         usage = payload.get("usage")
         usage_ok = usage is None or isinstance(usage, dict)
         if not isinstance(usage, dict):
@@ -278,7 +299,9 @@ class JevDecider:
         raw_in, raw_out = usage.get("input_tokens"), usage.get("output_tokens")
         in_tok, out_tok = _tokens(raw_in), _tokens(raw_out)
         usage_ok = usage_ok and all(v is None or _tokens(v, None) is not None for v in (raw_in, raw_out))
-        total_cost, cost_known = _call_cost(usage, in_tok, out_tok, model, self.model, tokens_ok=usage_ok)
+        total_cost, cost_known = _call_cost(
+            usage, in_tok, out_tok, model, sanitize(self.model, secrets), tokens_ok=usage_ok, secrets=secrets
+        )
 
         n = len(questions)
         in_shares = split_evenly(in_tok, n)
@@ -287,6 +310,8 @@ class JevDecider:
         out: dict[str, Answer] = {}
         for i, q in enumerate(questions):
             answer = _parse_answer(q, answers_raw.get(q.key))
+            if answer.error is not None:
+                answer.error = sanitize(answer.error, secrets)
             answer.latency_ms = latency_ms
             answer.input_tokens = in_shares[i]
             answer.output_tokens = out_shares[i]
@@ -307,7 +332,7 @@ def _parse_answer(q: Question, raw: object) -> Answer:
         return answer
     try:
         if q.kind == "yesno":
-            p = _probability(raw["noul"], "noul probability")
+            p = _probability(raw["noul"], "noul")
             answer.value = p >= 0.5
             answer.probabilities = {"true": p, "false": 1.0 - p}
             # (p_max - 1/2) / (1 - 1/2) with p_max = max(p, 1 - p).
@@ -318,7 +343,7 @@ def _parse_answer(q: Question, raw: object) -> Answer:
             raw_probs = {}
         if not isinstance(raw_probs, dict):
             raise ValueError(f"probabilities must be an object, got {type(raw_probs).__name__}")
-        probs = {str(k): _probability(v, f"probability for {k!r}") for k, v in raw_probs.items()}
+        probs = {str(k): _probability(v, "probability") for k, v in raw_probs.items()}
         if q.kind == "score":
             # Live Jev returns `score` as an expected level index (e.g. 2.96) with
             # `legend` {"0": "low", ...} and probabilities keyed by index. Report
@@ -333,10 +358,12 @@ def _parse_answer(q: Question, raw: object) -> Answer:
             value = raw["choice"]
         allowed = q.allowed_values()
         if value not in allowed:
-            answer.error = f"jev answered {value!r}, which is not one of {allowed!r}"
+            answer.error = f"jev answer has invalid {type(value).__name__}; not one of the allowed options"
             return answer
         conf = raw.get("confidence")
-        confidence = _probability(conf, "confidence") if conf is not None else probs.get(value)
+        confidence = _probability(conf, "confidence") if conf is not None else _normalized_confidence(
+            max(probs.values(), default=None), len(allowed)
+        )
         answer.value = value
         answer.probabilities = probs
         answer.confidence = confidence
@@ -344,7 +371,7 @@ def _parse_answer(q: Question, raw: object) -> Answer:
         answer.value = None
         answer.probabilities = {}
         answer.confidence = None
-        answer.error = f"jev answer is malformed: {e!r}"
+        answer.error = f"jev answer is malformed: {e}"
     return answer
 
 
@@ -352,11 +379,20 @@ def _probability(x: object, what: str) -> float:
     """A finite number in [0, 1]. Values within float noise of the bounds are
     clamped; anything else raises ValueError."""
     if isinstance(x, bool) or not isinstance(x, (int, float)):
-        raise ValueError(f"{what} must be a number, got {x!r}")
+        raise ValueError(f"{what} must be a number, got {type(x).__name__}")
     p = float(x)
     if not math.isfinite(p) or p < -_PROB_TOLERANCE or p > 1.0 + _PROB_TOLERANCE:
-        raise ValueError(f"{what} must be a finite number in [0, 1], got {x!r}")
+        raise ValueError(f"{what} must be a finite number in [0, 1], got {type(x).__name__}")
     return min(1.0, max(0.0, p))
+
+
+def _normalized_confidence(p_max: float | None, n: int) -> float | None:
+    """Normalize a top probability against the uniform baseline for n options."""
+    if p_max is None:
+        return None
+    if n == 1:
+        return 1.0
+    return (p_max - 1.0 / n) / (1.0 - 1.0 / n)
 
 
 def _tokens(x: object, default: int | None = 0) -> int | None:
@@ -372,7 +408,13 @@ def _tokens(x: object, default: int | None = 0) -> int | None:
 
 
 def _call_cost(
-    usage: dict, in_tok: int, out_tok: int, model: str, requested: str, tokens_ok: bool = True
+    usage: dict,
+    in_tok: int,
+    out_tok: int,
+    model: str,
+    requested: str,
+    tokens_ok: bool = True,
+    secrets: tuple[str, ...] = (),
 ) -> tuple[float, bool]:
     """(cost, known). Prefer the provider-reported `usage.cost` (OpenRouter
     sends it), else price the tokens through fabri.pricing under the returned
@@ -397,7 +439,10 @@ def _call_cost(
             return cost, True
     if model not in _warned_unpriced:
         _warned_unpriced.add(model)
-        logger.warning("jev: cannot price model %r; its cost is unknown and recorded as 0.0", model)
+        logger.warning(
+            "jev: cannot price model %r; its cost is unknown and recorded as 0.0",
+            sanitize(model, secrets),
+        )
     return 0.0, False
 
 
@@ -407,7 +452,3 @@ def _check_unique_keys(questions: list[Question]) -> None:
         if q.key in seen:
             raise ValueError(f"duplicate question key {q.key!r}")
         seen.add(q.key)
-
-
-def _redact(text: str, key: str) -> str:
-    return text.replace(key, "***") if key else text

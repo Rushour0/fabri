@@ -36,7 +36,10 @@ def test_scaffold_and_tree_validates(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert isinstance(tree.decider.primary, JevDecider)
     assert isinstance(tree.decider.fallback, LLMDecider)
     assert tree.start == "intent"
-    assert set(tree.nodes) == {"intent", "affects_others", "hard_to_undo", "bulk_change"}
+    assert set(tree.nodes) == {
+        "intent", "canvas_affects_others", "canvas_hard_to_undo",
+        "affects_others", "hard_to_undo", "bulk_change",
+    }
 
     # Every leaf points at a specialist config that exists and loads.
     leaves = [t for node in tree.nodes.values() for t in node.branches.values() if isinstance(t, dict)]
@@ -53,6 +56,23 @@ def test_scaffold_and_tree_validates(tmp_path: Path, monkeypatch: pytest.MonkeyP
     collections = {yaml.safe_load((agency / f"{n}.openai.yaml").read_text())["memory"]["collection"]
                    for n in ("chat", "canvas", "tasks")}
     assert len(collections) == 3
+
+
+def test_every_mutating_path_has_approval_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.chdir(tmp_path)
+    scaffold_agency("router-demo", "jev-router", Path("agencies"))
+    tree = DecisionTree.from_yaml(tmp_path / "agencies" / "router-demo" / "tree.yaml")
+
+    def walk(node_name: str, yesno_nodes: int = 0) -> None:
+        node = tree.nodes[node_name]
+        yesno_nodes += node.question.kind == "yesno"
+        for target in node.branches.values():
+            if isinstance(target, str):
+                walk(target, yesno_nodes)
+            elif target["agent"] in {"canvas", "tasks"} and not target.get("requires_approval"):
+                assert yesno_nodes >= 2
+
+    walk(tree.start)
 
 
 def test_readme_explains_the_routing_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

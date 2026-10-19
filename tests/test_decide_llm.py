@@ -104,6 +104,29 @@ def test_backend_error_becomes_decide_error(monkeypatch):
         decider.decide("s", QUESTIONS)
 
 
+def test_provider_exception_and_log_redact_api_key(monkeypatch, caplog):
+    import logging
+
+    secret = "sk-llm-SECRET-123"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+
+    class _Boom:
+        def step(self, system, messages):
+            raise LLMError(f"Authorization: Bearer {secret}")
+
+    with caplog.at_level(logging.WARNING, logger="fabri.decide.llm"):
+        with pytest.raises(DecideError) as exc:
+            LLMDecider(CFG, backend=_Boom()).decide("s", QUESTIONS)
+        text = json.dumps({"intent": "canvas", "urgency": "low", "risky": False})
+        backend = _Recording([LLMResponse(
+            final_text=text, usage=LLMUsage(input_tokens=1, output_tokens=1, model=secret),
+        )])
+        LLMDecider({**CFG, "model": secret}, backend=backend).decide("s", QUESTIONS)
+
+    assert secret not in str(exc.value)
+    assert all(secret not in record.getMessage() for record in caplog.records)
+
+
 def test_backend_built_lazily(monkeypatch):
     calls = []
     monkeypatch.setattr("fabri.runtime._instantiate", lambda rcfg, tools: calls.append(1))

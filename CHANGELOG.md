@@ -40,10 +40,11 @@ that ships.
 - New `fabri decide --tree tree.yaml --state '<text or @file.json>' [--json]`
   command prints the path taken, the leaf, and total cost and latency.
 - New `jev-router` agency template. A choice node routes to chat, canvas and
-  tasks specialists, listing the non-acting option first. Task requests then
-  pass three narrow yes/no checks (affects others, hard to undo, bulk
-  change); any "yes" ends at a `requires_approval: true` leaf, and an unsure
-  check goes to the LLM fallback rather than skipping approval.
+  tasks specialists, listing the non-acting option first. Canvas and task
+  requests both pass narrow yes/no approval checks (affects others and hard to
+  undo; tasks also checks bulk change); any "yes" ends at a
+  `requires_approval: true` leaf, and an unsure check goes to the LLM fallback
+  rather than skipping approval.
 - Pricing entries for `jev-1.13.0`, `jev-1.14.0`, `typesafe/jev-1.13` and
   `typesafe/jev-1.14` at $0.042 per million input tokens, output free.
 - New `fabri.style` module: `PLAIN_WRITING_RULES`, a short prompt block for

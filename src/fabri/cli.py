@@ -1450,13 +1450,14 @@ def _decide_state(raw: str | None, state_file: str | None = None) -> object:
 def cmd_decide(args: argparse.Namespace) -> None:
     """Run a decision tree on one state and print the path and the leaf."""
     from fabri.decide import DecideError, DecisionTree, TreeError
+    from fabri.decide.types import sanitize
 
     try:
         state = _decide_state(args.state, getattr(args, "state_file", None))
         tree = DecisionTree.from_yaml(args.tree)
         result = tree.run(state)
     except (OSError, ValueError, TreeError, DecideError) as e:
-        print(f"decide error: {e}", file=sys.stderr)
+        print(f"decide error: {sanitize(e, ())}", file=sys.stderr)
         sys.exit(1)
 
     if args.json:

@@ -32,7 +32,8 @@ the same latency.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Literal, Protocol
+import re
+from typing import Iterable, Literal, Protocol
 
 QuestionKind = Literal["choice", "score", "yesno"]
 AnswerSource = Literal["jev", "llm"]
@@ -42,11 +43,29 @@ QUESTION_KINDS: tuple[str, ...] = ("choice", "score", "yesno")
 _MAX_OPTIONS = 255
 _MIN_LEVELS, _MAX_LEVELS = 2, 10
 _YESNO_SIDES = ("true", "false")
+_BEARER_TOKEN = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
+_SK_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]+")
 
 
 class DecideError(RuntimeError):
     """A decider could not produce answers: HTTP, auth, timeout or parse
     failure. Messages never carry the API key."""
+
+
+def sanitize(text: object, secrets: Iterable[str] | str = ()) -> str:
+    """Redact configured secrets and common API-token forms from error text.
+
+    Provider payloads and SDK exceptions are untrusted: this helper is the
+    single final formatter for text that can reach a decision error, answer
+    error, or log message.
+    """
+    result = str(text)
+    values = (secrets,) if isinstance(secrets, str) else secrets
+    for secret in values:
+        if secret:
+            result = result.replace(secret, "***")
+    result = _BEARER_TOKEN.sub("Bearer ***", result)
+    return _SK_TOKEN.sub("***", result)
 
 
 @dataclass(frozen=True)
