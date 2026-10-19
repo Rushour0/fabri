@@ -25,6 +25,7 @@ from pathlib import Path
 
 from fabri.memory.embeddings import EMBEDDING_DIM, embed
 from fabri.memory.schema import EMBEDDING_MODEL_VERSION, MemoryEntry
+from fabri.memory.scopes import MemoryScope, check_collection_access, guarded
 
 try:
     import sqlite_vec  # type: ignore[import-not-found]
@@ -81,9 +82,12 @@ class SqliteMemoryStore:
         self,
         path: str | Path = ".fabri/memory.db",
         collection: str = "fabri",
+        bound_scope: MemoryScope | None = None,
     ):
         if not _HAS_SQLITE_VEC:
             raise RuntimeError(_INSTALL_HINT)
+        self.bound_scope = bound_scope
+        check_collection_access(collection, bound_scope)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
@@ -99,6 +103,25 @@ class SqliteMemoryStore:
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
         self._ensure_schema()
+
+    def sibling(self, collection: str, bound_scope: MemoryScope | None = None) -> "SqliteMemoryStore":
+        """Another collection stored as its own file next to this one."""
+        return SqliteMemoryStore(
+            path=self.path.parent / f"{collection}.db",
+            collection=collection,
+            bound_scope=bound_scope,
+        )
+
+    def list_collections(self) -> list[str]:
+        """Collection names that have a db file beside this store's file."""
+        return sorted(p.stem for p in self.path.parent.glob("*.db"))
+
+    @guarded
+    def drop(self) -> None:
+        """Delete this collection's db file (and its WAL/SHM side files)."""
+        self.conn.close()
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(str(self.path) + suffix).unlink(missing_ok=True)
 
     def _ensure_schema(self) -> None:
         cur = self.conn.cursor()
@@ -170,6 +193,7 @@ class SqliteMemoryStore:
                 f"Delete the db or point memory.sqlite_path at a fresh file."
             )
 
+    @guarded
     def upsert(self, entry: MemoryEntry) -> str:
         vector = embed(entry.text)
         cur = self.conn.cursor()
@@ -196,6 +220,7 @@ class SqliteMemoryStore:
         self.conn.commit()
         return entry.id
 
+    @guarded
     def get(self, point_id: str) -> MemoryEntry | None:
         row = self.conn.execute(
             "SELECT payload FROM guidelines WHERE id = ?", (point_id,)
@@ -204,6 +229,7 @@ class SqliteMemoryStore:
             return None
         return MemoryEntry.from_payload(json.loads(row[0]))
 
+    @guarded
     def query(
         self,
         text: str,
@@ -213,6 +239,7 @@ class SqliteMemoryStore:
     ) -> list[tuple[MemoryEntry, float]]:
         return self.query_by_vector(embed(text), top_k=top_k, kind=kind, tools_any=tools_any)
 
+    @guarded
     def query_by_vector(
         self,
         vector: list[float],
@@ -246,6 +273,7 @@ class SqliteMemoryStore:
                 break
         return out
 
+    @guarded
     def query_bm25(
         self,
         text: str,
@@ -287,6 +315,7 @@ class SqliteMemoryStore:
                 break
         return out
 
+    @guarded
     def find_similar(
         self, text: str, threshold: float = 0.85, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
@@ -295,6 +324,7 @@ class SqliteMemoryStore:
             return results[0]
         return None
 
+    @guarded
     def find_by_dedup_key(
         self, dedup_key: str, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
@@ -311,6 +341,7 @@ class SqliteMemoryStore:
             return None
         return MemoryEntry.from_payload(json.loads(row[0])), 1.0
 
+    @guarded
     def delete(self, point_id: str) -> None:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM guidelines WHERE id = ?", (point_id,))
@@ -318,6 +349,7 @@ class SqliteMemoryStore:
         cur.execute("DELETE FROM fts_guidelines WHERE id = ?", (point_id,))
         self.conn.commit()
 
+    @guarded
     def count(self, kind: str | None = None) -> int:
         if kind is None:
             row = self.conn.execute("SELECT COUNT(*) FROM guidelines").fetchone()
@@ -327,6 +359,7 @@ class SqliteMemoryStore:
             ).fetchone()
         return int(row[0])
 
+    @guarded
     def iterate(
         self, kind: str | None = None, limit: int | None = None
     ) -> list[MemoryEntry]:

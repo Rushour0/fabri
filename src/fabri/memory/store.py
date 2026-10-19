@@ -3,15 +3,37 @@ from qdrant_client.http import models as qmodels
 
 from fabri.memory.embeddings import EMBEDDING_DIM, embed
 from fabri.memory.schema import EMBEDDING_MODEL_VERSION, MemoryEntry
+from fabri.memory.scopes import MemoryScope, check_collection_access, guarded
 
 COLLECTION_NAME = "fabri"
 
 
 class QdrantMemoryStore:
-    def __init__(self, url: str = "http://localhost:6333", collection: str = COLLECTION_NAME):
-        self.client = QdrantClient(url=url)
+    def __init__(
+        self,
+        url: str = "http://localhost:6333",
+        collection: str = COLLECTION_NAME,
+        bound_scope: MemoryScope | None = None,
+    ):
+        self.url = url
         self.collection = collection
+        self.bound_scope = bound_scope
+        check_collection_access(collection, bound_scope)
+        self.client = QdrantClient(url=url)
         self._ensure_collection()
+
+    def sibling(self, collection: str, bound_scope: MemoryScope | None = None) -> "QdrantMemoryStore":
+        """Another collection on the same Qdrant instance."""
+        return QdrantMemoryStore(url=self.url, collection=collection, bound_scope=bound_scope)
+
+    def list_collections(self) -> list[str]:
+        """Collection names on this instance (hashed names only, no content)."""
+        return sorted(c.name for c in self.client.get_collections().collections)
+
+    @guarded
+    def drop(self) -> None:
+        """Delete this whole collection."""
+        self.client.delete_collection(collection_name=self.collection)
 
     def _ensure_collection(self) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
@@ -63,6 +85,7 @@ class QdrantMemoryStore:
                     f"Recreate the collection or set memory.collection to a fresh name."
                 )
 
+    @guarded
     def upsert(self, entry: MemoryEntry) -> str:
         vector = embed(entry.text)
         self.client.upsert(
@@ -71,12 +94,14 @@ class QdrantMemoryStore:
         )
         return entry.id
 
+    @guarded
     def get(self, point_id: str) -> MemoryEntry | None:
         points = self.client.retrieve(collection_name=self.collection, ids=[point_id])
         if not points:
             return None
         return MemoryEntry.from_payload(points[0].payload)
 
+    @guarded
     def query(
         self,
         text: str,
@@ -86,6 +111,7 @@ class QdrantMemoryStore:
     ) -> list[tuple[MemoryEntry, float]]:
         return self.query_by_vector(embed(text), top_k=top_k, kind=kind, tools_any=tools_any)
 
+    @guarded
     def query_by_vector(
         self,
         vector: list[float],
@@ -110,6 +136,7 @@ class QdrantMemoryStore:
         )
         return [(MemoryEntry.from_payload(p.payload), p.score) for p in results.points]
 
+    @guarded
     def find_similar(
         self, text: str, threshold: float = 0.85, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
@@ -121,6 +148,7 @@ class QdrantMemoryStore:
             return results[0]
         return None
 
+    @guarded
     def find_by_dedup_key(
         self, dedup_key: str, kind: str | None = None
     ) -> tuple[MemoryEntry, float] | None:
@@ -140,12 +168,14 @@ class QdrantMemoryStore:
             return None
         return MemoryEntry.from_payload(points[0].payload), 1.0
 
+    @guarded
     def delete(self, point_id: str) -> None:
         self.client.delete(
             collection_name=self.collection,
             points_selector=qmodels.PointIdsList(points=[point_id]),
         )
 
+    @guarded
     def count(self, kind: str | None = None) -> int:
         query_filter = None
         if kind is not None:
@@ -154,6 +184,7 @@ class QdrantMemoryStore:
             )
         return self.client.count(collection_name=self.collection, count_filter=query_filter).count
 
+    @guarded
     def iterate(
         self, kind: str | None = None, limit: int | None = None
     ) -> list[MemoryEntry]:
