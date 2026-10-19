@@ -11,6 +11,7 @@ import { FleetView } from "./components/FleetView";
 import { AgencyGraph } from "./components/AgencyGraph";
 import { QuestionsInbox } from "./components/QuestionsInbox";
 import { CompanyOrgChart } from "./components/CompanyOrgChart";
+import { SetupsView } from "./components/setups/SetupsView";
 import { CatalogView, type CatalogSelection } from "./components/CatalogView";
 import ConnectSlack from "./components/ConnectSlack";
 import ConnectGitHub from "./components/ConnectGitHub";
@@ -115,7 +116,7 @@ export default function App() {
   useEffect(() => {
     if (
       authState === "anon" &&
-      (surface === "history" || surface === "replay" || surface === "questions" || surface === "fleet")
+      (surface === "history" || surface === "replay" || surface === "questions" || surface === "fleet" || surface === "setups")
     ) {
       setShowAuth(true);
     }
@@ -291,6 +292,14 @@ export default function App() {
                 Fleet
               </button>
             )}
+            {hasAccountAccess && (
+              <button
+                className={"tab" + (surface === "setups" ? " tab--on" : "")}
+                onClick={() => go("setups")}
+              >
+                Setups
+              </button>
+            )}
             {/* Settings stays visible signed-out: the integrations are part of
                 the pitch, and each one gates its own connect action. */}
             <button
@@ -338,6 +347,7 @@ export default function App() {
         <div className="main-pane">
           <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>
             {hasAccountAccess && surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
+            {hasAccountAccess && surface === "setups" && <SetupsView />}
             {hasAccountAccess && surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
             {surface === "settings" && (
               <div className="settings">

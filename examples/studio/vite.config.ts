@@ -24,6 +24,8 @@ export default defineConfig({
         proxyTimeout: 0,
       },
       "/fleets": { target: FABRI_SERVE, changeOrigin: true, timeout: 0, proxyTimeout: 0 },
+      "/setups": { target: FABRI_SERVE, changeOrigin: true },
+      "/tools": { target: FABRI_SERVE, changeOrigin: true },
       "/health": { target: FABRI_SERVE, changeOrigin: true },
     },
   },
