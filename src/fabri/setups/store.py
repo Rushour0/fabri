@@ -23,11 +23,13 @@ content.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -56,13 +58,25 @@ DIR_FILES = {
 MAIN_FILE = {"agents": "agent.yaml", "skills": "skill.yaml", "plays": "play.yaml"}
 AGENT_KEYS = frozenset({"enabled", "max_steps", "max_cost_usd", "tools", "skills", "replace", "route",
                         "llm", "title", "description"})
-SKILL_KEYS = frozenset({"name", "description", "version", "types", "tools", "enabled", "title", "tags", "origin"})
+SKILL_KEYS = frozenset({"name", "description", "when_to_use", "version", "types", "tools", "enabled", "title",
+                        "tags", "origin", "load"})
+SKILL_LOAD_MODES = ("always", "on_demand")
+REFERENCE_FILE = re.compile(r"^references/[a-z0-9][a-z0-9._-]*\.(md|txt|json|ya?ml|csv)$")
+HISTORY_FILE = ".fabri-revisions.json"
 PLAY_KEYS_REQUIRED = ("name", "description")
 TOOLS_KEYS = frozenset({"sources", "allow"})
 _DATA_NAME = re.compile(r"^([a-z0-9][a-z0-9-]*)\.([a-z0-9]{1,8})$")
 _GLOB = re.compile(r"[*?\[]")
 
 Validator = Callable[[str, Any], None]
+
+
+def allowed_file(kind: str, file: str) -> bool:
+    """Whether `file` may sit inside a directory item of this kind. Skills
+    also take `references/<name>.<ext>` files, one level deep."""
+    if file in DIR_FILES.get(kind, ()):
+        return True
+    return kind == "skills" and bool(REFERENCE_FILE.fullmatch(file))
 
 
 @dataclass
@@ -133,6 +147,7 @@ def validate_agent(name: str, files: Mapping[str, str], budgets: Mapping[str, in
 def validate_skill(name: str, files: Mapping[str, str], budgets: Mapping[str, int],
                    policy: ToolPolicy | None = None, require_manifest: bool = True) -> list[str]:
     warnings: list[str] = []
+    on_demand = False
     if "skill.yaml" in files:
         data = parse_yaml_text(files["skill.yaml"], f"skills/{name}/skill.yaml")
         if data.get("name") != name:
@@ -144,6 +159,14 @@ def validate_skill(name: str, files: Mapping[str, str], budgets: Mapping[str, in
             warnings.append(f"skills/{name}/skill.yaml: unknown keys {sorted(unknown)}")
         _str_list(data.get("types"), f"skills/{name} types")
         _str_list(data.get("tags"), f"skills/{name} tags")
+        if "when_to_use" in data and not isinstance(data["when_to_use"], str):
+            raise SetupError(f"skills/{name}: when_to_use must be text")
+        if data.get("load") is not None and data["load"] not in SKILL_LOAD_MODES:
+            raise SetupError(f"skills/{name}: load must be one of {', '.join(SKILL_LOAD_MODES)}")
+        if len(data["description"]) > 1024:
+            warnings.append(f"skills/{name}: description is {len(data['description'])} chars; "
+                            "it is listed in the prompt for on-demand skills, keep it under 1024")
+        on_demand = data.get("load") == "on_demand"
         tools = _str_list(data.get("tools"), f"skills/{name} tools")
         if "enabled" in data and not isinstance(data["enabled"], bool):
             raise SetupError(f"skills/{name}: enabled must be true or false")
@@ -154,10 +177,19 @@ def validate_skill(name: str, files: Mapping[str, str], budgets: Mapping[str, in
         raise SetupError(f"skills/{name}: skill.yaml is required")
     if "prompt.md" in files:
         text = files["prompt.md"]
-        if len(text) > budgets["skill_prompt_chars"]:
-            raise SetupError(f"skills/{name}/prompt.md: {len(text)} chars is over the "
-                             f"{budgets['skill_prompt_chars']} budget")
+        limit = budgets["skill_ondemand_chars"] if on_demand else budgets["skill_prompt_chars"]
+        key = "skill_ondemand_chars" if on_demand else "skill_prompt_chars"
+        if len(text) > limit:
+            hint = "" if on_demand else "; set `load: on_demand` in skill.yaml to allow a longer skill"
+            raise SetupError(f"skills/{name}/prompt.md: {len(text)} chars is over the {limit} {key} budget{hint}")
         warnings += _slop_warnings(text, f"skills/{name}/prompt.md")
+    for file, text in files.items():
+        if file.startswith("references/"):
+            if len(text) > budgets["skill_ondemand_chars"]:
+                raise SetupError(f"skills/{name}/{file}: {len(text)} chars is over the "
+                                 f"{budgets['skill_ondemand_chars']} skill_ondemand_chars budget")
+            if file.endswith(".md"):
+                warnings += _slop_warnings(text, f"skills/{name}/{file}")
     return warnings
 
 
@@ -216,6 +248,8 @@ def validate_tools_yaml(text: str, policy: ToolPolicy | None = None) -> list[str
 
 def validate_setup_yaml(text: str) -> list[str]:
     data = parse_yaml_text(text, "setup.yaml")
+    if data.get("skill_load") not in (None, "always", "on_demand"):
+        raise SetupError("setup.yaml: skill_load must be always or on_demand")
     budgets = data.get("budgets")
     if budgets is not None:
         if not isinstance(budgets, Mapping):
@@ -256,9 +290,19 @@ def _item_target(layer: Path, kind: str, name: str) -> tuple[Path, str | None]:
     check_slug(item)
     if not slash:
         return layer / kind / item, None
-    if file not in DIR_FILES[kind]:
-        raise SetupError(f"{kind} files are {', '.join(DIR_FILES[kind])}")
+    if not allowed_file(kind, file):
+        extra = "; skills also take references/<name>.md|txt|json|yaml|csv" if kind == "skills" else ""
+        raise SetupError(f"{kind} files are {', '.join(DIR_FILES[kind])}{extra}")
     return layer / kind / item / file, file
+
+
+def _present_files(kind: str, directory: Path) -> list[str]:
+    """Relative names of the item files that exist in `directory`."""
+    names = [f for f in DIR_FILES[kind] if (directory / f).is_file()]
+    if kind == "skills" and (directory / "references").is_dir():
+        names += [f"references/{p.name}" for p in sorted((directory / "references").iterdir())
+                  if p.is_file() and REFERENCE_FILE.fullmatch(f"references/{p.name}")]
+    return names
 
 
 def _atomic_file(path: Path, content: str | bytes) -> None:
@@ -279,6 +323,7 @@ def _atomic_dir(path: Path, files: Mapping[str, str]) -> None:
     tmp.mkdir()
     try:
         for file, text in files.items():
+            (tmp / file).parent.mkdir(parents=True, exist_ok=True)
             (tmp / file).write_text(text, encoding="utf-8")
         if path.exists():
             old = path.parent / f".{path.name}.old-{uuid.uuid4().hex[:8]}"
@@ -317,7 +362,7 @@ def validate_item(
                 content = {MAIN_FILE[kind]: content.decode() if isinstance(content, bytes) else content}
             if not isinstance(content, Mapping) or not content:
                 raise SetupError(f"{kind}/{item}: content must be a mapping of file names to text")
-            bad = set(content) - set(DIR_FILES[kind])
+            bad = {f for f in content if not allowed_file(kind, f)}
             if bad:
                 raise SetupError(f"{kind}/{item}: unexpected files {sorted(bad)}")
             files = dict(content)
@@ -326,9 +371,9 @@ def validate_item(
                 raise SetupError(f"{kind}/{name}: content must be text")
             files = {file: content}
             # validate against the files already on disk
-            current = path.parent
-            for other in DIR_FILES[kind]:
-                if other != file and (current / other).is_file():
+            current = layer / kind / item
+            for other in _present_files(kind, current):
+                if other != file:
                     files.setdefault(other, (current / other).read_text(encoding="utf-8"))
         if kind == "agents":
             warnings += validate_agent(item, files, budgets, policy)
@@ -371,10 +416,13 @@ def put_item(
     *,
     policy: ToolPolicy | None = None,
     validators: Mapping[str, Validator] | None = None,
+    actor: str | None = None,
 ) -> PutResult:
     """Validate, then write one item atomically. Clears a disabled marker
     for the item. `validators` maps a kind to a host check
-    ``fn(name, parsed)`` that raises to refuse the write."""
+    ``fn(name, parsed)`` that raises to refuse the write. A skill write that
+    changes its files bumps the skill's revision (see `item_history`);
+    `actor` is recorded with it."""
     layer = Path(layer_dir)
     warnings = validate_item(layer, kind, name, content, policy=policy, validators=validators)
     path, file = _item_target(layer, kind, name)
@@ -387,10 +435,63 @@ def put_item(
     marker = _marker(layer, kind, name)
     if marker is not None:
         marker.unlink(missing_ok=True)
+    if kind == "skills":
+        _record_revision(layer, name.partition("/")[0], actor)
     return PutResult(path, warnings)
 
 
-def delete_item(layer_dir: str | Path, kind: str, name: str) -> bool:
+def _skill_digest(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for rel in sorted(_present_files("skills", directory)):
+        digest.update(rel.encode() + b"\0" + (directory / rel).read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def _read_history(layer: Path) -> dict[str, Any]:
+    try:
+        data = json.loads((layer / HISTORY_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _record_revision(layer: Path, item: str, actor: str | None, *, deleted: bool = False) -> None:
+    """Append a revision to the layer's hidden `.fabri-revisions.json` when the
+    skill's files differ from the last recorded state. The file is hidden, so
+    it never changes the resolver's content hash. History keeps the last 50
+    entries as {revision, sha, at, actor, deleted}; the full text is not kept."""
+    history = _read_history(layer)
+    key = f"skills/{item}"
+    entry = history.get(key) or {"revision": 0, "sha": None, "history": []}
+    sha = None if deleted else _skill_digest(layer / "skills" / item)
+    if entry.get("sha") == sha:
+        return
+    entry["revision"] = int(entry.get("revision") or 0) + 1
+    entry["sha"] = sha
+    entry["history"] = [*(entry.get("history") or []), {
+        "revision": entry["revision"], "sha": sha, "actor": actor, "deleted": deleted,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}][-50:]
+    history[key] = entry
+    _atomic_file(layer / HISTORY_FILE, json.dumps(history, indent=1, sort_keys=True))
+
+
+def item_history(layer_dir: str | Path, kind: str, name: str) -> list[dict[str, Any]]:
+    """Recorded revisions of a skill in this layer, oldest first. Empty for
+    other kinds and for skills never written through put_item."""
+    if kind != "skills":
+        return []
+    entry = _read_history(Path(layer_dir)).get(f"skills/{name}") or {}
+    return list(entry.get("history") or [])
+
+
+def item_revision(layer_dir: str | Path, kind: str, name: str) -> int:
+    """Current revision of a skill in this layer, 0 when none is recorded."""
+    if kind != "skills":
+        return 0
+    return int((_read_history(Path(layer_dir)).get(f"skills/{name}") or {}).get("revision") or 0)
+
+
+def delete_item(layer_dir: str | Path, kind: str, name: str, *, actor: str | None = None) -> bool:
     """Remove an item (or one file of a directory item) from this layer.
     Returns False when nothing was there. A shallower layer's copy shows
     through again; use set_disabled to hide it."""
@@ -403,6 +504,9 @@ def delete_item(layer_dir: str | Path, kind: str, name: str) -> bool:
         shutil.rmtree(old, ignore_errors=True)
     else:
         path.unlink()
+    if kind == "skills":
+        item = name.partition("/")[0]
+        _record_revision(Path(layer_dir), item, actor, deleted=not (Path(layer_dir) / "skills" / item).is_dir())
     return True
 
 
@@ -435,10 +539,11 @@ def read_item(layer_dir: str | Path, kind: str, name: str) -> dict[str, str] | s
     if not path.exists():
         return None
     if path.is_dir():
-        return {f: (path / f).read_text(encoding="utf-8") for f in DIR_FILES[kind] if (path / f).is_file()}
+        return {f: (path / f).read_text(encoding="utf-8") for f in _present_files(kind, path)}
     return path.read_bytes() if kind == "data" else path.read_text(encoding="utf-8")
 
 
 __all__ = [
-    "KINDS", "PutResult", "delete_item", "put_item", "read_item", "read_yaml", "set_disabled", "validate_item",
+    "KINDS", "PutResult", "allowed_file", "delete_item", "item_history", "item_revision", "put_item", "read_item",
+    "read_yaml", "set_disabled", "validate_item",
 ]

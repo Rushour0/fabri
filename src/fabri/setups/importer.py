@@ -7,7 +7,9 @@ Formats:
   slug comes from the directory name (``chat_canvas`` -> ``chat-canvas``),
   the frontmatter name is kept as ``title``, ``tags`` are kept, and the body
   becomes ``prompt.md``. A frontmatter ``types`` list is kept; otherwise
-  ``types: []`` (all agent types) and lint warns about it.
+  ``types: []`` (all agent types) and lint warns about it. ``when_to_use`` is
+  kept and ``references/`` files are copied. A body over the always-loaded
+  budget is imported with ``load: on_demand``.
 - ``fabri``: fabri's own skill layout (``skill.yaml`` with name, description,
   version; ``prompts/*.md`` joined into ``prompt.md``; ``config.yaml``
   ``tools.enabled`` mapped to ``tools``). Executable tools under ``tools/``
@@ -26,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from fabri.setups.layers import SetupError, read_yaml, split_frontmatter
+from fabri.setups.layers import SetupError, layer_budgets, read_yaml, split_frontmatter
 from fabri.setups.store import put_item, read_item, validate_item
 from fabri.tools.policy import ToolPolicy
 
@@ -70,8 +72,16 @@ def _from_skill_md(directory: Path) -> tuple[str, dict[str, str], list[str]]:
         manifest["tags"] = [str(t) for t in meta["tags"]]
     if isinstance(meta.get("tools"), list):
         manifest["tools"] = [str(t) for t in meta["tools"]]
+    if meta.get("when_to_use"):
+        manifest["when_to_use"] = str(meta["when_to_use"]).strip()
     manifest["origin"] = "skill-md"
-    return slug, {"skill.yaml": _dump(manifest), "prompt.md": body.strip() + "\n"}, []
+    files = {"skill.yaml": _dump(manifest), "prompt.md": body.strip() + "\n"}
+    refs = directory / "references"
+    if refs.is_dir():
+        for path in sorted(refs.iterdir()):
+            if path.is_file() and not path.name.startswith("."):
+                files[f"references/{path.name}"] = path.read_text(encoding="utf-8")
+    return slug, files, []
 
 
 def _from_fabri(directory: Path) -> tuple[str, dict[str, str], list[str]]:
@@ -132,6 +142,12 @@ def import_skills(
             continue
         seen.add(slug)
         report.warnings += warnings
+        if len(files.get("prompt.md", "")) > layer_budgets(into)["skill_prompt_chars"] and "skill.yaml" in files:
+            manifest = yaml.safe_load(files["skill.yaml"])
+            if manifest.get("load") is None:
+                manifest["load"] = "on_demand"
+                files["skill.yaml"] = _dump(manifest)
+                report.warnings.append(f"{slug}: prompt is over the always-loaded budget, imported with load: on_demand")
         try:
             report.warnings += validate_item(into, "skills", slug, files, policy=policy)
         except SetupError as exc:
