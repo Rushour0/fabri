@@ -1743,6 +1743,10 @@ def main() -> None:
                          help="Resolve tools from this dir instead of tools.manifest_dir "
                               "(repeatable; use 'builtin' for the bundled tools)")
     p_tools.set_defaults(func=cmd_tools)
+    # Dynamic setups: `fabri setup ...` and `fabri tools list|sync|register|...`.
+    # A bare `fabri tools` keeps the listing above.
+    from fabri.setups.cli import add_setup_commands
+    add_setup_commands(sub, p_tools)
 
     p_tool = sub.add_parser("tool", help="Tool-related helpers (scaffold a new tool)")
     tool_sub = p_tool.add_subparsers(dest="tool_command", required=True)

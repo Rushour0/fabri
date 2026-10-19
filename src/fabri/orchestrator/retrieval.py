@@ -332,11 +332,20 @@ def _qdrant_bm25(
 # Tool retrieval (unchanged)
 # ---------------------------------------------------------------------------
 
+def _tool_text(manifest: "ToolManifest") -> str:
+    # Catalog-backed tools carry a title; rank on it with the description so
+    # "List pets" and its schema-grade description both count.
+    title = getattr(manifest, "title", None)
+    body = manifest.description or manifest.name
+    return f"{title}\n{body}" if title else body
+
+
 def _tool_vector(manifest: "ToolManifest") -> list[float]:
-    key = (manifest.name, manifest.description)
+    text = _tool_text(manifest)
+    key = (manifest.name, text)
     vec = _tool_embedding_cache.get(key)
     if vec is None:
-        vec = embed(manifest.description or manifest.name)
+        vec = embed(text)
         _tool_embedding_cache[key] = vec
     return vec
 
