@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from fabri.setups.resolver import ResolvedSetup
+from fabri.setups.skill_tool import LOAD_SKILL, register_load_skill
 from fabri.setups.toolset import ResolvedToolSet, resolve_tools
 from fabri.tools.catalog import META_TOOLS
 from fabri.tools.credential_store import CredentialStore
@@ -42,7 +43,8 @@ def build_agent_config(
 
     `registry` holds the type's tools (agent.yaml `tools` plus its skills'
     tools, or every resolved tool when agent.yaml has no `tools` key), plus
-    find_tools and describe_tool when `meta_tools` is true.
+    find_tools and describe_tool when `meta_tools` is true, and `load_skill`
+    when the type has on-demand skills.
     """
     from fabri.config import DEFAULT_CONFIG, _deep_merge, _normalize_llm_roles
 
@@ -54,6 +56,7 @@ def build_agent_config(
     registry = tool_set.registry([t.name for t in chosen], sandbox_root=sandbox_root,
                                  meta_tools=meta_tools and bool(chosen))
     prompt, warnings = resolved.system_prompt(agent_type)
+    has_load_skill = register_load_skill(registry, resolved, agent_type)
 
     cfg = _deep_merge(copy.deepcopy(DEFAULT_CONFIG), dict(base_config or {}))
     cfg["llm"] = _deep_merge(cfg["llm"], dict(base_llm_cfg or {}))
@@ -71,12 +74,14 @@ def build_agent_config(
     tools_cfg = cfg["tools"]
     tools_cfg["enabled"] = list(registry.tools)
     retrieval = dict(tools_cfg.get("retrieval") or {})
-    retrieval["always_include"] = list(dict.fromkeys([*(retrieval.get("always_include") or []), *META_TOOLS]))
+    always = [*META_TOOLS, *([LOAD_SKILL] if has_load_skill else [])]
+    retrieval["always_include"] = list(dict.fromkeys([*(retrieval.get("always_include") or []), *always]))
     tools_cfg["retrieval"] = retrieval
     cfg["setup"] = {
         "agent_type": agent_type,
         "content_hash": resolved.content_hash,
         "skills": resolved.skills_for(agent_type),
+        "on_demand_skills": resolved.on_demand_skills(agent_type),
         "approvals": {n: m.approval for n, m in registry.tools.items()},
         "warnings": [*warnings, *tool_set.errors],
     }

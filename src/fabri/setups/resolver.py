@@ -102,6 +102,50 @@ class ResolvedSetup:
                 out.append(name)
         return out
 
+    def skill_load_mode(self, name: str) -> str:
+        """`always` or `on_demand`. A skill's own `load` wins, then an
+        `always` tag, then setup.yaml `skill_load`, then `always`."""
+        skill = self.skills[name]
+        if skill.get("load"):
+            return skill["load"]
+        if "always" in (skill.get("tags") or []):
+            return "always"
+        return "on_demand" if self.setup.get("skill_load") == "on_demand" else "always"
+
+    def skill_index_line(self, name: str) -> str:
+        skill = self.skills[name]
+        line = f"- `{name}`: {' '.join(str(skill.get('description') or '').split())}"
+        if skill.get("when_to_use"):
+            line += f" Use when: {' '.join(skill['when_to_use'].split())}"
+        if skill.get("references"):
+            line += f" ({len(skill['references'])} reference file{'s' if len(skill['references']) != 1 else ''})"
+        return line
+
+    def on_demand_skills(self, agent_type: str) -> list[str]:
+        return [n for n in self.skills_for(agent_type) if self.skill_load_mode(n) == "on_demand"]
+
+    def load_skill(self, agent_type: str, name: str, reference: str | None = None) -> dict[str, Any]:
+        """Full text of one skill (or one of its reference files) for a type.
+        Raises SetupError for a skill the type does not load or a reference
+        the skill does not list. Text is cut at `skill_ondemand_chars`."""
+        if name not in self.skills_for(agent_type):
+            raise SetupError(f"no skill named {name!r} for agent type {agent_type!r}")
+        skill = self.skills[name]
+        limit = self.budgets["skill_ondemand_chars"]
+        if reference is None:
+            text = (skill.get("prompt") or "").strip()
+            out: dict[str, Any] = {"name": name, "revision": skill.get("revision", 0),
+                                   "tools": skill.get("tools") or [], "references": skill.get("references") or []}
+        else:
+            if reference not in (skill.get("references") or []):
+                raise SetupError(f"skill {name!r} has no reference {reference!r}; "
+                                 f"it lists {skill.get('references') or []}")
+            text = (Path(skill["path"]) / reference).read_text(encoding="utf-8")
+            out = {"name": name, "reference": reference, "revision": skill.get("revision", 0)}
+        out["truncated"] = len(text) > limit
+        out["text"] = text[:limit]
+        return out
+
     def context_for(self, agent_type: str | None) -> dict[str, dict[str, Any]]:
         if agent_type is None:
             return dict(self.context)
@@ -128,17 +172,26 @@ class ResolvedSetup:
         warnings: list[str] = []
         agent = self.agent(agent_type)
         parts = [p for p in (base.strip(), agent.get("prompt", "").strip()) if p]
-        skill_parts = []
+        skill_parts, index_lines = [], []
         for name in self.skills_for(agent_type):
+            if self.skill_load_mode(name) == "on_demand":
+                index_lines.append(self.skill_index_line(name))
+                continue
             text = (self.skills[name].get("prompt") or "").strip()
             if not text:
                 continue
             if len(text) > budgets["skill_prompt_chars"]:
-                warnings.append(f"skill {name} skipped: prompt is {len(text)} chars, budget {budgets['skill_prompt_chars']}")
+                warnings.append(f"skill {name} skipped: prompt is {len(text)} chars, budget {budgets['skill_prompt_chars']}"
+                                "; set `load: on_demand` in its skill.yaml to keep it behind load_skill")
                 continue
             skill_parts.append(f"### {name}\n{text}")
         if skill_parts:
             parts.append("## Skills\n\n" + "\n\n".join(skill_parts))
+        if index_lines:
+            parts.append("## Skills to load on demand\n\n"
+                         "Each skill below holds detailed instructions that are not in this prompt. "
+                         "Call `load_skill` with the skill name when a task matches its description, "
+                         "before you act on that task.\n\n" + "\n".join(index_lines))
         used, context_parts = 0, []
         for name, item in self.context_for(agent_type).items():
             section = f"### {name}\n{item['text'].strip()}"
@@ -184,7 +237,8 @@ class ResolvedSetup:
             agent = self.agent(agent_type)
             prompt, warnings = self.system_prompt(agent_type)
             out["agent"] = {"type": agent_type, **strip(agent)}
-            out["skills"] = {n: strip(self.skills[n]) for n in self.skills_for(agent_type)}
+            out["skills"] = {n: {**strip(self.skills[n]), "load_mode": self.skill_load_mode(n)}
+                             for n in self.skills_for(agent_type)}
             out["context"] = {n: strip(c) for n, c in self.context_for(agent_type).items()}
             out["tools_for_type"] = self.tools_for(agent_type)
             out["system_prompt"] = prompt
@@ -199,6 +253,12 @@ class ResolvedSetup:
 
 def _disabled(directory: Path, name: str) -> bool:
     return (directory / f"{name}.disabled").exists()
+
+
+def _revision(layer_root: Path, name: str) -> int:
+    from fabri.setups.store import item_revision
+
+    return item_revision(layer_root, "skills", name)
 
 
 def _children(directory: Path) -> list[Path]:
@@ -285,9 +345,16 @@ def _resolve_uncached(layers: list[Layer], digest: str) -> ResolvedSetup:
                 skills.pop(path.name, None)
             else:
                 prompt = (path / "prompt.md").read_text(encoding="utf-8") if (path / "prompt.md").exists() else ""
+                refs_dir = path / "references"
+                references = sorted(f"references/{p.name}" for p in refs_dir.iterdir()
+                                    if p.is_file() and not p.name.startswith(".")) if refs_dir.is_dir() else []
                 skills[path.name] = {**meta, "name": path.name, "types": list(meta.get("types") or []),
-                                     "tools": list(meta.get("tools") or []), "prompt": prompt,
-                                     "source": layer.name, "path": str(path)}
+                                     "tools": list(meta.get("tools") or []),
+                                     "tags": [str(t) for t in meta.get("tags") or []],
+                                     "when_to_use": str(meta.get("when_to_use") or ""),
+                                     "load": meta.get("load") if meta.get("load") in ("always", "on_demand") else None,
+                                     "references": references, "revision": _revision(layer.path, path.name),
+                                     "prompt": prompt, "source": layer.name, "path": str(path)}
             sources[f"skills/{path.name}"] = layer.name
 
         # context

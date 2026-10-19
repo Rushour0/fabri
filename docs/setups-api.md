@@ -33,6 +33,7 @@ Every route requires the service's existing auth. Writes need the `admin` role. 
 | `POST /setups/scopes` | `{kind: pack\|org\|project, name, org?}` | the created scope |
 | `GET /setups/items?scope=S&kind=K` | | `[{name, kind, source_layer, size, updated_at, enabled}]` |
 | `GET /setups/item?scope=S&kind=K&name=N` | | `{name, kind, files: {path: text}, meta, lint: [..]}` |
+| `GET /setups/item/history?scope=S&kind=skills&name=N` | | `{name, kind, revision, history: [{revision, sha, at, actor, deleted}]}` (last 50) |
 | `PUT /setups/item?scope=S&kind=K&name=N` | `{files: {path: text}}` | `{ok, lint: [..]}`, written atomically, live on the next resolve |
 | `DELETE /setups/item?scope=S&kind=K&name=N` | | `204` |
 | `POST /setups/item/disable` | `{scope, kind, name, disabled: bool}` | `{ok}` |
@@ -53,8 +54,10 @@ Every route requires the service's existing auth. Writes need the `admin` role. 
 
 Details that the table leaves out:
 
+- `GET /setups/item` on a skill also returns `revision`. Every skill write or delete through the API bumps the revision when the files changed and records the audit actor in the skill history.
+- `GET /setups/resolved?type=T` marks each skill with `load_mode` (`always` or `on_demand`). `system_prompt` lists on-demand skills by name and description only; `config["setup"]["on_demand_skills"]` from `build_agent_config` names them, and the agent gets a `load_skill` tool.
 - `GET /setups/item` reads the layer named by `scope` only. An item listed with a `source_layer` other than the scope is opened with `scope=<that source_layer>`. Layer names in every response are scope strings.
-- `PUT /setups/item` replaces the whole item. Files not in the body are removed from a directory item (`skills/<name>/`). Allowed file names: agents `agent.yaml`, `prompt.md`, `prompt.append.md`; skills `skill.yaml`, `prompt.md`; plays `play.yaml`; context `<name>.md`; data `<name>`; tools `tools.yaml`; setup `setup.yaml`.
+- `PUT /setups/item` replaces the whole item. Files not in the body are removed from a directory item (`skills/<name>/`). Allowed file names: agents `agent.yaml`, `prompt.md`, `prompt.append.md`; skills `skill.yaml`, `prompt.md` and `references/<name>.md|txt|json|yaml|yml|csv`; plays `play.yaml`; context `<name>.md`; data `<name>`; tools `tools.yaml`; setup `setup.yaml`.
 - Kind `setup` is the layer's `setup.yaml` (name must be `setup.yaml`, files `{"setup.yaml": text}`). `GET` returns 404 while the layer has none, `PUT` validates the YAML (400 with the parse error), `DELETE` removes it.
 - Kind `tools` is `tools/tools.yaml` only (name `tools.yaml`). Single tools go through `/tools/register`. A `tools.yaml` that holds a literal credential in `headers` or `env` is refused on `PUT` (use `secret_ref` or `env`) and redacted on `GET`.
 - `GET /setups/items` lists what the scope's view contains (its own layer plus inherited layers), each tagged with `source_layer`. Items disabled in the scope's own layer appear with `enabled: false`.

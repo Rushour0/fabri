@@ -727,3 +727,22 @@ def test_agent_types_endpoint_matches_setup_yaml(api, root):
              params={"scope": "org:acme", "kind": "setup", "name": "setup.yaml"})
     assert api.call("GET", "/setups/orgs/acme/agent-types").json()["agents"] == ["chat"]
     assert api.call("GET", "/setups/resolved?org=acme&type=coder").status_code == 404
+
+
+def test_skill_references_revision_history_and_load_mode(api, root):
+    q = "?scope=baseline&kind=skills&name=guide"
+    files = {"skill.yaml": "name: guide\ndescription: A guide.\nload: on_demand\ntypes: [chat]\n",
+             "prompt.md": "Main text.\n", "references/detail.md": "Detail text.\n"}
+    assert api.call("PUT", "/setups/item" + q, {"files": files}).status_code == 200
+    got = api.call("GET", "/setups/item" + q).json()
+    assert got["files"]["references/detail.md"] == "Detail text.\n" and got["revision"] == 1
+    bad = api.call("PUT", "/setups/item" + q, {"files": {**files, "notes/x.md": "no"}})
+    assert bad.status_code == 400
+    api.call("PUT", "/setups/item" + q, {"files": {**files, "prompt.md": "Changed.\n"}})
+    hist = api.call("GET", "/setups/item/history" + q).json()
+    assert hist["revision"] == 2 and [h["revision"] for h in hist["history"]] == [1, 2]
+    assert hist["history"][0]["actor"] == "anonymous"
+    assert api.call("GET", "/setups/item/history?scope=baseline&kind=agents&name=chat").status_code == 400
+    resolved = api.call("GET", "/setups/resolved?type=chat").json()
+    assert resolved["skills"]["guide"]["load_mode"] == "on_demand"
+    assert "Changed." not in resolved["system_prompt"] and "`guide`" in resolved["system_prompt"]

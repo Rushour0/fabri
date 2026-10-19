@@ -42,11 +42,14 @@ from fabri.setups import (
     Layer,
     SetupError,
     Setups,
+    item_history,
+    item_revision,
     read_item,
     resolve_setup,
     validate_item,
 )
 from fabri.setups.layers import SLUG, check_slug, read_yaml, split_frontmatter
+from fabri.setups.store import allowed_file
 from fabri.setups.toolset import default_state_dir, diff_snapshots
 from fabri.tools.approval import ApprovalError
 from fabri.tools.catalog import read_state, save_catalog, write_state
@@ -378,6 +381,7 @@ class SetupsApi:
             ("POST", "/setups/scopes"): (r.post_scopes, True),
             ("GET", "/setups/items"): (r.get_items, False),
             ("GET", "/setups/item"): (r.get_item, False),
+            ("GET", "/setups/item/history"): (r.get_item_history, False),
             ("PUT", "/setups/item"): (r.put_item, True),
             ("DELETE", "/setups/item"): (r.delete_item, True),
             ("POST", "/setups/item/disable"): (r.post_disable, True),
@@ -682,7 +686,20 @@ class SetupsApi:
         label = self._item_label(kind, name)
         lint = [f for f in self._lint(self.setups(scope)) if f["layer"] == scope.text
                 and (f"{f['kind']}/{f['name']}" == label or (kind == "tools" and f["kind"] == "tools"))]
-        return 200, {"name": name, "kind": kind, "files": files, "meta": meta, "lint": lint}
+        body = {"name": name, "kind": kind, "files": files, "meta": meta, "lint": lint}
+        if kind == "skills":
+            body["revision"] = item_revision(scope_dir, kind, name)
+        return 200, body
+
+    def get_item_history(self, req: "Request"):
+        scope = parse_scope(req.query.get("scope"))
+        kind = self._kind(req.query.get("kind"))
+        if kind != "skills":
+            raise ApiError(400, "history is recorded for skills only")
+        name = self._item_name(kind, req.query.get("name"))
+        scope_dir = self._existing(scope)
+        return 200, {"name": name, "kind": kind, "revision": item_revision(scope_dir, kind, name),
+                     "history": item_history(scope_dir, kind, name)}
 
     @staticmethod
     def _meta(kind: str, name: str, files: Mapping[str, str]) -> dict[str, Any]:
@@ -717,7 +734,7 @@ class SetupsApi:
                 isinstance(k, str) and isinstance(v, str) for k, v in files.items()):
             raise ApiError(400, "files must be a non-empty mapping of file path to text")
         allowed = self._item_files(kind, name)
-        bad = sorted(set(files) - set(allowed))
+        bad = sorted(f for f in files if f not in allowed and not (kind == "skills" and allowed_file(kind, f)))
         if bad:
             raise ApiError(400, f"unexpected files {bad}; {kind}/{name} takes {allowed}")
         if kind in ("context", "data", "tools", "setup"):
@@ -737,7 +754,7 @@ class SetupsApi:
                                [f"{lit} is a raw value" for lit in literals])
         setups = self.setups(scope)
         with self._write_lock:
-            result = setups.put(scope.text, kind, name, content)
+            result = setups.put(scope.text, kind, name, content, actor=req.actor)
             self.audit(scope_dir, req.actor, "put", scope, kind, name, files)
         lint = [{"severity": "warning", "kind": kind, "name": name, "message": w, "layer": scope.text}
                 for w in result.warnings]
@@ -755,7 +772,7 @@ class SetupsApi:
         scope_dir = self._existing(scope)
         with self._write_lock:
             previous = read_item(scope_dir, kind, name)
-            if not self.setups(scope).delete(scope.text, kind, name):
+            if not self.setups(scope).delete(scope.text, kind, name, actor=req.actor):
                 raise ApiError(404, f"no {kind} item {name!r} in {scope.text}")
             self.audit(scope_dir, req.actor, "delete", scope, kind, name,
                        previous.decode("utf-8", "replace") if isinstance(previous, bytes) else previous)

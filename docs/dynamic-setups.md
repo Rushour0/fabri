@@ -47,10 +47,65 @@ Packs are not special. A pack is one more directory in the list.
 
 ```yaml
 name: weekly-chart          # must match the directory
-description: Build a weekly chart block.
+description: Build a weekly chart block.   # what it does; listed in the prompt for on-demand skills
+when_to_use: the user asks for a weekly chart or a trend over weeks   # optional trigger text
 types: [canvas]             # agent types that load it; [] means every type
 tools: [chart_update]       # tools it needs; added to the type's tool list
+tags: [charts]              # free labels; the tag `always` pins the skill to always-loaded
+load: on_demand             # always (default) | on_demand
+version: "1"                # your own label; fabri does not read it
 ```
+
+Optional files next to `skill.yaml`:
+
+```
+skills/<name>/
+  skill.yaml
+  prompt.md                      the instructions
+  references/<file>.md|txt|json|yaml|csv    longer material, one level deep
+```
+
+## Skill loading: always or on demand
+
+An `always` skill (the default) has its `prompt.md` copied into the system
+prompt on every turn, up to `skill_prompt_chars`. An `on_demand` skill puts one
+line in the prompt (name, description, `when_to_use`, how many reference
+files) and its text stays out. The agent calls `load_skill(name)` when a task
+matches; the call returns the full text, the skill's revision, its reference
+file names, and exposes the tools the skill names. `load_skill(name,
+reference="references/x.md")` returns one reference file. Both are cut at
+`skill_ondemand_chars` and set `truncated: true` when they are.
+
+Which mode a skill gets, first match wins: its own `load`, the `always` tag,
+setup.yaml `skill_load: on_demand`, then `always`. `load_skill` exists only
+for agent types that have at least one on-demand skill, and is always
+included in tool retrieval.
+
+A 15,700 character skill costs about 15,700 characters on every turn when
+`always`, and about 600 (the index line plus the two sentences that explain
+`load_skill`) when `on_demand`. A turn that loads it pays the 15,700 plus one
+tool round trip. Put long, situational skills on demand and keep short rules
+that must hold on every turn (a write gate, a style rule) `always`.
+
+Budgets: `skill_prompt_chars` (default 4000) applies to `always` skills;
+`skill_ondemand_chars` (default 40000) applies to `on_demand` skills and to
+each reference file. A too-long `always` skill is refused with a hint to use
+`load: on_demand`.
+
+## Revisions
+
+Each time a skill write changes the skill's files, `put_item` and
+`delete_item` append an entry to the layer's hidden `.fabri-revisions.json`:
+revision number, sha256 of the files, time, actor and whether it was a
+delete. An identical rewrite adds nothing. The last 50 entries are kept; the
+text itself is not (the API audit log keeps a content hash per write). The
+file is hidden, so it never changes the resolver's content hash. The resolved
+skill carries `revision`, and `load_skill` returns it. Read it with
+`fabri.setups.item_revision(layer_dir, "skills", name)` and
+`item_history(...)`.
+
+Import (`skill-md`) keeps `when_to_use` and `references/`, and sets
+`load: on_demand` when the body is over the always-loaded budget.
 
 A custom agent type becomes a route option when its merged `agent.yaml` has a
 `route` block with `description` and `not_for`. `resolved.route_options()`
@@ -151,7 +206,7 @@ marker that also hides shallower copies. Kinds are `setup`, `agents`, `skills`,
 `plays`, `context`, `data` and `tools`. Validation covers slugs, names that
 match directories, required fields, tool names against the global allowlist,
 budgets from that layer's `setup.yaml` `budgets:` (`skill_prompt_chars`,
-`context_chars`, `prompt_chars`, `data_bytes`), and `slop_report` warnings.
+`skill_ondemand_chars`, `context_chars`, `prompt_chars`, `data_bytes`), and `slop_report` warnings.
 Pass `validators={"plays": fn}` to add product checks. The `Setups` class
 bundles a layer list, a policy and validators.
 
