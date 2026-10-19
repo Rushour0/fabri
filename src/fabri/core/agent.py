@@ -290,7 +290,7 @@ def _run_single_attempt(
         if pop is None:
             return
         names = pop()
-        if not tool_retrieval_enabled or not names:
+        if not tool_retrieval_enabled or not isinstance(names, list) or not names:
             return
         shown = {t.name for t in visible_tools}
         added = [tools.tools[n] for n in names if n in tools.tools and n not in shown]
@@ -1508,8 +1508,8 @@ def _dispatch_tool_calls(
         # Log both names when a tool was called by an alias (for example an
         # OpenAPI operation_id) or when the tool has aliases of its own.
         canonical_fn = getattr(tools, "canonical_name", None)
-        canonical = canonical_fn(call.name) if canonical_fn else None
-        if canonical:
+        canonical = canonical_fn(call.name) if callable(canonical_fn) else None
+        if isinstance(canonical, str) and canonical in getattr(tools, "tools", {}):
             aliases = list(getattr(tools.tools[canonical], "aliases", None) or [])
             if canonical != call.name or aliases:
                 event["canonical_name"] = canonical
