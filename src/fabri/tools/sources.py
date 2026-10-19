@@ -170,7 +170,12 @@ def build_source_tools(
     validate_source_decl(decl, policy)
     kind = decl["kind"]
     builder = {"openapi": _build_openapi, "http": _build_http, "mcp": _build_mcp, "python": _build_python}[kind]
-    dry = dry_run_headers(decl.get("dry_run_header") or (policy.dry_run_header if policy else None)) if dry_run else {}
+    dry: dict[str, str] = {}
+    if dry_run:
+        # The declaration's header and the caller's policy header are both
+        # sent, so a host can always mark dry runs its own way.
+        dry.update(dry_run_headers(decl.get("dry_run_header")))
+        dry.update(dry_run_headers(policy.dry_run_header if policy else None))
     return builder(decl, base_dir=base_dir, policy=policy, transport=transport, store=store, dry=dry)
 
 
