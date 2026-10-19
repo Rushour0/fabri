@@ -116,12 +116,13 @@ class JevDecider:
         self._path = parts.path or "/"
         if parts.query:
             self._path += f"?{parts.query}"
-        # One keep-alive connection per thread. `_conns` tracks them by thread
-        # id so an acquire can close sockets left behind by finished threads;
+        # One keep-alive connection per thread. `_conns` retains the owning
+        # Thread object so reaping can check liveness while holding this same
+        # lock; a thread id alone can be reused and is racy with enumeration.
         # `_generation` tells a thread its cached connection was closed under it.
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._conns: dict[int, http.client.HTTPConnection] = {}
+        self._conns: dict[threading.Thread, http.client.HTTPConnection] = {}
         self._generation = 0
 
     @property
@@ -250,10 +251,10 @@ class JevDecider:
             return conn, bool(getattr(local, "used", False))
         conn = _open_connection(self._scheme, self._host, self._port, self.timeout_s)
         replaced: http.client.HTTPConnection | None = None
-        ident = threading.get_ident()
+        owner = threading.current_thread()
         with self._lock:
-            replaced = self._conns.get(ident)
-            self._conns[ident] = conn
+            replaced = self._conns.get(owner)
+            self._conns[owner] = conn
             local.generation = self._generation
         if replaced is not None and replaced is not conn:
             self._close_connections([replaced])
@@ -267,17 +268,16 @@ class JevDecider:
             self._local.conn = None
             self._local.used = False
         with self._lock:
-            ident = threading.get_ident()
-            if self._conns.get(ident) is conn:
-                del self._conns[ident]
+            owner = threading.current_thread()
+            if self._conns.get(owner) is conn:
+                del self._conns[owner]
         self._close_connections([conn])
 
     def _reap_dead_connections(self) -> None:
         """Close connections owned by threads that have already terminated."""
-        live = {thread.ident for thread in threading.enumerate() if thread.ident is not None}
         with self._lock:
-            stale = [ident for ident in self._conns if ident not in live]
-            conns = [self._conns.pop(ident) for ident in stale]
+            stale = [owner for owner in self._conns if not owner.is_alive()]
+            conns = [self._conns.pop(owner) for owner in stale]
         self._close_connections(conns)
 
     @staticmethod
@@ -339,30 +339,26 @@ def _parse_answer(q: Question, raw: object) -> Answer:
             answer.confidence = abs(2.0 * p - 1.0)
             return answer
         raw_probs = raw.get("probabilities")
-        if raw_probs is None:
-            raw_probs = {}
-        if not isinstance(raw_probs, dict):
-            raise ValueError(f"probabilities must be an object, got {type(raw_probs).__name__}")
-        probs = {str(k): _probability(v, "probability") for k, v in raw_probs.items()}
+        allowed = q.allowed_values()
         if q.kind == "score":
-            # Live Jev returns `score` as an expected level index (e.g. 2.96) with
-            # `legend` {"0": "low", ...} and probabilities keyed by index. Report
-            # the most likely level by name so it lines up with `confidence`.
-            legend = {str(k): str(v) for k, v in (raw.get("legend") or {}).items()}
-            if legend and probs:
-                probs = {legend.get(k, k): p for k, p in probs.items()}
-                value = max(probs, key=probs.__getitem__)
-            else:
-                value = raw["score"]
+            if not isinstance(raw_probs, dict):
+                raise ValueError(f"probabilities must be an object, got {type(raw_probs).__name__}")
+            probs = _score_probabilities(raw_probs, raw.get("legend"), allowed)
+            value = max(probs, key=probs.__getitem__)
         else:
             value = raw["choice"]
-        allowed = q.allowed_values()
         if value not in allowed:
             answer.error = f"jev answer has invalid {type(value).__name__}; not one of the allowed options"
             return answer
+        if q.kind == "choice":
+            if not isinstance(raw_probs, dict):
+                raise ValueError(f"probabilities must be an object, got {type(raw_probs).__name__}")
+            probs = _choice_probabilities(raw_probs, allowed)
+        if probs[value] != max(probs.values()):
+            raise ValueError("reported choice is not a most-probable option")
         conf = raw.get("confidence")
         confidence = _probability(conf, "confidence") if conf is not None else _normalized_confidence(
-            max(probs.values(), default=None), len(allowed)
+            probs[value], len(allowed)
         )
         answer.value = value
         answer.probabilities = probs
@@ -373,6 +369,69 @@ def _parse_answer(q: Question, raw: object) -> Answer:
         answer.confidence = None
         answer.error = f"jev answer is malformed: {e}"
     return answer
+
+
+def _choice_probabilities(raw_probs: dict, allowed: list[str] | list[bool]) -> dict[str, float]:
+    """Validate choice labels before retaining any provider-controlled text."""
+    labels = set(allowed)
+    unknown = sum(1 for label in raw_probs if not isinstance(label, str) or label not in labels)
+    if unknown:
+        raise ValueError(f"probabilities contain {unknown} unrecognized label(s)")
+    probs = {label: _probability(probability, "probability") for label, probability in raw_probs.items()}
+    return _validate_distribution(probs, labels)
+
+
+def _score_probabilities(
+    raw_probs: dict, raw_legend: object, allowed: list[str] | list[bool]
+) -> dict[str, float]:
+    """Map score indexes to declared levels without retaining provider labels."""
+    levels = list(allowed)
+    unknown = 0
+    if raw_legend is not None:
+        if not isinstance(raw_legend, dict):
+            raise ValueError(f"legend must be an object, got {type(raw_legend).__name__}")
+        for index, label in raw_legend.items():
+            if _level_index(index, len(levels)) is None or label not in levels:
+                unknown += 1
+
+    probs: dict[str, float] = {}
+    for index, probability in raw_probs.items():
+        level_index = _level_index(index, len(levels))
+        if level_index is None:
+            unknown += 1
+            continue
+        level = levels[level_index]
+        if level in probs:
+            unknown += 1
+            continue
+        probs[level] = _probability(probability, "probability")
+    if unknown:
+        raise ValueError(f"score response contains {unknown} unrecognized label(s)")
+    return _validate_distribution(probs, set(levels))
+
+
+def _level_index(label: object, count: int) -> int | None:
+    """A JSON score-map index, constrained to the question's level range."""
+    if isinstance(label, bool):
+        return None
+    if isinstance(label, int):
+        index = label
+    elif isinstance(label, str) and label.isdecimal():
+        index = int(label)
+    else:
+        return None
+    return index if 0 <= index < count else None
+
+
+def _validate_distribution(probs: dict[str, float], labels: set[object]) -> dict[str, float]:
+    """Require a near-normalized distribution, including safe partial maps."""
+    total = sum(probs.values())
+    missing = labels - set(probs)
+    if missing and abs(total - 1.0) > 1e-6:
+        raise ValueError("incomplete probabilities must sum to 1")
+    if abs(total - 1.0) > 0.02:
+        raise ValueError("probabilities must sum to 1")
+    return probs
 
 
 def _probability(x: object, what: str) -> float:
@@ -392,7 +451,8 @@ def _normalized_confidence(p_max: float | None, n: int) -> float | None:
         return None
     if n == 1:
         return 1.0
-    return (p_max - 1.0 / n) / (1.0 - 1.0 / n)
+    confidence = (p_max - 1.0 / n) / (1.0 - 1.0 / n)
+    return min(1.0, max(0.0, confidence))
 
 
 def _tokens(x: object, default: int | None = 0) -> int | None:

@@ -127,6 +127,22 @@ def test_provider_exception_and_log_redact_api_key(monkeypatch, caplog):
     assert all(secret not in record.getMessage() for record in caplog.records)
 
 
+def test_provider_default_api_key_env_is_redacted_when_config_omits_it(monkeypatch):
+    """Gemini keys are not necessarily Bearer- or sk-prefixed."""
+    secret = "AIzaSy-raw-gemini-key-SECRET"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+
+    class _Boom:
+        def step(self, system, messages):
+            raise RuntimeError(f"Gemini rejected API key {secret}")
+
+    decider = LLMDecider({"provider": "gemini", "model": "gemini-2.5-flash"}, backend=_Boom())
+    with pytest.raises(DecideError) as exc:
+        decider.decide("s", QUESTIONS)
+
+    assert secret not in str(exc.value)
+
+
 def test_backend_built_lazily(monkeypatch):
     calls = []
     monkeypatch.setattr("fabri.runtime._instantiate", lambda rcfg, tools: calls.append(1))

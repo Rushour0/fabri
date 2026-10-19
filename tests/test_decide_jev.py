@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import sys
 import threading
 
 import pytest
@@ -485,6 +486,71 @@ def test_missing_confidence_uses_normalized_choice_confidence(monkeypatch, key):
     assert cascade.needs_fallback(question, answer) is True
 
 
+@pytest.mark.parametrize("raw", [
+    {"choice": "a", "probabilities": {"a": 0.1, "b": 0.9}},
+    {"choice": "a", "probabilities": {"a": 0.75, "b": 0.75}},
+])
+def test_inconsistent_choice_probability_map_is_errored(monkeypatch, key, raw):
+    question = Question("c", "choice", "Which?", options={"a": None, "b": None})
+    answer = _one(monkeypatch, question, raw)
+    assert answer.value is None
+    assert answer.probabilities == {}
+    assert answer.error and "malformed" in answer.error
+
+
+def test_unrecognized_provider_labels_are_never_stored_or_printed(monkeypatch, key, tmp_path, capsys):
+    """A provider label may itself be the API key, so only declared text survives."""
+    secret = key
+    choice = Question("intent", "choice", "Which?", options={"canvas": None, "tasks": None})
+    score = Question("urgency", "score", "How urgent?", levels=["low", "high"])
+    answers = {
+        choice.key: jev_mod._parse_answer(choice, {
+            "choice": "canvas", "probabilities": {secret: 0.8, "tasks": 0.2},
+        }),
+        score.key: jev_mod._parse_answer(score, {
+            "score": 1.0, "legend": {"0": secret, "1": "high"},
+            "probabilities": {"0": 0.2, "1": 0.8},
+        }),
+    }
+    for answer in answers.values():
+        assert answer.value is None and answer.error
+        assert secret not in repr(answer)
+        assert secret not in json.dumps(answer.to_dict())
+
+    class _Decider:
+        def decide(self, state, questions):
+            return {questions[0].key: answers[questions[0].key]}
+
+    tree_path = tmp_path / "tree.yaml"
+    tree_path.write_text("""\
+name: redaction
+decider: {kind: jev}
+start: intent
+nodes:
+  intent:
+    question:
+      kind: choice
+      instructions: Which?
+      options: {canvas: null, tasks: null}
+    branches:
+      canvas: {done: true}
+      tasks: {done: false}
+""")
+    monkeypatch.setattr("fabri.decide.tree.build_decider", lambda cfg: _Decider())
+    from fabri import cli
+
+    for json_output in (False, True):
+        argv = ["fabri", "decide", "--tree", str(tree_path), "--state", "s"]
+        if json_output:
+            argv.append("--json")
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            cli.main()
+        captured = capsys.readouterr()
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
 def test_template_readme_states_yesno_threshold_as_probability():
     from fabri.agency_templates.jev_router import README
 
@@ -586,6 +652,32 @@ def test_acquire_closes_connections_owned_by_finished_threads(monkeypatch, key):
 
     assert len(decider._conns) <= 1
     assert all(connection.closed for connection in fake.connections[:-1])
+
+
+def test_reap_keeps_a_just_started_live_threads_connection(monkeypatch, key):
+    fake = _install(monkeypatch, [YESNO_OK])
+    decider = JevDecider()
+    connected = threading.Barrier(2)
+    release = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def work():
+        try:
+            decider._connection()
+            connected.wait()
+            release.wait()
+        except BaseException as exc:  # surfaced below
+            errors.append(exc)
+
+    worker = threading.Thread(target=work)
+    worker.start()
+    connected.wait()
+    decider._reap_dead_connections()
+    assert len(decider._conns) == 1
+    assert not fake.connections[0].closed
+    release.wait()
+    worker.join()
+    assert not errors
 
 
 def test_response_asking_to_close_drops_the_connection(monkeypatch, key):

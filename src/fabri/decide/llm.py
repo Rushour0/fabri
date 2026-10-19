@@ -134,6 +134,15 @@ class LLMDecider:
 
     def _secrets(self) -> tuple[str, ...]:
         api_key_env = self.llm_cfg.get("api_key_env")
+        if not api_key_env:
+            # Keep the redaction key in lockstep with the provider-aware
+            # default applied while config is normalized for backend creation.
+            from fabri.config import _PROVIDER_DEFAULT_API_KEY_ENV
+            from fabri.core.llm import Provider
+
+            raw_provider = self.llm_cfg.get("provider")
+            provider = Provider.coerce(raw_provider) if raw_provider else Provider.GEMINI
+            api_key_env = _PROVIDER_DEFAULT_API_KEY_ENV.get(provider)
         key = os.environ.get(api_key_env) if isinstance(api_key_env, str) else None
         return (key,) if key else ()
 
