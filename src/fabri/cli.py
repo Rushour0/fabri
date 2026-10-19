@@ -979,7 +979,7 @@ def cmd_new_agency(args: argparse.Namespace) -> None:
             )
         else:
             created = scaffold_agency(args.name, args.template, args.dest)
-            entry = "agent.openai.yaml"
+            entry = AGENCY_TEMPLATES[args.template].get("ENTRY", "agent.openai.yaml")
     except (OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1424,6 +1424,57 @@ def cmd_admin_dashboard(args: argparse.Namespace) -> None:
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
     print(render_dashboard(config, tools, store))
+
+
+def _read_state_file(path: Path) -> object:
+    """A state file's contents: parsed as JSON when it ends in .json,
+    otherwise passed as text."""
+    text = path.read_text()
+    if path.suffix.lower() == ".json":
+        return json.loads(text)
+    return text
+
+
+def _decide_state(raw: str | None, state_file: str | None = None) -> object:
+    """The state for `fabri decide`. `--state-file PATH` always reads the file.
+    `--state @path` reads the file only when it exists; otherwise the text,
+    leading '@' included, is the state (a message may start with '@')."""
+    if state_file is not None:
+        return _read_state_file(Path(state_file))
+    raw = raw or ""
+    if raw.startswith("@") and len(raw) > 1 and Path(raw[1:]).is_file():
+        return _read_state_file(Path(raw[1:]))
+    return raw
+
+
+def cmd_decide(args: argparse.Namespace) -> None:
+    """Run a decision tree on one state and print the path and the leaf."""
+    from fabri.decide import DecideError, DecisionTree, TreeError
+
+    try:
+        state = _decide_state(args.state, getattr(args, "state_file", None))
+        tree = DecisionTree.from_yaml(args.tree)
+        result = tree.run(state)
+    except (OSError, ValueError, TreeError, DecideError) as e:
+        print(f"decide error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        payload = {"tree": tree.name, **result.to_dict()}
+        for step, answer in zip(payload["path"], result.path):
+            step["question"] = tree.nodes[answer.key].question.instructions
+        print(json.dumps(payload, indent=2))
+        return
+
+    print(f"tree: {tree.name}")
+    for node_name, answer in zip(result.nodes, result.path):
+        question = tree.nodes[node_name].question
+        conf = "n/a" if answer.confidence is None else f"{answer.confidence:.2f}"
+        flag = " escalated" if answer.escalated else ""
+        print(f"  {node_name}: {question.instructions}")
+        print(f"    -> {answer.value!r} (confidence {conf}, source {answer.source}{flag})")
+    print(f"leaf: {json.dumps(result.leaf)}")
+    print(f"cost: {result.cost_text()}  latency: {result.latency_ms:.0f} ms")
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -1878,6 +1929,18 @@ def main() -> None:
         "export", help="Export a session's trace to the configured OTLP backend (Langfuse/Honeycomb/…)")
     p_traces_export.add_argument("session_id")
     p_traces_export.set_defaults(func=cmd_traces_export)
+
+    p_decide = sub.add_parser(
+        "decide", help="Run a decision tree (Jev, LLM or cascade) on one state and print the route")
+    p_decide.add_argument("--tree", required=True, help="Path to a decision tree YAML")
+    state_src = p_decide.add_mutually_exclusive_group(required=True)
+    state_src.add_argument("--state",
+                           help="State as literal text. @file reads that file if it exists "
+                                "(parsed as JSON when it ends in .json); otherwise the text is sent as is")
+    state_src.add_argument("--state-file", metavar="PATH",
+                           help="Read the state from PATH (parsed as JSON when it ends in .json)")
+    p_decide.add_argument("--json", action="store_true", help="Print the result as JSON")
+    p_decide.set_defaults(func=cmd_decide)
 
     # B7: embeddable service — a non-Python host submits a task over HTTP and
     # streams events without importing fabri.

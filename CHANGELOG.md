@@ -4,6 +4,63 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.24.1
+
+**Typed decisions with Jev, plus an LLM fallback.**
+
+- New `fabri.decide` package. A decider takes a state and a list of typed
+  questions (`choice`, `score`, or `yesno`) and returns one answer per
+  question with its probabilities, confidence, source, latency, tokens and
+  cost.
+- `JevDecider` calls TypeSafe AI's Jev decision model over its `/systemone`
+  API, either directly (`TYPESAFE_API_KEY`) or through OpenRouter
+  (`OPENROUTER_API_KEY`). It uses the standard library for HTTP and keeps one
+  connection open per thread, so only the first call pays the TCP and TLS
+  setup. It sends every question in one request, retries once on 429 or 5xx,
+  reconnects once when the server has closed an idle connection, and keeps
+  the API key out of error messages. A yes/no answer reports `P(true) >= 0.5`
+  as its value and `|2P - 1|` as its confidence, the same formula Jev uses
+  for a two-option choice. A score answer maps Jev's expected level index
+  through its legend to the most likely level name. Probabilities outside
+  [0, 1], NaN and malformed payloads produce an errored answer instead of an
+  exception, so a cascade escalates them. Cost comes from the provider's
+  reported `usage.cost` when present, otherwise from `fabri.pricing`. An
+  unpriced model is flagged with `cost_known=False` instead of reporting $0.
+- `LLMDecider` answers the same questions with any fabri `llm:` block and
+  rejects answers outside the declared options.
+- `CascadeDecider` asks a primary decider first and re-asks only the
+  questions that errored or came back below a per-kind confidence threshold
+  on a fallback, in one batched call. Escalated answers are marked and their
+  cost and latency include the primary attempt.
+- `DecisionTree` loads a YAML router (nodes, branches, leaves) and validates
+  it at load time: branch keys must be declared answers, every answer needs a
+  branch, referenced nodes must exist, and cycles or depth over 16 are
+  rejected. Leaves pass through as written, so `requires_approval: true` stays
+  set.
+- New `fabri decide --tree tree.yaml --state '<text or @file.json>' [--json]`
+  command prints the path taken, the leaf, and total cost and latency.
+- New `jev-router` agency template. A choice node routes to chat, canvas and
+  tasks specialists, listing the non-acting option first. Task requests then
+  pass three narrow yes/no checks (affects others, hard to undo, bulk
+  change); any "yes" ends at a `requires_approval: true` leaf, and an unsure
+  check goes to the LLM fallback rather than skipping approval.
+- Pricing entries for `jev-1.13.0`, `jev-1.14.0`, `typesafe/jev-1.13` and
+  `typesafe/jev-1.14` at $0.042 per million input tokens, output free.
+- New `fabri.style` module: `PLAIN_WRITING_RULES`, a short prompt block for
+  user-facing agents, and `slop_report(text)`, a deterministic count of
+  common AI-writing tells. The `jev-router` specialists carry the rules as
+  their `system_prompt_prefix`. On 24 gpt-5-mini answers the rules cut tells
+  from 8.54 to 0.08 per answer (`benchmarks/style/slop_eval.py`).
+- Agency templates may declare `ENTRY`, the config file named in the
+  post-scaffold hint.
+- `benchmarks/jev/`: a 420-item decision benchmark (routing, tool selection,
+  approval yes/no, urgency score) with option-order, large-action-set,
+  near-valid and injected-text perturbations. On 2026-10-19, Jev with a
+  gpt-5-mini fallback scored 99.3% against 96.9% for gpt-5-mini alone, at a
+  p50 of 504 ms against 1686 ms and about one seventh of the cost per
+  correct decision. Labels are synthetic, so treat the accuracies as an
+  upper bound. Results: `benchmarks/results/jev-decisions-2026-10-19.md`.
+
 ## 0.24.0
 
 **Run a roster entry from the tools your team already uses.**
