@@ -4,6 +4,50 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## Unreleased
+
+Dynamic tools and layered setups. No version bump yet.
+
+- `fabri.tools.openapi` turns an OpenAPI 3 document (URL, file or dict) into
+  tools. Names are `<resource>_<action>` from the path and method, with the
+  `operationId` kept as an alias that the registry, allow lists and approval
+  maps accept. Descriptions carry a `Responses:` line with status codes and
+  reason enums, capped at 1,500 characters. Input schemas merge path and query
+  params with the JSON body, and `$ref`, `allOf`, `oneOf` and `nullable` are
+  resolved. Allow, deny, method and tag filters apply, and DELETE stays out
+  unless named. Calls go over httpx with headers from secret refs or env var
+  names, an optional dry-run header, and status codes mapped to ok, conflict
+  and error.
+- `fabri.tools.sources` reads one declaration format for `openapi`, `http`,
+  `mcp` and `python` sources and builds `(manifest, handler)` pairs.
+  `fabri.tools.policy.ToolPolicy` caps names, kinds, hosts, DELETE and python
+  modules.
+- `fabri.setups` resolves an ordered list of layer directories into agent
+  types, prompts, skills, context, data, plays and a tool set, recording the
+  source layer of every item. Tools from all layers are unioned and then
+  intersected with the caller's global allowlist. Results are cached by a
+  content hash of the layer files, so edits show up on the next resolve.
+  Includes atomic put, delete and disable per kind with validation and
+  per-layer budgets, skill import from SKILL.md and fabri layouts, lint, route
+  options for custom agent types, and `build_agent_config` for `run_agent`.
+- `fabri.tools.registration` registers tools into a layer at runtime with
+  validation, versioning and an audit log. Auth accepts secret refs and env
+  var names only.
+- `fabri.tools.catalog` gives each tool a title and a description built from
+  the schema, overridable per layer, and adds the `find_tools` and
+  `describe_tool` meta tools. A tool either of them returns can be called in
+  the same run even when tool retrieval hid it. `fabri.tools.probe` learns ids,
+  slugs and enum values from safe GET calls with redaction, and
+  `fabri.tools.describe` can rewrite descriptions with an LLM, cached and
+  checked for grounding and writing tells.
+- `ToolManifest` gains optional `approval`, `aliases` and `title` fields.
+  Traces log the canonical tool name next to an alias. Tool retrieval ranks on
+  the title as well as the description.
+- New CLI commands: `fabri setup show|import|lint` and `fabri tools
+  list|sync|register|unregister|enable|disable|probe|describe`. A bare
+  `fabri tools` still lists the configured manifest tools.
+- New guide: docs/dynamic-setups.md.
+
 ## 0.24.1
 
 **Typed decisions with Jev, plus an LLM fallback.**
