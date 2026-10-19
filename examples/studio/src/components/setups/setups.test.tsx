@@ -37,7 +37,7 @@ describe("shared pieces", () => {
 describe("tools views", () => {
   it("renders the catalog table columns", () => {
     const html = renderToStaticMarkup(
-      <CatalogTable entries={[{ name: "t", alias: ["a"], title: "Title", description: "", approval: "read", source: "crm", endpoint: "GET /x", kind: "http", options: {}, params: 0 }]} />,
+      <CatalogTable entries={[{ name: "t", alias: ["a"], title: "Title", description: "", approval: "read", source: "crm", layer: "baseline", origin: "registered", endpoint: "GET /x", kind: "http", options: {}, params: 0 }]} />,
     );
     for (const h of ["Title", "Name", "Alias", "Approval", "Source", "Endpoint"]) expect(html).toContain(h);
     expect(html).toContain("GET /x");

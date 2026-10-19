@@ -23,7 +23,7 @@ function Group({ label, items }: { label: string; items: ResolvedItem[] }) {
               <code>{it.name}</code>
               <LayerBadge source={it.source} />
               {!it.enabled && <span className="su-badge su-badge--off">disabled</span>}
-              {it.detail && <span className="su-reslist__detail">{it.detail}</span>}
+              {it.detail && it.detail !== it.name && <span className="su-reslist__detail">{it.detail}</span>}
             </li>
           ))}
         </ul>

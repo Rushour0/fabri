@@ -270,12 +270,14 @@ export function NewItem({
 
 // ---- panel ----
 
-export function ItemsPanel({ scope, kind }: { scope: Scope; kind: Exclude<Kind, "tools"> }) {
+export function ItemsPanel({ scope, kind, localFirst = false }: { scope: Scope; kind: Exclude<Kind, "tools">; localFirst?: boolean }) {
   const items = useLoad(() => setupsApi.items(scope.id, kind), `${scope.id}|${kind}`);
   const lintAll = useLoad(() => setupsApi.lint(scope.id), scope.id);
   const [open, setOpen] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
+  // Project views start on what the project owns; inherited items are one click away.
+  const [showInherited, setShowInherited] = useState(!localFirst);
 
   useEffect(() => {
     setOpen(null);
@@ -283,8 +285,10 @@ export function ItemsPanel({ scope, kind }: { scope: Scope; kind: Exclude<Kind, 
     setImporting(false);
   }, [scope.id, kind]);
 
-  const list = items.data ?? [];
-  const existing = useMemo(() => new Set(list.map((i) => i.name)), [list]);
+  const all = items.data ?? [];
+  const hidden = showInherited ? 0 : all.filter((i) => isInherited(i.source_layer, scope.id)).length;
+  const list = showInherited ? all : all.filter((i) => !isInherited(i.source_layer, scope.id));
+  const existing = useMemo(() => new Set(all.map((i) => i.name)), [all]);
   const openItem = list.find((i) => i.name === open);
 
   return (
@@ -294,6 +298,12 @@ export function ItemsPanel({ scope, kind }: { scope: Scope; kind: Exclude<Kind, 
           {KIND_LABEL[kind]} visible in <strong>{scope.label}</strong>. The badge shows the layer each one comes from.
         </p>
         <div className="su-actions">
+          {localFirst && (
+            <label className="su-check">
+              <input type="checkbox" checked={showInherited} onChange={(e) => setShowInherited(e.target.checked)} />
+              <span>Show inherited</span>
+            </label>
+          )}
           {kind === "skills" && (
             <button className="btn" onClick={() => { setImporting((v) => !v); setCreating(false); }} aria-expanded={importing}>
               Import
@@ -336,6 +346,7 @@ export function ItemsPanel({ scope, kind }: { scope: Scope; kind: Exclude<Kind, 
           {items.error && <ErrorBox message={items.error} onRetry={items.reload} />}
           {items.data && list.length === 0 && (
             <Empty title={`No ${KIND_LABEL[kind].toLowerCase()} here yet`}>
+              {hidden > 0 && `${hidden} inherited item${hidden === 1 ? " is" : "s are"} hidden. `}
               Create one{kind === "skills" ? " or import SKILL.md files" : ""}. Items from lower layers show up once they exist.
             </Empty>
           )}

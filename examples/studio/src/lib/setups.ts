@@ -417,6 +417,8 @@ export interface CatalogEntry {
   description: string;
   approval: string;
   source: string;
+  layer: string;
+  origin: string;
   endpoint: string;
   kind: string;
   options: Record<string, unknown[]>;
@@ -448,6 +450,8 @@ export function normCatalog(raw: unknown): CatalogEntry[] {
       description: String(r.description ?? ""),
       approval: String(r.approval ?? ""),
       source: String(r.source ?? r.layer ?? ""),
+      layer: String(r.layer ?? ""),
+      origin: String(r.origin ?? ""),
       endpoint,
       kind: String(r.kind ?? ""),
       options: (r.options as Record<string, unknown[]>) ?? {},

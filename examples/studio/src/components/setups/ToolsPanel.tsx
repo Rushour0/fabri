@@ -293,7 +293,16 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
       cat.reload();
     });
 
-  const registered = reg.data ?? [];
+  // The items listing may not include registered tools, so fold in the catalog's registered entries.
+  const registered: SetupItem[] = (() => {
+    const byName = new Map<string, SetupItem>();
+    for (const e of cat.data ?? []) {
+      if (e.origin === "registered")
+        byName.set(e.name, { name: e.name, kind: "tools", source_layer: e.layer, size: null, updated_at: null, enabled: true });
+    }
+    for (const t of reg.data ?? []) byName.set(t.name, t);
+    return [...byName.values()];
+  })();
 
   return (
     <div className="su-panel">
@@ -338,7 +347,7 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
         <h3 className="su-h3">Registered in this scope</h3>
         {reg.loading && !reg.data && <Loading what="registered tools" />}
         {reg.error && <ErrorBox message={reg.error} onRetry={reg.reload} />}
-        {reg.data && registered.length === 0 && (
+        {reg.data && cat.data && registered.length === 0 && (
           <Empty title="Nothing registered here">Use Register tool to add an http, openapi or mcp tool to this scope.</Empty>
         )}
         {registered.length > 0 && (
@@ -353,10 +362,12 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
                   <td><LayerBadge source={t.source_layer} inherited={isInherited(t.source_layer, scope.id)} /></td>
                   <td>{t.enabled ? <span className="su-badge su-badge--on">enabled</span> : <span className="su-badge su-badge--off">disabled</span>}</td>
                   <td className="su-row-actions">
+                    {isInherited(t.source_layer, scope.id) ? <span className="su-dim">inherited</span> : <>
                     <button className="btn" onClick={() => toggle(t)} disabled={busy !== null} aria-label={`${t.enabled ? "Disable" : "Enable"} ${t.name}`}>
                       {t.enabled ? "Disable" : "Enable"}
                     </button>
                     <ConfirmButton label="Unregister" confirmLabel={`Unregister ${t.name}`} onConfirm={() => unregister(t)} disabled={busy !== null} />
+                    </>}
                   </td>
                 </tr>
               ))}

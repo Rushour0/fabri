@@ -85,7 +85,7 @@ function GlobalSkills({ type }: { type: string }) {
             </table>
           )}
           {res.data && res.data.universal > 0 && mine.length > 0 && (
-            <p className="su-dim">{res.data.universal} more baseline skill{res.data.universal === 1 ? "" : "s"} apply to every type (see Advanced, baseline).</p>
+            <p className="su-dim">{res.data.universal} more baseline skill{res.data.universal === 1 ? " applies" : "s apply"} to every type (see Advanced, baseline).</p>
           )}
         </div>
         {open && (

@@ -71,7 +71,7 @@ export function ProjectsView({
                 tabs={[{ id: "skills", label: "Local skills" }, { id: "context", label: "Context" }, { id: "data", label: "Data" }]}
               />
             </div>
-            <ItemsPanel key={`${selected.id}|${tab}`} scope={selected} kind={tab} />
+            <ItemsPanel localFirst key={`${selected.id}|${tab}`} scope={selected} kind={tab} />
           </>
         )}
       </div>
