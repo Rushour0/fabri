@@ -45,7 +45,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import httpx
 
-from fabri.tools.approval import check_approval, default_approval_for_method
+from fabri.tools.approval import RANK, check_approval, safe_approval
 from fabri.tools.openapi import OpenAPIError, load_openapi, parse_operations
 from fabri.tools.policy import SOURCE_KINDS, PolicyError, ToolPolicy
 from fabri.tools.sources import TOOL_NAME
@@ -292,7 +292,7 @@ def validate_registration(
         out.update(endpoint=endpoint, method=method)
         if not policy.name_allowed(name):
             raise PolicyError(f"tool name {name!r} is not in the policy's allowlist")
-        default_approval = default_approval_for_method(method)
+        default_approval = safe_approval(method, name, endpoint)
     elif kind == "openapi":
         source = _openapi_source(decl)
         spec = source["spec"]
@@ -323,7 +323,7 @@ def validate_registration(
             if not policy.name_allowed(op.name, op.aliases):
                 raise PolicyError(f"operation {op_id} ({op.name}) is not in the policy's allowlist")
         out["source"] = source
-        default_approval = "read" if all(ops[i].method == "GET" for i in source["operation_ids"]) else "write"
+        default_approval = max((ops[i].safe_approval for i in source["operation_ids"]), key=RANK.__getitem__)
     elif kind == "mcp":
         server = decl.get("server")
         if not isinstance(server, Mapping) or bool(server.get("command")) == bool(server.get("url")):

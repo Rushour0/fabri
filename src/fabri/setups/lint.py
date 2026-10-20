@@ -8,6 +8,7 @@ checks the merged result:
 - skills and agent types that name tools the resolved tool set lacks
 - skills imported with ``types: []``, which load for every type
 - ``slop_report`` tells in prompts and context (warnings, never errors)
+- tools whose approval class is looser than fabri's default (warnings)
 """
 from __future__ import annotations
 
@@ -49,7 +50,10 @@ def lint_setup(
     *,
     tool_names: Iterable[str] | None = None,
     policy: ToolPolicy | None = None,
+    tool_set=None,
 ) -> list[LintFinding]:
+    """`tool_set` (a ResolvedToolSet), when given, also flags tools whose
+    approval class is looser than fabri's default for them."""
     resolved = layers if isinstance(layers, ResolvedSetup) else resolve_setup(as_layers(layers))
     findings: list[LintFinding] = []
 
@@ -83,6 +87,10 @@ def lint_setup(
         if (root / "tools" / "tools.yaml").is_file():
             run(layer.name, "tools/tools.yaml", validate_tools_yaml,
                 (root / "tools" / "tools.yaml").read_text(encoding="utf-8"), policy)
+        for path in sorted((root / "tools" / "sources").glob("*.yaml")) if (root / "tools" / "sources").is_dir() else []:
+            if not path.name.startswith("."):
+                run(layer.name, f"tools/sources/{path.name}", validate_tools_yaml,
+                    path.read_text(encoding="utf-8"), policy, f"tools/sources/{path.name}")
 
     known = set(tool_names) if tool_names is not None else None
     budgets = resolved.budgets
@@ -108,6 +116,11 @@ def lint_setup(
                 if tool not in known:
                     findings.append(LintFinding("error", skill["source"], f"skills/{name}",
                                                 f"tool {tool!r} is not in the resolved tool set"))
+    if tool_set is not None:
+        from fabri.setups.toolset import approval_warnings
+
+        for tool, message in approval_warnings(tool_set):
+            findings.append(LintFinding("warning", tool.layer, f"tools/{tool.source}", message))
     return _dedupe(findings)
 
 

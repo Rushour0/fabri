@@ -73,7 +73,7 @@ def test_mcp_source_uses_existing_client(monkeypatch):
     from fabri.tools import mcp_client
     from fabri.tools.manifest_schema import ToolManifest
 
-    def fake_build(cfg):
+    def fake_build(cfg, approval_for=None):
         assert cfg["name"] == "files" and cfg["command"] == ["mcp-files"]
         m = ToolManifest(name="mcp_files_read", description="read", command=[], input_schema={}, output_schema={})
         return FakeClient(), [(m, lambda args: {"ok": True})]

@@ -10,9 +10,10 @@ registry.
 Transports:
 - **stdio (default)** — JSON-RPC over NDJSON (line-delimited). The server is
   spawned as a subprocess by the client.
-- **http (v0.7.2 G19 follow-up)** — JSON-RPC over POST to a single endpoint.
-  Plain request/response, no SSE streaming. SSE is a planned follow-up; the
-  POST-only mode covers most stateless MCP servers.
+- **http**: MCP Streamable HTTP, JSON-RPC over POST to one endpoint. The
+  answer may be plain JSON or an SSE stream; both are read, and the
+  ``Mcp-Session-Id`` the server hands out is sent back. The older two-endpoint
+  HTTP+SSE transport (a GET /sse stream plus a POST endpoint) is not supported.
 
 Config shapes:
 
@@ -145,7 +146,7 @@ class MCPStdioClient:
         )
 
     def initialize(self) -> dict:
-        return self._request(
+        result = self._request(
             "initialize",
             {
                 "protocolVersion": "2024-11-05",
@@ -153,6 +154,8 @@ class MCPStdioClient:
                 "clientInfo": {"name": "fabri", "version": "0.7.0"},
             },
         )
+        self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        return result
 
     def list_tools(self) -> list[dict]:
         result = self._request("tools/list") or {}
@@ -185,9 +188,8 @@ class MCPHttpClient:
     (initialize / list_tools / call_tool / close) so build_mcp_tools can
     treat them interchangeably.
 
-    Plain POST: the JSON-RPC request is the body; the response is parsed from
-    the body. No SSE; servers that ONLY support streaming responses are not
-    supported by this v0 transport — the planned SSE follow-up adds that.
+    Each request is one POST. The answer is read as JSON, or as an SSE stream
+    when the server sends text/event-stream.
     """
 
     url: str
@@ -195,51 +197,79 @@ class MCPHttpClient:
     name: str = "mcp"
     timeout_s: float = 30.0
     _next_id: int = field(default=0, init=False, repr=False)
+    _session_id: str | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
         # No persistent connection; nothing to do here. Kept for API parity.
         return
 
-    def _request(self, method: str, params=None):
-        import json as _json
+    def _post(self, msg: dict):
         import urllib.error
         import urllib.request
 
-        self._next_id += 1
-        msg = {"jsonrpc": "2.0", "id": self._next_id, "method": method}
-        if params is not None:
-            msg["params"] = params
-        body = _json.dumps(msg).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        body = json.dumps(msg).encode("utf-8")
+        # Streamable HTTP servers answer with JSON or an SSE stream; they
+        # refuse requests that do not accept both.
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
         if self.headers:
             headers.update(self.headers)
         req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                raw = resp.read()
+            resp = urllib.request.urlopen(req, timeout=self.timeout_s)
         except urllib.error.HTTPError as e:
             raise MCPProtocolError(
                 f"MCP HTTP {self.url} → HTTP {e.code}: {e.read()[:200]!r}"
             ) from e
         except urllib.error.URLError as e:
             raise MCPProtocolError(f"MCP HTTP {self.url} → URLError: {e}") from e
-        try:
-            payload = _json.loads(raw.decode("utf-8"))
-        except Exception as e:
-            raise MCPProtocolError(f"MCP HTTP {self.url} → non-JSON body: {e}") from e
+        with resp:
+            headers = getattr(resp, "headers", None) or {}
+            session = headers.get("Mcp-Session-Id")
+            if session:
+                self._session_id = session
+            return headers.get("Content-Type") or "", resp.read()
+
+    def _request(self, method: str, params=None):
+        self._next_id += 1
+        msg = {"jsonrpc": "2.0", "id": self._next_id, "method": method}
+        if params is not None:
+            msg["params"] = params
+        content_type, raw = self._post(msg)
+        if "text/event-stream" in content_type.lower():
+            payload = _sse_response(raw, self._next_id)
+            if payload is None:
+                raise MCPProtocolError(f"MCP HTTP {self.url} → no response for id={self._next_id} in the event stream")
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                raise MCPProtocolError(f"MCP HTTP {self.url} → non-JSON body: {e}") from e
         if isinstance(payload, dict) and "error" in payload:
             raise MCPProtocolError(f"MCP {method} → error: {payload['error']}")
         return (payload or {}).get("result") if isinstance(payload, dict) else None
 
+    def notify(self, method: str, params=None) -> None:
+        msg = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            msg["params"] = params
+        try:
+            self._post(msg)
+        except MCPProtocolError:
+            pass  # notifications have no answer; a server that rejects one still serves requests
+
     def initialize(self):
-        return self._request(
+        result = self._request(
             "initialize",
             {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-03-26",
                 "capabilities": {},
                 "clientInfo": {"name": "fabri", "version": "0.7.2"},
             },
         )
+        self.notify("notifications/initialized")
+        return result
 
     def list_tools(self):
         result = self._request("tools/list") or {}
@@ -254,6 +284,25 @@ class MCPHttpClient:
         return
 
 
+def _sse_response(raw: bytes, request_id: int) -> dict | None:
+    """The JSON-RPC message answering `request_id` in an SSE body."""
+    data: list[str] = []
+    for line in [*raw.decode("utf-8", errors="replace").splitlines(), ""]:
+        if line.startswith("data:"):
+            data.append(line[5:].lstrip())
+            continue
+        if line.strip() or not data:
+            continue
+        try:
+            message = json.loads("\n".join(data))
+        except ValueError:
+            message = None
+        data = []
+        if isinstance(message, dict) and message.get("id") == request_id:
+            return message
+    return None
+
+
 def _sanitize_name(s: str) -> str:
     """Tool names go into both the LLM tool-call schema and our registry —
     keep them to ascii-alnum-underscore."""
@@ -262,9 +311,12 @@ def _sanitize_name(s: str) -> str:
 
 def build_mcp_tools(
     server_cfg: dict,
+    approval_for=None,
 ):
     """Connect to one MCP server (stdio or HTTP). Returns the live client and
     a list of (manifest, handler) pairs to register with the ToolRegistry.
+    `approval_for(remote_name, tool_spec)`, when given, sets each manifest's
+    approval class from the server's tools/list entry.
 
     Picks transport by which of `command` / `url` is set in server_cfg. The
     caller is responsible for `close()`-ing the client when done (the registry
@@ -306,6 +358,8 @@ def build_mcp_tools(
             output_schema={"type": "object"},
             timeout_s=float(spec.get("timeoutSeconds") or 30),
         )
+        if approval_for is not None:
+            manifest.approval = approval_for(remote_name, spec)
 
         def _handler(args: dict, _remote_name: str = remote_name) -> dict:
             try:

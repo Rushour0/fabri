@@ -18,8 +18,10 @@ One operation becomes one tool:
   status codes and any documented reason enums. Capped at 1,500 characters.
 - ``input_schema``: path and query parameters merged with the JSON request
   body. ``$ref``, ``allOf``, ``oneOf``/``anyOf`` and ``nullable`` are resolved.
-- ``approval``: ``read`` for GET, ``write`` otherwise, unless overridden by the
-  ``approval`` map or an ``x-fabri-approval`` extension on the operation.
+- ``approval``: ``read`` for GET, ``always_approve`` for DELETE and for
+  operations that send messages or move money, ``write`` otherwise. The
+  ``approval`` map overrides it; an ``x-fabri-approval`` extension on the
+  operation can only make it stricter.
 
 DELETE operations are left out unless ``methods`` names DELETE or ``allow``
 names the operation exactly.
@@ -40,7 +42,7 @@ from urllib.parse import quote, urlparse
 import httpx
 import yaml
 
-from fabri.tools.approval import check_approval, default_approval_for_method
+from fabri.tools.approval import check_approval, safe_approval, stricter
 from fabri.tools.credential_store import CredentialStore
 from fabri.tools.http_call import dry_run_headers, send
 from fabri.tools.manifest_schema import ToolManifest
@@ -351,6 +353,7 @@ class OpenAPIOperation:
     responses: dict[str, dict] = field(default_factory=dict)  # code -> {description, reasons}
     probe_safe: bool = False
     aliases: list[str] = field(default_factory=list)
+    safe_approval: str = "write"  # the class from method and name alone, before any override
 
     def manifest(self, timeout_s: float = 30.0) -> ToolManifest:
         return ToolManifest(
@@ -560,15 +563,18 @@ def _build_operation(resolver, path, method, op, shared, name, op_id, aliases, r
     summary = str(op.get("summary") or "").strip()
     text = str(op.get("description") or "").strip()
     desc = compose_description(summary, text, responses, f"{method.upper()} {path}", cap)
+    safe = safe_approval(method, name, op_id, path, summary)
+    spec_hint = op.get("x-fabri-approval")
+    # A spec's own hint can tighten the default but not loosen it; the layer's map can do either.
     approval = (approval_map or {}).get(name) or (approval_map or {}).get(op_id) \
-        or op.get("x-fabri-approval") or default_approval_for_method(method)
+        or (stricter(check_approval(spec_hint), safe) if spec_hint else safe)
     return OpenAPIOperation(
         name=name, operation_id=op_id, method=method.upper(), path=path, resource=resource,
         action=action, summary=summary, text=text, description=desc, input_schema=input_schema,
         approval=check_approval(approval), tags=[str(t) for t in op.get("tags") or []],
         params=params, body_mode=body_mode, body_keys=body_keys, body_required=body_required,
         body_schema=body_schema, body_content_type=body_ct, responses=responses,
-        probe_safe=bool(op.get("x-fabri-probe-safe")), aliases=aliases,
+        probe_safe=bool(op.get("x-fabri-probe-safe")), aliases=aliases, safe_approval=safe,
     )
 
 

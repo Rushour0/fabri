@@ -221,28 +221,29 @@ def validate_data(name: str, content: bytes, budgets: Mapping[str, int]) -> list
     return []
 
 
-def validate_tools_yaml(text: str, policy: ToolPolicy | None = None) -> list[str]:
-    data = parse_yaml_text(text, "tools/tools.yaml")
-    warnings = [f"tools/tools.yaml: unknown keys {sorted(set(data) - TOOLS_KEYS)}"] if set(data) - TOOLS_KEYS else []
+def validate_tools_yaml(text: str, policy: ToolPolicy | None = None,
+                        label: str = "tools/tools.yaml") -> list[str]:
+    data = parse_yaml_text(text, label)
+    warnings = [f"{label}: unknown keys {sorted(set(data) - TOOLS_KEYS)}"] if set(data) - TOOLS_KEYS else []
     sources = data.get("sources") or []
     if not isinstance(sources, list):
-        raise SetupError("tools/tools.yaml: sources must be a list")
+        raise SetupError(f"{label}: sources must be a list")
     names = set()
     for decl in sources:
         try:
             warnings += validate_source_decl(decl, policy)
         except (ToolSourceError, PolicyError, ApprovalError) as exc:
-            raise SetupError(f"tools/tools.yaml: {exc}") from None
+            raise SetupError(f"{label}: {exc}") from None
         if decl["name"] in names:
-            raise SetupError(f"tools/tools.yaml: source {decl['name']} is declared twice")
+            raise SetupError(f"{label}: source {decl['name']} is declared twice")
         names.add(decl["name"])
-    allow = _str_list(data.get("allow"), "tools/tools.yaml allow")
-    _check_tool_names(allow, policy, "tools/tools.yaml allow")
+    allow = _str_list(data.get("allow"), f"{label} allow")
+    _check_tool_names(allow, policy, f"{label} allow")
     if policy is not None and policy.allow is not None:
         for entry in allow:
             if _GLOB.search(entry) and not any(fnmatch.fnmatchcase(entry, p) or fnmatch.fnmatchcase(p, entry)
                                                for p in policy.allow):
-                warnings.append(f"tools/tools.yaml allow: {entry!r} matches nothing the global allowlist allows")
+                warnings.append(f"{label} allow: {entry!r} matches nothing the global allowlist allows")
     return warnings
 
 

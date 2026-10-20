@@ -50,6 +50,18 @@ from fabri.setups import (
 )
 from fabri.setups.layers import SLUG, check_slug, read_yaml, split_frontmatter
 from fabri.setups.store import allowed_file
+from fabri.setups.tool_entries import (
+    EntryError,
+    add_entry,
+    auth_headers,
+    connector_tool_entry,
+    list_entries,
+    mcp_entry,
+    openapi_entry,
+    remove_entry,
+    set_entry_enabled,
+    stack_summary,
+)
 from fabri.setups.toolset import default_state_dir, diff_snapshots
 from fabri.tools.approval import ApprovalError
 from fabri.tools.catalog import read_state, save_catalog, write_state
@@ -395,6 +407,11 @@ class SetupsApi:
             ("POST", "/tools/enable"): (r.post_enable, True),
             ("POST", "/tools/sync"): (r.post_sync, True),
             ("POST", "/tools/probe"): (r.post_probe, True),
+            ("GET", "/tools/sources"): (r.get_tool_sources, False),
+            ("POST", "/tools/sources"): (r.post_tool_source, True),
+            ("POST", "/tools/sources/enable"): (r.post_tool_source_enable, True),
+            ("DELETE", "/tools/sources"): (r.delete_tool_source, True),
+            ("GET", "/tools/connectors"): (r.get_connectors, False),
         }
 
     def matches(self, raw_path: str) -> bool:
@@ -427,7 +444,7 @@ class SetupsApi:
                 out["reasons"] = exc.reasons
             self._send(handler, exc.status, out)
             return
-        except (SetupError, PolicyError, RegistrationError, ApprovalError, ToolSourceError) as exc:
+        except (SetupError, PolicyError, RegistrationError, ApprovalError, ToolSourceError, EntryError) as exc:
             self._send(handler, 400, {"error": str(exc), "reasons": [str(exc)]})
             return
         self._send(handler, status, payload)
@@ -543,7 +560,7 @@ class SetupsApi:
         resolved = setups.resolve()
         tools = setups.tools()
         findings = lint_setup(resolved, tool_names=[n for t in tools.tools.values() for n in [t.name, *t.aliases]],
-                              policy=self.policy)
+                              policy=self.policy, tool_set=tools)
         out = []
         for f in findings:
             kind, _, name = f.item.partition("/")
@@ -1176,6 +1193,141 @@ class SetupsApi:
             self.audit(scope_dir, req.actor, "probe-tools", scope, "tools", "",
                        {"ops": ops, "probed": report["probed"]})
         return 200, {"probed": report["probed"], "skipped": report["skipped"]}
+
+    # ---- tool sources (tools/sources/<name>.yaml)
+
+    def get_tool_sources(self, req: "Request"):
+        scope = parse_scope(req.query.get("scope"))
+        scope_dir = self._existing(scope)
+        setups = self.setups(scope)
+        tools = setups.tools()
+        summary = stack_summary(tools, layer_name=scope.text)
+        entries = list_entries(scope_dir)
+        for entry in entries:
+            rows = [summary[s] for s in entry["sources"] if s in summary]
+            entry["tools"] = sum(r["tools"] for r in rows)
+            entry["approvals"] = {c: sum(r["approvals"][c] for r in rows) for c in ("read", "write", "always_approve")}
+        return 200, {"scope": scope.text, "entries": entries, "errors": [str(e) for e in tools.errors]}
+
+    @staticmethod
+    def _opt_list(body: Mapping[str, Any], key: str) -> list[str] | None:
+        value = body.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ApiError(400, f"{key} must be a list of strings")
+        return value
+
+    @staticmethod
+    def _opt_str(body: Mapping[str, Any], key: str) -> str | None:
+        value = body.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ApiError(400, f"{key} must be a string")
+        return value or None
+
+    @staticmethod
+    def _opt_bool(body: Mapping[str, Any], key: str, default: bool) -> bool:
+        value = body.get(key, default)
+        if not isinstance(value, bool):
+            raise ApiError(400, f"{key} must be true or false")
+        return value
+
+    def _body_headers(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        auth = body.get("auth") or {}
+        headers = body.get("headers") or {}
+        if not isinstance(auth, Mapping) or not isinstance(headers, Mapping) \
+                or not all(isinstance(v, str) for v in headers.values()):
+            raise ApiError(400, "auth must be {env | secret_ref, header?, prefix?}; headers must map names to env vars")
+        prefix = auth.get("prefix", "Bearer ")
+        return auth_headers(auth_env=auth.get("env"), secret_ref=auth.get("secret_ref"),
+                            auth_header=auth.get("header"), auth_prefix=prefix, header_env=dict(headers))
+
+    def _entry_from_body(self, body: Mapping[str, Any]):
+        source = body.get("source")
+        approval = self._opt_str(body, "approval")
+        if source == "openapi":
+            spec_url, spec_text = self._opt_str(body, "spec_url"), body.get("spec_text")
+            if (spec_url is None) == (spec_text is None):
+                raise ApiError(400, "give exactly one of spec_url or spec_text")
+            if spec_text is not None and not isinstance(spec_text, str):
+                raise ApiError(400, "spec_text must be the spec as text")
+            if spec_url is not None and not spec_url.startswith(("http://", "https://")):
+                raise ApiError(400, "spec_url must be an http or https URL; upload a file as spec_text")
+            if spec_url is not None:
+                self.policy.check_host(spec_url, "spec_url")
+            return openapi_entry(
+                spec_url, spec_text=spec_text, name=self._opt_str(body, "name"),
+                include=self._opt_list(body, "include"), exclude=self._opt_list(body, "exclude"),
+                methods=self._opt_list(body, "methods"), allow_delete=self._opt_bool(body, "allow_delete", False),
+                approval=approval, base_url=self._opt_str(body, "base_url"), headers=self._body_headers(body),
+                snapshot=self._opt_bool(body, "snapshot", False),
+                strip_prefixes=self._opt_list(body, "strip_prefixes"), transport=self.transport)
+        if source == "mcp":
+            command = body.get("command")
+            if command is not None and not (isinstance(command, str) or (
+                    isinstance(command, list) and all(isinstance(c, str) for c in command))):
+                raise ApiError(400, "command must be a string or a list of strings")
+            env = body.get("env")
+            if env is not None and not isinstance(env, (list, Mapping)):
+                raise ApiError(400, "env must be a list of NAME or NAME=VAR, or a mapping")
+            name = self._opt_str(body, "name")
+            if not name:
+                raise ApiError(400, "missing required field 'name'")
+            return mcp_entry(name, command=command, url=self._opt_str(body, "url"), env=env,
+                             headers=self._body_headers(body), include=self._opt_list(body, "include"),
+                             approval=approval, connect=self._opt_bool(body, "connect", True))
+        if source == "connector":
+            connector = self._opt_str(body, "connector")
+            if not connector:
+                raise ApiError(400, "missing required field 'connector'")
+            return connector_tool_entry(
+                connector, name=self._opt_str(body, "name"), token_env=self._opt_str(body, "token_env"),
+                workspace=self._opt_str(body, "workspace"), remote=self._opt_bool(body, "remote", False),
+                approval=approval, connect=self._opt_bool(body, "connect", False))
+        raise ApiError(400, "source must be openapi, mcp or connector")
+
+    def post_tool_source(self, req: "Request"):
+        scope, scope_dir = self._tool_scope(req)
+        dry_run = self._opt_bool(req.body, "dry_run", False)
+        replace = self._opt_bool(req.body, "replace", False)
+        entry = self._entry_from_body(req.body)
+        with self._write_lock:
+            report = add_entry(scope_dir, entry, chain=self.chain(scope), policy=self.policy, replace=replace,
+                               dry_run=dry_run, actor=req.actor, scope=scope.text, transport=self.transport,
+                               store=self.store)
+        body = report.to_dict()
+        body["yaml"] = entry.to_yaml()
+        if report.errors and not dry_run:
+            raise ApiError(409 if any("already exists" in e for e in report.errors) else 400,
+                           "tool source not added", report.errors)
+        return 200, body
+
+    def post_tool_source_enable(self, req: "Request"):
+        scope, scope_dir = self._tool_scope(req)
+        name = self._need(req.body, "name")
+        enabled = self._opt_bool(req.body, "enabled", True)
+        try:
+            with self._write_lock:
+                changed = set_entry_enabled(scope_dir, name, enabled, actor=req.actor, scope=scope.text)
+        except EntryError as exc:
+            raise ApiError(404 if "no tool source" in str(exc) else 400, str(exc)) from None
+        return 200, {"ok": True, "changed": changed}
+
+    def delete_tool_source(self, req: "Request"):
+        scope = parse_scope(req.query.get("scope"))
+        scope_dir = self._existing(scope)
+        name = req.query.get("name") or ""
+        try:
+            with self._write_lock:
+                removed = remove_entry(scope_dir, name, actor=req.actor, scope=scope.text)
+        except EntryError as exc:
+            raise ApiError(404 if "no tool source" in str(exc) else 400, str(exc)) from None
+        return 200, {"ok": True, "removed": removed}
+
+    def get_connectors(self, req: "Request"):
+        from fabri.tools.connectors import list_connectors
+
+        return 200, list_connectors()
 
 
 @dataclass

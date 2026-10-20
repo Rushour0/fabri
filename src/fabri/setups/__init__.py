@@ -94,7 +94,9 @@ class Setups:
         return import_skills(source, self.layer(layer).path, fmt=fmt, dry_run=dry_run, policy=self.policy)
 
     def lint(self) -> list[LintFinding]:
-        return lint_setup(self.resolve(), tool_names=self.tools().names(), policy=self.policy)
+        tools = self.tools()
+        return lint_setup(self.resolve(), tool_names=[n for t in tools.tools.values() for n in [t.name, *t.aliases]],
+                          policy=self.policy, tool_set=tools)
 
 
 __all__ = [

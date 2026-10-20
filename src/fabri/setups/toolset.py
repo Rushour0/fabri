@@ -28,6 +28,7 @@ import httpx
 
 from fabri.setups.layers import LayerLike
 from fabri.setups.resolver import ResolvedSetup, resolve_setup
+from fabri.tools.approval import RANK, stricter
 from fabri.tools.credential_store import CredentialStore
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.openapi import OpenAPIOperation
@@ -53,6 +54,8 @@ class ResolvedTool:
     operation: OpenAPIOperation | None = None
     # The description the source built, before the catalog rewrote it.
     base_description: str = ""
+    # The class fabri picks from method and name alone; lint flags a looser one.
+    safe_approval: str = "write"
 
     @property
     def aliases(self) -> list[str]:
@@ -140,6 +143,18 @@ class ResolvedToolSet:
         return [tool.row() for _, tool in sorted(self.tools.items())]
 
 
+def approval_warnings(tools: "ResolvedToolSet") -> list[tuple[ResolvedTool, str]]:
+    """Tools whose approval class is looser than the one fabri would pick, so
+    a hand-edited YAML never lowers a class without someone seeing it."""
+    out = []
+    for tool in sorted(tools.tools.values(), key=lambda t: t.name):
+        if RANK.get(tool.approval, 1) < RANK.get(tool.safe_approval, 1):
+            message = (f"tool {tool.name} has approval {tool.approval}, looser than the default "
+                       f"{tool.safe_approval}; keep it only if that is intended")
+            out.append((tool, message))
+    return out
+
+
 def diff_snapshots(old: Mapping[str, Mapping[str, Any]], new: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
     """Names added, removed and changed (fingerprint differs) between two
     ResolvedToolSet.snapshot() values."""
@@ -178,6 +193,9 @@ def _build(setup: ResolvedSetup, policy: ToolPolicy, transport, store, dry_run) 
                 continue
             if not policy.name_allowed(tool.manifest.name, tool.manifest.aliases or ()):
                 continue
+            floor = policy.floor_for(tool.manifest.name, tool.manifest.aliases or ())
+            if floor is not None:
+                tool.manifest.approval = stricter(tool.manifest.approval or "write", floor)
             if tool.manifest.name in tools and tools[tool.manifest.name].source != tool.source:
                 errors.append(f"{label}: tool {tool.manifest.name} also built by source "
                               f"{tools[tool.manifest.name].source}; the deeper one wins")
@@ -186,6 +204,7 @@ def _build(setup: ResolvedSetup, policy: ToolPolicy, transport, store, dry_run) 
                 approval=tool.manifest.approval or "write", kind=tool.kind, source=tool.source,
                 layer=item["source"], origin=item.get("origin", "declared"), method=tool.method,
                 path=tool.path, operation=tool.operation, base_description=tool.manifest.description,
+                safe_approval=tool.safe_approval,
             )
     return ResolvedToolSet(tools=tools, errors=errors, content_hash=setup.content_hash)
 

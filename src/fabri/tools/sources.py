@@ -39,7 +39,7 @@ from urllib.parse import quote
 
 import httpx
 
-from fabri.tools.approval import APPROVAL_CLASSES, check_approval, default_approval_for_method
+from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval, safe_approval
 from fabri.tools.credential_store import CredentialStore
 from fabri.tools.http_call import check_header_specs, dry_run_headers, resolve_headers, send
 from fabri.tools.manifest_schema import ToolManifest
@@ -86,6 +86,8 @@ class SourceTool:
     path: str | None = None
     operation: OpenAPIOperation | None = None
     extra: dict = field(default_factory=dict)
+    # The class fabri would pick with no override in the declaration.
+    safe_approval: str = "write"
 
 
 def _approval_for(decl: Mapping[str, Any], tool_name: str, default: str) -> str:
@@ -114,6 +116,7 @@ def validate_source_decl(decl: Any, policy: ToolPolicy | None = None) -> list[st
         check_approval(approval)
     try:
         check_header_specs(decl.get("headers"))
+        check_header_specs(decl.get("env"))
     except ValueError as exc:
         raise ToolSourceError(f"source {name}: {exc}") from None
     if kind == "openapi" and not decl.get("spec"):
@@ -232,7 +235,7 @@ def _build_openapi(decl, *, base_dir, policy, transport, store, dry) -> list[Sou
         handler = operation_handler(op, base_url=base_url, client=client, headers=decl.get("headers"),
                                     store=store, extra_headers=dry, timeout_s=timeout)
         out.append(SourceTool(op.manifest(timeout), handler, "openapi", decl["name"], op.method, op.path, op,
-                              {"base_url": base_url}))
+                              {"base_url": base_url}, safe_approval=op.safe_approval))
     return out
 
 
@@ -258,13 +261,13 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry) -> list[Source
         return send(client, method, target, headers=headers, store=store, extra_headers=dry,
                     json_body=args, timeout_s=timeout, tool_name=name)
 
+    safe = safe_approval(method, name, url)
     manifest = ToolManifest(
         name=name, description=str(decl.get("description") or f"{method} {url}"), command=[],
         input_schema=schema, output_schema={"type": "object"}, timeout_s=timeout,
-        approval=_approval_for(decl, name, default_approval_for_method(method)),
-        title=decl.get("title"),
+        approval=_approval_for(decl, name, safe), title=decl.get("title"),
     )
-    return [SourceTool(manifest, handler, "http", name, method, url)]
+    return [SourceTool(manifest, handler, "http", name, method, url, safe_approval=safe)]
 
 
 def _build_python(decl, *, base_dir, policy, transport, store, dry) -> list[SourceTool]:
@@ -302,11 +305,14 @@ def _build_mcp(decl, *, base_dir, policy, transport, store, dry) -> list[SourceT
         cfg["command"] = list(decl["command"])
         if decl.get("env"):
             cfg["env"] = resolve_headers(decl.get("env"), store)
-    client, pairs = build_mcp_tools(cfg)
+    client, pairs = build_mcp_tools(
+        cfg, approval_for=lambda remote, spec: mcp_approval(remote, str(spec.get("description") or ""),
+                                                            spec.get("annotations")))
     out = []
     for manifest, handler in pairs:
-        manifest.approval = _approval_for(decl, manifest.name, "write")
-        out.append(SourceTool(manifest, handler, "mcp", decl["name"], extra={"client": client}))
+        safe = manifest.approval or "write"
+        manifest.approval = _approval_for(decl, manifest.name, safe)
+        out.append(SourceTool(manifest, handler, "mcp", decl["name"], extra={"client": client}, safe_approval=safe))
     return out
 
 

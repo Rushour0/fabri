@@ -11,6 +11,7 @@ Each layer has the same shape (every part optional):
       context/<name>.md             always-on context; frontmatter `types: [...]` narrows it
       data/<name>.<ext>             reference data, not injected
       tools/tools.yaml              `sources:` and `allow:`, unioned across layers
+      tools/sources/<name>.yaml     the same shape, one file per added source
       tools/registered/<name>.json  tools added through fabri.tools.registration
       plays/<name>/play.yaml        a deeper play replaces a shallower one
 
@@ -414,6 +415,25 @@ def _resolve_uncached(layers: list[Layer], digest: str) -> ResolvedSetup:
             sources[f"tools/sources/{decl['name']}"] = layer.name
         for entry in tools_yaml.get("allow") or []:
             allow.append({"entry": str(entry), "source": layer.name})
+        declared_here = {str(d.get("name")) for d in tools_yaml.get("sources") or [] if isinstance(d, Mapping)}
+        for path in sorted((root / "tools" / "sources").glob("*.yaml")) if (root / "tools" / "sources").is_dir() else []:
+            if path.name.startswith("."):
+                continue
+            entry_yaml = read_yaml(path)
+            for decl in entry_yaml.get("sources") or []:
+                if not isinstance(decl, Mapping) or not decl.get("name"):
+                    warnings.append(f"layer {layer.name}: tools/sources/{path.name} has a source without a name")
+                    continue
+                if str(decl["name"]) in declared_here:
+                    warnings.append(f"layer {layer.name}: source {decl['name']} is in tools.yaml and "
+                                    f"tools/sources/{path.name}; the sources file wins")
+                declared_here.add(str(decl["name"]))
+                tool_sources[str(decl["name"])] = {"decl": dict(decl), "source": layer.name,
+                                                   "base_dir": str(root / "tools"), "origin": "declared",
+                                                   "file": f"tools/sources/{path.name}"}
+                sources[f"tools/sources/{decl['name']}"] = layer.name
+            for entry in entry_yaml.get("allow") or []:
+                allow.append({"entry": str(entry), "source": layer.name})
         for tool_name, override in read_yaml(root / "tools" / "descriptions.yaml").items():
             if isinstance(override, Mapping):
                 merged_override = {**descriptions.get(str(tool_name), {})}

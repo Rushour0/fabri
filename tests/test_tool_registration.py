@@ -115,7 +115,7 @@ def test_delete_blocked_unless_policy_allows(layers, tmp_path):
                           allowed_hosts=POLICY.allowed_hosts, allow_delete=True)
     register_tool(layers[1][1], openapi, actor="a", policy=allowing)
     tools = resolve_tools(layers, transport=recorder([]))
-    assert tools.names() == ["pet_delete"] and tools.get("deletePet").approval == "write"
+    assert tools.names() == ["pet_delete"] and tools.get("deletePet").approval == "always_approve"
 
 
 def test_other_policy_rules(layers):

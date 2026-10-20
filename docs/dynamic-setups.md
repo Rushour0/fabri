@@ -20,6 +20,8 @@ Every layer has the same shape, and every part is optional:
   context/<name>.md              always-on context; frontmatter `types: [...]` narrows it
   data/<name>.<ext>              reference data, not injected
   tools/tools.yaml               `sources:` and `allow:`
+  tools/sources/<name>.yaml      the same shape, one file per source added with `fabri setups tools add`
+  tools/specs/<name>.yaml        spec copies those files point at
   tools/registered/<name>.json   tools added at runtime (see Registering tools)
   tools/descriptions.yaml        title and description overrides per tool
   plays/<name>/play.yaml
@@ -35,7 +37,7 @@ Merge rules, the same at every depth:
 - Skills, context, data and plays: the same name at a deeper layer replaces the
   shallower item. A marker file `<kind>/<name>.disabled`, or `enabled: false`,
   removes it.
-- `tools.yaml` sources are unioned by name and `allow` entries are unioned.
+- `tools.yaml` and `tools/sources/*.yaml` sources are unioned by name and `allow` entries are unioned.
 
 Every resolved item records the layer it came from. `fabri setup show
 --layers base org project --type chat` prints the merged view. Name a layer
@@ -155,9 +157,18 @@ logged.
 A tool is kept only when a layer's `allow` entry matches it and the caller's
 global allowlist matches it too. A layer can narrow, never widen.
 
-Every tool has an approval class: `read` (GET by default), `write` (every
-other method), or `always_approve`. fabri records it; the host's approval gate
-reads it from `tool_set.approvals()` or `manifest.approval`.
+Every tool has an approval class: `read` (GET by default), `write` (other
+methods), or `always_approve` (DELETE, and operations that send messages or
+move money). MCP tools default to `write`, or `always_approve` when the server
+marks them destructive or their name deletes or sends. An `x-fabri-approval`
+on an operation can only raise the class; a layer's `approval` map can set
+any class, and lint warns when it is looser than the default. A policy's
+`approval_floor: {pattern: class}` raises classes for every layer. fabri
+records the class; the host's approval gate reads it from
+`tool_set.approvals()` or `manifest.approval`.
+
+`fabri setups tools add openapi|mcp|connector` writes a source file for you;
+see [adding-tools.md](adding-tools.md).
 
 ## Integration
 

@@ -10,6 +10,7 @@ never widen it.
     allow_delete: false              # DELETE operations and http tools
     python_modules: [myapp.tools]    # module prefixes for python callables
     dry_run_header: {name: X-Dry-Run, value: "1"}
+    approval_floor: {"*": write, "crm_*": always_approve}   # raise approval classes, never lower
 
 A policy file can also be a bare list of names, which sets `allow` only.
 """
@@ -25,7 +26,8 @@ from urllib.parse import urlparse
 import yaml
 
 SOURCE_KINDS: tuple[str, ...] = ("openapi", "mcp", "http", "python")
-_POLICY_KEYS = {"allow", "allowed_kinds", "allowed_hosts", "allow_delete", "python_modules", "dry_run_header"}
+_POLICY_KEYS = {"allow", "allowed_kinds", "allowed_hosts", "allow_delete", "python_modules", "dry_run_header",
+                "approval_floor"}
 
 
 class PolicyError(ValueError):
@@ -41,6 +43,8 @@ class ToolPolicy:
     # None = any module, () = no python callables at all.
     python_modules: tuple[str, ...] | None = ()
     dry_run_header: Mapping[str, Any] | str | None = field(default=None, hash=False, compare=False)
+    # (pattern, class) pairs; a matching tool gets at least that class.
+    approval_floor: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def permissive(cls, allow: Iterable[str] | None = None) -> "ToolPolicy":
@@ -72,6 +76,18 @@ class ToolPolicy:
             value = data[key]
             return None if value is None else tuple(str(x) for x in value)
 
+        floor = base.approval_floor
+        if "approval_floor" in data:
+            raw = data["approval_floor"] or {}
+            if not isinstance(raw, Mapping):
+                raise PolicyError("approval_floor must map tool name patterns to approval classes")
+            from fabri.tools.approval import ApprovalError, check_approval
+
+            try:
+                floor = tuple((str(k), check_approval(v)) for k, v in raw.items())
+            except ApprovalError as exc:
+                raise PolicyError(f"approval_floor: {exc}") from None
+
         return cls(
             allow=tup("allow", base.allow),
             allowed_kinds=tuple(kinds or ()),
@@ -79,6 +95,7 @@ class ToolPolicy:
             allow_delete=bool(data.get("allow_delete", base.allow_delete)),
             python_modules=tup("python_modules", base.python_modules),
             dry_run_header=data.get("dry_run_header", base.dry_run_header),
+            approval_floor=floor,
         )
 
     @classmethod
@@ -101,6 +118,16 @@ class ToolPolicy:
         if self.allow is None:
             return True
         return any(fnmatch.fnmatchcase(n, p) for n in (name, *aliases) for p in self.allow)
+
+    def floor_for(self, name: str, aliases: Iterable[str] = ()) -> str | None:
+        """The strictest approval_floor class whose pattern matches, or None."""
+        from fabri.tools.approval import stricter
+
+        found = None
+        for pattern, value in self.approval_floor:
+            if any(fnmatch.fnmatchcase(n, pattern) for n in (name, *aliases)):
+                found = value if found is None else stricter(found, value)
+        return found
 
     def kind_allowed(self, kind: str) -> bool:
         return kind in self.allowed_kinds

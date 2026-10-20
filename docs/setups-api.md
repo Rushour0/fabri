@@ -46,6 +46,11 @@ Every route requires the service's existing auth. Writes need the `admin` role. 
 | `POST /tools/enable` | `{scope, name, enabled}` | `{ok}` |
 | `POST /tools/sync` | `{scope}` | `{added, removed, changed}` |
 | `POST /tools/probe` | `{scope, ops?}` | `{probed, skipped}` (safe GETs only) |
+| `GET /tools/sources?scope=S` | | `{scope, entries: [{name, file, origin, kinds, sources, enabled, allow, tools, approvals}], errors}` |
+| `POST /tools/sources` | `{scope, source: openapi\|mcp\|connector, ..., dry_run?, replace?}` | `{name, file, tool_count, approvals, tools, hidden, errors, warnings, lint, written, yaml}` |
+| `POST /tools/sources/enable` | `{scope, name, enabled}` | `{ok, changed}` |
+| `DELETE /tools/sources?scope=S&name=N` | | `{ok, removed: [path]}` |
+| `GET /tools/connectors` | | `[{name, title, summary, kinds, env_var, store_provider, remote_option}]` |
 | `GET /setups/agent-types` | | `[{type, title, route?, global_skills: [name], used_by: [org]}]` |
 | `GET /setups/agent-types/{type}` | | `{type, title, prompt, global_skills: [name]}` |
 | `PUT /setups/agent-types/{type}` | `{prompt?, global_skills?: [name]}` | the same object after the write |
@@ -66,6 +71,14 @@ Details that the table leaves out:
 - `GET /tools/catalog` entries carry `endpoint: {method, path, kind}`, `layer`, `origin`, `examples` and `probed_at` besides the listed fields.
 - `POST /setups/scopes` returns 201, or 409 when the scope exists. A project needs its org to exist.
 - Import `files` are paths relative to an upload root, such as `my-skill/SKILL.md`. A bare `SKILL.md` becomes the skill `imported-skill`. Absolute paths, `..` and hidden segments are rejected. The response also carries `warnings` and `dry_run`.
+- `/tools/sources` manages `<layer>/tools/sources/<name>.yaml`, one plain YAML file per added source (see [adding-tools.md](adding-tools.md)). `POST` body fields by `source`:
+  - `openapi`: `spec_url` or `spec_text` (the spec as text; server paths are not accepted), `name?`, `include?`, `exclude?`, `methods?`, `allow_delete?`, `base_url?`, `snapshot?`, `strip_prefixes?`.
+  - `mcp`: `name`, `command` (string or list) or `url`, `env?` (`["NAME", "CHILD=PARENT"]` or a mapping, stdio only), `include?`, `connect?` (default true: start or call the server to list its tools).
+  - `connector`: `connector` (`github`, `linear`, `slack`), `name?`, `token_env?`, `workspace?`, `remote?`, `connect?` (default false).
+  - All: `approval?` (a floor: `read`, `write` or `always_approve`), `auth?: {env | secret_ref, header?, prefix?}`, `headers?: {Name: ENV_VAR}`, `dry_run?`, `replace?`. Credentials are env var names or secret refs only; anything else is 400.
+- `POST /tools/sources` checks the source builds under the server's policy before writing. With `dry_run: true` it always returns 200 with `written: false` and any `errors`; otherwise a source that does not build is 400 with `reasons`, and a name that exists is 409 unless `replace: true`. `yaml` is the file text that was (or would be) written. `lint` holds findings for this source after the write; a credential that is not set on the server is a warning.
+- `GET /tools/sources` builds the scope's tools to count them, so MCP servers in the scope are started or called. `tools` and `approvals` count tools that source builds in this layer. Entries from `tools/tools.yaml` and `tools/registered/` are listed too; enable and delete work on `tools/sources` files and registered tools only.
+- Default approval classes: GET is `read`, DELETE and operations that send messages or move money are `always_approve`, other methods are `write`; MCP tools are `write`, or `always_approve` when destructive or sending. A policy's `approval_floor` raises classes. Lint warns when a YAML sets a class looser than the default.
 - Errors are `{error}` with 400 (invalid input, validation or policy), 401, 403, 404, 405, 409, 413 or 415. Policy and registration refusals add `reasons: [text]`.
 
 Scope string: `baseline` | `pack:<name>` | `org:<org>` | `org:<org>/project:<project>`. Kind: `agents` | `skills` | `context` | `data` | `tools` | `plays`.
