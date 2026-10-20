@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { Fragment, useMemo, useState, type FormEvent } from "react";
 import {
   APPROVAL_CLASSES,
   buildDecl,
@@ -15,49 +15,187 @@ import {
   type SyncDiff,
   type ToolKind,
 } from "../../lib/setups";
+import {
+  facet,
+  filterRows,
+  NO_FILTER,
+  PAGE_SIZES,
+  paginate,
+  rangeLabel,
+  toToolRows,
+  type ToolFilter,
+  type ToolRow,
+} from "../../lib/toolsTable";
 import { ApprovalBadge, ConfirmButton, Empty, ErrorBox, isInherited, LayerBadge, Loading, useLoad } from "./shared";
 
 // ---- catalog table ----
 
-export function CatalogTable({ entries }: { entries: CatalogEntry[] }) {
-  const [q, setQ] = useState("");
-  const shown = entries.filter((e) =>
-    `${e.name} ${e.alias.join(" ")} ${e.title} ${e.source}`.toLowerCase().includes(q.trim().toLowerCase()),
-  );
+function ToolDetail({ row, colSpan }: { row: ToolRow; colSpan: number }) {
   return (
-    <>
-      <div className="su-field su-field--inline">
-        <label className="su-field__label" htmlFor="su-cat-q">Filter</label>
-        <input id="su-cat-q" className="su-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="name, alias, title" />
-        <span className="su-dim">{shown.length} of {entries.length}</span>
+    <tr className="su-tool-detail">
+      <td colSpan={colSpan}>
+        <div className="su-tool-detail__body">
+          {row.description ? <p className="su-tool-detail__desc">{row.description}</p> : <p className="su-dim">No description.</p>}
+          <dl className="su-tool-detail__meta">
+            <div><dt>Alias</dt><dd>{row.alias.length ? row.alias.map((a) => <code key={a} className="su-chip">{a}</code>) : <span className="su-dim">none</span>}</dd></div>
+            <div><dt>Source</dt><dd>{row.source || <span className="su-dim">-</span>}</dd></div>
+            <div><dt>Origin</dt><dd>{row.origin || <span className="su-dim">-</span>}</dd></div>
+          </dl>
+          {row.params.length > 0 && (
+            <table className="su-table su-table--sub" aria-label={`Parameters of ${row.name}`}>
+              <thead>
+                <tr><th scope="col">Param</th><th scope="col">Type</th><th scope="col">In</th><th scope="col">Required</th></tr>
+              </thead>
+              <tbody>
+                {row.params.map((p) => (
+                  <tr key={`${p.location}:${p.name}`}>
+                    <th scope="row"><code>{p.name}</code></th>
+                    <td><span className="su-dim">{p.type || "-"}</span></td>
+                    <td><span className="su-dim">{p.location || "-"}</span></td>
+                    <td>{p.required ? "yes" : <span className="su-dim">no</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+const COLS = 6;
+
+export function CatalogTable({
+  entries,
+  registered = [],
+  scopeId = "",
+}: {
+  entries: CatalogEntry[];
+  registered?: SetupItem[];
+  scopeId?: string;
+}) {
+  const [filter, setFilter] = useState<ToolFilter>(NO_FILTER);
+  const [size, setSize] = useState<number>(PAGE_SIZES[0]);
+  const [page, setPage] = useState(0);
+  const [open, setOpen] = useState<string | null>(null);
+
+  const rows = useMemo(() => toToolRows(entries, registered), [entries, registered]);
+  const methods = useMemo(() => facet(rows, "method"), [rows]);
+  const approvals = useMemo(() => facet(rows, "approval"), [rows]);
+  const shown = useMemo(() => filterRows(rows, filter), [rows, filter]);
+  const pg = paginate(shown, page, size);
+
+  const setF = <K extends keyof ToolFilter>(k: K, v: ToolFilter[K]) => {
+    setFilter((f) => ({ ...f, [k]: v }));
+    setPage(0);
+  };
+  const filtered = filter.q.trim() !== "" || filter.method !== "" || filter.approval !== "";
+
+  return (
+    <div className="su-tools">
+      <div className="su-tools__bar">
+        <div className="su-field su-field--inline">
+          <label className="su-field__label" htmlFor="su-cat-q">Search</label>
+          <input
+            id="su-cat-q"
+            className="su-input"
+            type="search"
+            value={filter.q}
+            onChange={(e) => setF("q", e.target.value)}
+            placeholder="name or path"
+          />
+        </div>
+        {methods.length > 1 && (
+          <div className="su-field su-field--inline">
+            <label className="su-field__label" htmlFor="su-cat-method">Method</label>
+            <select id="su-cat-method" className="su-input su-input--narrow" value={filter.method} onChange={(e) => setF("method", e.target.value)}>
+              <option value="">All</option>
+              {methods.map((m) => <option key={m.value} value={m.value}>{m.value} ({m.count})</option>)}
+            </select>
+          </div>
+        )}
+        {approvals.length > 1 && (
+          <div className="su-field su-field--inline">
+            <label className="su-field__label" htmlFor="su-cat-appr">Approval</label>
+            <select id="su-cat-appr" className="su-input su-input--narrow" value={filter.approval} onChange={(e) => setF("approval", e.target.value)}>
+              <option value="">All</option>
+              {approvals.map((a) => <option key={a.value} value={a.value}>{a.value.replace("_", " ")} ({a.count})</option>)}
+            </select>
+          </div>
+        )}
+        {filtered && (
+          <button className="btn su-tools__clear" onClick={() => { setFilter(NO_FILTER); setPage(0); }}>Clear</button>
+        )}
       </div>
+
       <div className="su-scroll-x">
-        <table className="su-table" aria-label="Tool catalog">
+        <table className="su-table su-table--tools" aria-label="Tool catalog">
           <thead>
             <tr>
-              <th scope="col">Title</th>
               <th scope="col">Name</th>
-              <th scope="col">Alias</th>
+              <th scope="col">Method</th>
+              <th scope="col">Path</th>
               <th scope="col">Approval</th>
-              <th scope="col">Source</th>
-              <th scope="col">Endpoint</th>
+              <th scope="col">Enabled</th>
+              <th scope="col">Layer</th>
             </tr>
           </thead>
           <tbody>
-            {shown.map((e) => (
-              <tr key={e.name}>
-                <td>{e.title || <span className="su-dim">-</span>}</td>
-                <th scope="row"><code>{e.name}</code></th>
-                <td>{e.alias.length ? e.alias.map((a) => <code key={a} className="su-chip">{a}</code>) : <span className="su-dim">-</span>}</td>
-                <td><ApprovalBadge approval={e.approval} /></td>
-                <td><span className="su-dim">{e.source || "-"}</span></td>
-                <td className="su-endpoint"><code>{e.endpoint || "-"}</code></td>
-              </tr>
-            ))}
+            {pg.rows.length === 0 && (
+              <tr><td colSpan={COLS} className="su-dim">No tools match.</td></tr>
+            )}
+            {pg.rows.map((r) => {
+              const isOpen = open === r.name;
+              return (
+                <Fragment key={r.name}>
+                  <tr className={"su-tool-row" + (isOpen ? " su-row--on" : "")} onClick={() => setOpen(isOpen ? null : r.name)}>
+                    <th scope="row">
+                      <button
+                        className="su-link"
+                        aria-expanded={isOpen}
+                        onClick={(e) => { e.stopPropagation(); setOpen(isOpen ? null : r.name); }}
+                      >
+                        {r.name}
+                      </button>
+                      {r.title && <span className="su-tool-row__title">{r.title}</span>}
+                    </th>
+                    <td>{r.method ? <span className={`su-method su-method--${r.method.toLowerCase()}`}>{r.method}</span> : <span className="su-dim">-</span>}</td>
+                    <td className="su-endpoint"><code>{r.path || "-"}</code></td>
+                    <td><ApprovalBadge approval={r.approval} /></td>
+                    <td>{r.enabled ? <span className="su-badge su-badge--on">on</span> : <span className="su-badge su-badge--off">off</span>}</td>
+                    <td>{r.layer ? <LayerBadge source={r.layer} inherited={scopeId !== "" && isInherited(r.layer, scopeId)} /> : <span className="su-dim">-</span>}</td>
+                  </tr>
+                  {isOpen && <ToolDetail row={r} colSpan={COLS} />}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
-    </>
+
+      <div className="su-pager" role="navigation" aria-label="Tool pages">
+        <span className="su-pager__count" aria-live="polite">
+          {rangeLabel(pg)}
+          {filtered && <span className="su-dim"> (filtered from {rows.length})</span>}
+        </span>
+        <span className="su-actions__spacer" />
+        <label className="su-field__label" htmlFor="su-cat-size">Per page</label>
+        <select
+          id="su-cat-size"
+          className="su-input su-input--narrow"
+          value={size}
+          onChange={(e) => { setSize(Number(e.target.value)); setPage(0); }}
+        >
+          {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <button className="btn" onClick={() => setPage(0)} disabled={pg.page === 0} aria-label="First page">First</button>
+        <button className="btn" onClick={() => setPage(pg.page - 1)} disabled={pg.page === 0} aria-label="Previous page">Prev</button>
+        <span className="su-dim">Page {pg.page + 1} of {pg.pages}</span>
+        <button className="btn" onClick={() => setPage(pg.page + 1)} disabled={pg.page >= pg.pages - 1} aria-label="Next page">Next</button>
+        <button className="btn" onClick={() => setPage(pg.pages - 1)} disabled={pg.page >= pg.pages - 1} aria-label="Last page">Last</button>
+      </div>
+    </div>
   );
 }
 
@@ -294,7 +432,7 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
     });
 
   // The items listing may not include registered tools, so fold in the catalog's registered entries.
-  const registered: SetupItem[] = (() => {
+  const registered = useMemo<SetupItem[]>(() => {
     const byName = new Map<string, SetupItem>();
     for (const e of cat.data ?? []) {
       if (e.origin === "registered")
@@ -302,7 +440,7 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
     }
     for (const t of reg.data ?? []) byName.set(t.name, t);
     return [...byName.values()];
-  })();
+  }, [cat.data, reg.data]);
 
   return (
     <div className="su-panel">
@@ -381,7 +519,7 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
         {cat.loading && !cat.data && <Loading what="catalog" />}
         {cat.error && <ErrorBox message={cat.error} onRetry={cat.reload} />}
         {cat.data && cat.data.length === 0 && <Empty title="The catalog is empty">Register a tool, or sync sources declared in tools.yaml.</Empty>}
-        {cat.data && cat.data.length > 0 && <CatalogTable entries={cat.data} />}
+        {cat.data && cat.data.length > 0 && <CatalogTable entries={cat.data} registered={registered} scopeId={scope.id} />}
       </section>
     </div>
   );

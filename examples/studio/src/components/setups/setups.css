@@ -117,6 +117,32 @@
 .su-link:hover { color: var(--accent-2); text-decoration: underline; }
 .su-chip { display: inline-block; margin: 0 4px 2px 0; padding: 1px 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; font-size: 11px; color: var(--text-dim); }
 
+/* tools table */
+.su-tools { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.su-tools__bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.su-tools__clear { padding: 5px 10px; font-size: 12px; }
+.setups .su-input--narrow { min-width: 0; width: auto; }
+.su-table--tools th, .su-table--tools td { padding: 7px 10px; }
+.su-tool-row { cursor: pointer; }
+.su-tool-row:hover { background: var(--surface-2); }
+.su-tool-row th .su-link { margin-right: 0; }
+.su-tool-row__title { display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--text-faint); }
+.su-method { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.su-method--get { color: var(--ok); }
+.su-method--post, .su-method--put, .su-method--patch { color: var(--accent); }
+.su-method--delete { color: var(--err); }
+.su-tool-detail > td { background: var(--bg); padding: 12px 14px 14px; }
+.su-tool-detail__body { display: flex; flex-direction: column; gap: 10px; max-width: 900px; }
+.su-tool-detail__desc { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text-dim); white-space: pre-wrap; }
+.su-tool-detail__meta { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 24px; font-size: 12.5px; }
+.su-tool-detail__meta dt { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+.su-tool-detail__meta dd { margin: 2px 0 0; }
+.su-table--sub { font-size: 12.5px; max-width: 640px; }
+.su-table--sub th, .su-table--sub td { padding: 4px 8px; }
+.su-pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.su-pager .btn { padding: 4px 10px; font-size: 12px; }
+.su-pager__count { font-variant-numeric: tabular-nums; }
+
 /* badges: layer, approval, state */
 .su-badge { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border-2); color: var(--text-dim); background: var(--surface-2); white-space: nowrap; }
 .su-badge--baseline { color: var(--text); }

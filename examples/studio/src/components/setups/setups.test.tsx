@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ApprovalBadge, Empty, ErrorBox, isInherited, LayerBadge, LintList, TabBar } from "./shared";
 import { CatalogTable, ProbeView, SyncDiffView } from "./ToolsPanel";
+import { normCatalog } from "../../lib/setups";
 
 // No DOM test runner is installed, so these render to static markup.
 
@@ -35,12 +36,19 @@ describe("shared pieces", () => {
 });
 
 describe("tools views", () => {
-  it("renders the catalog table columns", () => {
-    const html = renderToStaticMarkup(
-      <CatalogTable entries={[{ name: "t", alias: ["a"], title: "Title", description: "", approval: "read", source: "crm", layer: "baseline", origin: "registered", endpoint: "GET /x", kind: "http", options: {}, params: 0 }]} />,
+  it("renders the tools table with columns, a count and pager", () => {
+    const entries = normCatalog(
+      Array.from({ length: 30 }, (_, i) => ({
+        name: `t${i}`, title: "Title", approval: "read", layer: "baseline", origin: "declared",
+        endpoint: { method: "GET", path: `/x/${i}`, kind: "openapi" },
+      })),
     );
-    for (const h of ["Title", "Name", "Alias", "Approval", "Source", "Endpoint"]) expect(html).toContain(h);
-    expect(html).toContain("GET /x");
+    const html = renderToStaticMarkup(<CatalogTable entries={entries} scopeId="baseline" />);
+    for (const h of ["Name", "Method", "Path", "Approval", "Enabled", "Layer"]) expect(html).toContain(`>${h}</th>`);
+    expect(html).toContain("/x/0");
+    expect(html).not.toContain("/x/25");
+    expect(html).toContain("1-25 of 30");
+    expect(html).toContain("Page 1 of 2");
   });
   it("renders sync diff and probe output", () => {
     expect(renderToStaticMarkup(<SyncDiffView diff={{ added: ["n"], removed: [], changed: ["c"] }} />)).toContain("Added");

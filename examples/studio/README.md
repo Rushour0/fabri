@@ -78,6 +78,15 @@ Pointing at a different `fabri serve` host/port? Set `FABRI_SERVE_URL`:
 FABRI_SERVE_URL=http://127.0.0.1:9000 npm run dev
 ```
 
+Only managing setups? Set `VITE_STUDIO_SECTIONS` to the sections you want
+(`roster`, `conversation`, `company`, `questions`, `fleet`, `setups`, `settings`).
+Unset shows all of them. Without `conversation` the Conversations sidebar is
+hidden and Studio opens on Setups. Put it in `.env.local` and restart Vite:
+
+```bash
+echo 'VITE_STUDIO_SECTIONS=setups,settings' > .env.local
+```
+
 ## Drop it onto your own agency
 
 Studio is agency-agnostic — it only speaks the `fabri serve` HTTP API. To use

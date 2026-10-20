@@ -20,6 +20,11 @@ import { useHashRoute, type Surface } from "./hooks/useHashRoute";
 import { listQuestions, getCompany, getCatalog, onUnauthorized, type Company, type Catalog } from "./lib/api";
 import { getMe, logout, type AuthState } from "./lib/auth";
 import { LoginScreen, type AuthReason } from "./components/LoginScreen";
+import { hasSection, landingSurface, STUDIO_SECTIONS, surfaceAllowed, type Section } from "./lib/sections";
+
+// VITE_STUDIO_SECTIONS picks the top-level sections; unset shows all of them.
+const show = (s: Section) => hasSection(STUDIO_SECTIONS, s);
+const HOME = landingSurface(STUDIO_SECTIONS);
 
 const STATUS_LABEL: Record<string, string> = {
   idle: "Ready",
@@ -83,7 +88,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Tab state lives in the URL hash (#conversation, #questions, #replay/<id>),
   // so tabs are deep-linkable and browser Back/Forward works.
-  const { surface, replayId, go, hadInitialHash } = useHashRoute("conversation");
+  const { surface, replayId, go, hadInitialHash } = useHashRoute(HOME);
   // Where the replay was opened from, so its back button returns there.
   const [replayFrom, setReplayFrom] = useState<Surface>("history");
   const busy = run.status === "submitting" || run.status === "running";
@@ -107,6 +112,11 @@ export default function App() {
 
   useEffect(() => onUnauthorized(() => setAuthState("anon")), []);
 
+  // A deep link or a stale hash can point at a hidden section.
+  useEffect(() => {
+    if (!surfaceAllowed(STUDIO_SECTIONS, surface)) go(HOME);
+  }, [go, surface]);
+
   useEffect(() => {
     if (!appVisible) return;
     if (surface !== "conversation") return;
@@ -123,14 +133,14 @@ export default function App() {
   }, [authState, surface]);
 
   useEffect(() => {
-    if (hasAccountAccess && surface === "history") go("conversation");
+    if (hasAccountAccess && surface === "history") go(HOME);
   }, [go, hasAccountAccess, surface]);
 
   // Pending-question count for the Questions tab badge, so a waiting question is
   // visible from any surface. Lightweight poll, independent of the inbox's own.
   const [pendingCount, setPendingCount] = useState(0);
   useEffect(() => {
-    if (!appVisible || !hasAccountAccess) {
+    if (!appVisible || !hasAccountAccess || !show("questions")) {
       setPendingCount(0);
       return;
     }
@@ -151,7 +161,7 @@ export default function App() {
   // agency). Fetched once — a served config doesn't change over a session.
   const [company, setCompany] = useState<Company | null>(null);
   useEffect(() => {
-    if (!appVisible) return;
+    if (!appVisible || !show("company")) return;
     getCompany()
       .then(setCompany)
       .catch(() => setCompany(null));
@@ -162,7 +172,7 @@ export default function App() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [selection, setSelection] = useState<CatalogSelection | null>(null);
   useEffect(() => {
-    if (!appVisible) return;
+    if (!appVisible || !show("roster")) return;
     getCatalog()
       .then((c) => {
         setCatalog(c);
@@ -213,7 +223,7 @@ export default function App() {
       await logout();
     } finally {
       setAuthState("anon");
-      go("conversation");
+      go(HOME);
     }
   };
 
@@ -232,7 +242,7 @@ export default function App() {
           setShowAuth(false);
           // From the integrations prompt, "not now" should leave the visitor
           // where they were rather than yanking them into the thread.
-          if (authReason !== "integrations") go("conversation");
+          if (authReason !== "integrations") go(HOME);
         }}
         reason={authReason}
       />
@@ -243,9 +253,11 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="header__brand">
-          <button className="sidebar-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open conversations">
-            Conversations
-          </button>
+          {show("conversation") && (
+            <button className="sidebar-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open conversations">
+              Conversations
+            </button>
+          )}
           <span className="header__logo" aria-hidden />
           <span className="header__title">Fabri Studio</span>
         </div>
@@ -259,19 +271,23 @@ export default function App() {
                 Roster
               </button>
             )}
-            <button
-              className={"tab" + (surface === "conversation" ? " tab--on" : "")}
-              onClick={() => go("conversation")}
-            >
-              Conversation
-            </button>
-            <button
-              className={"tab" + (surface === "company" ? " tab--on" : "")}
-              onClick={() => go("company")}
-            >
-              Company
-            </button>
-            {hasAccountAccess && (
+            {show("conversation") && (
+              <button
+                className={"tab" + (surface === "conversation" ? " tab--on" : "")}
+                onClick={() => go("conversation")}
+              >
+                Conversation
+              </button>
+            )}
+            {show("company") && (
+              <button
+                className={"tab" + (surface === "company" ? " tab--on" : "")}
+                onClick={() => go("company")}
+              >
+                Company
+              </button>
+            )}
+            {hasAccountAccess && show("questions") && (
               <button
                 className={"tab" + (surface === "questions" ? " tab--on" : "")}
                 onClick={() => go("questions")}
@@ -284,7 +300,7 @@ export default function App() {
                 )}
               </button>
             )}
-            {hasAccountAccess && (
+            {hasAccountAccess && show("fleet") && (
               <button
                 className={"tab" + (surface === "fleet" ? " tab--on" : "")}
                 onClick={() => go("fleet")}
@@ -292,7 +308,7 @@ export default function App() {
                 Fleet
               </button>
             )}
-            {hasAccountAccess && (
+            {hasAccountAccess && show("setups") && (
               <button
                 className={"tab" + (surface === "setups" ? " tab--on" : "")}
                 onClick={() => go("setups")}
@@ -302,12 +318,14 @@ export default function App() {
             )}
             {/* Settings stays visible signed-out: the integrations are part of
                 the pitch, and each one gates its own connect action. */}
-            <button
-              className={"tab" + (surface === "settings" ? " tab--on" : "")}
-              onClick={() => go("settings")}
-            >
-              Settings
-            </button>
+            {show("settings") && (
+              <button
+                className={"tab" + (surface === "settings" ? " tab--on" : "")}
+                onClick={() => go("settings")}
+              >
+                Settings
+              </button>
+            )}
             </nav>
             {authEmail && (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -317,14 +335,17 @@ export default function App() {
                 </button>
               </div>
             )}
-            <div className={`status status--${run.status}`}>
-            <span className="status__dot" aria-hidden />
-            {STATUS_LABEL[run.status] ?? run.status}
-          </div>
+            {show("conversation") && (
+              <div className={`status status--${run.status}`}>
+                <span className="status__dot" aria-hidden />
+                {STATUS_LABEL[run.status] ?? run.status}
+              </div>
+            )}
         </div>
       </header>
 
       <div className="workspace">
+        {show("conversation") && (
         <aside className={"conversation-sidebar" + (sidebarOpen ? " conversation-sidebar--open" : "")} aria-label="Saved conversations">
           <div className="conversation-sidebar__header">
             <span>Conversations</span>
@@ -343,6 +364,7 @@ export default function App() {
             </div>
           )}
         </aside>
+        )}
 
         <div className="main-pane">
           <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>

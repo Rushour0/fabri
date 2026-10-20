@@ -420,9 +420,22 @@ export interface CatalogEntry {
   layer: string;
   origin: string;
   endpoint: string;
+  /** HTTP method and path split out of `endpoint`, empty when the tool has none. */
+  method: string;
+  path: string;
   kind: string;
   options: Record<string, unknown[]>;
   params: number;
+  paramList: CatalogParam[];
+  /** null when the server does not say; the catalog only carries it for some entries. */
+  enabled: boolean | null;
+}
+
+export interface CatalogParam {
+  name: string;
+  type: string;
+  required: boolean;
+  location: string;
 }
 
 export function normCatalog(raw: unknown): CatalogEntry[] {
@@ -438,11 +451,22 @@ export function normCatalog(raw: unknown): CatalogEntry[] {
     const r = (x ?? {}) as Record<string, unknown>;
     const alias = r.alias ?? r.aliases;
     let endpoint = "";
-    if (typeof r.endpoint === "string") endpoint = r.endpoint;
-    else if (r.endpoint && typeof r.endpoint === "object") {
-      const e = r.endpoint as Record<string, unknown>;
-      endpoint = [e.method, e.url ?? e.path].filter(Boolean).join(" ");
-    } else endpoint = [r.method, r.path].filter(Boolean).join(" ");
+    let method = "";
+    let path = "";
+    let kind = String(r.kind ?? "");
+    if (typeof r.endpoint === "string") {
+      endpoint = r.endpoint;
+      const m = /^([A-Za-z]+)\s+(\S.*)$/.exec(r.endpoint.trim());
+      if (m) [method, path] = [m[1], m[2]];
+      else path = r.endpoint.trim();
+    } else {
+      const e = (r.endpoint && typeof r.endpoint === "object" ? r.endpoint : r) as Record<string, unknown>;
+      method = String(e.method ?? "");
+      path = String(e.url ?? e.path ?? "");
+      if (!kind && e !== r && e.kind) kind = String(e.kind);
+      endpoint = [method, path].filter(Boolean).join(" ");
+    }
+    const params = Array.isArray(r.params) ? r.params : [];
     return {
       name: String(r.name ?? ""),
       alias: Array.isArray(alias) ? alias.map(String) : typeof alias === "string" && alias ? [alias] : [],
@@ -453,9 +477,16 @@ export function normCatalog(raw: unknown): CatalogEntry[] {
       layer: String(r.layer ?? ""),
       origin: String(r.origin ?? ""),
       endpoint,
-      kind: String(r.kind ?? ""),
+      method: method.toUpperCase(),
+      path,
+      kind,
       options: (r.options as Record<string, unknown[]>) ?? {},
-      params: Array.isArray(r.params) ? r.params.length : 0,
+      params: params.length,
+      paramList: params.map((p) => {
+        const o = (p && typeof p === "object" ? p : { name: p }) as Record<string, unknown>;
+        return { name: String(o.name ?? ""), type: String(o.type ?? ""), required: o.required === true, location: String(o.location ?? "") };
+      }),
+      enabled: typeof r.enabled === "boolean" ? r.enabled : null,
     };
   });
 }
