@@ -19,7 +19,7 @@ import ConnectGitHub from "./components/ConnectGitHub";
 import ConnectLinear from "./components/ConnectLinear";
 import { useHashRoute, type Surface } from "./hooks/useHashRoute";
 import { listQuestions, getCompany, getCatalog, onUnauthorized, type Company, type Catalog } from "./lib/api";
-import { getMe, logout, type AuthState } from "./lib/auth";
+import { getAuthConfig, getMe, LEGACY_AUTH_CONFIG, logout, mustSignIn, type AuthConfig, type AuthState } from "./lib/auth";
 import { LoginScreen, type AuthReason } from "./components/LoginScreen";
 import { hasSection, landingSurface, STUDIO_SECTIONS, surfaceAllowed, type Section } from "./lib/sections";
 
@@ -79,6 +79,7 @@ function TurnBlock({
 export default function App() {
   const run = useRunEvents();
   const [authState, setAuthState] = useState<AuthState>("loading");
+  const [authConfig, setAuthConfig] = useState<AuthConfig>(LEGACY_AUTH_CONFIG);
   const [showAuth, setShowAuth] = useState(false);
   // Which prompt sent the visitor to the login screen, so its copy matches.
   const [authReason, setAuthReason] = useState<AuthReason>("history");
@@ -103,8 +104,10 @@ export default function App() {
 
   useEffect(() => {
     let live = true;
-    getMe().then((state) => {
-      if (live) setAuthState(state);
+    Promise.all([getMe(), getAuthConfig()]).then(([state, cfg]) => {
+      if (!live) return;
+      setAuthConfig(cfg);
+      setAuthState(state);
     });
     return () => {
       live = false;
@@ -231,6 +234,18 @@ export default function App() {
   if (authState === "loading") {
     return <main style={{ minHeight: "100%", display: "grid", placeItems: "center" }}>Loading…</main>;
   }
+  if (mustSignIn(authState, authConfig)) {
+    return (
+      <LoginScreen
+        onAuthed={(email) => {
+          setAuthState({ email });
+          setShowAuth(false);
+        }}
+        reason="required"
+        allowSignup={authConfig.signup}
+      />
+    );
+  }
   if (showAuth) {
     return (
       <LoginScreen
@@ -246,6 +261,7 @@ export default function App() {
           if (authReason !== "integrations") go(HOME);
         }}
         reason={authReason}
+        allowSignup={authConfig.signup}
       />
     );
   }

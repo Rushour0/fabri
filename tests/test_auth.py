@@ -15,6 +15,9 @@ import fabri.service.auth as auth
 from fabri.service.http_server import _Handler
 from fabri.service.run_store import RunStore
 
+# The older opt-in mode: anonymous visitors may start and follow their own runs.
+GUESTS = {"allow_guests": True}
+
 
 def test_user_store_creates_and_verifies_users(tmp_path):
     store = UserStore(tmp_path / "auth.db")
@@ -68,7 +71,9 @@ def test_run_owner_returns_only_the_persisted_owner(tmp_path):
 
 
 def test_auth_routes_hide_another_users_run():
-    service = SimpleNamespace(auth_enabled=True, run_owner=lambda _session_id: "user-a")
+    service = SimpleNamespace(
+        auth_enabled=True, auth_cfg=GUESTS, run_owner=lambda _session_id: "user-a"
+    )
 
     for path, action in (
         ("/runs/owned-run/events", "_stream_events"),
@@ -93,7 +98,9 @@ def test_auth_routes_hide_another_users_run():
 
 
 def test_auth_routes_allow_unowned_guest_run():
-    service = SimpleNamespace(auth_enabled=True, run_owner=lambda _session_id: None)
+    service = SimpleNamespace(
+        auth_enabled=True, auth_cfg=GUESTS, run_owner=lambda _session_id: None
+    )
 
     for path, action in (
         ("/runs/guest-run/events", "_stream_events"),
@@ -116,10 +123,10 @@ def test_auth_routes_allow_unowned_guest_run():
         assert calls == ["guest-run"]
 
 
-def test_catalog_is_public_when_auth_is_enabled():
+def test_catalog_is_public_in_guest_mode():
     handler = object.__new__(_Handler)
     handler.server = SimpleNamespace(
-        service=SimpleNamespace(auth_enabled=True, auth_secret="secret"),
+        service=SimpleNamespace(auth_enabled=True, auth_secret="secret", auth_cfg=GUESTS),
         catalog={},
     )
     handler.path = "/catalog"
@@ -136,6 +143,7 @@ def test_submit_allows_guest_and_leaves_run_unowned():
     submitted = []
     service = SimpleNamespace(
         auth_enabled=True,
+        auth_cfg=GUESTS,
         submit=lambda task, overrides, **kwargs: submitted.append(
             (task, overrides, kwargs)
         )

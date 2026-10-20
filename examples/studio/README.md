@@ -130,10 +130,12 @@ To get the most out of the UI, your config should:
   the listener writes an `ask_user` event into the run's trace (so it reaches the
   browser over the *same* SSE stream, carrying its `question_id`) and holds the
   socket open until `POST /runs/<id>/answer` supplies the answer.
-- **Authentication is optional for conversation.** With auth enabled, guests can
-  browse the roster and run a live thread immediately. Signing in attaches new
-  runs to an account so they appear in the persistent Conversations sidebar;
-  account dashboards and saved replay remain private to that user.
+- **Authentication.** With `auth.enabled` every API route except `/health` and
+  `/auth/*` needs a session or a bearer token, so a signed-out visitor sees only
+  the login screen. Starting or changing work needs the admin role. Set
+  `auth.allow_guests: true` for the older mode where guests can browse the
+  roster and run a live thread without an account. Runs started by a signed-in
+  user stay private to that user.
 
 ## Layout
 

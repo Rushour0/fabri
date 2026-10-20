@@ -2,6 +2,8 @@
 // through the dev server's /pba/v1/spend proxy, which adds the service token
 // and company. Pure shaping helpers live here so they test without a DOM.
 
+import { notifyUnauthorized } from "./api";
+
 export const SPEND_BASE = "/pba/v1/spend";
 export const SPEND_PAGE = 25;
 export const DAYS_SHOWN = 30;
@@ -87,6 +89,7 @@ async function getJson<T>(path: string): Promise<T> {
   } catch (e) {
     throw new SpendError(`Cannot reach pba (${e instanceof Error ? e.message : String(e)}).`);
   }
+  if (res.status === 401) notifyUnauthorized();
   const text = await res.text();
   let body: unknown;
   try {

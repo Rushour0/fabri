@@ -3,7 +3,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { login, signup } from "../lib/auth";
 
 /** Why the visitor landed here, so the pitch matches the action they took. */
-export type AuthReason = "history" | "integrations";
+export type AuthReason = "history" | "integrations" | "required";
 
 const REASON_COPY: Record<AuthReason, { title: string; blurb: string; skip: string }> = {
   history: {
@@ -18,16 +18,24 @@ const REASON_COPY: Record<AuthReason, { title: string; blurb: string; skip: stri
       "Integrations attach to an account, so Slack, GitHub, and Linear need one. Studio itself stays usable without signing in.",
     skip: "Not now",
   },
+  required: {
+    title: "Sign in",
+    blurb: "This Studio is invite only. Sign in with the account an admin set up for you.",
+    skip: "",
+  },
 };
 
 export function LoginScreen({
   onAuthed,
   onContinueAsGuest,
   reason = "history",
+  allowSignup = true,
 }: {
   onAuthed: (email: string) => void;
-  onContinueAsGuest: () => void;
+  /** Omit when the server has no guest mode; the skip button then goes away. */
+  onContinueAsGuest?: () => void;
   reason?: AuthReason;
+  allowSignup?: boolean;
 }) {
   const copy = REASON_COPY[reason];
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -82,26 +90,28 @@ export function LoginScreen({
         <p style={{ margin: "-8px 0 18px", color: "var(--text-dim)", fontSize: 12.5, lineHeight: 1.5, textAlign: "center" }}>
           {copy.blurb}
         </p>
-        <div className="tabs" aria-label="Authentication mode" style={{ marginBottom: 18 }}>
-          <button
-            className={"tab" + (mode === "login" ? " tab--on" : "")}
-            style={{ flex: 1 }}
-            type="button"
-            onClick={() => setMode("login")}
-            aria-pressed={mode === "login"}
-          >
-            Log in
-          </button>
-          <button
-            className={"tab" + (mode === "signup" ? " tab--on" : "")}
-            style={{ flex: 1 }}
-            type="button"
-            onClick={() => setMode("signup")}
-            aria-pressed={mode === "signup"}
-          >
-            Sign up
-          </button>
-        </div>
+        {allowSignup && (
+          <div className="tabs" aria-label="Authentication mode" style={{ marginBottom: 18 }}>
+            <button
+              className={"tab" + (mode === "login" ? " tab--on" : "")}
+              style={{ flex: 1 }}
+              type="button"
+              onClick={() => setMode("login")}
+              aria-pressed={mode === "login"}
+            >
+              Log in
+            </button>
+            <button
+              className={"tab" + (mode === "signup" ? " tab--on" : "")}
+              style={{ flex: 1 }}
+              type="button"
+              onClick={() => setMode("signup")}
+              aria-pressed={mode === "signup"}
+            >
+              Sign up
+            </button>
+          </div>
+        )}
         <label style={fieldStyle} htmlFor="auth-email">
           Email
           <input
@@ -145,9 +155,11 @@ export function LoginScreen({
         <button className="btn btn--primary" style={{ width: "100%", marginTop: 18 }} type="submit" disabled={submitting}>
           {submitting ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
         </button>
-        <button className="btn" style={{ width: "100%", marginTop: 8 }} type="button" onClick={onContinueAsGuest}>
-          {copy.skip}
-        </button>
+        {onContinueAsGuest && (
+          <button className="btn" style={{ width: "100%", marginTop: 8 }} type="button" onClick={onContinueAsGuest}>
+            {copy.skip}
+          </button>
+        )}
       </form>
     </main>
   );

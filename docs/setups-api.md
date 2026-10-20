@@ -25,6 +25,24 @@ Every route requires the service's existing auth. Writes need the `admin` role. 
 - Writes (anything that is not a GET): `Authorization: Bearer $FABRI_ADMIN_TOKEN`, or a session whose email is listed under `auth.admins` in the service config, or `FABRI_SERVICE_TOKEN` when neither an admin token nor session auth is configured. `/tools/probe` and `/tools/sync` count as writes (they call out and write state). 401 means no valid credentials, 403 means authenticated without the admin role.
 - The audit `actor` is the session email, `admin-token`, `service-token`, or `anonymous` when the gate is open.
 
+The same rules cover the rest of `fabri serve` once `auth.enabled` is on: every route except `/health`, `/auth/*` and signed webhooks needs one of the credentials above, and anything that starts or changes work (`POST /runs`, `/fleets`, answer, cancel, install routes) needs admin. `auth.allow_guests: true` brings back anonymous runs.
+
+Invite-only service config, passed with `fabri serve --auth-config FILE` so it stays out of run configs:
+
+```yaml
+auth:
+  enabled: true
+  signup: false                 # /auth/signup answers 403
+  admins: [you@example.com]
+  allowed_emails: [you@example.com, teammate@example.com]
+  db_path: /data/fabri/auth.db
+```
+
+- `allowed_emails` (or `FABRI_AUTH_ALLOWED_EMAILS`, comma list): signup and login for any other email get the same answers as a taken email or a wrong password, after the same password-hash work. A session whose email drops off the list stops working.
+- `FABRI_AUTH_ADMINS`, `FABRI_AUTH_SIGNUP` and `FABRI_AUTH_DB_PATH` override the file. `FABRI_AUTH_SECRET` signs sessions.
+- Users without signup: `fabri auth add-user EMAIL --auth-config FILE` and `fabri auth set-password EMAIL --auth-config FILE`. The password comes from a prompt, or one line on stdin.
+- `GET /auth/check` answers 204 when the caller could read and 401 otherwise, for a proxy's `forward_auth` in front of non-fabri paths. `GET /auth/config` tells Studio whether signup and guests are on.
+
 ## Endpoints
 
 | Method and path | Body | Returns |

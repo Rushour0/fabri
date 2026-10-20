@@ -6,6 +6,8 @@
 // normalizer below accepts the plausible shapes (array or name-keyed map,
 // string or list for aliases) and returns one stable shape for the views.
 
+import { notifyUnauthorized } from "./api";
+
 export const KINDS = ["agents", "skills", "context", "data", "tools", "plays"] as const;
 export type Kind = (typeof KINDS)[number];
 
@@ -638,6 +640,7 @@ async function call<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   } catch (e) {
     throw new SetupsError(`Cannot reach the server (${errorText(e)}).`);
   }
+  if (res.status === 401) notifyUnauthorized();
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   let body: unknown = undefined;

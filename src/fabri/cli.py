@@ -1604,7 +1604,11 @@ def cmd_serve(args: argparse.Namespace) -> None:
     from fabri.service.http_server import serve_http
     from fabri.service.service import FabriService
 
-    service = FabriService(template_config=args.config, home_root=args.home_root)
+    service = FabriService(
+        template_config=args.config,
+        home_root=args.home_root,
+        auth_config=getattr(args, "auth_config", None),
+    )
     server = serve_http(service, host=args.host, port=args.port, setups_api=_setups_api(args))
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(
@@ -1650,7 +1654,11 @@ def cmd_studio(args: argparse.Namespace) -> None:
         except (OSError, ValueError) as exc:
             print(f"catalog error: {exc}", file=sys.stderr)
             sys.exit(1)
-        service = FabriService(catalog=catalog, home_root=args.home_root)
+        service = FabriService(
+            catalog=catalog,
+            home_root=args.home_root,
+            auth_config=getattr(args, "auth_config", None),
+        )
         server = serve_http(
             service, host=args.host, port=args.port, serve_studio=True, catalog=catalog,
             setups_api=_setups_api(args),
@@ -1673,7 +1681,10 @@ def cmd_studio(args: argparse.Namespace) -> None:
                 sys.exit(1)
             template_config = str(root)
 
-        service = FabriService(template_config=template_config, home_root=args.home_root)
+        service = FabriService(
+            template_config=template_config, home_root=args.home_root,
+            auth_config=getattr(args, "auth_config", None),
+        )
         server = serve_http(
             service,
             host=args.host,
@@ -1691,6 +1702,62 @@ def cmd_studio(args: argparse.Namespace) -> None:
     finally:
         server.shutdown()
         service.close()
+
+
+def _auth_store(args: argparse.Namespace):
+    """The user store `fabri serve` would open for the same flags and env."""
+    from fabri.config import load_auth_config
+    from fabri.service.auth import UserStore
+
+    if args.auth_config:
+        auth_cfg = load_auth_config(args.auth_config)
+    else:
+        auth_cfg = load_config(args.config).get("auth", {})
+    home_root = Path(args.home_root) if args.home_root else (
+        Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve"
+    )
+    return UserStore(auth_cfg.get("db_path") or home_root / "auth.db"), auth_cfg
+
+
+def _read_new_password() -> str:
+    import getpass
+
+    if sys.stdin.isatty():
+        password = getpass.getpass("Password: ")
+        if getpass.getpass("Repeat password: ") != password:
+            print("passwords do not match", file=sys.stderr)
+            sys.exit(1)
+    else:
+        password = sys.stdin.readline().rstrip("\r\n")
+    if len(password) < 8:
+        print("password must be at least 8 characters", file=sys.stderr)
+        sys.exit(1)
+    return password
+
+
+def cmd_auth_add_user(args: argparse.Namespace) -> None:
+    from fabri.service.auth import email_allowed
+
+    store, auth_cfg = _auth_store(args)
+    if not email_allowed(auth_cfg, args.email):
+        print(f"{args.email} is not in auth.allowed_emails; add it there first", file=sys.stderr)
+        sys.exit(1)
+    password = _read_new_password()
+    try:
+        store.create_user(args.email, password)
+    except ValueError:
+        print(f"{args.email} already exists; use `fabri auth set-password`", file=sys.stderr)
+        sys.exit(1)
+    print(f"created {args.email.strip().lower()} in {store.db_path}")
+
+
+def cmd_auth_set_password(args: argparse.Namespace) -> None:
+    store, _ = _auth_store(args)
+    password = _read_new_password()
+    if not store.set_password(args.email, password):
+        print(f"no user {args.email}; use `fabri auth add-user`", file=sys.stderr)
+        sys.exit(1)
+    print(f"password updated for {args.email.strip().lower()}")
 
 
 def main() -> None:
@@ -2114,6 +2181,8 @@ def main() -> None:
                      help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
     p_serve.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
                      help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
+    p_serve.add_argument("--auth-config", dest="auth_config", default=None, metavar="FILE",
+                         help="YAML with an `auth:` section for Studio login; overrides the template's")
     p_serve.set_defaults(func=cmd_serve)
 
     p_studio = sub.add_parser(
@@ -2153,7 +2222,24 @@ def main() -> None:
                      help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
     p_studio.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
                      help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
+    p_studio.add_argument("--auth-config", dest="auth_config", default=None, metavar="FILE",
+                          help="YAML with an `auth:` section for Studio login; overrides the template's")
     p_studio.set_defaults(func=cmd_studio)
+
+    p_auth = sub.add_parser("auth", help="Manage Studio login users offline (password read from stdin)")
+    auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
+    for name, func, text in (
+        ("add-user", cmd_auth_add_user, "Create a Studio user"),
+        ("set-password", cmd_auth_set_password, "Reset a Studio user's password"),
+    ):
+        p_cmd = auth_sub.add_parser(name, help=text)
+        p_cmd.add_argument("email")
+        p_cmd.add_argument("--config", default=None, help="Template agent.yaml the server uses")
+        p_cmd.add_argument("--auth-config", dest="auth_config", default=None, metavar="FILE",
+                           help="The server's --auth-config file")
+        p_cmd.add_argument("--home-root", dest="home_root", default=None,
+                           help="The server's --home-root (default: $FABRI_HOME/serve)")
+        p_cmd.set_defaults(func=func)
 
     args = parser.parse_args()
     try:

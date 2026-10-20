@@ -373,6 +373,10 @@ DEFAULT_CONFIG = {
         "session_ttl_s": 604800,
         "secure_cookie": True,
         "db_path": None,
+        "signup": True,
+        "allowed_emails": [],
+        "admins": [],
+        "allow_guests": False,
     },
 }
 
@@ -595,6 +599,10 @@ def _apply_env_overrides(cfg: dict) -> dict:
     - ``FABRI_SLACK_STUDIO_URL`` -> ``routing.slack.studio_base_url``
     - ``FABRI_AUTH_ENABLED`` -> ``auth.enabled`` (1/true/yes/on)
     - ``FABRI_AUTH_SECURE_COOKIE`` -> ``auth.secure_cookie`` (0/false/no/off disables it)
+    - ``FABRI_AUTH_SIGNUP`` -> ``auth.signup`` (0/false/no/off disables it)
+    - ``FABRI_AUTH_ALLOWED_EMAILS`` -> ``auth.allowed_emails`` (comma list)
+    - ``FABRI_AUTH_ADMINS`` -> ``auth.admins`` (comma list)
+    - ``FABRI_AUTH_DB_PATH`` -> ``auth.db_path``
     """
     out = cfg
 
@@ -653,17 +661,54 @@ def _apply_env_overrides(cfg: dict) -> dict:
         routing["slack"] = {**(routing.get("slack") or {}), **slack_over}
         out = {**out, "routing": routing}
 
-    auth_over: dict = {}
-    auth_enabled = os.environ.get("FABRI_AUTH_ENABLED")
-    if auth_enabled is not None:
-        auth_over["enabled"] = auth_enabled.strip().lower() in ("1", "true", "yes", "on")
-    secure_cookie = os.environ.get("FABRI_AUTH_SECURE_COOKIE")
-    if secure_cookie is not None:
-        auth_over["secure_cookie"] = secure_cookie.strip().lower() not in ("0", "false", "no", "off")
+    auth_over = _auth_env_overrides()
     if auth_over:
         out = {**out, "auth": {**(out.get("auth") or {}), **auth_over}}
 
     return out
+
+
+def _auth_env_overrides() -> dict:
+    over: dict = {}
+    enabled = os.environ.get("FABRI_AUTH_ENABLED")
+    if enabled is not None:
+        over["enabled"] = enabled.strip().lower() in ("1", "true", "yes", "on")
+    secure_cookie = os.environ.get("FABRI_AUTH_SECURE_COOKIE")
+    if secure_cookie is not None:
+        over["secure_cookie"] = secure_cookie.strip().lower() not in ("0", "false", "no", "off")
+    signup = os.environ.get("FABRI_AUTH_SIGNUP")
+    if signup is not None:
+        over["signup"] = signup.strip().lower() not in ("0", "false", "no", "off")
+    for env, key in (("FABRI_AUTH_ALLOWED_EMAILS", "allowed_emails"), ("FABRI_AUTH_ADMINS", "admins")):
+        value = os.environ.get(env)
+        if value is not None and value.strip():
+            over[key] = [e.strip() for e in value.split(",") if e.strip()]
+    db_path = os.environ.get("FABRI_AUTH_DB_PATH")
+    if db_path:
+        over["db_path"] = db_path
+    return over
+
+
+def load_auth_config(path: str | Path) -> dict:
+    """Load the `auth:` section of a standalone service config file.
+
+    Framework auth defaults sit under it and FABRI_AUTH_* env vars on top,
+    the same precedence as `load_config`. Unlike the agent template, a bad
+    file is an error, so a typo can never quietly turn auth off."""
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError as e:
+        raise ConfigError(f"auth config file not found: {path}") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"malformed YAML in {path}: {e}") from e
+    section = data.get("auth") if isinstance(data, dict) else None
+    if not isinstance(section, dict):
+        raise ConfigError(f"{path} must contain an `auth:` mapping")
+    for key in ("allowed_emails", "admins"):
+        if key in section and not isinstance(section[key], list):
+            raise ConfigError(f"auth.{key} in {path} must be a list of emails")
+    return {**DEFAULT_CONFIG["auth"], **section, **_auth_env_overrides()}
 
 
 def load_config(path: str | None) -> dict:

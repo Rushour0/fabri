@@ -30,7 +30,7 @@ from threading import Lock
 
 import yaml
 
-from fabri.config import ConfigError, load_config
+from fabri.config import ConfigError, load_auth_config, load_config
 from fabri.events import EventType
 from fabri.memory.output import split_agent_output
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
@@ -120,6 +120,9 @@ class FabriService:
             runtimes). ``None`` uses the standard ``fabri run`` command.
         catalog: optional pre-installed roster entries keyed by their catalog
             reference. A submit with ``catalog_ref`` selects that entry's config.
+        auth_config: optional service config file whose ``auth:`` section
+            replaces the template's, so login settings stay out of run configs.
+            Errors in it raise instead of turning auth off.
     """
 
     def __init__(
@@ -130,6 +133,7 @@ class FabriService:
         sync_hook: FileSyncHook | None = None,
         command_builder: CommandBuilder | None = None,
         catalog: Mapping[str, dict] | None = None,
+        auth_config: str | Path | None = None,
     ) -> None:
         self.template_config = template_config
         self.catalog = catalog
@@ -145,6 +149,8 @@ class FabriService:
             self._slack_cfg = {}
             self.auth_cfg = {}
             self._default_agency = "default"
+        if auth_config is not None:
+            self.auth_cfg = load_auth_config(auth_config)
         self.home_root = (
             Path(home_root)
             if home_root is not None

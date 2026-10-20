@@ -20,7 +20,6 @@ Auth (docs/setups-api.md, "Every route requires the service's existing auth"):
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -479,33 +478,17 @@ class SetupsApi:
 
     def _authorize(self, handler: Any, *, write: bool) -> str:
         service = handler.service
-        admin_token = os.environ.get("FABRI_ADMIN_TOKEN") or ""
-        service_token = os.environ.get("FABRI_SERVICE_TOKEN") or ""
-        auth_header = handler.headers.get("Authorization", "")
-        bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-        session_auth = bool(getattr(service, "auth_enabled", False))
-        actor, is_admin = None, False
-        if bearer and admin_token and hmac.compare_digest(bearer, admin_token):
-            actor, is_admin = "admin-token", True
-        elif bearer and service_token and hmac.compare_digest(bearer, service_token):
-            actor, is_admin = "service-token", (not admin_token and not session_auth)
-        if actor is None and session_auth:
-            user_id = handler._current_user()
-            store = getattr(service, "user_store", None)
-            user = store.get_user(user_id) if (user_id and store is not None) else None
-            if user is not None:
-                actor = user["email"]
-                admins = {str(a).strip().lower() for a in (getattr(service, "auth_cfg", {}) or {}).get("admins") or []}
-                is_admin = actor.lower() in admins
-        if actor is None:
-            read_open = not session_auth and not service_token
-            write_open = read_open and not admin_token
+        principal = handler._principal()
+        if principal is None:
+            session_auth = bool(getattr(service, "auth_enabled", False))
+            read_open = not session_auth and not os.environ.get("FABRI_SERVICE_TOKEN")
+            write_open = read_open and not os.environ.get("FABRI_ADMIN_TOKEN")
             if (write and write_open) or (not write and read_open):
                 return "anonymous"
             raise ApiError(401, "auth required")
-        if write and not is_admin:
+        if write and not principal.is_admin:
             raise ApiError(403, "admin role required")
-        return actor
+        return principal.actor
 
     # ---- helpers
 
