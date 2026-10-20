@@ -8,8 +8,9 @@ import {
   type Kind,
   type Scope,
 } from "../../lib/setups";
-import { AgentTypesView } from "./AgentTypesView";
 import { CompaniesView } from "./CompaniesView";
+import { GlobalSkillsView } from "./GlobalSkillsView";
+import { OrgTypesView } from "./OrgTypesView";
 import { ItemsPanel } from "./ItemsPanel";
 import { ProjectsView } from "./ProjectsView";
 import { ResolvedView } from "./ResolvedView";
@@ -18,10 +19,11 @@ import { TabBar, useLoad } from "./shared";
 import { ToolsPanel } from "./ToolsPanel";
 import "./setups.css";
 
-type Mode = "agents" | "companies" | "projects" | "tools" | "merged" | "scopes";
+type Mode = "agents" | "skills" | "companies" | "projects" | "tools" | "merged" | "scopes";
 
 const BASE_TABS: { id: Mode; label: string }[] = [
   { id: "agents", label: "Agent types" },
+  { id: "skills", label: "Global skills" },
   { id: "companies", label: "Companies" },
   { id: "projects", label: "Projects" },
   { id: "tools", label: "Tools" },
@@ -105,8 +107,8 @@ export function SetupsView() {
         <div>
           <h2 className="catalog__title">Setups</h2>
           <p className="catalog__sub">
-            Agent types carry the global prompt and skills. Each company picks the types it uses. Projects add local skills,
-            context and data.
+            An agent type is the kind of organization served, such as a basketball league or a tennis club. Every type gets the
+            global skills. Each company picks its type. Projects add local skills, context and data.
           </p>
         </div>
         <label className="su-adv">
@@ -119,7 +121,8 @@ export function SetupsView() {
       <TabBar label="Setups sections" value={mode} onChange={setMode} tabs={tabs} />
 
       <div className="su-body" role="tabpanel" aria-labelledby={`su-tab-${mode}`}>
-        {mode === "agents" && <AgentTypesView />}
+        {mode === "agents" && <OrgTypesView tree={tree.data} loading={tree.loading} error={tree.error} onRetry={tree.reload} />}
+        {mode === "skills" && <GlobalSkillsView />}
         {mode === "companies" && (
           <CompaniesView
             tree={tree.data}

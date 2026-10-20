@@ -695,6 +695,15 @@ export const setupsApi = {
       throw e;
     }
   },
+  /** A scope's setup.yaml, parsed by the server. Empty when the scope has none. */
+  setupMeta: async (scope: string): Promise<Record<string, unknown>> => {
+    try {
+      return normItem(await call(`/setups/item${qs({ scope, kind: "setup", name: "setup.yaml" })}`)).meta;
+    } catch (e) {
+      if (e instanceof SetupsError && e.status === 404) return {};
+      throw e;
+    }
+  },
   putOrgSetup: async (scope: string, text: string) =>
     normLint(
       (
@@ -792,4 +801,54 @@ export function skillFilesForType(name: string, type: string): Record<string, st
 /** The org and project a catalog/resolved call should use for a scope. */
 export function scopeContext(scope: Scope): { org?: string; project?: string } {
   return { org: scope.org, project: scope.project };
+}
+
+// ---- org types (packs) and global skills ----
+
+export interface OrgType {
+  name: string;
+  title: string;
+  description: string;
+}
+
+/** A pack's setup.yaml as an org type: `title` and `description`, falling back to the pack name. */
+export function normOrgType(name: string, meta: Record<string, unknown>): OrgType {
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  return { name, title: str(meta.title) || name, description: str(meta.description) };
+}
+
+export interface GlobalSkill {
+  name: string;
+  what: string;
+  workers: string[];
+  code: string;
+}
+
+/** baseline setup.yaml `global_skills`: what every org type gets and the workers behind each. */
+export function normGlobalSkills(meta: Record<string, unknown>): GlobalSkill[] {
+  const list = Array.isArray(meta.global_skills) ? meta.global_skills : [];
+  return list
+    .map((x) => {
+      const r = (x ?? {}) as Record<string, unknown>;
+      return {
+        name: String(r.name ?? "").trim(),
+        what: String(r.what ?? "").trim(),
+        workers: Array.isArray(r.workers) ? r.workers.map(String) : [],
+        code: typeof r.code === "string" ? r.code : "",
+      };
+    })
+    .filter((s) => s.name);
+}
+
+/** Workers no global skill names (chat and none route and reply). */
+export function unlistedWorkers(skills: GlobalSkill[], workers: string[]): string[] {
+  const named = new Set(skills.flatMap((s) => s.workers));
+  return workers.filter((w) => !named.has(w));
+}
+
+/** The companies that picked each pack, from the scope tree. */
+export function packCompanies(tree: ScopeTree): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const o of tree.orgs) for (const p of o.packs) (out[p] ??= []).push(o.name);
+  return out;
 }

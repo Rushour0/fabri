@@ -38,11 +38,11 @@ function GlobalSkills({ type }: { type: string }) {
     <div className="su-panel">
       <div className="su-panel__bar">
         <p className="su-panel__sub">
-          Global skills for <strong>{type}</strong>: baseline skills whose <code>types</code> include it. Every company and
+          Skills for the <strong>{type}</strong> worker: baseline skills whose <code>types</code> include it. Every company and
           project inherits them.
         </p>
         <button className="btn btn--primary" onClick={() => setCreating((v) => !v)} aria-expanded={creating}>
-          New global skill
+          New skill
         </button>
       </div>
       {creating && (
@@ -59,17 +59,17 @@ function GlobalSkills({ type }: { type: string }) {
           }}
         />
       )}
-      {res.loading && !res.data && <Loading what="global skills" />}
+      {res.loading && !res.data && <Loading what="skills" />}
       {res.error && <ErrorBox message={res.error} onRetry={res.reload} />}
       <div className="su-split">
         <div className="su-list-wrap">
           {res.data && mine.length === 0 && (
-            <Empty title={`No global skills target ${type}`}>
+            <Empty title={`No baseline skills target ${type}`}>
               Add one here. {res.data.universal > 0 && `${res.data.universal} baseline skill${res.data.universal === 1 ? " applies" : "s apply"} to every type.`}
             </Empty>
           )}
           {mine.length > 0 && (
-            <table className="su-table" aria-label={`Global skills for ${type}`}>
+            <table className="su-table" aria-label={`Skills for ${type}`}>
               <thead><tr><th scope="col">Skill</th><th scope="col">Layer</th></tr></thead>
               <tbody>
                 {mine.map((s) => (
@@ -96,9 +96,9 @@ function GlobalSkills({ type }: { type: string }) {
   );
 }
 
-export function AgentTypesView() {
+export function AgentTypesView({ initial = null }: { initial?: string | null }) {
   const types = useLoad(() => setupsApi.items(BASELINE.id, "agents"), "agent-types");
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<string | null>(initial);
   const [sub, setSub] = useState<Sub>("prompt");
   const [creating, setCreating] = useState(false);
   const list = types.data ?? [];
@@ -107,10 +107,10 @@ export function AgentTypesView() {
 
   return (
     <div className="su-layout">
-      <aside className="su-side" aria-label="Agent types">
+      <aside className="su-side" aria-label="Workers">
         <div className="su-tree__head">
-          <h3 className="su-side-title">Agent types</h3>
-          <button className="btn" onClick={() => setCreating((v) => !v)} aria-expanded={creating}>+ Type</button>
+          <h3 className="su-side-title">Workers</h3>
+          <button className="btn" onClick={() => setCreating((v) => !v)} aria-expanded={creating}>+ Worker</button>
         </div>
         {creating && (
           <NewItem
@@ -126,9 +126,9 @@ export function AgentTypesView() {
             }}
           />
         )}
-        {types.loading && !types.data && <Loading what="agent types" />}
+        {types.loading && !types.data && <Loading what="workers" />}
         {types.error && <ErrorBox message={types.error} onRetry={types.reload} />}
-        {types.data && list.length === 0 && <Empty title="No agent types">Create one, for example chat or task_planner.</Empty>}
+        {types.data && list.length === 0 && <Empty title="No workers">Create one, for example chat or task_planner.</Empty>}
         <ul className="su-cards">
           {list.map((t) => (
             <li key={t.name}>
@@ -141,7 +141,7 @@ export function AgentTypesView() {
         </ul>
       </aside>
       <div className="su-main">
-        {!sel && <Empty title="Pick an agent type">Open one to edit its prompt and the global skills every company inherits.</Empty>}
+        {!sel && <Empty title="Pick a worker">Open one to edit its prompt and the skills every company inherits.</Empty>}
         {sel && (
           <>
             <div className="su-main__head">
@@ -150,7 +150,7 @@ export function AgentTypesView() {
                 label={`${sel} sections`}
                 value={sub}
                 onChange={setSub}
-                tabs={[{ id: "prompt", label: "Prompt and config" }, { id: "skills", label: "Global skills" }]}
+                tabs={[{ id: "prompt", label: "Prompt and config" }, { id: "skills", label: "Skills" }]}
               />
             </div>
             {sub === "prompt" ? (

@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ApprovalBadge, Empty, ErrorBox, isInherited, LayerBadge, LintList, TabBar } from "./shared";
 import { CatalogTable, ProbeView, SyncDiffView } from "./ToolsPanel";
 import { normCatalog } from "../../lib/setups";
+import { OrgTypeList } from "./CompaniesView";
+import { GlobalSkillsTable } from "./GlobalSkillsView";
 
 // No DOM test runner is installed, so these render to static markup.
 
@@ -32,6 +34,24 @@ describe("shared pieces", () => {
     const html = renderToStaticMarkup(<TabBar label="x" value="b" onChange={() => {}} tabs={[{ id: "a", label: "A" }, { id: "b", label: "B" }]} />);
     expect(html).toContain('role="tablist"');
     expect(html.match(/tabindex="0"/g)?.length).toBe(1);
+  });
+});
+
+describe("org type and global skill views", () => {
+  it("shows the global skills with the worker behind each", () => {
+    const html = renderToStaticMarkup(
+      <GlobalSkillsTable
+        skills={[{ name: "League admin", what: "Create seasons", workers: ["admin"], code: "" }, { name: "Suggestions", what: "Chips", workers: [], code: "src/s.py" }]}
+        others={["chat", "none"]}
+      />,
+    );
+    for (const s of ["League admin", "Create seasons", "<code>admin</code>", "src/s.py", "<code>chat</code>"]) expect(html).toContain(s);
+  });
+  it("shows the agent type a company picked, or that it has none", () => {
+    const html = renderToStaticMarkup(<OrgTypeList org="demo-league" types={[{ name: "basketball", title: "Basketball league", description: "Games" }]} />);
+    expect(html).toContain("Basketball league");
+    expect(html).toContain("<code>basketball</code>");
+    expect(renderToStaticMarkup(<OrgTypeList org="x" types={[]} />)).toContain("None picked yet");
   });
 });
 

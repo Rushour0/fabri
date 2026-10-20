@@ -16,6 +16,10 @@ import {
   validateRegister,
   validName,
   normItem,
+  normGlobalSkills,
+  normOrgType,
+  packCompanies,
+  unlistedWorkers,
 } from "./setups";
 
 describe("scopes", () => {
@@ -119,5 +123,29 @@ describe("tool registration", () => {
     const d = buildDecl({ ...EMPTY_REGISTER, kind: "openapi", name: "a", description: "d", spec: "https://s", operationIds: "x, y" });
     expect(d.source).toEqual({ spec: "https://s", operation_ids: ["x", "y"] });
     expect(buildDecl({ ...EMPTY_REGISTER, kind: "mcp", name: "m", description: "d", serverMode: "command", serverCommand: "npx srv -y" }).server).toEqual({ command: ["npx", "srv", "-y"] });
+  });
+});
+
+describe("org types and global skills", () => {
+  it("reads a pack setup as an org type, falling back to its name", () => {
+    expect(normOrgType("tennis", { title: "Tennis club", description: "Courts and ladders" })).toEqual({ name: "tennis", title: "Tennis club", description: "Courts and ladders" });
+    expect(normOrgType("soccer", {})).toEqual({ name: "soccer", title: "soccer", description: "" });
+  });
+  it("reads the global skills manifest and the workers it leaves out", () => {
+    const skills = normGlobalSkills({
+      global_skills: [
+        { name: "Canvas drafts", what: "Draft a canvas", workers: ["canvas_generator", "canvas"] },
+        { name: "Suggestions", what: "Chips", workers: [], code: "src/suggestions.py" },
+        { what: "no name" },
+      ],
+    });
+    expect(skills.map((s) => s.name)).toEqual(["Canvas drafts", "Suggestions"]);
+    expect(skills[1].code).toBe("src/suggestions.py");
+    expect(unlistedWorkers(skills, ["chat", "canvas", "canvas_generator", "none"])).toEqual(["chat", "none"]);
+    expect(normGlobalSkills({})).toEqual([]);
+  });
+  it("maps each pack to the companies that picked it", () => {
+    const tree = normScopes({ packs: ["basketball", "tennis"], orgs: [{ name: "a", packs: ["basketball"] }, { name: "b", packs: ["basketball", "tennis"] }] });
+    expect(packCompanies(tree)).toEqual({ basketball: ["a", "b"], tennis: ["b"] });
   });
 });

@@ -2,16 +2,48 @@ import { useEffect, useState } from "react";
 import {
   BASELINE,
   errorText,
+  normOrgType,
   orgScope,
+  packScope,
   parseAgentsList,
   projectScope,
   setAgentsList,
   setupsApi,
+  type OrgType,
   type Scope,
   type ScopeTree,
 } from "../../lib/setups";
 import { CreateForm } from "./ScopeTree";
 import { Empty, ErrorBox, Loading, useLoad } from "./shared";
+
+export function OrgTypeList({ org, types }: { org: string; types: OrgType[] }) {
+  return (
+    <section className="su-card" aria-label="Agent type for this company">
+      <h3 className="su-h3">Agent type</h3>
+      <p className="su-panel__sub">The kind of organization {org} is. Stored in <code>companies/{org}/setup.yaml</code> under <code>packs</code>.</p>
+      {types.length === 0 ? (
+        <p className="su-dim">None picked yet, so only the global skills apply.</p>
+      ) : (
+        <ul className="su-reslist">
+          {types.map((t) => (
+            <li key={t.name} className="su-reslist__item">
+              <span><strong>{t.title}</strong> <code>{t.name}</code></span>
+              {t.description && <span className="su-dim">{t.description}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function OrgTypeCard({ org, packs }: { org: string; packs: string[] }) {
+  const res = useLoad(
+    () => Promise.all(packs.map(async (p) => normOrgType(p, await setupsApi.setupMeta(packScope(p).id).catch(() => ({}))))),
+    `${org}|${packs.join(",")}`,
+  );
+  return <OrgTypeList org={org} types={res.data ?? packs.map((p) => normOrgType(p, {}))} />;
+}
 
 function AgentSelection({ org }: { org: string }) {
   const scope = orgScope(org);
@@ -68,18 +100,18 @@ function AgentSelection({ org }: { org: string }) {
   };
 
   return (
-    <section className="su-card" aria-label="Agent types for this company">
-      <h3 className="su-h3">Agent types</h3>
-      <p className="su-panel__sub">Stored in <code>companies/{org}/setup.yaml</code> under <code>agents</code>. Types left unchecked are off for {org}.</p>
-      {(types.loading || setup.loading) && !setup.data && !types.data && <Loading what="agent types" />}
+    <section className="su-card" aria-label="Workers for this company">
+      <h3 className="su-h3">Workers</h3>
+      <p className="su-panel__sub">The workers behind the global skills. Stored in <code>companies/{org}/setup.yaml</code> under <code>agents</code>. Workers left unchecked are off for {org}.</p>
+      {(types.loading || setup.loading) && !setup.data && !types.data && <Loading what="workers" />}
       {types.error && <ErrorBox message={types.error} onRetry={types.reload} />}
       {setup.error && <ErrorBox message={setup.error} onRetry={setup.reload} />}
-      {types.data && names.length === 0 && <Empty title="No agent types defined">Create them under Agent types first.</Empty>}
+      {types.data && names.length === 0 && <Empty title="No workers defined">Create them under Global skills first.</Empty>}
       {types.data && setup.data !== null && (
         <>
-          {implicit && <p className="su-note">No list saved yet, so every type is on. Save to make this selection explicit.</p>}
+          {implicit && <p className="su-note">No list saved yet, so every worker is on. Save to make this selection explicit.</p>}
           <fieldset className="su-checks">
-            <legend className="su-sr">Agent types used by {org}</legend>
+            <legend className="su-sr">Workers used by {org}</legend>
             {all.map((n) => (
               <label key={n} className="su-check">
                 <input type="checkbox" checked={checked.has(n)} onChange={() => toggle(n)} />
@@ -141,17 +173,18 @@ export function CompaniesView({
             <li key={o.name}>
               <button className={"su-typecard" + (o.name === sel ? " su-typecard--on" : "")} onClick={() => { setSel(o.name); setCreating(null); }} aria-pressed={o.name === sel}>
                 <span className="su-typecard__name">{o.name}</span>
-                <span className="su-dim">{o.projects.length} project{o.projects.length === 1 ? "" : "s"}</span>
+                <span className="su-dim">{[o.packs.join(", "), `${o.projects.length} project${o.projects.length === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}</span>
               </button>
             </li>
           ))}
         </ul>
       </aside>
       <div className="su-main">
-        {!org && <Empty title="Pick a company">Choose which agent types it uses and see its projects.</Empty>}
+        {!org && <Empty title="Pick a company">See its agent type, choose its workers and open its projects.</Empty>}
         {org && (
           <>
             <div className="su-main__head"><h2 className="su-h2">{org.name}</h2></div>
+            <OrgTypeCard key={`type-${org.name}`} org={org.name} packs={org.packs} />
             <AgentSelection key={org.name} org={org.name} />
             <section className="su-card" aria-label="Projects">
               <div className="su-tree__head">
