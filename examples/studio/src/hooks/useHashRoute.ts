@@ -10,6 +10,7 @@ export const SURFACES = [
   "history",
   "fleet",
   "setups",
+  "spend",
   "replay",
   "settings",
 ] as const;

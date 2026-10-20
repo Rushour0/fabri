@@ -4,9 +4,9 @@ import type { Surface } from "../hooks/useHashRoute";
 // separated list (for example "setups,settings") to hide the rest. Unset or
 // empty shows everything, which is what a generic Studio wants.
 
-export type Section = "roster" | "conversation" | "company" | "questions" | "fleet" | "setups" | "settings";
+export type Section = "roster" | "conversation" | "company" | "questions" | "fleet" | "setups" | "spend" | "settings";
 
-export const SECTIONS: readonly Section[] = ["roster", "conversation", "company", "questions", "fleet", "setups", "settings"];
+export const SECTIONS: readonly Section[] = ["roster", "conversation", "company", "questions", "fleet", "setups", "spend", "settings"];
 
 const ALIASES: Record<string, Section> = { catalog: "roster" };
 
@@ -39,6 +39,7 @@ export function surfaceSection(surface: Surface): Section | null {
     case "questions":
     case "fleet":
     case "setups":
+    case "spend":
     case "settings":
       return surface;
     default:

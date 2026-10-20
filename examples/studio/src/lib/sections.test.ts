@@ -25,6 +25,11 @@ describe("studio sections", () => {
     expect(surfaceAllowed(cfg, "replay")).toBe(true);
     expect(landingSurface(cfg)).toBe("setups");
   });
+  it("knows the spend section", () => {
+    const cfg = parseSections("setups,spend,settings");
+    expect(surfaceAllowed(cfg, "spend")).toBe(true);
+    expect(surfaceAllowed(cfg, "fleet")).toBe(false);
+  });
   it("maps catalog to roster", () => {
     const cfg = parseSections("catalog");
     expect(surfaceAllowed(cfg, "catalog")).toBe(true);

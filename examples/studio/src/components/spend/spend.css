@@ -1,0 +1,38 @@
+/* Spend. Built on setups.css and the Studio tokens; no new palette. */
+.sp-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.sp-stat { gap: 4px; }
+.sp-stat__n { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.sp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.sp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+
+.sp-bars { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding-top: 4px; border-bottom: 1px solid var(--border); }
+.sp-bars__col { flex: 1; height: 100%; display: flex; align-items: flex-end; min-width: 0; }
+.sp-bars__bar { display: block; width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; opacity: 0.85; transition: opacity 0.18s var(--ease); }
+.sp-bars__col:hover .sp-bars__bar { opacity: 1; }
+.sp-bars__bar--zero { height: 0; }
+.sp-bars__axis { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+
+.sp-shares { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sp-shares__row {
+  width: 100%; display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(60px, 2fr) 76px 38px; align-items: center; gap: 10px;
+  background: none; border: 1px solid transparent; border-radius: 7px; padding: 5px 8px; font: inherit; font-size: 13px; color: var(--text); text-align: left;
+}
+button.sp-shares__row { cursor: pointer; }
+button.sp-shares__row:hover { background: var(--surface-2); }
+.sp-shares__row--on { background: var(--surface-2); border-color: var(--border-2); }
+.sp-shares__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-shares__bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.sp-shares__bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.sp-shares__usd { font-size: 12.5px; }
+.sp-shares__pct { font-size: 11.5px; }
+
+.sp-table td, .sp-table th { padding: 6px 10px; }
+.sp-table code { font-size: 11.5px; }
+.sp-table .su-badge { margin-left: 4px; font-size: 9.5px; padding: 1px 5px; }
+.sp-nowrap { white-space: nowrap; }
+.sp-flag--err { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border-2)); }
+.spend button:focus-visible, .spend select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 980px) {
+  .sp-stats, .sp-grid { grid-template-columns: 1fr; }
+}

@@ -12,6 +12,7 @@ import { AgencyGraph } from "./components/AgencyGraph";
 import { QuestionsInbox } from "./components/QuestionsInbox";
 import { CompanyOrgChart } from "./components/CompanyOrgChart";
 import { SetupsView } from "./components/setups/SetupsView";
+import { SpendView } from "./components/spend/SpendView";
 import { CatalogView, type CatalogSelection } from "./components/CatalogView";
 import ConnectSlack from "./components/ConnectSlack";
 import ConnectGitHub from "./components/ConnectGitHub";
@@ -126,7 +127,7 @@ export default function App() {
   useEffect(() => {
     if (
       authState === "anon" &&
-      (surface === "history" || surface === "replay" || surface === "questions" || surface === "fleet" || surface === "setups")
+      (surface === "history" || surface === "replay" || surface === "questions" || surface === "fleet" || surface === "setups" || surface === "spend")
     ) {
       setShowAuth(true);
     }
@@ -316,6 +317,14 @@ export default function App() {
                 Setups
               </button>
             )}
+            {hasAccountAccess && show("spend") && (
+              <button
+                className={"tab" + (surface === "spend" ? " tab--on" : "")}
+                onClick={() => go("spend")}
+              >
+                Spend
+              </button>
+            )}
             {/* Settings stays visible signed-out: the integrations are part of
                 the pitch, and each one gates its own connect action. */}
             {show("settings") && (
@@ -370,6 +379,7 @@ export default function App() {
           <main className={"thread" + (narrowColumn ? " thread--narrow" : "")}>
             {hasAccountAccess && surface === "questions" && <QuestionsInbox onOpenRun={(id) => openReplay(id, "questions")} />}
             {hasAccountAccess && surface === "setups" && <SetupsView />}
+            {hasAccountAccess && surface === "spend" && <SpendView />}
             {hasAccountAccess && surface === "fleet" && <FleetView onOpenRun={(id) => openReplay(id, "fleet")} />}
             {surface === "settings" && (
               <div className="settings">
