@@ -20,7 +20,7 @@ BOSS, DEV, OUTSIDER = "boss@x.test", "dev@x.test", "outsider@x.test"
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     for name in ("FABRI_ADMIN_TOKEN", "FABRI_SERVICE_TOKEN", "FABRI_AUTH_ALLOWED_EMAILS",
-                 "FABRI_AUTH_ADMINS", "FABRI_AUTH_SIGNUP", "FABRI_AUTH_DB_PATH", "FABRI_AUTH_ENABLED"):
+                 "FABRI_AUTH_ADMINS", "FABRI_AUTH_SIGNUP", "FABRI_AUTH_DB_PATH", "FABRI_AUTH_ENABLED", "FABRI_AUTH_CONFIG"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FABRI_AUTH_SECRET", "secret")
 
@@ -231,3 +231,10 @@ def test_cli_default_store_matches_the_server_home(tmp_path, monkeypatch):
         assert service.user_store.verify_user(BOSS, "password-1")
     finally:
         service.close()
+
+
+def test_cli_reads_the_auth_config_path_from_env(tmp_path, monkeypatch):
+    db = tmp_path / "env-users.db"
+    monkeypatch.setenv("FABRI_AUTH_CONFIG", str(write_auth(tmp_path, INVITE_ONLY + f"  db_path: {db}\n")))
+    run_cli(monkeypatch, ["auth", "add-user", BOSS], "password-1\n")
+    assert UserStore(db).verify_user(BOSS, "password-1")

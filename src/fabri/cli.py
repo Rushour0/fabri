@@ -1761,6 +1761,7 @@ def cmd_auth_set_password(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    auth_config = os.environ.get("FABRI_AUTH_CONFIG") or None
     parser = argparse.ArgumentParser(prog="fabri")
     parser.add_argument(
         "--version",
@@ -2181,8 +2182,8 @@ def main() -> None:
                      help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
     p_serve.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
                      help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
-    p_serve.add_argument("--auth-config", dest="auth_config", default=None, metavar="FILE",
-                         help="YAML with an `auth:` section for Studio login; overrides the template's")
+    p_serve.add_argument("--auth-config", dest="auth_config", default=auth_config, metavar="FILE",
+                         help="YAML with an `auth:` section for Studio login (default: $FABRI_AUTH_CONFIG)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_studio = sub.add_parser(
@@ -2222,8 +2223,8 @@ def main() -> None:
                      help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
     p_studio.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
                      help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
-    p_studio.add_argument("--auth-config", dest="auth_config", default=None, metavar="FILE",
-                          help="YAML with an `auth:` section for Studio login; overrides the template's")
+    p_studio.add_argument("--auth-config", dest="auth_config", default=auth_config, metavar="FILE",
+                          help="YAML with an `auth:` section for Studio login (default: $FABRI_AUTH_CONFIG)")
     p_studio.set_defaults(func=cmd_studio)
 
     p_auth = sub.add_parser("auth", help="Manage Studio login users offline (password read from stdin)")
@@ -2235,8 +2236,8 @@ def main() -> None:
         p_cmd = auth_sub.add_parser(name, help=text)
         p_cmd.add_argument("email")
         p_cmd.add_argument("--config", default=None, help="Template agent.yaml the server uses")
-        p_cmd.add_argument("--auth-config", dest="auth_config", default=None, metavar="FILE",
-                           help="The server's --auth-config file")
+        p_cmd.add_argument("--auth-config", dest="auth_config", default=auth_config, metavar="FILE",
+                           help="The server's --auth-config file (default: $FABRI_AUTH_CONFIG)")
         p_cmd.add_argument("--home-root", dest="home_root", default=None,
                            help="The server's --home-root (default: $FABRI_HOME/serve)")
         p_cmd.set_defaults(func=func)

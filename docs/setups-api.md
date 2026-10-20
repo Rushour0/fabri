@@ -27,7 +27,7 @@ Every route requires the service's existing auth. Writes need the `admin` role. 
 
 The same rules cover the rest of `fabri serve` once `auth.enabled` is on: every route except `/health`, `/auth/*` and signed webhooks needs one of the credentials above, and anything that starts or changes work (`POST /runs`, `/fleets`, answer, cancel, install routes) needs admin. `auth.allow_guests: true` brings back anonymous runs.
 
-Invite-only service config, passed with `fabri serve --auth-config FILE` so it stays out of run configs:
+Invite-only service config, passed with `fabri serve --auth-config FILE` (or `FABRI_AUTH_CONFIG=FILE`) so it stays out of run configs:
 
 ```yaml
 auth:
@@ -40,7 +40,7 @@ auth:
 
 - `allowed_emails` (or `FABRI_AUTH_ALLOWED_EMAILS`, comma list): signup and login for any other email get the same answers as a taken email or a wrong password, after the same password-hash work. A session whose email drops off the list stops working.
 - `FABRI_AUTH_ADMINS`, `FABRI_AUTH_SIGNUP` and `FABRI_AUTH_DB_PATH` override the file. `FABRI_AUTH_SECRET` signs sessions.
-- Users without signup: `fabri auth add-user EMAIL --auth-config FILE` and `fabri auth set-password EMAIL --auth-config FILE`. The password comes from a prompt, or one line on stdin.
+- Users without signup: `fabri auth add-user EMAIL` and `fabri auth set-password EMAIL`, with the server's `--auth-config` (or `FABRI_AUTH_CONFIG`). The password comes from a prompt, or one line on stdin.
 - `GET /auth/check` answers 204 when the caller could read and 401 otherwise, for a proxy's `forward_auth` in front of non-fabri paths. `GET /auth/config` tells Studio whether signup and guests are on.
 
 ## Endpoints
