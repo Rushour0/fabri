@@ -175,7 +175,14 @@ def _call_with_retry(
                 if on_retry is not None:
                     on_retry()
                 delay = base_delay * (2**i)
-                logger.warning("llm call transient error (attempt %d/%d), retrying in %.1fs: %s", i + 1, attempts, delay, e)
+                # Type and status only: provider exception text can echo request
+                # headers or payload values, and this runs before any caller
+                # gets a chance to redact it.
+                logger.warning(
+                    "llm call transient error (attempt %d/%d), retrying in %.1fs: %s%s",
+                    i + 1, attempts, delay, type(e).__name__,
+                    f" (status {e.status_code})" if isinstance(getattr(e, "status_code", None), int) else "",
+                )
                 time.sleep(delay)
     raise LLMError(f"llm call failed after {attempts} attempts: {last}") from last
 
@@ -481,6 +488,14 @@ def _requires_max_completion_tokens(model: str) -> bool:
     return m.startswith("gpt-5") or bool(re.match(r"o[1-9]", m))
 
 
+def _default_tool_reasoning_effort(model: str) -> str:
+    """'minimal' for the first GPT-5 generation (gpt-5, gpt-5-mini,
+    gpt-5-nano, plus date-suffixed ids), which has no 'none' setting; 'none'
+    for the dotted GPT-5.x models, which need it to take function tools."""
+    m = (model or "").lower()
+    return "minimal" if re.match(r"gpt-5(-mini|-nano)?($|-\d)", m) else "none"
+
+
 class OpenAILLMBackend:
     """Second provider proving LLMBackend is provider-agnostic: same step()
     signature as AnthropicLLMBackend. The agent's message history is kept in
@@ -496,6 +511,7 @@ class OpenAILLMBackend:
         max_tokens: int = 1024,
         api_key_env: str = "OPENAI_API_KEY",
         base_url: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         import openai
         import os
@@ -511,6 +527,8 @@ class OpenAILLMBackend:
         self._model = model
         self._max_tokens = max_tokens
         self._base_url = base_url
+        # Explicit `llm.reasoning_effort` wins over the per-model default below.
+        self._reasoning_effort = reasoning_effort
         self._tools: list[dict] = []
         self.set_tools(tools or [])
 
@@ -607,8 +625,14 @@ class OpenAILLMBackend:
             # default here; a host wanting reasoning can point the role at the
             # Responses API in a future backend. o-series models can't disable
             # reasoning, so scope this to the GPT-5 family that errored.
-            if self._tools and self._model.lower().startswith("gpt-5"):
-                extra_kwargs["reasoning_effort"] = "none"
+            # The original gpt-5 / gpt-5-mini / gpt-5-nano reject 'none' (400:
+            # supported values are minimal, low, medium, high) but accept tools
+            # at any of those, so they get 'minimal', the fastest setting.
+            explicit = getattr(self, "_reasoning_effort", None)
+            if explicit:
+                extra_kwargs["reasoning_effort"] = explicit
+            elif self._tools and self._model.lower().startswith("gpt-5"):
+                extra_kwargs["reasoning_effort"] = _default_tool_reasoning_effort(self._model)
 
         def _create(max_tokens: int):
             return _call_with_retry(

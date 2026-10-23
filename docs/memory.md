@@ -389,7 +389,150 @@ Separately, `tools.retrieval.*` controls *tool* retrieval (narrowing the provide
 guideline retrieval): `enabled=False`, `top_k=6`, `always_include=["spawn_subagent", "ask_user",
 "decompose"]` (`src/fabri/config.py:154-162`).
 
-## 7. Evidence and limits
+## 7. Scoped memory: user, org and global
+
+Scoped memory keeps what one person taught the agent apart from what an organization learned, and
+keeps both apart from the generic lessons that are safe to share everywhere. It is off by default.
+With no scope, memory behaves exactly as described in sections 1 to 6.
+
+### The three scopes
+
+| Scope | Holds | Who can read it |
+| --- | --- | --- |
+| USER | Preferences, phrasing, personal shortcuts | That one user only |
+| ORG | Org facts and process lessons | Everyone in that org |
+| GLOBAL | Generic, de-identified lessons a human approved | Everyone |
+
+A host describes who a run is for with a `MemoryScope(user_id, org_id, project_id=None, aliases=())`.
+`user_id` has to be unique across orgs (an account id, not a first name). `aliases` are display names
+for the person, org and project. They are never used in a collection name. They are stored next to
+org lessons so the de-identifier can strip them later.
+
+Collection names come from hashed ids: `fabri_u_<hash>` for a user and `fabri_o_<hash>` for an org,
+where the hash is the first 24 hex characters of a SHA-256 over the lowercased id. Raw emails and
+names never appear in a Qdrant collection name or a sqlite file name. Set `FABRI_SCOPE_SALT` to mix a
+secret into the hash if your ids are low entropy, such as emails. Keep the same salt across hosts and
+CLI calls, or `memory forget` will not find the collection. GLOBAL lives in `fabri_global`, and the
+promotion queue in `fabri_global_candidates`. On sqlite each collection is its own file beside the
+configured `sqlite_path`.
+
+### Passing the scope per run
+
+```python
+from fabri import run_agent
+from fabri.memory.scopes import MemoryScope
+
+scope = MemoryScope(user_id="acct_8f31", org_id="org_204", project_id="proj_7",
+                    aliases=("Jane Doe", "Example Co"))
+result = run_agent(task, llm, tools, store, memory_scope=scope,
+                   retrieval_config=run_cfg.retrieval_config)
+```
+
+`store` only locates the backend (Qdrant URL or sqlite directory). In a scoped run its own collection
+is not read. A host can also set `memory.scoped.user_id` and `org_id` in config, or use
+`fabri run --user-id U --org-id O [--project-id P]`. Flags win over config.
+
+To write lessons for the same scope, build a `ScopedMemory` and hand it to `process_trace`:
+
+```python
+from fabri.memory.scopes import ScopedMemory
+scoped = ScopedMemory.from_config(config["memory"], scope, store)
+process_trace(session_id, store, compress_llm, scoped_memory=scoped, config=config)
+```
+
+`fabri run` does this for you when a scope is set.
+
+### Writes
+
+Each mined lesson, convention or fact is classified before it is stored. Deterministic rules run
+first (`fabri.memory.scope_classify`). Text with first-person preferences ("I prefer", "call me"),
+text that names the user, or a personal kind such as `preference` goes to USER. Process wording (tool
+failures, "our team policy", check-before-act steps) goes to ORG. If both match, USER wins, because
+leaking a personal habit to colleagues costs more than keeping a process lesson private. When no rule
+matches, `memory.scoped.default_scope` decides (default `org`). Set `memory.scoped.llm_classifier:
+true` to ask the compress LLM instead, only for text the rules could not place. GLOBAL is never a
+write target for a run.
+
+### Retrieval
+
+Retrieval asks each scope for its own top-k (`memory.scoped.budgets`, default 2 user, 3 org, 2
+global), runs the usual hybrid pipeline against each store, and merges the results into one
+`<retrieved_guidelines>` block. Every line carries its scope: `- [user] [tactical] ...`,
+`- [org] [strategic] ...`, `- [global] [strategic] ...`. Conventions carry it as an attribute:
+`<convention scope="org">`. A line that appears in two scopes is kept once, under the narrower scope.
+ActionMemory proposals are not produced in scoped runs.
+
+### Isolation
+
+Isolation is enforced twice. Hosts only open the collections of their own scope, and the store layer
+checks every call as well. Every method on `QdrantMemoryStore` and `SqliteMemoryStore` runs
+`check_collection_access` (`src/fabri/memory/scopes.py`). A user or org collection is allowed only
+when it belongs to the scope bound to the store, or to the scope in force through
+`scope_context(scope)` when none is bound. A store bound to one scope that is called while another
+scope is in force is rejected, and so is a store whose `collection` was changed after construction.
+The guard fails closed: with no scope bound or in force, a user or org collection raises
+`ScopeViolation`. Only the maintenance commands enter `admin_access()`.
+
+Two limits to know. The guard protects collections that follow the hashed naming scheme. It does not
+protect a legacy collection that someone names by hand. Also, an ORG lesson keeps the task text of
+the run that produced it in `applicability`, so anyone in that org can see the task text that led to
+a lesson. Keep personal detail out of tasks that run under a shared org.
+
+### Promotion to GLOBAL
+
+GLOBAL grows only through a human-approved queue.
+
+1. `fabri memory promote --scan` reads each org collection as an operator. It never opens a user
+   collection. Each tactical, strategic or success lesson is de-identified first.
+2. The scrubbed text goes into the `fabri_global_candidates` collection through `ingest_guideline`,
+   with the hashed org id standing in for the session id. That reuses the recurrence code from
+   section 3: near-duplicate lessons merge, and the count of distinct "sessions" is the count of
+   distinct orgs. One org repeating itself does not raise the count.
+3. A candidate is listed once it has at least N distinct orgs (`memory.scoped.min_orgs`, default 3,
+   or `--min-orgs`).
+4. `fabri memory promote` lists candidates as `id  orgs=N  status  text`. The text is the
+   de-identified form and the count is a number. Org ids and raw org text are never shown.
+5. `fabri memory promote --approve ID` writes the candidate to GLOBAL, after checking N again.
+   `--reject ID` marks it rejected and it will not come back. `ID` can be a unique prefix.
+
+The deterministic scrubber (`fabri.memory.scrub`) removes emails, phone numbers, URLs, IPs, uuids,
+long hex ids and key-like tokens, home directories and absolute paths, @handles, amounts, dates,
+ticket-style ids, numbers of three or more digits, numbers next to a removed name, the scope's
+aliases and ids, and capitalized words it does not recognize. After scrubbing, a leak check looks for
+leftover emails, phones, URLs, IPs and alias names. A lesson that still leaks, is mostly
+placeholders, or is very short is skipped. With `--llm-rewrite` (or `memory.scoped.llm_rewrite`) an
+LLM rewrites the scrubbed text into a generic rule. The LLM only ever sees text that was already
+scrubbed, and its output is scrubbed and checked again. The scrubber is a heuristic. A human still
+reads each candidate before approving it.
+
+### Deletion
+
+`fabri memory forget --user U` deletes that user's collection. `fabri memory forget --org O` deletes
+the org collection and removes the org from every candidate. Pending candidates that no longer reach
+N distinct orgs are deleted. If an already approved global lesson now has fewer than N source orgs,
+the command prints a warning so a human can review it. Approved lessons are de-identified copies, so
+they are not removed automatically. User data never feeds the candidate queue, so forgetting a user
+needs no further cleanup.
+
+### Config
+
+```yaml
+memory:
+  scoped:
+    enabled: true
+    user_id: acct_8f31        # or pass per run
+    org_id: org_204
+    project_id: null
+    aliases: ["Jane Doe", "Example Co"]
+    budgets: {user: 2, org: 3, global: 2}
+    global_collection: fabri_global
+    default_scope: org
+    llm_classifier: false
+    min_orgs: 3
+    llm_rewrite: false
+```
+
+## 8. Evidence and limits
 
 The retrieval-side numbers cited above (hybrid recall@5 0.94 vs dense 0.79, RRF `k=20` vs `k=60`,
 tail-only success-pattern reservation) come from the offline retrieval eval

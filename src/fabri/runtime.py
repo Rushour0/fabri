@@ -126,12 +126,16 @@ def _instantiate(rcfg: dict, tool_defs: list[dict]):
         base_url = rcfg.get("base_url") or (
             _OPENROUTER_BASE_URL if provider == Provider.OPENROUTER else None
         )
+        # Only pass reasoning_effort when configured, so the call shape for
+        # every existing config is unchanged.
+        effort_kwargs = {"reasoning_effort": rcfg["reasoning_effort"]} if rcfg.get("reasoning_effort") else {}
         return OpenAILLMBackend(
             model=model,
             tools=tool_defs,
             max_tokens=max_tokens,
             api_key_env=api_key_env,
             base_url=base_url,
+            **effort_kwargs,
         )
     if provider == Provider.GEMINI:
         return GeminiLLMBackend(

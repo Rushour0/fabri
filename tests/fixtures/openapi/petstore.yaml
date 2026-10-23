@@ -1,0 +1,162 @@
+openapi: 3.0.3
+info:
+  title: Toy petstore
+  version: "1.0"
+servers:
+  - url: https://petstore.test
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      tags: [pets]
+      summary: List pets
+      description: Returns pets, newest first.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, maximum: 100}
+        - name: status
+          in: query
+          schema: {type: string, enum: [available, adopted]}
+      responses:
+        "200":
+          description: A page of pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Pet"}
+    post:
+      operationId: createPet
+      tags: [pets]
+      summary: Create a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewPet"}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pet"}
+        "409":
+          description: Name taken
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: {type: integer}
+    get:
+      operationId: showPetById
+      tags: [pets]
+      summary: Get one pet
+      responses:
+        "200":
+          description: The pet
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pet"}
+        "404":
+          description: Not found
+    patch:
+      operationId: updatePet
+      tags: [pets]
+      summary: Update a pet
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewPet"}
+      responses:
+        "200":
+          description: Updated
+    delete:
+      operationId: deletePet
+      tags: [pets]
+      summary: Delete a pet
+      responses:
+        "204":
+          description: Deleted
+  /pets/{petId}/adopt:
+    post:
+      operationId: adoptPet
+      tags: [pets]
+      summary: Adopt a pet
+      description: Marks the pet as adopted by the given owner.
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner_id]
+              properties:
+                owner_id: {type: integer}
+      responses:
+        "200":
+          description: Adopted
+        "409":
+          description: Not adoptable
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /store/pets:
+    get:
+      operationId: listStorePets
+      tags: [store]
+      summary: List pets in the store window
+      responses:
+        "200":
+          description: Pets
+  /v1/owners:
+    get:
+      operationId: listOwners
+      tags: [owners]
+      summary: List owners
+      responses:
+        "200":
+          description: Owners
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Owner"}
+components:
+  schemas:
+    NewPet:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        tag: {type: string, nullable: true}
+    Pet:
+      allOf:
+        - $ref: "#/components/schemas/NewPet"
+        - type: object
+          required: [id]
+          properties:
+            id: {type: integer, readOnly: true}
+            status: {type: string, enum: [available, adopted]}
+    Owner:
+      type: object
+      properties:
+        id: {type: integer}
+        slug: {type: string}
+        email: {type: string}
+    Error:
+      type: object
+      properties:
+        reason:
+          type: string
+          enum: [duplicate_name, already_adopted, not_available]
+        message: {type: string}

@@ -42,6 +42,9 @@ class ToolRegistry:
         # Hold references to long-lived backing objects (e.g. MCPStdioClient
         # subprocesses) so they aren't GC'd while their handlers are live.
         self._owned_resources: list[object] = []
+        # Names a tool asked the agent loop to expose mid-run (see
+        # request_exposure). Drained by the loop after each tool step.
+        self._exposed: list[str] = []
         for manifest_dir in dirs:
             for path in sorted(manifest_dir.glob("*.json")):
                 manifest = ToolManifest.from_file(path)
@@ -73,12 +76,37 @@ class ToolRegistry:
     def list(self) -> list[ToolManifest]:
         return list(self.tools.values())
 
+    def canonical_name(self, name: str) -> str | None:
+        """Return the registered name for `name`, following manifest aliases
+        (for example an OpenAPI operation_id). None when nothing matches."""
+        if name in self.tools:
+            return name
+        for manifest in self.tools.values():
+            if name in (manifest.aliases or ()):
+                return manifest.name
+        return None
+
+    def request_exposure(self, names: list[str]) -> None:
+        """Ask the agent loop to add these tools to the provider tool list
+        for the rest of the run. Used by discovery tools such as find_tools
+        when tool retrieval narrowed the visible set."""
+        for name in names:
+            canonical = self.canonical_name(name)
+            if canonical and canonical not in self._exposed:
+                self._exposed.append(canonical)
+
+    def pop_exposed(self) -> list[str]:
+        names, self._exposed = self._exposed, []
+        return names
+
     def invoke(self, name: str, args: dict) -> dict:
         if name == BATCH_TOOL_NAME and BATCH_TOOL_NAME in self.tools:
             return self.invoke_batch(args.get("calls") or [])
-        manifest = self.tools.get(name)
-        if manifest is None:
+        canonical = self.canonical_name(name)
+        if canonical is None:
             return tool_error(f"unknown tool: {name}")
+        name = canonical
+        manifest = self.tools[name]
         if name in self._callables:
             try:
                 return self._callables[name](args)

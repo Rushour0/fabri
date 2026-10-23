@@ -132,6 +132,11 @@ PRICING: dict[str, tuple[float, float]] = {
     # reconciled to invoice like the rest; ap-south-1 may differ slightly.
     "moonshot.kimi-k2-thinking":      (0.60, 2.50),
     "moonshotai.kimi-k2.5":           (0.60, 3.00),
+    # TypeSafe Jev (fabri.decide); output tokens are free. The OpenRouter rate is assumed equal to TypeSafe list price and not yet reconciled.
+    "jev-1.13.0":        (0.042, 0.0),
+    "jev-1.14.0":        (0.042, 0.0),
+    "typesafe/jev-1.13": (0.042, 0.0),
+    "typesafe/jev-1.14": (0.042, 0.0),
 }
 
 

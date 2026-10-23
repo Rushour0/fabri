@@ -29,6 +29,7 @@ from fabri.memory.action_mining import (
     observed_max_token_retries,
 )
 from fabri.memory.pruning import ingest_guideline
+from fabri.memory.scopes import MemoryScope, ScopedMemory
 from fabri.memory.recurrence import fingerprint
 from fabri.orchestrator.action_detection import detect_proposed_actions, resolve_action_scope
 from fabri.orchestrator.action_execution import apply_safe_memory_actions
@@ -212,6 +213,31 @@ def _print_dry_run(config: dict, task: str) -> None:
     print(render_dry_run_plan(plan, task=task))
 
 
+def _resolve_memory_scope(args: argparse.Namespace, mem_cfg: dict) -> MemoryScope | None:
+    """Scope for this run: --user-id/--org-id/--project-id override memory.scoped.
+    Returns None (legacy single-collection memory) when neither is set."""
+    flags = {
+        "user_id": getattr(args, "user_id", None),
+        "org_id": getattr(args, "org_id", None),
+        "project_id": getattr(args, "project_id", None),
+    }
+    cfg_scope = MemoryScope.from_config(mem_cfg)
+    if not any(flags.values()):
+        return cfg_scope
+    cfg = mem_cfg.get("scoped") or {}
+    user_id = flags["user_id"] or (cfg_scope.user_id if cfg_scope else cfg.get("user_id"))
+    org_id = flags["org_id"] or (cfg_scope.org_id if cfg_scope else cfg.get("org_id"))
+    if not user_id or not org_id:
+        print("scoped memory needs both --user-id and --org-id (or memory.scoped ids)", file=sys.stderr)
+        sys.exit(2)
+    return MemoryScope(
+        user_id=str(user_id),
+        org_id=str(org_id),
+        project_id=flags["project_id"] or (cfg_scope.project_id if cfg_scope else cfg.get("project_id")),
+        aliases=tuple(cfg_scope.aliases) if cfg_scope else tuple(cfg.get("aliases") or ()),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     # B3: --dry-run inspects the plan with no network — resolve and print before
@@ -227,6 +253,10 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     mem_cfg = config["memory"]
     store = _open_store(mem_cfg)
+    memory_scope = _resolve_memory_scope(args, mem_cfg)
+    scoped_memory = (
+        ScopedMemory.from_config(mem_cfg, memory_scope, store) if memory_scope is not None else None
+    )
 
     tools_cfg = config["tools"]
     applied_memory_actions: list[dict[str, object]] = []
@@ -280,6 +310,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         decompose_llm=llms["decompose_llm"],
         planner_llm=llms["planner_llm"],
         narrator_llm=llms["narrator_llm"],
+        memory_scope=scoped_memory,
         **run_cfg.as_kwargs(),
     )
     if applied_memory_actions:
@@ -322,6 +353,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     entries = []
     if mem_cfg.get("mining_enabled", True):
         compress_llm = build_llm(config, [])
+        if scoped_memory is not None:
+            scoped_memory.classifier_llm = compress_llm
         entries = process_trace(
             session_id,
             store,
@@ -338,6 +371,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             producer_agent_id=config.get("agent", {}).get("name"),
             memory_scope=mem_cfg.get("scope", "agent"),
             config=config,
+            scoped_memory=scoped_memory,
         )
     if mem_cfg.get("mining_enabled", True):
         try:
@@ -356,7 +390,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                     evidence["source_session_ids"] = [session_id]
                 signature = candidate["problem_signature"]
                 ingest_guideline(
-                    store,
+                    scoped_memory.store("org") if scoped_memory is not None else store,
                     action_candidate_text(candidate),
                     session_id=session_id,
                     kind="success_pattern",
@@ -853,6 +887,77 @@ def cmd_memory_stale(args: argparse.Namespace) -> None:
     print(json.dumps(results, indent=2))
 
 
+def cmd_memory_promote(args: argparse.Namespace) -> None:
+    """GLOBAL promotion queue. Output carries the de-identified text and a source
+    count only: no org ids, no raw org text."""
+    from fabri.memory import global_promotion as gp
+
+    config = load_config(args.config)
+    mem_cfg = config["memory"]
+    scoped_cfg = mem_cfg.get("scoped") or {}
+    min_orgs = args.min_orgs or int(scoped_cfg.get("min_orgs", gp.DEFAULT_MIN_ORGS))
+    global_collection = scoped_cfg.get("global_collection") or "fabri_global"
+    base = _open_store(mem_cfg)
+
+    if args.approve or args.reject:
+        try:
+            if args.approve:
+                entry = gp.approve(base, args.approve, min_orgs=min_orgs, global_collection=global_collection)
+                print(f"approved: now in {global_collection}: {entry.text}")
+            else:
+                gp.reject(base, args.reject)
+                print("rejected")
+        except (KeyError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.scan:
+        llm = None
+        if args.llm_rewrite or scoped_cfg.get("llm_rewrite"):
+            llm = build_llm(config, [])
+        report = gp.scan_orgs(base, min_orgs=min_orgs, llm=llm, rewrite=llm is not None)
+        print(
+            f"scanned {report.orgs_scanned} org(s): {report.ingested} lesson(s) queued, "
+            f"{report.skipped_unclean} skipped as not clean, {report.skipped_other} skipped as not generic",
+            file=sys.stderr,
+        )
+    candidates = gp.list_candidates(
+        base, min_orgs=min_orgs, status=None if args.show_all else gp.STATUS_PENDING
+    )
+    if not candidates:
+        print(f"no candidates with at least {min_orgs} source orgs")
+        return
+    for c in candidates:
+        print(f"{c.id[:8]}  orgs={c.source_count}  {c.status}  {c.text}")
+
+
+def cmd_memory_forget(args: argparse.Namespace) -> None:
+    """Delete a scope's collection. --org also withdraws the org from GLOBAL
+    candidates; candidates that no longer meet N are dropped."""
+    from fabri.memory import global_promotion as gp
+
+    config = load_config(args.config)
+    mem_cfg = config["memory"]
+    min_orgs = int((mem_cfg.get("scoped") or {}).get("min_orgs", gp.DEFAULT_MIN_ORGS))
+    base = _open_store(mem_cfg)
+    if args.user:
+        dropped = gp.forget_user(base, user_id=args.user)
+        print("user collection deleted" if dropped else "no collection for that user")
+        return
+    report = gp.forget_org(base, org_id=args.org, min_orgs=min_orgs)
+    print("org collection deleted" if report.collection_dropped else "no collection for that org")
+    print(
+        f"candidates: {report.candidates_updated} updated, {report.candidates_dropped} dropped"
+    )
+    if report.approved_below_min:
+        print(
+            f"warning: {report.approved_below_min} approved global lesson(s) now have fewer than "
+            f"{min_orgs} source orgs. Review them.",
+            file=sys.stderr,
+        )
+
+
 def cmd_replay(args: argparse.Namespace) -> None:
     """G5: re-run the task from a prior session against the *current* memory
     state. Prints a before/after table so the user can see whether the memory
@@ -979,7 +1084,7 @@ def cmd_new_agency(args: argparse.Namespace) -> None:
             )
         else:
             created = scaffold_agency(args.name, args.template, args.dest)
-            entry = "agent.openai.yaml"
+            entry = AGENCY_TEMPLATES[args.template].get("ENTRY", "agent.openai.yaml")
     except (OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1426,14 +1531,85 @@ def cmd_admin_dashboard(args: argparse.Namespace) -> None:
     print(render_dashboard(config, tools, store))
 
 
+def _read_state_file(path: Path) -> object:
+    """A state file's contents: parsed as JSON when it ends in .json,
+    otherwise passed as text."""
+    text = path.read_text()
+    if path.suffix.lower() == ".json":
+        return json.loads(text)
+    return text
+
+
+def _decide_state(raw: str | None, state_file: str | None = None) -> object:
+    """The state for `fabri decide`. `--state-file PATH` always reads the file.
+    `--state @path` reads the file only when it exists; otherwise the text,
+    leading '@' included, is the state (a message may start with '@')."""
+    if state_file is not None:
+        return _read_state_file(Path(state_file))
+    raw = raw or ""
+    if raw.startswith("@") and len(raw) > 1 and Path(raw[1:]).is_file():
+        return _read_state_file(Path(raw[1:]))
+    return raw
+
+
+def cmd_decide(args: argparse.Namespace) -> None:
+    """Run a decision tree on one state and print the path and the leaf."""
+    from fabri.decide import DecideError, DecisionTree, TreeError
+    from fabri.decide.types import sanitize
+
+    try:
+        state = _decide_state(args.state, getattr(args, "state_file", None))
+        tree = DecisionTree.from_yaml(args.tree)
+        result = tree.run(state)
+    except (OSError, ValueError, TreeError, DecideError) as e:
+        print(f"decide error: {sanitize(e, ())}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        payload = {"tree": tree.name, **result.to_dict()}
+        for step, answer in zip(payload["path"], result.path):
+            step["question"] = tree.nodes[answer.key].question.instructions
+        print(json.dumps(payload, indent=2))
+        return
+
+    print(f"tree: {tree.name}")
+    for node_name, answer in zip(result.nodes, result.path):
+        question = tree.nodes[node_name].question
+        conf = "n/a" if answer.confidence is None else f"{answer.confidence:.2f}"
+        flag = " escalated" if answer.escalated else ""
+        print(f"  {node_name}: {question.instructions}")
+        print(f"    -> {answer.value!r} (confidence {conf}, source {answer.source}{flag})")
+    print(f"leaf: {json.dumps(result.leaf)}")
+    print(f"cost: {result.cost_text()}  latency: {result.latency_ms:.0f} ms")
+
+
+def _setups_api(args: argparse.Namespace):
+    """Build the Setups API from --setups-root/--setups-config, or None."""
+    root, config = getattr(args, "setups_root", None), getattr(args, "setups_config", None)
+    if root is None and config is None:
+        return None
+    from fabri.service.setups_routes import SetupsApi
+    from fabri.setups import SetupError
+
+    try:
+        return SetupsApi.from_files(root, config)
+    except (SetupError, OSError, ValueError) as exc:
+        print(f"setups error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     """B7: start the embeddable HTTP service. A non-Python host POSTs a task and
     streams events (SSE) without importing fabri. Blocks until Ctrl-C."""
     from fabri.service.http_server import serve_http
     from fabri.service.service import FabriService
 
-    service = FabriService(template_config=args.config, home_root=args.home_root)
-    server = serve_http(service, host=args.host, port=args.port)
+    service = FabriService(
+        template_config=args.config,
+        home_root=args.home_root,
+        auth_config=getattr(args, "auth_config", None),
+    )
+    server = serve_http(service, host=args.host, port=args.port, setups_api=_setups_api(args))
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(
         f"fabri serve listening on http://{bound_host}:{bound_port} "
@@ -1478,9 +1654,14 @@ def cmd_studio(args: argparse.Namespace) -> None:
         except (OSError, ValueError) as exc:
             print(f"catalog error: {exc}", file=sys.stderr)
             sys.exit(1)
-        service = FabriService(catalog=catalog, home_root=args.home_root)
+        service = FabriService(
+            catalog=catalog,
+            home_root=args.home_root,
+            auth_config=getattr(args, "auth_config", None),
+        )
         server = serve_http(
-            service, host=args.host, port=args.port, serve_studio=True, catalog=catalog
+            service, host=args.host, port=args.port, serve_studio=True, catalog=catalog,
+            setups_api=_setups_api(args),
         )
     else:
         company = None
@@ -1500,13 +1681,17 @@ def cmd_studio(args: argparse.Namespace) -> None:
                 sys.exit(1)
             template_config = str(root)
 
-        service = FabriService(template_config=template_config, home_root=args.home_root)
+        service = FabriService(
+            template_config=template_config, home_root=args.home_root,
+            auth_config=getattr(args, "auth_config", None),
+        )
         server = serve_http(
             service,
             host=args.host,
             port=args.port,
             serve_studio=True,
             company=company,
+            setups_api=_setups_api(args),
         )
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)
@@ -1519,7 +1704,64 @@ def cmd_studio(args: argparse.Namespace) -> None:
         service.close()
 
 
+def _auth_store(args: argparse.Namespace):
+    """The user store `fabri serve` would open for the same flags and env."""
+    from fabri.config import load_auth_config
+    from fabri.service.auth import UserStore
+
+    if args.auth_config:
+        auth_cfg = load_auth_config(args.auth_config)
+    else:
+        auth_cfg = load_config(args.config).get("auth", {})
+    home_root = Path(args.home_root) if args.home_root else (
+        Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve"
+    )
+    return UserStore(auth_cfg.get("db_path") or home_root / "auth.db"), auth_cfg
+
+
+def _read_new_password() -> str:
+    import getpass
+
+    if sys.stdin.isatty():
+        password = getpass.getpass("Password: ")
+        if getpass.getpass("Repeat password: ") != password:
+            print("passwords do not match", file=sys.stderr)
+            sys.exit(1)
+    else:
+        password = sys.stdin.readline().rstrip("\r\n")
+    if len(password) < 8:
+        print("password must be at least 8 characters", file=sys.stderr)
+        sys.exit(1)
+    return password
+
+
+def cmd_auth_add_user(args: argparse.Namespace) -> None:
+    from fabri.service.auth import email_allowed
+
+    store, auth_cfg = _auth_store(args)
+    if not email_allowed(auth_cfg, args.email):
+        print(f"{args.email} is not in auth.allowed_emails; add it there first", file=sys.stderr)
+        sys.exit(1)
+    password = _read_new_password()
+    try:
+        store.create_user(args.email, password)
+    except ValueError:
+        print(f"{args.email} already exists; use `fabri auth set-password`", file=sys.stderr)
+        sys.exit(1)
+    print(f"created {args.email.strip().lower()} in {store.db_path}")
+
+
+def cmd_auth_set_password(args: argparse.Namespace) -> None:
+    store, _ = _auth_store(args)
+    password = _read_new_password()
+    if not store.set_password(args.email, password):
+        print(f"no user {args.email}; use `fabri auth add-user`", file=sys.stderr)
+        sys.exit(1)
+    print(f"password updated for {args.email.strip().lower()}")
+
+
 def main() -> None:
+    auth_config = os.environ.get("FABRI_AUTH_CONFIG") or None
     parser = argparse.ArgumentParser(prog="fabri")
     parser.add_argument(
         "--version",
@@ -1558,6 +1800,12 @@ def main() -> None:
                        help="Print the resolved config + the tool defs that would be "
                             "sent to the model, then exit without any LLM call (B3). "
                             "Requires no API key.")
+    p_run.add_argument("--user-id", dest="user_id", default=None,
+                       help="Scoped memory: private USER scope id (hashed into the collection name)")
+    p_run.add_argument("--org-id", dest="org_id", default=None,
+                       help="Scoped memory: shared ORG scope id (hashed into the collection name)")
+    p_run.add_argument("--project-id", dest="project_id", default=None,
+                       help="Scoped memory: optional project id (used to strip project names)")
     p_run.set_defaults(func=cmd_run)
 
     p_ingest = sub.add_parser("ingest-traces", help="Synthesize guidelines from a session's trace")
@@ -1621,6 +1869,31 @@ def main() -> None:
                              help="Restrict to this kind (repeatable; default: tactical + strategic)")
     p_mem_stale.add_argument("--limit", type=int, default=None)
     p_mem_stale.set_defaults(func=cmd_memory_stale)
+
+    p_mem_promote = mem_sub.add_parser(
+        "promote",
+        help="List GLOBAL candidates (de-identified, with source-org counts); approve or reject one")
+    p_mem_promote.add_argument("--scan", action="store_true",
+                               help="Read the org collections, de-identify, and update the candidate queue first")
+    p_mem_promote.add_argument("--min-orgs", dest="min_orgs", type=int, default=None,
+                               help="Distinct orgs a lesson must recur in (default memory.scoped.min_orgs, 3)")
+    p_mem_promote.add_argument("--llm-rewrite", dest="llm_rewrite", action="store_true",
+                               help="With --scan: rewrite scrubbed lessons to a generic form with the LLM")
+    p_mem_promote.add_argument("--all", dest="show_all", action="store_true",
+                               help="List approved and rejected candidates too")
+    promote_action = p_mem_promote.add_mutually_exclusive_group()
+    promote_action.add_argument("--approve", metavar="ID", default=None,
+                                help="Write this candidate to the GLOBAL collection")
+    promote_action.add_argument("--reject", metavar="ID", default=None,
+                                help="Reject this candidate; it will not resurface")
+    p_mem_promote.set_defaults(func=cmd_memory_promote)
+
+    p_mem_forget = mem_sub.add_parser(
+        "forget", help="Delete one user's or one org's memory collection")
+    forget_target = p_mem_forget.add_mutually_exclusive_group(required=True)
+    forget_target.add_argument("--user", metavar="USER_ID", default=None)
+    forget_target.add_argument("--org", metavar="ORG_ID", default=None)
+    p_mem_forget.set_defaults(func=cmd_memory_forget)
 
     p_repo = sub.add_parser("repo", help="File issues and draft PRs from a fabri run")
     repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
@@ -1691,6 +1964,10 @@ def main() -> None:
                          help="Resolve tools from this dir instead of tools.manifest_dir "
                               "(repeatable; use 'builtin' for the bundled tools)")
     p_tools.set_defaults(func=cmd_tools)
+    # Dynamic setups: `fabri setup ...` and `fabri tools list|sync|register|...`.
+    # A bare `fabri tools` keeps the listing above.
+    from fabri.setups.cli import add_setup_commands
+    add_setup_commands(sub, p_tools)
 
     p_tool = sub.add_parser("tool", help="Tool-related helpers (scaffold a new tool)")
     tool_sub = p_tool.add_subparsers(dest="tool_command", required=True)
@@ -1879,6 +2156,18 @@ def main() -> None:
     p_traces_export.add_argument("session_id")
     p_traces_export.set_defaults(func=cmd_traces_export)
 
+    p_decide = sub.add_parser(
+        "decide", help="Run a decision tree (Jev, LLM or cascade) on one state and print the route")
+    p_decide.add_argument("--tree", required=True, help="Path to a decision tree YAML")
+    state_src = p_decide.add_mutually_exclusive_group(required=True)
+    state_src.add_argument("--state",
+                           help="State as literal text. @file reads that file if it exists "
+                                "(parsed as JSON when it ends in .json); otherwise the text is sent as is")
+    state_src.add_argument("--state-file", metavar="PATH",
+                           help="Read the state from PATH (parsed as JSON when it ends in .json)")
+    p_decide.add_argument("--json", action="store_true", help="Print the result as JSON")
+    p_decide.set_defaults(func=cmd_decide)
+
     # B7: embeddable service — a non-Python host submits a task over HTTP and
     # streams events without importing fabri.
     p_serve = sub.add_parser(
@@ -1889,6 +2178,12 @@ def main() -> None:
     p_serve.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080; 0 = OS-assigned)")
     p_serve.add_argument("--home-root", dest="home_root", default=None,
                          help="Parent dir for per-run FABRI_HOME workspaces (default: $FABRI_HOME/serve or ~/.fabri/serve)")
+    p_serve.add_argument("--setups-root", dest="setups_root", default=None, metavar="DIR",
+                     help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
+    p_serve.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
+                     help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
+    p_serve.add_argument("--auth-config", dest="auth_config", default=auth_config, metavar="FILE",
+                         help="YAML with an `auth:` section for Studio login (default: $FABRI_AUTH_CONFIG)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_studio = sub.add_parser(
@@ -1924,7 +2219,28 @@ def main() -> None:
         default=None,
         help="Parent dir for per-run FABRI_HOME workspaces (default: $FABRI_HOME/serve or ~/.fabri/serve)",
     )
+    p_studio.add_argument("--setups-root", dest="setups_root", default=None, metavar="DIR",
+                     help="Serve the Setups API (/setups/*, /tools/*) over this layer root")
+    p_studio.add_argument("--setups-config", dest="setups_config", default=None, metavar="FILE",
+                     help="YAML: root, layers, global_allow, policy (see docs/setups-api.md)")
+    p_studio.add_argument("--auth-config", dest="auth_config", default=auth_config, metavar="FILE",
+                          help="YAML with an `auth:` section for Studio login (default: $FABRI_AUTH_CONFIG)")
     p_studio.set_defaults(func=cmd_studio)
+
+    p_auth = sub.add_parser("auth", help="Manage Studio login users offline (password read from stdin)")
+    auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
+    for name, func, text in (
+        ("add-user", cmd_auth_add_user, "Create a Studio user"),
+        ("set-password", cmd_auth_set_password, "Reset a Studio user's password"),
+    ):
+        p_cmd = auth_sub.add_parser(name, help=text)
+        p_cmd.add_argument("email")
+        p_cmd.add_argument("--config", default=None, help="Template agent.yaml the server uses")
+        p_cmd.add_argument("--auth-config", dest="auth_config", default=auth_config, metavar="FILE",
+                           help="The server's --auth-config file (default: $FABRI_AUTH_CONFIG)")
+        p_cmd.add_argument("--home-root", dest="home_root", default=None,
+                           help="The server's --home-root (default: $FABRI_HOME/serve)")
+        p_cmd.set_defaults(func=func)
 
     args = parser.parse_args()
     try:

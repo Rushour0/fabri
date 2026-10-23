@@ -9,9 +9,13 @@ export function onUnauthorized(listener: () => void): () => void {
   return () => unauthorizedListeners.delete(listener);
 }
 
+export function notifyUnauthorized(): void {
+  unauthorizedListeners.forEach((listener) => listener());
+}
+
 async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const res = await fetch(input, { ...init, credentials: "same-origin" });
-  if (res.status === 401) unauthorizedListeners.forEach((listener) => listener());
+  if (res.status === 401) notifyUnauthorized();
   return res;
 }
 

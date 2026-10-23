@@ -26,12 +26,20 @@ fabri imports, no websockets dependency. Three endpoints:
 - ``GET  /health``          ``{"status": "ok"}``.
 - ``GET  /company``         ``{"company": {...} | null}`` -- served company org chart.
 - ``GET  /catalog``         ``{"catalog": {...} | null}`` -- installed roster entries.
+- ``GET  /auth/check``      204 when the caller may read, 401 otherwise (for a
+                            reverse proxy's forward-auth).
+
+With ``auth.enabled`` every route except ``/health``, ``/auth/*`` and signed
+webhooks needs a session or a service/admin bearer token, and anything that
+starts or changes work needs the admin role. ``auth.allow_guests`` restores the
+older mode where anonymous visitors may start and follow their own runs.
 
 Built on :class:`http.server.ThreadingHTTPServer` so a streaming ``events``
 request doesn't block a concurrent ``POST /runs``.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
@@ -50,8 +58,12 @@ from fabri.service.github_events import handle_github_event
 from fabri.service.surfaces import pipeline as surface_pipeline
 from fabri.service.service import FabriService
 from fabri.service.auth import (
+    Principal,
     build_clear_cookie,
     build_set_cookie,
+    burn_password_check,
+    email_allowed,
+    email_set,
     parse_cookie,
     sign_session,
     verify_session,
@@ -72,6 +84,11 @@ _LINEAR_UNINSTALL_RE = re.compile(r"^/linear/installs/([A-Za-z0-9_.-]+)/delete/?
 _AUTH_BODY_MAX_BYTES = 8 * 1024
 _AUTH_EMAIL_MAX_LENGTH = 254
 _AUTH_PASSWORD_MAX_LENGTH = 1024
+# GETs that write install state or start an OAuth install.
+_ADMIN_GETS = frozenset({
+    "/slack/install", "/slack/oauth/callback", "/github/setup",
+    "/linear/install", "/linear/oauth/callback",
+})
 
 
 def studio_assets_available() -> bool:
@@ -88,7 +105,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     @property
     def serve_studio(self) -> bool:
-        return cast("FabriHTTPServer", self.server).serve_studio
+        return bool(getattr(self.server, "serve_studio", False))
 
     @property
     def slack_cfg(self) -> dict:
@@ -124,9 +141,82 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "auth required"})
         return user_id
 
+    def _principal(self) -> Principal | None:
+        """The caller: an admin/service bearer token or a signed-in, invited user."""
+        service = self.service
+        admin_token = os.environ.get("FABRI_ADMIN_TOKEN") or ""
+        service_token = os.environ.get("FABRI_SERVICE_TOKEN") or ""
+        headers = getattr(self, "headers", None) or {}
+        header = headers.get("Authorization", "") or ""
+        bearer = header[7:].strip().encode() if header.lower().startswith("bearer ") else b""
+        session_auth = bool(getattr(service, "auth_enabled", False))
+        if bearer and admin_token and hmac.compare_digest(bearer, admin_token.encode()):
+            return Principal("admin-token", True)
+        if bearer and service_token and hmac.compare_digest(bearer, service_token.encode()):
+            return Principal("service-token", not admin_token and not session_auth)
+        if not session_auth:
+            return None
+        user_id = self._current_user()
+        store = getattr(service, "user_store", None)
+        user = store.get_user(user_id) if user_id and store is not None else None
+        if user is None:
+            return None
+        cfg = getattr(service, "auth_cfg", None) or {}
+        if not email_allowed(cfg, user["email"]):
+            return None
+        return Principal(user["email"], user["email"].lower() in email_set(cfg.get("admins")), user_id)
+
+    def _strict_auth(self) -> bool:
+        service = self.service
+        cfg = getattr(service, "auth_cfg", None) or {}
+        return bool(getattr(service, "auth_enabled", False)) and not cfg.get("allow_guests")
+
+    def _gate(self, method: str) -> bool:
+        """Under strict auth: a caller for every route, admin for any change."""
+        self._caller = None
+        if not self._strict_auth():
+            return True
+        principal = self._principal()
+        if principal is None:
+            self._send_json(401, {"error": "auth required"})
+            return False
+        path = urlsplit(self.path).path.rstrip("/")
+        if (method != "GET" or path in _ADMIN_GETS) and not principal.is_admin:
+            self._send_json(403, {"error": "admin role required"})
+            return False
+        self._caller = principal
+        return True
+
+    def _owner_scope(self) -> tuple[bool, str | None]:
+        """(allowed, user_id filter) for listing routes. A token sees every run."""
+        if not self.service.auth_enabled:
+            return True, None
+        if self._strict_auth():
+            caller = getattr(self, "_caller", None)
+            return caller is not None, caller.user_id if caller else None
+        user_id = self._require_user()
+        return user_id is not None, user_id
+
+    def _auth_check(self) -> None:
+        open_reads = not self.service.auth_enabled and not os.environ.get("FABRI_SERVICE_TOKEN")
+        ok = open_reads or self._principal() is not None
+        self.send_response(204 if ok else 401)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _authorize_run(self, session_id: str) -> bool:
         """Allow capability-style guest runs or the authenticated run owner."""
         owner_id = self.service.run_owner(session_id)
+        if self._strict_auth():
+            caller = getattr(self, "_caller", None)
+            if caller is None:
+                self._send_json(401, {"error": "auth required"})
+                return False
+            if owner_id is None or caller.user_id is None or owner_id == caller.user_id:
+                return True
+            self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
+            return False
         if owner_id is None:
             # Anonymous runs are intentionally not attached to an account. Their
             # UUID session id is the capability needed to stream or control the
@@ -141,9 +231,34 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _setups_dispatch(self, method: str) -> bool:
+        """Serve /setups/* and /tools/* when the server has a SetupsApi."""
+        api = getattr(self.server, "setups_api", None)
+        if api is None or not api.matches(self.path):
+            return False
+        api.handle(self, method)
+        return True
+
+    def do_PUT(self) -> None:  # noqa: N802
+        if self._setups_dispatch("PUT"):
+            return
+        if self._gate("PUT"):
+            self._send_json(404, {"error": f"no route for PUT {self.path}"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if self._setups_dispatch("DELETE"):
+            return
+        if self._gate("DELETE"):
+            self._send_json(404, {"error": f"no route for DELETE {self.path}"})
+
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
+        if self._setups_dispatch("GET"):
+            return
         parsed = urlsplit(self.path)
         path = parsed.path
+        if path in ("/auth/check", "/auth/check/"):
+            self._auth_check()
+            return
         if self.service.auth_enabled and path in ("/auth/me", "/auth/me/"):
             user_id = self._current_user()
             user = (
@@ -151,17 +266,27 @@ class _Handler(BaseHTTPRequestHandler):
                 if user_id and self.service.user_store
                 else None
             )
-            if user is None:
+            if user is None or not email_allowed(self.service.auth_cfg or {}, user["email"]):
                 self._send_json(401, {"error": "auth required"})
             else:
                 self._send_json(200, {"email": user["email"]})
             return
+        if self.service.auth_enabled and path in ("/auth/config", "/auth/config/"):
+            cfg = self.service.auth_cfg or {}
+            self._send_json(200, {"signup": bool(cfg.get("signup", True)),
+                                  "guests": bool(cfg.get("allow_guests"))})
+            return
         if path in ("/health", "/health/"):
             self._send_json(200, {"status": "ok"})
             return
+        if self.serve_studio and not self._is_api_path(self.path):
+            self._send_studio_asset()
+            return
+        if not self._gate("GET"):
+            return
         if path in ("/runs", "/runs/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             try:
                 filters = self._run_filters(parsed.query)
@@ -173,14 +298,14 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         if path in ("/agencies", "/agencies/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"agencies": self.service.list_agencies(user_id=user_id)})
             return
         if path in ("/questions", "/questions/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"questions": self.service.list_pending_questions(user_id=user_id)})
             return
@@ -192,15 +317,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"catalog": catalog_listing(catalog) if catalog is not None else None})
             return
         if path in ("/fleets", "/fleets/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"fleets": self.service.list_fleets(user_id=user_id)})
             return
         m = _FLEET_RE.match(path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             try:
                 self._send_json(200, self.service.fleet_status(m.group(1), user_id=user_id))
@@ -233,8 +358,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._slack_oauth_callback(parse_qs(parsed.query))
             return
         if path in ("/slack/installs", "/slack/installs/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"installs": [
                 {"team_id": r["team_id"], "team_name": r["team_name"], "installed_at": r["installed_at"]}
@@ -242,8 +367,8 @@ class _Handler(BaseHTTPRequestHandler):
             ]})
             return
         if path in ("/github/app-info", "/github/app-info/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"install_url": github_app.install_url()})
             return
@@ -257,8 +382,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._redirect_studio("/?github=connected#settings")
             return
         if path in ("/github/installs", "/github/installs/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"installs": [
                 {"installation_id": r["installation_id"], "account_login": r["account_login"],
@@ -280,17 +405,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._linear_oauth_callback(parse_qs(parsed.query))
             return
         if path in ("/linear/installs", "/linear/installs/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._send_json(200, {"installs": [
                 {"workspace_id": r["workspace_id"], "workspace_name": r["workspace_name"],
                  "installed_at": r["installed_at"]}
                 for r in self.service.linear_install_store.list()
             ]})
-            return
-        if self.serve_studio and not self._is_api_path(self.path):
-            self._send_studio_asset()
             return
         self._send_json(404, {"error": f"no route for GET {self.path}"})
 
@@ -308,6 +430,8 @@ class _Handler(BaseHTTPRequestHandler):
         return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
+        if self._setups_dispatch("POST"):
+            return
         if self.service.auth_enabled and self.path.rstrip("/") in {
             "/auth/signup",
             "/auth/login",
@@ -353,6 +477,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(encoded)
             return
+        if not self._gate("POST"):
+            return
         m = _ANSWER_RE.match(self.path)
         if m:
             if self.service.auth_enabled and not self._authorize_run(m.group(1)):
@@ -366,31 +492,31 @@ class _Handler(BaseHTTPRequestHandler):
             self._cancel(m.group(1))
             return
         if self.path in ("/fleets", "/fleets/"):
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             self._submit_fleet(user_id=user_id)
             return
         m = _SLACK_UNINSTALL_RE.match(urlsplit(self.path).path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             ok = self.service.install_store.delete(m.group(1))
             self._send_json(200, {"deleted": ok})
             return
         m = _GITHUB_UNINSTALL_RE.match(urlsplit(self.path).path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             ok = self.service.github_install_store.delete(m.group(1))
             self._send_json(200, {"deleted": ok})
             return
         m = _LINEAR_UNINSTALL_RE.match(urlsplit(self.path).path)
         if m:
-            user_id = self._require_user() if self.service.auth_enabled else None
-            if self.service.auth_enabled and user_id is None:
+            ok, user_id = self._owner_scope()
+            if not ok:
                 return
             ok = self.service.linear_install_store.delete(m.group(1))
             self._send_json(200, {"deleted": ok})
@@ -401,7 +527,10 @@ class _Handler(BaseHTTPRequestHandler):
         # Signing in is optional for live conversations. Authenticated runs are
         # attached to the account and appear in History; guest runs stay
         # unowned and are accessible only through their UUID session id.
-        user_id = self._current_user() if self.service.auth_enabled else None
+        if self._strict_auth():
+            user_id = self._caller.user_id
+        else:
+            user_id = self._current_user() if self.service.auth_enabled else None
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
@@ -481,6 +610,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def _auth_post(self, path: str) -> None:
+        cfg = self.service.auth_cfg or {}
+        if path == "/auth/signup" and not cfg.get("signup", True):
+            self._send_json(403, {"error": "signup is disabled"})
+            return
         if path == "/auth/logout":
             self._send_json(
                 200,
@@ -528,9 +661,14 @@ class _Handler(BaseHTTPRequestHandler):
         if store is None or secret is None:
             self._send_json(500, {"error": "authentication is unavailable"})
             return
+        invited = email_allowed(cfg, email)
         if path == "/auth/signup":
             if len(password) < 8:
                 self._send_json(400, {"error": "Password must be at least 8 characters"})
+                return
+            if not invited:
+                burn_password_check(password)
+                self._send_json(200, {"ok": True})
                 return
             try:
                 store.create_user(email, password)
@@ -539,7 +677,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True})
             return
         else:
-            user_id = store.verify_user(email, password)
+            if invited:
+                user_id = store.verify_user(email, password)
+            else:
+                burn_password_check(password)
+                user_id = None
             if user_id is None:
                 self._send_json(401, {"error": "invalid email or password"})
                 return
@@ -666,7 +808,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
@@ -704,8 +846,10 @@ class FabriHTTPServer(ThreadingHTTPServer):
         serve_studio: bool = False,
         company: dict | None = None,
         catalog: Mapping[str, dict] | None = None,
+        setups_api: object | None = None,
     ) -> None:
         super().__init__(address, _Handler)
+        self.setups_api = setups_api
         self.service = service
         self.serve_studio = serve_studio
         self.company = company
@@ -720,6 +864,7 @@ def serve_http(
     serve_studio: bool = False,
     company: dict | None = None,
     catalog: Mapping[str, dict] | None = None,
+    setups_api: object | None = None,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
@@ -727,5 +872,6 @@ def serve_http(
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
     """
     return FabriHTTPServer(
-        (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog
+        (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog,
+        setups_api=setups_api,
     )

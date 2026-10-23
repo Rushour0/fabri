@@ -7,6 +7,8 @@ import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 
@@ -41,10 +43,7 @@ class UserStore:
 
     def create_user(self, email: str, password: str) -> str:
         normalized = self._email(email)
-        salt = os.urandom(16)
-        password_hash = hashlib.scrypt(
-            password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32
-        ).hex()
+        password_hash, salt = _hash_password(password)
         user_id = uuid.uuid4().hex
         try:
             with self._connect() as connection:
@@ -64,16 +63,7 @@ class UserStore:
                 (self._email(email),),
             ).fetchone()
         if row is None:
-            # Keep unknown-email attempts comparable to a real password check.
-            calculated = hashlib.scrypt(
-                password.encode(),
-                salt=_DUMMY_SALT,
-                n=2**14,
-                r=8,
-                p=1,
-                dklen=32,
-            ).hex()
-            hmac.compare_digest(calculated, _DUMMY_HASH)
+            burn_password_check(password)
             return None
         calculated = hashlib.scrypt(
             password.encode(),
@@ -85,12 +75,64 @@ class UserStore:
         ).hex()
         return row[0] if hmac.compare_digest(calculated, row[1]) else None
 
+    def set_password(self, email: str, password: str) -> bool:
+        password_hash, salt = _hash_password(password)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET pw_hash = ?, pw_salt = ? WHERE email = ?",
+                (password_hash, salt.hex(), self._email(email)),
+            )
+        return cursor.rowcount > 0
+
     def get_user(self, user_id: str) -> dict[str, str] | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT id, email FROM users WHERE id = ?", (user_id,)
             ).fetchone()
         return {"id": row[0], "email": row[1]} if row is not None else None
+
+
+def _hash_password(password: str) -> tuple[str, bytes]:
+    salt = os.urandom(16)
+    password_hash = hashlib.scrypt(
+        password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32
+    ).hex()
+    return password_hash, salt
+
+
+def burn_password_check(password: str) -> None:
+    """Spend the same scrypt work as a real check so refusals are not faster."""
+    calculated = hashlib.scrypt(
+        password.encode(), salt=_DUMMY_SALT, n=2**14, r=8, p=1, dklen=32
+    ).hex()
+    hmac.compare_digest(calculated, _DUMMY_HASH)
+
+
+def email_set(values: Iterable[str] | str | None) -> frozenset[str]:
+    if values is None:
+        return frozenset()
+    if isinstance(values, str):
+        values = values.split(",")
+    return frozenset(v.strip().lower() for v in values if str(v).strip())
+
+
+def allowed_emails(auth_cfg: Mapping) -> frozenset[str]:
+    """Emails allowed to sign up or log in. Empty means no invite list."""
+    return email_set(auth_cfg.get("allowed_emails"))
+
+
+def email_allowed(auth_cfg: Mapping, email: str) -> bool:
+    allowed = allowed_emails(auth_cfg)
+    return not allowed or email.strip().lower() in allowed
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Who is calling: a session user's email, or a token name."""
+
+    actor: str
+    is_admin: bool
+    user_id: str | None = None
 
 
 def sign_session(user_id: str, secret: str, ttl_s: int) -> str:

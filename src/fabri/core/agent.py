@@ -16,6 +16,7 @@ from fabri.events import EventType, StepReason
 from fabri.toon import encode as toon_encode
 from fabri.core.outcome import Outcome
 from fabri.core.structured import parse_response
+from fabri.memory.scopes import MemoryScope, ScopedMemory
 from fabri.memory.store import QdrantMemoryStore
 from fabri.memory.output import split_agent_output
 from fabri.orchestrator.convention_application import validate_branch_selection
@@ -208,6 +209,7 @@ def _run_single_attempt(
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
+    memory_scope: "MemoryScope | ScopedMemory | None" = None,
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -245,10 +247,28 @@ def _run_single_attempt(
             },
             "task": task,
         }
-    context_block, retrieval_meta = retrieve_context_with_meta(
-        store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
-        retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
-    )
+    if memory_scope is not None:
+        # Scoped run: merge USER, ORG and GLOBAL top-k (per-scope budgets, every
+        # line tagged). `store` only locates the backend; its own collection is
+        # not read.
+        scoped_memory = (
+            memory_scope
+            if isinstance(memory_scope, ScopedMemory)
+            else ScopedMemory.from_config(
+                {"scoped": (retrieval_config.scoped if retrieval_config else None) or {}},
+                memory_scope,
+                store,
+            )
+        )
+        context_block, retrieval_meta = scoped_memory.retrieve(
+            task, tool_names=[t.name for t in tools.list()],
+            retrieval_config=retrieval_config, session_id=session_id,
+        )
+    else:
+        context_block, retrieval_meta = retrieve_context_with_meta(
+            store, task, top_k=top_k, tool_names=[t.name for t in tools.list()],
+            retrieval_config=retrieval_config, session_id=session_id, current_state=current_state,
+        )
     retrieved_conventions = retrieval_meta.get("retrieved_conventions")
     # Validation arms on RETRIEVAL, not on the mining flag: an approved
     # convention can only reach this run's prompt deliberately (mined,
@@ -280,6 +300,32 @@ def _run_single_attempt(
             logger.warning("backend %s lacks set_tools(); tool-list filtering will not propagate to the provider", type(llm).__name__)
     else:
         visible_tools = tools.list()
+    visible_tools = list(visible_tools)
+
+    def _refresh_exposed_tools() -> None:
+        # A discovery tool (find_tools / describe_tool) can ask for tools the
+        # retrieval step hid. Add them to the provider tool list so the model
+        # can call them later in this same run.
+        pop = getattr(tools, "pop_exposed", None)
+        if pop is None:
+            return
+        names = pop()
+        if not tool_retrieval_enabled or not isinstance(names, list) or not names:
+            return
+        shown = {t.name for t in visible_tools}
+        added = [tools.tools[n] for n in names if n in tools.tools and n not in shown]
+        if not added:
+            return
+        visible_tools.extend(added)
+        try:
+            llm.set_tools([
+                {"name": t.name, "description": t.description, "input_schema": t.input_schema or {"type": "object"}}
+                for t in visible_tools
+            ])
+        except AttributeError:
+            pass
+        log_event(session_id, {"type": "tools_exposed", "tools": [t.name for t in added]})
+
     tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in visible_tools)
     system = build_system_prompt(
         context_block,
@@ -710,6 +756,7 @@ def _run_single_attempt(
                         dispatch_stats=dispatch_stats,
                     )
                     item_had_failure |= step_had_failure
+                    _refresh_exposed_tools()
                     item_total_tool_calls += len(response.tool_calls)
                     item_failed_tool_calls += dispatch_stats["failed_calls"]
                     log_event(session_id, {
@@ -1193,6 +1240,7 @@ def run_agent(
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
+    memory_scope: "MemoryScope | ScopedMemory | None" = None,
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
@@ -1232,6 +1280,7 @@ def run_agent(
         max_parallel_spawns=max_parallel_spawns,
         retrieval_config=retrieval_config,
         retrieved_guidelines_task_precedence=retrieved_guidelines_task_precedence,
+        memory_scope=memory_scope,
     )
     result = _run_single_attempt(task, **base_kwargs)
     if not (repair and repair.get("enabled")):
@@ -1478,6 +1527,15 @@ def _dispatch_tool_calls(
             "args": call.args,
             "result": result,
         }
+        # Log both names when a tool was called by an alias (for example an
+        # OpenAPI operation_id) or when the tool has aliases of its own.
+        canonical_fn = getattr(tools, "canonical_name", None)
+        canonical = canonical_fn(call.name) if callable(canonical_fn) else None
+        if isinstance(canonical, str) and canonical in getattr(tools, "tools", {}):
+            aliases = list(getattr(tools.tools[canonical], "aliases", None) or [])
+            if canonical != call.name or aliases:
+                event["canonical_name"] = canonical
+                event["aliases"] = aliases
         if i in parallel_index_set and call.args.get("parallel_group"):
             event["parallel_group"] = call.args["parallel_group"]
         log_event(session_id, event)

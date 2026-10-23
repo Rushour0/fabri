@@ -3,6 +3,9 @@
 > **Status:** config verified against fabri's local MCP client schema; **not yet
 > live-verified** against the GitHub MCP server or a real GitHub PAT.
 
+In a layered setup, `fabri setups tools add connector github --scope org:<org>`
+writes the source below for you; see [adding-tools.md](../adding-tools.md).
+
 GitHub is configuration, not a new fabri tool. fabri starts a configured MCP
 server when it builds an agent, discovers that server's tools, and wraps each
 one as a normal fabri tool.

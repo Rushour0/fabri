@@ -4,6 +4,139 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.24.2
+
+**Dynamic tools, layered setups, scoped memory and Studio sign-in.**
+
+- `fabri.tools.openapi` turns an OpenAPI 3 document (URL, file or dict) into
+  tools. Names are `<resource>_<action>` from the path and method, with the
+  `operationId` kept as an alias that the registry, allow lists and approval
+  maps accept. Descriptions carry a `Responses:` line with status codes and
+  reason enums, capped at 1,500 characters. Input schemas merge path and query
+  params with the JSON body, and `$ref`, `allOf`, `oneOf` and `nullable` are
+  resolved. Allow, deny, method and tag filters apply, and DELETE stays out
+  unless named. Calls go over httpx with headers from secret refs or env var
+  names, an optional dry-run header, and status codes mapped to ok, conflict
+  and error.
+- `fabri.tools.sources` reads one declaration format for `openapi`, `http`,
+  `mcp` and `python` sources and builds `(manifest, handler)` pairs.
+  `fabri.tools.policy.ToolPolicy` caps names, kinds, hosts, DELETE and python
+  modules.
+- `fabri.setups` resolves an ordered list of layer directories into agent
+  types, prompts, skills, context, data, plays and a tool set, recording the
+  source layer of every item. Tools from all layers are unioned and then
+  intersected with the caller's global allowlist. Results are cached by a
+  content hash of the layer files, so edits show up on the next resolve.
+  Includes atomic put, delete and disable per kind with validation and
+  per-layer budgets, skill import from SKILL.md and fabri layouts, lint, route
+  options for custom agent types, and `build_agent_config` for `run_agent`.
+- `fabri.tools.registration` registers tools into a layer at runtime with
+  validation, versioning and an audit log. Auth accepts secret refs and env
+  var names only.
+- `fabri.tools.catalog` gives each tool a title and a description built from
+  the schema, overridable per layer, and adds the `find_tools` and
+  `describe_tool` meta tools. A tool either of them returns can be called in
+  the same run even when tool retrieval hid it. `fabri.tools.probe` learns ids,
+  slugs and enum values from safe GET calls with redaction, and
+  `fabri.tools.describe` can rewrite descriptions with an LLM, cached and
+  checked for grounding and writing tells.
+- `ToolManifest` gains optional `approval`, `aliases` and `title` fields.
+  Traces log the canonical tool name next to an alias. Tool retrieval ranks on
+  the title as well as the description.
+- New CLI commands: `fabri setup show|import|lint` and `fabri tools
+  list|sync|register|unregister|enable|disable|probe|describe`. A bare
+  `fabri tools` still lists the configured manifest tools.
+- New guide: docs/dynamic-setups.md.
+- Skills take `when_to_use` and `load: always | on_demand` fields and
+  `references/` files. On-demand skills show as one index line in the prompt
+  and the `load_skill` meta tool returns the full text or one reference file.
+  Item edits record a revision history.
+- `fabri setups tools add openapi|mcp|connector` writes a tool source into a
+  layer, builds it under the host policy first, refuses name clashes and
+  prints the approval class of every tool. The Setups API gains
+  `/tools/sources` and `/tools/connectors`.
+- Scoped memory: user, org and global scopes with hashed collection names, a
+  store-level scope guard, a write classifier and a scrubber. Promotion to
+  global needs recurrence across orgs, de-identified candidates and human
+  approval. `run_agent`, `process_trace`, config and the CLI (`memory
+  promote`, `memory forget`) take a scope. See docs/memory.md.
+- Studio: a Setups tab with a scope tree, item editor and skill import with
+  dry run; a paginated tools table; agent types shown as org types with a
+  Global skills tab; a Spend section; and `VITE_STUDIO_SECTIONS` to pick the
+  top-level sections.
+- Studio sign-in: with `auth.enabled`, every route except `/health`, `/auth/*`
+  and signed webhooks needs a session or a bearer token, and anything that
+  starts or changes work needs the admin role. `auth.allowed_emails` limits
+  signup and login, `auth.signup: false` turns signup off, and `fabri auth
+  add-user` and `set-password` work offline. `fabri auth` and `fabri serve`
+  read `FABRI_AUTH_CONFIG` as the default config path.
+
+## 0.24.1
+
+**Typed decisions with Jev, plus an LLM fallback.**
+
+- New `fabri.decide` package. A decider takes a state and a list of typed
+  questions (`choice`, `score`, or `yesno`) and returns one answer per
+  question with its probabilities, confidence, source, latency, tokens and
+  cost.
+- `JevDecider` calls TypeSafe AI's Jev decision model over its `/systemone`
+  API, either directly (`TYPESAFE_API_KEY`) or through OpenRouter
+  (`OPENROUTER_API_KEY`). It uses the standard library for HTTP and keeps one
+  connection open per thread, so only the first call pays the TCP and TLS
+  setup. It sends every question in one request, retries once on 429 or 5xx,
+  reconnects once when the server has closed an idle connection, and keeps
+  the API key out of error messages. A yes/no answer reports `P(true) >= 0.5`
+  as its value and `|2P - 1|` as its confidence, the same formula Jev uses
+  for a two-option choice. A score answer maps Jev's expected level index
+  through its legend to the most likely level name. Probabilities outside
+  [0, 1], NaN and malformed payloads produce an errored answer instead of an
+  exception, so a cascade escalates them. Cost comes from the provider's
+  reported `usage.cost` when present, otherwise from `fabri.pricing`. An
+  unpriced model is flagged with `cost_known=False` instead of reporting $0.
+- `LLMDecider` answers the same questions with any fabri `llm:` block and
+  rejects answers outside the declared options.
+- `CascadeDecider` asks a primary decider first and re-asks only the
+  questions that errored or came back below a per-kind confidence threshold
+  on a fallback, in one batched call. Escalated answers are marked and their
+  cost and latency include the primary attempt.
+- `DecisionTree` loads a YAML router (nodes, branches, leaves) and validates
+  it at load time: branch keys must be declared answers, every answer needs a
+  branch, referenced nodes must exist, and cycles or depth over 16 are
+  rejected. Leaves pass through as written, so `requires_approval: true` stays
+  set.
+- New `fabri decide --tree tree.yaml --state '<text or @file.json>' [--json]`
+  command prints the path taken, the leaf, and total cost and latency.
+- New `jev-router` agency template. A choice node routes to chat, canvas and
+  tasks specialists, listing the non-acting option first. Canvas and task
+  requests both pass narrow yes/no approval checks (affects others and hard to
+  undo; tasks also checks bulk change); any "yes" ends at a
+  `requires_approval: true` leaf, and an unsure check goes to the LLM fallback
+  rather than skipping approval.
+- Pricing entries for `jev-1.13.0`, `jev-1.14.0`, `typesafe/jev-1.13` and
+  `typesafe/jev-1.14` at $0.042 per million input tokens, output free.
+- New `fabri.style` module: `PLAIN_WRITING_RULES`, a short prompt block for
+  user-facing agents, and `slop_report(text)`, a deterministic count of
+  common AI-writing tells. The `jev-router` specialists carry the rules as
+  their `system_prompt_prefix`. On 24 gpt-5-mini answers the rules cut tells
+  from 8.54 to 0.08 per answer (`benchmarks/style/slop_eval.py`).
+- OpenAI backend: gpt-5, gpt-5-mini and gpt-5-nano with function tools now
+  send `reasoning_effort: minimal` instead of `none`, which those models
+  reject with a 400. Dotted GPT-5.x models keep `none`. A new
+  `llm.reasoning_effort` setting overrides the default per config or role.
+- Transient LLM errors are logged with type and status only, never provider
+  text. `LLMDecider` resolves its provider's default key env once, so the key
+  it sends is the key it redacts. A Jev score legend that disagrees with the
+  declared level order now errors the answer instead of being trusted.
+- Agency templates may declare `ENTRY`, the config file named in the
+  post-scaffold hint.
+- `benchmarks/jev/`: a 420-item decision benchmark (routing, tool selection,
+  approval yes/no, urgency score) with option-order, large-action-set,
+  near-valid and injected-text perturbations. On 2026-10-19, Jev with a
+  gpt-5-mini fallback scored 99.3% against 96.9% for gpt-5-mini alone, at a
+  p50 of 504 ms against 1686 ms and about one seventh of the cost per
+  correct decision. Labels are synthetic, so treat the accuracies as an
+  upper bound. Results: `benchmarks/results/jev-decisions-2026-10-19.md`.
+
 ## 0.24.0
 
 **Run a roster entry from the tools your team already uses.**

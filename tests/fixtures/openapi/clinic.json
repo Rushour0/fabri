@@ -1,0 +1,126 @@
+{
+  "openapi": "3.0.1",
+  "info": {"title": "Toy clinic scheduler", "version": "2"},
+  "servers": [{"url": "https://clinic.test"}],
+  "paths": {
+    "/admin/v2/clinics/{clinicId}/appointments": {
+      "parameters": [{"$ref": "#/components/parameters/ClinicId"}],
+      "get": {
+        "operationId": "Appointments_List",
+        "tags": ["appointments"],
+        "summary": "List appointments",
+        "parameters": [{"$ref": "#/components/parameters/Status"}],
+        "responses": {"200": {"$ref": "#/components/responses/AppointmentPage"}}
+      },
+      "post": {
+        "operationId": "Appointments_Book",
+        "tags": ["appointments"],
+        "summary": "Book an appointment",
+        "requestBody": {"$ref": "#/components/requestBodies/Booking"},
+        "responses": {
+          "201": {"description": "Booked"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "422": {"description": "Invalid booking"}
+        }
+      }
+    },
+    "/admin/v2/clinics/{clinicId}/appointments/{appointmentId}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/ClinicId"},
+        {"name": "appointmentId", "in": "path", "required": true, "schema": {"type": "string"}}
+      ],
+      "put": {
+        "operationId": "Appointments_Replace",
+        "summary": "Replace an appointment",
+        "requestBody": {"$ref": "#/components/requestBodies/Booking"},
+        "responses": {"200": {"description": "Replaced"}, "409": {"$ref": "#/components/responses/Conflict"}}
+      }
+    },
+    "/admin/v2/categories": {
+      "get": {
+        "operationId": "Categories_Tree",
+        "summary": "Category tree",
+        "responses": {
+          "200": {
+            "description": "Tree",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Category"}}}
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ClinicId": {"name": "clinicId", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Slug"}},
+      "Status": {"name": "status", "in": "query", "schema": {"$ref": "#/components/schemas/Status"}},
+      "TraceHeader": {"name": "X-Trace", "in": "header", "schema": {"type": "string"}}
+    },
+    "requestBodies": {
+      "Booking": {
+        "required": true,
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Booking"}}}
+      }
+    },
+    "responses": {
+      "AppointmentPage": {
+        "description": "A page",
+        "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Appointment"}}}}
+      },
+      "Conflict": {
+        "description": "Slot conflict",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
+      }
+    },
+    "schemas": {
+      "Slug": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+      "Status": {"type": "string", "enum": ["booked", "cancelled"]},
+      "Base": {
+        "type": "object",
+        "required": ["patient"],
+        "properties": {"patient": {"type": "string"}, "notes": {"type": "string", "nullable": true}}
+      },
+      "Booking": {
+        "allOf": [
+          {"$ref": "#/components/schemas/Base"},
+          {
+            "type": "object",
+            "required": ["slot"],
+            "properties": {
+              "slot": {"type": "string", "format": "date-time"},
+              "contact": {"$ref": "#/components/schemas/Contact"},
+              "priority": {"type": "string", "enum": ["low", "high"], "nullable": true}
+            }
+          }
+        ]
+      },
+      "Appointment": {
+        "allOf": [
+          {"$ref": "#/components/schemas/Booking"},
+          {"type": "object", "properties": {"id": {"type": "string"}, "status": {"$ref": "#/components/schemas/Status"}}}
+        ]
+      },
+      "Contact": {
+        "oneOf": [
+          {"type": "object", "required": ["email"], "properties": {"email": {"type": "string"}}},
+          {"type": "object", "required": ["phone"], "properties": {"phone": {"type": "string"}}}
+        ]
+      },
+      "Category": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "children": {"type": "array", "items": {"$ref": "#/components/schemas/Category"}}
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {"reason": {"type": "string", "enum": ["slot_taken", "clinic_closed"]}}
+          }
+        }
+      }
+    }
+  }
+}

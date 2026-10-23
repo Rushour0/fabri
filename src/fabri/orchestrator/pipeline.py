@@ -23,6 +23,7 @@ from fabri.memory.output import split_agent_output
 from fabri.memory.embeddings import embeddings_available
 from fabri.memory.pruning import PROMOTION_THRESHOLD_SESSIONS, SIMILARITY_THRESHOLD, ingest_guideline
 from fabri.memory.schema import MemoryEntry
+from fabri.memory.scopes import ScopedMemory
 from fabri.memory.store import QdrantMemoryStore
 from fabri.orchestrator.traces import log_event, read_trace
 from fabri.tools.result import is_error
@@ -283,6 +284,7 @@ def process_trace(
     memory_scope: str = "agent",
     on_report: Callable[[MiningReport], None] | None = None,
     config: Mapping[str, object] | None = None,
+    scoped_memory: "ScopedMemory | None" = None,
 ) -> list[MemoryEntry]:
     """Mine a session's trace for failures, synthesize each into a compressed
     guideline, and ingest it into memory (dedup/promote per pruning rules).
@@ -302,7 +304,11 @@ def process_trace(
     guideline, success pattern) for deterministic, keyed text so ingesting an
     arbitrarily large external log costs $0 unless convention mining is
     separately enabled. Both default to today's behaviour (read from disk, LLM
-    synthesis) so every existing caller is byte-identical."""
+    synthesis) so every existing caller is byte-identical.
+
+    `scoped_memory`: when given, each mined item is classified (deterministic
+    rules, optional LLM) and written to the USER or ORG collection of that
+    scope instead of `store`. GLOBAL is never a write target here."""
     if memory_scope not in _MEMORY_SCOPES:
         raise ValueError(f"unsupported memory scope: {memory_scope}")
     report = MiningReport(session_id=session_id, producer_agent_id=producer_agent_id)
@@ -367,11 +373,18 @@ def process_trace(
                     quarantining_memory = dict(memory_config)
                     quarantining_memory["convention_mining_enabled"] = False
                     ingest_config = {"memory": quarantining_memory}
+                convention_store = store
+                if scoped_memory is not None:
+                    convention_tag, convention_store = scoped_memory.route(
+                        json.dumps(candidate.to_dict(), default=str), kind="convention"
+                    )
                 entry = ingest_convention(
-                    store,
+                    convention_store,
                     candidate,
                     config=ingest_config,
                 )
+                if scoped_memory is not None:
+                    scoped_memory.annotate(entry, convention_tag, convention_store)
                 new_entries.append(entry)
         except Exception:  # noqa: BLE001 -- convention mining must never fail the run
             logger.warning(
@@ -388,8 +401,11 @@ def process_trace(
         **kwargs: object,
     ) -> MemoryEntry:
         report.candidates_produced += 1
-        return ingest_guideline(
-            store,
+        target, tag = store, None
+        if scoped_memory is not None:
+            tag, target = scoped_memory.route(text, kind=str(kwargs.get("kind") or ""))
+        entry = ingest_guideline(
+            target,
             text,
             session_id,
             producer_agent_id=producer_agent_id,
@@ -400,6 +416,9 @@ def process_trace(
             on_disposition=report.disposition,
             **kwargs,
         )
+        if scoped_memory is not None and tag is not None:
+            scoped_memory.annotate(entry, tag, target)
+        return entry
 
     if record_postmortem and events:
         postmortem_text = build_postmortem_text(events)
