@@ -4,9 +4,9 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
-## Unreleased
+## 0.24.2
 
-Dynamic tools and layered setups. No version bump yet.
+**Dynamic tools, layered setups, scoped memory and Studio sign-in.**
 
 - `fabri.tools.openapi` turns an OpenAPI 3 document (URL, file or dict) into
   tools. Names are `<resource>_<action>` from the path and method, with the
@@ -47,6 +47,29 @@ Dynamic tools and layered setups. No version bump yet.
   list|sync|register|unregister|enable|disable|probe|describe`. A bare
   `fabri tools` still lists the configured manifest tools.
 - New guide: docs/dynamic-setups.md.
+- Skills take `when_to_use` and `load: always | on_demand` fields and
+  `references/` files. On-demand skills show as one index line in the prompt
+  and the `load_skill` meta tool returns the full text or one reference file.
+  Item edits record a revision history.
+- `fabri setups tools add openapi|mcp|connector` writes a tool source into a
+  layer, builds it under the host policy first, refuses name clashes and
+  prints the approval class of every tool. The Setups API gains
+  `/tools/sources` and `/tools/connectors`.
+- Scoped memory: user, org and global scopes with hashed collection names, a
+  store-level scope guard, a write classifier and a scrubber. Promotion to
+  global needs recurrence across orgs, de-identified candidates and human
+  approval. `run_agent`, `process_trace`, config and the CLI (`memory
+  promote`, `memory forget`) take a scope. See docs/memory.md.
+- Studio: a Setups tab with a scope tree, item editor and skill import with
+  dry run; a paginated tools table; agent types shown as org types with a
+  Global skills tab; a Spend section; and `VITE_STUDIO_SECTIONS` to pick the
+  top-level sections.
+- Studio sign-in: with `auth.enabled`, every route except `/health`, `/auth/*`
+  and signed webhooks needs a session or a bearer token, and anything that
+  starts or changes work needs the admin role. `auth.allowed_emails` limits
+  signup and login, `auth.signup: false` turns signup off, and `fabri auth
+  add-user` and `set-password` work offline. `fabri auth` and `fabri serve`
+  read `FABRI_AUTH_CONFIG` as the default config path.
 
 ## 0.24.1
 
