@@ -4,6 +4,24 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## Unreleased
+
+- `run_agent(..., hooks=RunHooks(...))` takes host callbacks for one run:
+  `before_step`, `after_step`, `on_llm_call`, `before_tool`, `after_tool` and
+  `on_unknown_tool`. `before_step` and `after_step` can return `Stop(text)` to
+  end the run with that answer; `before_tool` can return `Reject`. Hooks are a
+  kwarg, not a config field.
+- A run stopped by a hook keeps the normal final outcome, skips response-schema
+  validation, ends a planner run after the current item and is not repaired.
+  Its `final` trace event carries `"stop": "hook"`.
+- `ToolRegistry.invoke` runs a fixed pipeline: batch, name check, three empty
+  slots for later features, `before_tool`, handler, an empty ledger slot,
+  `after_tool`. Calls inside a `batch` go through it one by one.
+- New `fabri.tools.run_context` with `RunContext` and `CallContext` context
+  variables. Parallel `spawn_subagent` dispatch copies the context per thread.
+- Runs without hooks produce the same traces as before; golden traces for a
+  plain run, a planner run and a repair run pin this.
+
 ## 0.24.2
 
 **Dynamic tools, layered setups, scoped memory and Studio sign-in.**

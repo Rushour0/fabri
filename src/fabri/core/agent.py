@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import json
 import re
@@ -8,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS, decompose
+from fabri.core.hooks import RunHooks, Stop, StopSignal
 from fabri.core.llm import LLMBackend, LLMError, LLMUsage, ToolCall
 from fabri.pricing import cost_for
 from fabri.core.planner import DEFAULT_MAX_PLAN_ITEMS, PlanItem, plan as run_plan, topological_order
@@ -31,6 +33,7 @@ from fabri.orchestrator.retrieval import (
 from fabri.orchestrator.traces import log_event
 from fabri.tools.registry import ToolRegistry
 from fabri.tools.result import tool_error
+from fabri.tools.run_context import CallContext, RunContext, call_scope, current_run, run_scope
 
 MAX_STEPS = 10
 # Upper bound on how many spawn_subagent calls in one `parallel_group` run
@@ -216,6 +219,11 @@ def _run_single_attempt(
     # output in (decompose). Native tool-call args are always provider JSON.
     session_id = session_id or str(uuid.uuid4())
     logger.info("agent run starting: task=%r session_id=%s", task, session_id)
+    run_ctx = current_run()
+    hooks = run_ctx.hooks if run_ctx is not None else None
+    # The early stop for this attempt (core.hooks.StopSignal), mirrored onto
+    # the RunContext so the repair loop can see it.
+    stop_signal: list[StopSignal | None] = [None]
 
     # START is the run's root event and MUST be the first line in the trace —
     # reports and the OTel exporter treat it as the parent of everything. Emit
@@ -534,6 +542,26 @@ def _run_single_attempt(
                 "step": step,
             })
 
+    def _call_step(kind: str, msgs: list[dict]):
+        """Every main-backend model call made by the loop goes through here, so
+        `on_llm_call` sees each one with its wall time."""
+        on_llm_call = getattr(hooks, "on_llm_call", None)
+        if on_llm_call is None:
+            return llm.step(system, msgs)
+        started = time.monotonic()
+        response = llm.step(system, msgs)
+        on_llm_call(kind, response, (time.monotonic() - started) * 1000)
+        return response
+
+    def _hook_stop(verdict: object) -> bool:
+        if not isinstance(verdict, Stop):
+            return False
+        signal = StopSignal("hook", verdict.final_text)
+        stop_signal[0] = signal
+        if run_ctx is not None:
+            run_ctx.stop = signal
+        return True
+
     def _finalize_structured(
         candidate: str, msgs: list[dict], step: int
     ) -> tuple[str, bool, str | None, object | None]:
@@ -648,7 +676,7 @@ def _run_single_attempt(
             msgs.append({"role": "assistant", "content": text})
             msgs.append({"role": "user", "content": corrective})
             try:
-                resp = llm.step(system, msgs)
+                resp = _call_step("structured_retry", msgs)
             except LLMError as e:
                 _accumulate(e.usage)
                 return text, False, f"structured-output retry failed: {e}", None
@@ -721,6 +749,8 @@ def _run_single_attempt(
             global_step = step_offset + inner_step
             steps_used = inner_step + 1
             t0 = time.monotonic()
+            # Pre-step seam, in a fixed order: cancel check (slot), budget
+            # check, context guard (slot), host before_step, step_started.
             if _budget_breached():
                 log_event(session_id, {
                     "type": "budget_exceeded",
@@ -730,11 +760,18 @@ def _run_single_attempt(
                 item_failed = True
                 item_error = "cost budget exceeded"
                 break
+            before_step = getattr(hooks, "before_step", None)
+            if before_step is not None and _hook_stop(before_step(global_step, item_messages)):
+                # No model call for this step, so it does not count as used.
+                return (
+                    stop_signal[0].final_text, True, False, None, item_had_failure,
+                    item_total_tool_calls, item_failed_tool_calls, inner_step,
+                )
             log_event(session_id, {"type": EventType.STEP_STARTED.value, "step": global_step})
             if item_max_steps > 1 and inner_step == item_max_steps - 1:
                 _inject_final_step_nudge(item_messages)
             try:
-                response = llm.step(system, item_messages)
+                response = _call_step("step", item_messages)
                 _accumulate(response.usage)
                 _track_last_text(response)
                 # Priced from this step's usage alone so reports can attribute
@@ -768,6 +805,12 @@ def _run_single_attempt(
                         "tool_count": len(response.tool_calls),
                         "cost_usd": step_cost,
                     })
+                    after_step = getattr(hooks, "after_step", None)
+                    if after_step is not None and _hook_stop(after_step(global_step, response)):
+                        return (
+                            stop_signal[0].final_text, True, False, None, item_had_failure,
+                            item_total_tool_calls, item_failed_tool_calls, steps_used,
+                        )
                     continue
             except LLMError as e:
                 _accumulate(e.usage)
@@ -798,6 +841,12 @@ def _run_single_attempt(
                     "reason": StepReason.FINAL.value,
                     "cost_usd": step_cost,
                 })
+                after_step = getattr(hooks, "after_step", None)
+                if after_step is not None:
+                    # The answer is already final; a Stop here only replaces
+                    # its text.
+                    if _hook_stop(after_step(global_step, response)):
+                        item_final = stop_signal[0].final_text
                 return (
                     item_final, item_success, item_failed, item_error, item_had_failure,
                     item_total_tool_calls, item_failed_tool_calls, steps_used,
@@ -904,6 +953,18 @@ def _run_single_attempt(
                         "reason": "llm_error",
                     })
                     break
+                if stop_signal[0] is not None:
+                    # A host hook ended the run: keep what this item produced
+                    # and skip the remaining items.
+                    if item_final:
+                        per_item_outputs.append(item_final)
+                    log_event(session_id, {
+                        "type": EventType.PLAN_ITEM_FINISHED.value,
+                        "index": plan_idx,
+                        "ok": True,
+                        "stop": stop_signal[0].kind,
+                    })
+                    break
                 if item_success and item_final:
                     per_item_outputs.append(item_final)
                     completed.append(f"#{plan_idx} {item.goal}")
@@ -927,6 +988,9 @@ def _run_single_attempt(
             if per_item_outputs and not failed:
                 final_text = "\n\n".join(per_item_outputs)
                 success = len(per_item_outputs) == len(plan_items)
+            if stop_signal[0] is not None and not failed:
+                final_text = "\n\n".join(per_item_outputs)
+                success = True
         # Skip the historical single-loop body below by jumping to outcome.
         plan_engaged = True
     else:
@@ -954,6 +1018,11 @@ def _run_single_attempt(
             # ERROR / budget_exceeded + STEP_FINISHED events.
             failed = True
             error_reason = item_error
+        elif stop_signal[0] is not None:
+            # A host hook stop is the final answer as given: no response-schema
+            # validation and no corrective retries.
+            final_text = stop_signal[0].final_text
+            success = True
         elif item_success and item_final is not None:
             # O1: validate the final answer against response_schema (no-op when
             # unset). May fire bounded corrective retries, each an extra
@@ -1000,7 +1069,10 @@ def _run_single_attempt(
     logger.info("agent run finished: outcome=%s session_id=%s", outcome.value, session_id)
 
     if success:
-        log_event(session_id, {"type": EventType.FINAL.value, "text": final_text, "outcome": outcome.value})
+        final_event = {"type": EventType.FINAL.value, "text": final_text, "outcome": outcome.value}
+        if stop_signal[0] is not None:
+            final_event["stop"] = stop_signal[0].kind
+        log_event(session_id, final_event)
     elif failed:
         log_event(session_id, {
             "type": EventType.FAILED.value,
@@ -1175,7 +1247,12 @@ def _run_with_repair(
     result = first_result
     prev_signature: str | None = None
     attempt = 0
+    run_ctx = current_run()
     while attempt < max_attempts:
+        if run_ctx is not None and run_ctx.stop is not None:
+            # A host hook ended the run on purpose; that is not a failure to
+            # repair.
+            break
         verdict = _verdict(result)
         if verdict["ok"]:
             break
@@ -1200,7 +1277,8 @@ def _run_with_repair(
     else:
         # Loop fell through `attempt < max_attempts`: the budget is spent. One
         # last verify decides whether the final re-run actually fixed it.
-        if max_attempts > 0 and not _verdict(result)["ok"]:
+        stopped = run_ctx is not None and run_ctx.stop is not None
+        if max_attempts > 0 and not stopped and not _verdict(result)["ok"]:
             log_event(session_id, {
                 "type": "repair_aborted",
                 "reason": "max_attempts",
@@ -1241,8 +1319,13 @@ def run_agent(
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
     memory_scope: "MemoryScope | ScopedMemory | None" = None,
+    hooks: RunHooks | None = None,
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
+
+    `hooks` is an optional `core.hooks.RunHooks` with host callbacks for this
+    run (steps, model calls, tool calls). It is code, so it is a kwarg here and
+    never part of `AgentRunConfig` or YAML. See docs/creating-an-agent.md.
 
     `repair` is the optional `agent.repair` config block. When it is None or
     `repair["enabled"]` is false (the default), this is a single agent run with
@@ -1282,10 +1365,12 @@ def run_agent(
         retrieved_guidelines_task_precedence=retrieved_guidelines_task_precedence,
         memory_scope=memory_scope,
     )
-    result = _run_single_attempt(task, **base_kwargs)
-    if not (repair and repair.get("enabled")):
-        return result
-    return _run_with_repair(task, result, repair, base_kwargs)
+    # One RunContext for the whole run; repair attempts share it.
+    with run_scope(RunContext(session_id=session_id, hooks=hooks)):
+        result = _run_single_attempt(task, **base_kwargs)
+        if not (repair and repair.get("enabled")):
+            return result
+        return _run_with_repair(task, result, repair, base_kwargs)
 
 
 SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
@@ -1351,7 +1436,18 @@ def _dispatch_tool_calls(
     parallel_indices = _index_parallel_groups(calls)
     parallel_index_set = {i for idxs in parallel_indices.values() for i in idxs}
 
-    def _dispatch_one(call: ToolCall) -> dict:
+    run_ctx = current_run()
+
+    def _dispatch_one(i: int, call: ToolCall) -> dict:
+        if run_ctx is None:
+            return _dispatch_call(call)
+        with call_scope(CallContext(
+            run=run_ctx, step=step_num, call_index=i, tool_call_id=call.id,
+            invoked_name=call.name, args=call.args,
+        )):
+            return _dispatch_call(call)
+
+    def _dispatch_call(call: ToolCall) -> dict:
         if call.name == DECOMPOSE_TOOL_NAME:
             return decompose(
                 llm, call.args.get("task", default_task),
@@ -1393,7 +1489,7 @@ def _dispatch_tool_calls(
         logger.info("step %d: dispatching tool %s args=%s", step_num, call.name, call.args)
         _emit_tool_started(i, call, None)
         t0 = time.monotonic()
-        results[i] = _dispatch_one(call)
+        results[i] = _dispatch_one(i, call)
         elapsed = time.monotonic() - t0
         logger.info("step %d: tool %s returned ok=%s in %.2fs", step_num, call.name, results[i].get("ok"), elapsed)
 
@@ -1416,7 +1512,7 @@ def _dispatch_tool_calls(
                         step_num, call.name, group_name, call.args)
             _emit_tool_started(i, call, group_name)
             t0 = time.monotonic()
-            results[i] = _dispatch_one(call)
+            results[i] = _dispatch_one(i, call)
             logger.info("step %d: tool %s returned ok=%s in %.2fs",
                         step_num, call.name, results[i].get("ok"), time.monotonic() - t0)
             continue
@@ -1432,7 +1528,10 @@ def _dispatch_tool_calls(
         workers = max(1, min(len(idx_list), max_parallel_spawns))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_idx = {
-                pool.submit(_dispatch_one, calls[i]): i for i in idx_list
+                # A fresh context copy per submit carries the run and lets
+                # each worker set its own CallContext.
+                pool.submit(contextvars.copy_context().run, _dispatch_one, i, calls[i]): i
+                for i in idx_list
             }
             for future in as_completed(future_to_idx):
                 i = future_to_idx[future]

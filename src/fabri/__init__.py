@@ -1,6 +1,7 @@
 from fabri.admin import AdminAuthError, describe_config, memory_summary, render_dashboard, require_admin
 from fabri.config import DEFAULT_CONFIG, load_config
 from fabri.core.agent import AgentProtocolError, run_agent
+from fabri.core.hooks import Reject, RunHooks, Stop
 from fabri.core.llm import (
     AnthropicLLMBackend,
     GeminiLLMBackend,
@@ -66,5 +67,8 @@ __all__ = [
     "render_dashboard",
     "require_admin",
     "run_agent",
+    "RunHooks",
+    "Stop",
+    "Reject",
     "validate",
 ]

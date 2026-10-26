@@ -241,6 +241,57 @@ store = SqliteMemoryStore(
 )
 ```
 
+### Run hooks
+
+A host that embeds fabri can watch or steer one run by passing
+`hooks=RunHooks(...)` to `run_agent`. Hooks are code, so they are a kwarg and
+never part of `agent.yaml` or `AgentRunConfig`. Every field is optional.
+
+| Hook | Called | Return |
+|---|---|---|
+| `before_step(step, messages)` | before each model call, after the budget check | `Stop(text)` ends the run with `text` as the answer, no model call |
+| `after_step(step, response)` | after a step that called the model | `Stop(text)` ends the run |
+| `on_llm_call(kind, response, elapsed_ms)` | after each main-backend call; `kind` is `"step"` or `"structured_retry"` | ignored |
+| `before_tool(call)` | inside `ToolRegistry.invoke`, before the handler | `Reject(reason, result=None)` skips the handler |
+| `after_tool(call, result)` | after the handler | a dict replaces the result |
+| `on_unknown_tool(name, args)` | when a name matches no tool or alias | a dict becomes the result; `None` keeps `unknown tool` |
+
+`call` is a `fabri.tools.run_context.CallContext` with `step`, `call_index`,
+`batch_index`, `tool_call_id`, `invoked_name`, `canonical_name` and `args`.
+Calls inside a `batch` reach the tool hooks one by one with their
+`batch_index`; the batch wrapper itself does not. A run stopped by a hook ends
+with the normal final outcome, skips `response_schema` validation, ends a
+planner run after the current item, and is never repaired.
+
+Example from a host app that ends a turn once its own writes are staged,
+records each model call, and turns unknown `admin_` operations into a soft
+result:
+
+```python
+from fabri import RunHooks, Stop, run_agent
+from fabri.tools.result import tool_ok
+
+def before_step(step, messages):
+    if turn.done():
+        return Stop("Done. Review the changes on the card.")
+    turn.new_step()
+
+def on_llm_call(kind, response, elapsed_ms):
+    usage = response.usage
+    timing.record_llm(f"agent_{kind}", elapsed_ms, usage.input_tokens if usage else 0)
+
+def on_unknown_tool(name, args):
+    if name.startswith("admin_"):
+        return tool_ok({"status": "not_available", "op": name})
+    return None
+
+hooks = RunHooks(before_step=before_step, on_llm_call=on_llm_call, on_unknown_tool=on_unknown_tool)
+result = run_agent(message, llm, tools, None, hooks=hooks, **AgentRunConfig.from_config(config).as_kwargs())
+```
+
+A host that calls `tools.invoke(...)` itself, outside `run_agent`, gets no
+hooks and the same behaviour as before.
+
 ## 6. Worked example: a content-authoring agent for a game project
 
 `ludexel` (a GBA game) wires this framework up as a story/content authoring

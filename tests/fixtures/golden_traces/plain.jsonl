@@ -1,0 +1,24 @@
+{"task": "plain task", "type": "start"}
+{"cold_store": true, "retrieved": 0, "store_count": 0, "strategy": "hybrid", "top_k": 5, "type": "retrieval"}
+{"step": 0, "type": "step_started"}
+{"step": 0, "text": "Calling a few tools.", "type": "thought"}
+{"args": {"x": 1}, "call_index": 0, "name": "echo", "step": 0, "type": "tool_started"}
+{"args": {"x": 2}, "call_index": 1, "name": "echo_alias", "step": 0, "type": "tool_started"}
+{"args": {}, "call_index": 2, "name": "nope", "step": 0, "type": "tool_started"}
+{"args": {"calls": [{"args": {"y": 1}, "name": "echo"}, {"args": {}, "name": "nope2"}]}, "call_index": 3, "name": "batch", "step": 0, "type": "tool_started"}
+{"aliases": ["echo_alias"], "args": {"x": 1}, "call_index": 0, "canonical_name": "echo", "name": "echo", "result": {"ok": true, "result": {"echo": {"x": 1}}}, "step": 0, "type": "tool_call"}
+{"aliases": ["echo_alias"], "args": {"x": 2}, "call_index": 1, "canonical_name": "echo", "name": "echo_alias", "result": {"ok": true, "result": {"echo": {"x": 2}}}, "step": 0, "type": "tool_call"}
+{"args": {}, "call_index": 2, "name": "nope", "result": {"error": "unknown tool: nope", "ok": false}, "step": 0, "type": "tool_call"}
+{"args": {"calls": [{"args": {"y": 1}, "name": "echo"}, {"args": {}, "name": "nope2"}]}, "call_index": 3, "name": "batch", "result": {"ok": true, "result": {"results": [{"ok": true, "result": {"echo": {"y": 1}}}, {"error": "unknown tool: nope2", "ok": false}]}}, "step": 0, "type": "tool_call"}
+{"cost_usd": 0.00045, "elapsed_s": 0, "reason": "tools", "step": 0, "tool_count": 4, "tool_failure": true, "type": "step_finished"}
+{"step": 1, "type": "step_started"}
+{"calls": [{"call_index": 0, "name": "spawn_subagent"}, {"call_index": 1, "name": "spawn_subagent"}], "parallel_group": "g", "step": 1, "type": "parallel_group_started"}
+{"args": {"parallel_group": "g", "task": "a"}, "call_index": 0, "name": "spawn_subagent", "parallel_group": "g", "step": 1, "type": "tool_started"}
+{"args": {"parallel_group": "g", "task": "b"}, "call_index": 1, "name": "spawn_subagent", "parallel_group": "g", "step": 1, "type": "tool_started"}
+{"args": {"parallel_group": "g", "task": "a"}, "call_index": 0, "name": "spawn_subagent", "parallel_group": "g", "result": {"ok": true, "result": {"spawned": "a"}}, "step": 1, "type": "tool_call"}
+{"args": {"parallel_group": "g", "task": "b"}, "call_index": 1, "name": "spawn_subagent", "parallel_group": "g", "result": {"ok": true, "result": {"spawned": "b"}}, "step": 1, "type": "tool_call"}
+{"cost_usd": 0.0009, "elapsed_s": 0, "reason": "tools", "step": 1, "tool_count": 2, "tool_failure": false, "type": "step_finished"}
+{"step": 2, "type": "step_started"}
+{"cost_usd": 0.00135, "elapsed_s": 0, "reason": "final", "step": 2, "type": "step_finished"}
+{"outcome": "success_with_recovery", "text": "all done", "type": "final"}
+{"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "cost_by_model": {"claude-sonnet-4-6": 0.0027}, "cost_usd": 0.0027, "guideline_reuse_rate": null, "guidelines_from_prior_sessions": 0, "guidelines_retrieved": 0, "input_tokens": 600, "max_token_retries": 0, "output_tokens": 60, "provider_transient_retries": 0, "step_count": 3, "subagent_cost_usd": 0.0, "subagent_count": 2, "subagent_failed_count": 0, "subagent_max_subtree_cost_usd": 0.0, "subagent_regret_count": 0, "subagent_successful_count": 2, "total_cost_usd": 0.0027, "type": "usage", "wall_time_s": 0}
