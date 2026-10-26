@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from fabri.core.hooks import Reject
+
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.result import tool_error, tool_ok
+from fabri.tools.run_context import (
+    CallContext,
+    RunContext,
+    batch_entry_call,
+    call_scope,
+    current_call,
+    current_run,
+)
 
 if TYPE_CHECKING:
     from fabri.sandbox import Sandbox
@@ -35,6 +46,9 @@ def is_spawn_tool(name: str, manifest: ToolManifest) -> bool:
 # Nested batches multiply fan-out unpredictably; spawn_subagent + ask_user
 # have side effects that don't belong inside an opaque batch result.
 BATCH_FORBIDDEN_NESTED = frozenset({BATCH_TOOL_NAME, "spawn_subagent", "ask_user"})
+# The loop handles decompose itself and a missing batch manifest is a config
+# problem, so neither name is offered to the host's on_unknown_tool hook.
+_UNKNOWN_HOOK_EXCLUDED = frozenset({BATCH_TOOL_NAME, "decompose"})
 
 
 class ToolRegistry:
@@ -130,19 +144,91 @@ class ToolRegistry:
         return names
 
     def invoke(self, name: str, args: dict) -> dict:
+        """Run one tool call through a fixed pipeline:
+
+        1. ``batch`` is checked as one call, then goes to ``invoke_batch``;
+           each entry re-enters here.
+        2. Resolve the name. Unknown names go to ``hooks.on_unknown_tool``,
+           then to the ``unknown tool`` error.
+        3. Deferred-not-loaded check (slot, empty).
+        4. Ledger dedup lookup (slot, empty).
+        5. ``hooks.before_tool``, which can reject but never approve.
+        6. Approval gate and argument checks (``_check_call``), then the
+           handler.
+        7. Ledger record (slot, empty).
+        8. ``hooks.after_tool``.
+
+        Steps 2-8 read the active RunContext. With none active (a host calling
+        invoke directly) only step 1, the name check, the checks and the
+        handler run, as before run contexts existed."""
         if name == BATCH_TOOL_NAME and BATCH_TOOL_NAME in self.tools:
             # The batch call is checked like any other call (its own approval
             # class, its required arguments) before any inner call runs. Each
             # inner call is then checked on its own when invoke_batch hands it
-            # back to invoke(). The batch row's seconds include its inner calls.
-            name = BATCH_TOOL_NAME
-            run = lambda: self.invoke_batch(args.get("calls") or [])  # noqa: E731
-        else:
-            canonical = self.canonical_name(name)
-            if canonical is None:
-                return tool_error(f"unknown tool: {name}")
-            name = canonical
-            run = None
+            # back to invoke(), where it meets the hooks. The batch row's
+            # seconds include its inner calls.
+            return self._run_handler(
+                BATCH_TOOL_NAME, args, lambda: self.invoke_batch(args.get("calls") or []))
+        run = current_run()
+        hooks = run.hooks if run is not None else None
+        canonical = self.canonical_name(name)
+        if canonical is None:
+            on_unknown = getattr(hooks, "on_unknown_tool", None)
+            if on_unknown is not None and name not in _UNKNOWN_HOOK_EXCLUDED:
+                try:
+                    handled = on_unknown(name, args)
+                except Exception as e:
+                    return tool_error(f"{name}: on_unknown_tool hook raised {type(e).__name__}: {e}")
+                if handled is not None:
+                    return handled
+            return tool_error(f"unknown tool: {name}")
+        if run is None:
+            return self._run_handler(canonical, args)
+        call = self._call_context(run, name, canonical, args)
+        with call_scope(call):
+            # 3. deferred-not-loaded check: slot for deferred tool loading.
+            # 4. ledger dedup lookup: slot for the write ledger.
+            # 5. host before_tool. It can only reject; the approval and
+            #    argument checks still run in _run_handler.
+            before = getattr(hooks, "before_tool", None)
+            result = None
+            if before is not None:
+                try:
+                    verdict = before(call)
+                except Exception as e:
+                    return tool_error(f"{canonical}: before_tool hook raised {type(e).__name__}: {e}")
+                if isinstance(verdict, Reject):
+                    result = verdict.result if verdict.result is not None else tool_error(
+                        f"{canonical}: rejected: {verdict.reason}"
+                    )
+            # 6. approval gate, argument checks and the handler.
+            if result is None:
+                result = self._run_handler(canonical, args)
+                # 7. ledger record: slot for the write ledger.
+            # 8. host after_tool.
+            after = getattr(hooks, "after_tool", None)
+            if after is not None:
+                try:
+                    replaced = after(call, result)
+                except Exception as e:
+                    return tool_error(f"{canonical}: after_tool hook raised {type(e).__name__}: {e}")
+                if isinstance(replaced, dict):
+                    result = replaced
+            return result
+
+    @staticmethod
+    def _call_context(run: RunContext, name: str, canonical: str, args: dict) -> CallContext:
+        """The active CallContext for this call with the resolved name filled in.
+        A tool invoked from inside another tool (no matching context) gets a
+        fresh CallContext that carries only the run."""
+        call = current_call()
+        if call is None or call.invoked_name != name:
+            call = CallContext(run=run, invoked_name=name, args=args)
+        return replace(call, run=run, canonical_name=canonical, args=args)
+
+    def _run_handler(self, name: str, args: dict, run: Callable[[], dict] | None = None) -> dict:
+        """Usage stats, the approval and argument checks (_check_call), then
+        the handler (or ``run`` for a batch)."""
         manifest = self.tools[name]
         stats = self.usage.setdefault(name, {"calls": 0, "failures": 0, "refused": 0, "seconds": 0.0})
         stats["calls"] += 1
@@ -257,7 +343,7 @@ class ToolRegistry:
         if not isinstance(calls, list):
             return tool_error("batch: `calls` must be a list of {name, args} objects")
         results: list[dict] = []
-        for entry in calls:
+        for index, entry in enumerate(calls):
             if not isinstance(entry, dict) or "name" not in entry:
                 results.append(tool_error("batch entry malformed: expected {name, args}"))
                 continue
@@ -268,5 +354,10 @@ class ToolRegistry:
                     f"side-effecting meta-tools are not allowed."
                 ))
                 continue
-            results.append(self.invoke(inner_name, entry.get("args") or {}))
+            inner_args = entry.get("args") or {}
+            if current_run() is None:
+                results.append(self.invoke(inner_name, inner_args))
+                continue
+            with call_scope(batch_entry_call(index, inner_name, inner_args)):
+                results.append(self.invoke(inner_name, inner_args))
         return tool_ok({"results": results})
