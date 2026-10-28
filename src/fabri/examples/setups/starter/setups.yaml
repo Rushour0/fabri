@@ -1,0 +1,23 @@
+# Layer root for `fabri studio --setups-config setups.yaml`.
+root: .
+policy: strict
+layers:
+  - {kind: baseline, path: baseline}
+  - {kind: pack, path: "packs/{pack}"}
+  - {kind: org, path: "companies/{org}"}
+  - {kind: project, path: "companies/{org}/projects/{project}"}
+ui:
+  title: Support setups
+  intro: >-
+    An industry is the kind of business a company runs, and its context and
+    skills reach every role. Roles are the agents every company gets. A company
+    adds its own context and skills, and each project adds more for one piece
+    of work.
+  labels:
+    agent_types: Industries
+    agent_type: Industry
+    workers: Roles
+    worker: Role
+    global_skills: Capabilities
+  tabs: [companies, projects, agents, skills, tools, preview, merged]
+  default_tab: companies

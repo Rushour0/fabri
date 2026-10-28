@@ -1,0 +1,4 @@
+name: urgency
+description: Decide how urgent a ticket is.
+when_to_use: setting priority, outage reports, many customers affected
+types: [triage]

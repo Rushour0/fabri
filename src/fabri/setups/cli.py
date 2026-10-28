@@ -527,10 +527,34 @@ def _add_setups_tools(setup_sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=cmd_setups_tools_connectors)
 
 
+STARTERS = ("starter",)
+
+
+def cmd_setup_init(args: argparse.Namespace) -> None:
+    import importlib.resources
+    import shutil
+
+    target = Path(args.dir)
+    if target.exists() and any(target.iterdir()):
+        print(f"{target} is not empty; pick a new directory", file=sys.stderr)
+        sys.exit(1)
+    source = importlib.resources.files("fabri.examples") / "setups" / args.template
+    with importlib.resources.as_file(source) as src:
+        shutil.copytree(src, target, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".fabri-state"))
+    print(f"wrote the {args.template} setups to {target}")
+    print(f"next: fabri studio --setups-config {target / 'setups.yaml'}")
+
+
 def add_setup_commands(sub: argparse._SubParsersAction, p_tools: argparse.ArgumentParser) -> None:
     p_setup = sub.add_parser("setup", aliases=["setups"], help="Layered setups: show, import, lint and tools")
     setup_sub = p_setup.add_subparsers(dest="setup_command", required=True)
     _add_setups_tools(setup_sub)
+
+    p = setup_sub.add_parser("init", help="Copy a starter setups folder (baseline, a pack, two companies, a project)")
+    p.add_argument("dir", help="New directory to create")
+    p.add_argument("--template", choices=STARTERS, default="starter")
+    p.set_defaults(func=cmd_setup_init)
 
     p = setup_sub.add_parser("show", help="Print the resolved setup with the source layer of every item")
     _layers(p)

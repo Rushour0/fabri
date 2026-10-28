@@ -1,0 +1,4 @@
+name: mobile-sync
+description: Troubleshoot the mobile app not syncing.
+when_to_use: the mobile or Android or iOS app shows old data, duplicates or does not sync
+types: [support]

@@ -1,0 +1,6 @@
+title: Support
+max_steps: 12
+tools: [tickets_search, ticket_get]
+route:
+  description: Questions and problems from customers, by ticket or chat.
+  not_for: Changes to billing records or refunds over the approval limit.

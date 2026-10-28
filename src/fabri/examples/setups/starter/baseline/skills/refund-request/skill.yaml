@@ -1,0 +1,4 @@
+name: refund-request
+description: Handle a refund or credit request.
+when_to_use: the customer asks for money back, a credit or a chargeback
+types: [support]

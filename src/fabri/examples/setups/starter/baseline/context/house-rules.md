@@ -1,0 +1,3 @@
+- Never promise a date the team has not confirmed.
+- Quote the customer's own words when you restate their problem.
+- Ask one question at a time.

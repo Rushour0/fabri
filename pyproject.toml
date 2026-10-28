@@ -90,6 +90,7 @@ include = ["fabri*"]
 # `builtin` manifest_dir token resolves to an empty registry. See tools/examples.
 [tool.setuptools.package-data]
 "fabri.examples.agencies" = ["**/*", "**/.*"]
+"fabri.examples" = ["setups/**/*"]
 "fabri.service.studio_assets" = ["**/*", "**/.*"]
 "fabri.tools.examples" = [
     "*.json",

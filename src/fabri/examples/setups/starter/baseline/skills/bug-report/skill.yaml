@@ -1,0 +1,3 @@
+name: bug-report
+description: Turn a customer's problem into a bug report engineers can act on.
+when_to_use: something is broken, crashes, errors or shows the wrong result

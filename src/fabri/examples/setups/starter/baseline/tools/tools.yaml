@@ -1,0 +1,36 @@
+# The example host is never called while a setup resolves. Point these at your
+# own helpdesk API and set HELPDESK_TOKEN to use them.
+sources:
+  - kind: http
+    name: tickets_search
+    title: Search tickets
+    url: https://helpdesk.example.com/api/tickets
+    method: GET
+    description: Find tickets by text, customer email or status.
+    headers: {Authorization: {env: HELPDESK_TOKEN, prefix: "Bearer "}}
+    input_schema: {type: object, properties: {q: {type: string}, status: {type: string}}}
+  - kind: http
+    name: ticket_get
+    title: Read a ticket
+    url: https://helpdesk.example.com/api/tickets/{id}
+    method: GET
+    description: One ticket with its messages and the customer's plan.
+    headers: {Authorization: {env: HELPDESK_TOKEN, prefix: "Bearer "}}
+    input_schema: {type: object, properties: {id: {type: string}}, required: [id]}
+  - kind: http
+    name: ticket_label
+    title: Label a ticket
+    url: https://helpdesk.example.com/api/tickets/{id}/labels
+    method: POST
+    description: Set the product area and urgency labels on a ticket.
+    headers: {Authorization: {env: HELPDESK_TOKEN, prefix: "Bearer "}}
+    input_schema: {type: object, properties: {id: {type: string}, labels: {type: array, items: {type: string}}}, required: [id, labels]}
+  - kind: http
+    name: ticket_reply
+    title: Reply to a customer
+    url: https://helpdesk.example.com/api/tickets/{id}/reply
+    method: POST
+    description: Send a reply to the customer on a ticket.
+    headers: {Authorization: {env: HELPDESK_TOKEN, prefix: "Bearer "}}
+    input_schema: {type: object, properties: {id: {type: string}, body: {type: string}}, required: [id, body]}
+allow: [tickets_search, ticket_get, ticket_label, ticket_reply]

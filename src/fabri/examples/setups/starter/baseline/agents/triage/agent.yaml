@@ -1,0 +1,6 @@
+title: Triage
+max_steps: 8
+tools: [tickets_search, ticket_get, ticket_label]
+route:
+  description: Sorting new tickets by product area and urgency.
+  not_for: Writing replies to customers.

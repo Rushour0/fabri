@@ -1,0 +1,10 @@
+skill_load: on_demand
+skill_index_top_k: 3
+# What every company gets, and the roles that deliver it.
+global_skills:
+  - name: Answer tickets
+    what: Reply to customer questions and problems by ticket or chat.
+    workers: [support]
+  - name: Sort new tickets
+    what: Label each new ticket with a product area and an urgency.
+    workers: [triage]

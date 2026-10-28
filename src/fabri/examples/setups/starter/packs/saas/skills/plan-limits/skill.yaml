@@ -1,0 +1,4 @@
+name: plan-limits
+description: Explain what each plan includes and what happens at a limit.
+when_to_use: questions about seats, usage limits, upgrades or downgrades
+types: [support]
