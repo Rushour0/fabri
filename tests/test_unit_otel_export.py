@@ -43,7 +43,7 @@ def test_tool_spans_keyed_by_call_index_not_name(monkeypatch):
     """Two concurrent spawn_subagent calls (same tool name) that complete out
     of order must map to their OWN spans. Name-keying would close the wrong
     span and orphan the other; call_index keying is correct."""
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (

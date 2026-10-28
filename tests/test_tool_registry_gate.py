@@ -146,7 +146,7 @@ def test_run_agent_usage_carries_tool_usage(tmp_path):
 def test_otel_root_span_gets_tool_usage_attributes():
     import pytest
 
-    pytest.importorskip("opentelemetry")
+    pytest.importorskip("opentelemetry.sdk")
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter

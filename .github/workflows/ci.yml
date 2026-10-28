@@ -45,7 +45,7 @@ jobs:
         # doesn't pull the multi-GB CUDA torch build.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,sqlite,embeddings]"
+          pip install -e ".[dev,sqlite,embeddings,otel]"
 
       - name: Test
         run: pytest tests/ -q
