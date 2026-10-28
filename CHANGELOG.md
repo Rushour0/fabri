@@ -4,6 +4,41 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.26.0
+
+**Linear installs that keep working, per-source credential grants, and the
+rest of the 0.25.0 follow-ups.**
+
+- Linear installs now refresh. Since April 2026 every Linear OAuth access
+  token expires after 24 hours and comes with a rotating refresh token, and
+  fabri stored only the access token, so a Linear install stopped working a
+  day after it was made. The install store now keeps the refresh token and
+  expiry, and `get_token` swaps in a new access token when the stored one is
+  within 5 minutes of expiring. The refresh holds the database write lock so
+  two servers sharing it never spend the same refresh token. A failed refresh
+  keeps a token that is still live and returns nothing for an expired one.
+  Installs made before this release have no refresh token: reconnect them
+  once.
+- `fabri installs list [--surface slack|github|linear] [--json]` and `fabri
+  installs remove <surface> <id>` read and edit the server's install database
+  offline. Tokens are never printed. Removing an install deletes the stored
+  token; the app stays in the workspace until someone removes it there.
+- The `usage` event and `result["usage"]` carry `tool_usage`: per tool, the
+  calls, failures, refusals and seconds for that run. The OTel exporter sets
+  them on the root span as `fabri.tool_usage.<tool>.<field>`.
+  `ToolRegistry.usage_snapshot()` and `usage_since()` give a run its own
+  share of a shared registry.
+- Tool policies take `credential_grants`, a map from source name patterns to
+  the `provider:handle` refs they may use. A source that names any other ref
+  fails to build, and its handlers resolve through a store that refuses
+  anything outside the grant. Without the key there is no cap.
+  `ScopedCredentialStore` grants now accept fnmatch patterns.
+- setup.yaml `skill_index_top_k` caps the on-demand skill index. Given the
+  task (`build_agent_config(..., task=...)` or `system_prompt(..., task=...)`),
+  the best matching skills get a full line and the rest are listed by name,
+  ranked by embeddings when the extra is installed and by shared words
+  otherwise.
+
 ## 0.25.0
 
 **Approval gates that hold, scoped credentials, and smaller prompts.**
