@@ -34,9 +34,11 @@ function Result({ p }: { p: Preview }) {
   const skillMax = Math.max(0, ...p.onDemand.map((s) => s.score));
   const toolMax = Math.max(0, ...p.tools.map((t) => t.score));
   const shownTools = p.tools.filter((t) => t.shown).length;
-  const toolNote = p.retrieval.enabled
-    ? `${shownTools} of ${p.tools.length} shown to the model: the top ${p.retrieval.topK ?? "?"} plus pinned tools`
-    : `all ${p.tools.length} shown to the model; tool retrieval is off`;
+  const toolNote = !p.retrieval.enabled
+    ? `all ${p.tools.length} shown to the model; tool retrieval is off`
+    : p.ranking === "words"
+      ? `all ${p.tools.length} shown to the model; retrieval needs the embeddings extra and keeps every tool without it`
+      : `${shownTools} of ${p.tools.length} shown to the model: the top ${p.retrieval.topK ?? "?"} plus pinned tools`;
   const fullSkills = p.onDemand.filter((s) => s.full).length;
   return (
     <>
