@@ -4,6 +4,41 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## 0.25.0
+
+**Approval gates that hold, scoped credentials, and smaller prompts.**
+
+First PyPI release since 0.24.0, so it also ships everything listed under
+0.24.1 and 0.24.2 below.
+
+- `ToolRegistry` enforces `always_approve`. Each call goes to
+  `registry.approver(name, args, manifest)` and runs only on a true answer.
+  With no approver, or one that raises, the call is refused and the agent
+  gets an error. Tools that send messages, move money or delete default to
+  this class, so a host that used them without its own gate now needs to set
+  an approver.
+- The registry refuses a call that is missing a required argument or whose
+  arguments are not an object, before the tool runs, and counts calls,
+  failures, refusals and seconds per tool in `registry.usage`.
+- `python` tool sources honor `timeout_s` (default 30). A call past it
+  returns an error; the call itself keeps running in a background thread.
+- Skills: a new `skills_total_chars` budget (default 8000) caps all of a
+  type's always-loaded skills together. An always-loaded skill over its own
+  budget, or past the total, is now listed on demand behind `load_skill`
+  instead of being dropped from the prompt, and the setup warnings say which
+  skill moved and why.
+- `ScopedCredentialStore` wraps any credential store with a list of
+  `provider:handle` grants (`provider:*` for all handles of one provider).
+  Other refs fail with `CredentialScopeError`, so a run built for one
+  workspace cannot read another workspace's token from a shared store. With
+  `audit_path`, or `FABRI_CRED_AUDIT_LOG` for the default store, every lookup
+  appends a JSON line with the provider, handle, actor and result. Secret
+  values are never written.
+- Surface adapters gain `health()`, built from `required_env()`,
+  `outbound_env()` and `install_count()`. `GET /surfaces/health` (admin)
+  lists each registered surface with the env vars it is missing (names
+  only), its install count, and whether it can post results back.
+
 ## 0.24.2
 
 **Dynamic tools, layered setups, scoped memory and Studio sign-in.**
