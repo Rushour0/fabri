@@ -32,6 +32,8 @@ import importlib
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -279,16 +281,29 @@ def _build_python(decl, *, base_dir, policy, transport, store, dry) -> list[Sour
     if not callable(fn):
         raise ToolSourceError(f"python source {name}: {target} is not callable")
 
-    def handler(args: dict) -> dict:
+    timeout = float(decl.get("timeout_s") or 30.0)
+
+    def call(args: dict) -> dict:
         result = fn(dict(args or {}))
         if isinstance(result, dict) and "ok" in result:
             return result
         return tool_ok({"status": "ok", "data": result})
 
+    def handler(args: dict) -> dict:
+        # A thread cannot be killed, so a call past the timeout keeps running
+        # in the background; the agent gets an error and moves on.
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{name}")
+        try:
+            return pool.submit(call, args).result(timeout=timeout)
+        except FuturesTimeout:
+            return tool_error(f"{name}: timed out after {timeout:g}s")
+        finally:
+            pool.shutdown(wait=False)
+
     manifest = ToolManifest(
         name=name, description=str(decl.get("description") or (fn.__doc__ or name).strip().splitlines()[0]),
         command=[], input_schema=dict(decl.get("input_schema") or {"type": "object"}),
-        output_schema={"type": "object"}, timeout_s=float(decl.get("timeout_s") or 30.0),
+        output_schema={"type": "object"}, timeout_s=timeout,
         approval=_approval_for(decl, name, "write"), title=decl.get("title"),
     )
     return [SourceTool(manifest, handler, "python", name)]

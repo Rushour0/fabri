@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -10,6 +11,9 @@ if TYPE_CHECKING:
     from fabri.sandbox import Sandbox
 
 ToolHandler = Callable[[dict], dict]
+# approver(name, args, manifest) -> True to run the call. Asked for every
+# call to a tool whose approval class is `always_approve`.
+Approver = Callable[[str, dict, ToolManifest], bool]
 
 BATCH_TOOL_NAME = "batch"
 # Nested batches multiply fan-out unpredictably; spawn_subagent + ask_user
@@ -23,6 +27,7 @@ class ToolRegistry:
         manifest_dir: Path | list[Path],
         sandbox_root: str | None = None,
         sandbox: "Sandbox | None" = None,
+        approver: Approver | None = None,
     ):
         dirs = [manifest_dir] if isinstance(manifest_dir, Path) else list(manifest_dir)
         self.manifest_dirs = dirs
@@ -45,6 +50,11 @@ class ToolRegistry:
         # Names a tool asked the agent loop to expose mid-run (see
         # request_exposure). Drained by the loop after each tool step.
         self._exposed: list[str] = []
+        # Tools marked `always_approve` run only when the approver says yes.
+        # With no approver they are refused: a human has to be in the loop.
+        self.approver = approver
+        # Per tool: calls, failures, refused (approval or bad args), seconds.
+        self.usage: dict[str, dict[str, float]] = {}
         for manifest_dir in dirs:
             for path in sorted(manifest_dir.glob("*.json")):
                 manifest = ToolManifest.from_file(path)
@@ -107,6 +117,41 @@ class ToolRegistry:
             return tool_error(f"unknown tool: {name}")
         name = canonical
         manifest = self.tools[name]
+        stats = self.usage.setdefault(name, {"calls": 0, "failures": 0, "refused": 0, "seconds": 0.0})
+        stats["calls"] += 1
+        refusal = self._check_call(name, args, manifest)
+        if refusal is not None:
+            stats["refused"] += 1
+            return refusal
+        t0 = time.monotonic()
+        try:
+            result = self._run(name, args, manifest)
+        finally:
+            stats["seconds"] += time.monotonic() - t0
+        if not result.get("ok"):
+            stats["failures"] += 1
+        return result
+
+    def _check_call(self, name: str, args: object, manifest: ToolManifest) -> dict | None:
+        """An error result when the call must not run, else None."""
+        if not isinstance(args, dict):
+            return tool_error(f"{name}: arguments must be a JSON object")
+        missing = [k for k in (manifest.input_schema or {}).get("required") or [] if k not in args]
+        if missing:
+            return tool_error(f"{name}: missing required argument(s): {', '.join(missing)}")
+        if manifest.approval == "always_approve":
+            if self.approver is None:
+                return tool_error(f"{name} needs human approval and no approver is configured; "
+                                  "the call was not made")
+            try:
+                approved = bool(self.approver(name, args, manifest))
+            except Exception as e:  # noqa: BLE001 -- a broken approver means no
+                return tool_error(f"{name}: approval check failed ({type(e).__name__}); the call was not made")
+            if not approved:
+                return tool_error(f"{name}: a human declined this call; it was not made")
+        return None
+
+    def _run(self, name: str, args: dict, manifest: ToolManifest) -> dict:
         if name in self._callables:
             try:
                 return self._callables[name](args)

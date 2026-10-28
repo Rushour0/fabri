@@ -147,7 +147,11 @@ fabri setups tools add connector slack --scope org:acme --name ops_slack --token
 
 `--workspace` uses the credential store ref `<provider>:<workspace>`, which
 fabri resolves from `FABRI_CRED_<PROVIDER>_<WORKSPACE>` or from the Slack and
-Linear install database. Connectors do not reach the service when added; pass
+Linear install database. To keep tenants apart, wrap the store a run gets in
+`ScopedCredentialStore(store, ["slack:acme", "linear:*"])`: any other ref
+fails with `CredentialScopeError`. Pass `audit_path=` (or set
+`FABRI_CRED_AUDIT_LOG` for the default store) to append one JSON line per
+lookup with the provider, handle, actor and result, never the value. Connectors do not reach the service when added; pass
 `--connect` to list the tools of an MCP connector now. A missing token here is
 a warning, not an error: the file is right and the tools build where the
 token is set. The github and linear connectors need `mcp` in `allowed_kinds`.
@@ -155,7 +159,23 @@ token is set. The github and linear connectors need `mcp` in `allowed_kinds`.
 ## Approval classes
 
 Every tool has a class the host's approval gate reads: `read`, `write` or
-`always_approve`. Defaults:
+`always_approve`. `ToolRegistry` enforces `always_approve` itself: each call
+goes to the registry's `approver(name, args, manifest)` callback and runs only
+when it returns true. With no approver set, or one that raises, the call is
+refused and the agent gets an error saying so. `read` and `write` tools are
+left to the host.
+
+```python
+config, registry = build_agent_config(resolved, "chat")
+registry.approver = lambda name, args, manifest: ask_a_human(name, args)
+```
+
+The registry also refuses a call that is missing a required argument before
+it runs, and counts calls, failures, refusals and seconds per tool in
+`registry.usage`. A `python` source call that runs past its `timeout_s`
+(default 30) returns an error; the call keeps running in a background thread.
+
+Defaults:
 
 | Source | read | write | always_approve |
 |---|---|---|---|
