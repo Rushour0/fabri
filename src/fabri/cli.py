@@ -1760,6 +1760,51 @@ def cmd_auth_set_password(args: argparse.Namespace) -> None:
     print(f"password updated for {args.email.strip().lower()}")
 
 
+_INSTALL_KINDS = ("slack", "github", "linear")
+
+
+def _install_stores(args: argparse.Namespace) -> dict:
+    from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
+
+    if args.home_root:
+        db = Path(args.home_root) / "installs.db"
+    elif os.environ.get("FABRI_INSTALL_DB"):
+        db = Path(os.environ["FABRI_INSTALL_DB"])
+    else:
+        db = Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve" / "installs.db"
+    if not db.exists():
+        print(f"no install database at {db}", file=sys.stderr)
+        sys.exit(1)
+    return {"slack": SlackInstallStore(db), "github": GitHubInstallStore(db), "linear": LinearInstallStore(db)}
+
+
+def cmd_installs_list(args: argparse.Namespace) -> None:
+    stores = _install_stores(args)
+    kinds = [args.surface] if args.surface else list(_INSTALL_KINDS)
+    # The stores' list() rows carry no tokens; the id column differs per surface.
+    id_keys = {"slack": ("team_id", "team_name"), "github": ("installation_id", "account_login"),
+               "linear": ("workspace_id", "workspace_name")}
+    rows = [{"surface": kind, **row} for kind in kinds for row in stores[kind].list()]
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        print("no installs")
+        return
+    for row in rows:
+        id_key, name_key = id_keys[row["surface"]]
+        print(f"{row['surface']:<7} {row[id_key]:<24} {row.get(name_key) or ''}")
+
+
+def cmd_installs_remove(args: argparse.Namespace) -> None:
+    stores = _install_stores(args)
+    if not stores[args.surface].delete(args.install_id):
+        print(f"no {args.surface} install {args.install_id}", file=sys.stderr)
+        sys.exit(1)
+    print(f"removed {args.surface} install {args.install_id} and its stored token. "
+          f"The app stays in that workspace until someone removes it there.")
+
+
 def main() -> None:
     auth_config = os.environ.get("FABRI_AUTH_CONFIG") or None
     parser = argparse.ArgumentParser(prog="fabri")
@@ -2241,6 +2286,20 @@ def main() -> None:
         p_cmd.add_argument("--home-root", dest="home_root", default=None,
                            help="The server's --home-root (default: $FABRI_HOME/serve)")
         p_cmd.set_defaults(func=func)
+
+    p_installs = sub.add_parser("installs", help="List or remove Slack, GitHub and Linear workspace installs offline")
+    installs_sub = p_installs.add_subparsers(dest="installs_command", required=True)
+    p_inst_list = installs_sub.add_parser("list", help="List installs (no tokens are printed)")
+    p_inst_list.add_argument("--surface", choices=_INSTALL_KINDS, default=None)
+    p_inst_list.add_argument("--json", action="store_true")
+    p_inst_list.set_defaults(func=cmd_installs_list)
+    p_inst_rm = installs_sub.add_parser("remove", help="Delete one install and its stored token")
+    p_inst_rm.add_argument("surface", choices=_INSTALL_KINDS)
+    p_inst_rm.add_argument("install_id", help="Slack team id, GitHub installation id or Linear workspace id")
+    p_inst_rm.set_defaults(func=cmd_installs_remove)
+    for p_cmd in (p_inst_list, p_inst_rm):
+        p_cmd.add_argument("--home-root", dest="home_root", default=None,
+                           help="The server's --home-root (default: $FABRI_INSTALL_DB, then $FABRI_HOME/serve)")
 
     args = parser.parse_args()
     try:
