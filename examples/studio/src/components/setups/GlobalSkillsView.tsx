@@ -2,12 +2,14 @@ import { useState } from "react";
 import { BASELINE, normGlobalSkills, setupsApi, unlistedWorkers, type GlobalSkill } from "../../lib/setups";
 import { AgentTypesView } from "./AgentTypesView";
 import { Empty, ErrorBox, Loading, useLoad } from "./shared";
+import { useLabel } from "./uiConfig";
 
 export function GlobalSkillsTable({ skills, others, onWorker }: { skills: GlobalSkill[]; others: string[]; onWorker?: (w: string) => void }) {
+  const label = useLabel();
   return (
     <>
       <table className="su-table" aria-label="Global skills">
-        <thead><tr><th scope="col">Global skill</th><th scope="col">What it does</th><th scope="col">Worker</th></tr></thead>
+        <thead><tr><th scope="col">Name</th><th scope="col">What it does</th><th scope="col">{label("worker")}</th></tr></thead>
         <tbody>
           {skills.map((s) => (
             <tr key={s.name}>
@@ -42,18 +44,19 @@ export function GlobalSkillsView() {
     return { skills, others: unlistedWorkers(skills, workers.map((w) => w.name)) };
   }, "global-skills");
   const [worker, setWorker] = useState<string | null>(null);
+  const label = useLabel();
 
   return (
     <div className="su-main su-main--full">
-      <section className="su-card" aria-label="Global skills">
-        <h3 className="su-h3">Global skills</h3>
+      <section className="su-card" aria-label={label("global_skills")}>
+        <h3 className="su-h3">{label("global_skills")}</h3>
         <p className="su-panel__sub">
-          Every agent type gets these. Listed in <code>baseline/setup.yaml</code> under <code>global_skills</code>; each is served by
-          the workers named here.
+          Every {label("agent_type").toLowerCase()} gets these. Listed in <code>baseline/setup.yaml</code> under <code>global_skills</code>; each is served by
+          the {label("workers").toLowerCase()} named here.
         </p>
-        {res.loading && !res.data && <Loading what="global skills" />}
+        {res.loading && !res.data && <Loading what={label("global_skills").toLowerCase()} />}
         {res.error && <ErrorBox message={res.error} onRetry={res.reload} />}
-        {res.data && res.data.skills.length === 0 && <Empty title="No global skills listed">Add a global_skills list to baseline/setup.yaml.</Empty>}
+        {res.data && res.data.skills.length === 0 && <Empty title={`No ${label("global_skills").toLowerCase()} listed`}>Add a <code>global_skills</code> list to <code>baseline/setup.yaml</code>.</Empty>}
         {res.data && res.data.skills.length > 0 && <GlobalSkillsTable skills={res.data.skills} others={res.data.others} onWorker={setWorker} />}
       </section>
       <AgentTypesView key={worker ?? ""} initial={worker} />

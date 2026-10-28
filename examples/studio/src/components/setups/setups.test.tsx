@@ -70,6 +70,15 @@ describe("tools views", () => {
     expect(html).toContain("1-25 of 30");
     expect(html).toContain("Page 1 of 2");
   });
+  it("shows recent call counts when usage is given", () => {
+    const entries = normCatalog([{ name: "ticket_get", approval: "read", layer: "baseline", origin: "declared" }]);
+    const html = renderToStaticMarkup(
+      <CatalogTable entries={entries} scopeId="baseline"
+        usage={{ runs: 2, tools: { ticket_get: { calls: 5, failures: 1, refused: 0, seconds: 1, runs: 2 } } }} />,
+    );
+    expect(html).toContain(">Calls</th>");
+    expect(html).toContain("1 failed");
+  });
   it("renders sync diff and probe output", () => {
     expect(renderToStaticMarkup(<SyncDiffView diff={{ added: ["n"], removed: [], changed: ["c"] }} />)).toContain("Added");
     expect(renderToStaticMarkup(<ProbeView r={{ probed: ["g"], skipped: [{ name: "p", reason: "not a GET" }] }} />)).toContain("not a GET");

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { BASELINE, setupsApi, skillFilesForType, skillTypes, type SetupItem } from "../../lib/setups";
 import { Editor, NewItem } from "./ItemsPanel";
 import { Empty, ErrorBox, LayerBadge, Loading, TabBar, useLoad } from "./shared";
+import { useLabel } from "./uiConfig";
 
 type Sub = "prompt" | "skills";
 
@@ -104,13 +105,14 @@ export function AgentTypesView({ initial = null }: { initial?: string | null }) 
   const list = types.data ?? [];
   const existing = useMemo(() => new Set(list.map((t) => t.name)), [list]);
   const cur = list.find((t) => t.name === sel);
+  const label = useLabel();
 
   return (
     <div className="su-layout">
-      <aside className="su-side" aria-label="Workers">
+      <aside className="su-side" aria-label={label("workers")}>
         <div className="su-tree__head">
-          <h3 className="su-side-title">Workers</h3>
-          <button className="btn" onClick={() => setCreating((v) => !v)} aria-expanded={creating}>+ Worker</button>
+          <h3 className="su-side-title">{label("workers")}</h3>
+          <button className="btn" onClick={() => setCreating((v) => !v)} aria-expanded={creating}>+ {label("worker")}</button>
         </div>
         {creating && (
           <NewItem
@@ -126,9 +128,9 @@ export function AgentTypesView({ initial = null }: { initial?: string | null }) 
             }}
           />
         )}
-        {types.loading && !types.data && <Loading what="workers" />}
+        {types.loading && !types.data && <Loading what={label("workers").toLowerCase()} />}
         {types.error && <ErrorBox message={types.error} onRetry={types.reload} />}
-        {types.data && list.length === 0 && <Empty title="No workers">Create one, for example chat or task_planner.</Empty>}
+        {types.data && list.length === 0 && <Empty title={`No ${label("workers").toLowerCase()}`}>Create one, for example <code>support</code> or <code>triage</code>.</Empty>}
         <ul className="su-cards">
           {list.map((t) => (
             <li key={t.name}>
@@ -141,7 +143,7 @@ export function AgentTypesView({ initial = null }: { initial?: string | null }) 
         </ul>
       </aside>
       <div className="su-main">
-        {!sel && <Empty title="Pick a worker">Open one to edit its prompt and the skills every company inherits.</Empty>}
+        {!sel && <Empty title={`Pick a ${label("worker").toLowerCase()}`}>Open one to edit its prompt and the {label("skills").toLowerCase()} every {label("company").toLowerCase()} inherits.</Empty>}
         {sel && (
           <>
             <div className="su-main__head">

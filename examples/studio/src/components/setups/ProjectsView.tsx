@@ -3,6 +3,7 @@ import { projectScope, type Scope, type ScopeTree } from "../../lib/setups";
 import { CreateForm } from "./ScopeTree";
 import { ItemsPanel } from "./ItemsPanel";
 import { Empty, ErrorBox, Loading, TabBar } from "./shared";
+import { useLabel } from "./uiConfig";
 
 type PTab = "skills" | "context" | "data";
 
@@ -24,15 +25,16 @@ export function ProjectsView({
   onSelect: (s: Scope) => void;
 }) {
   const [tab, setTab] = useState<PTab>("skills");
+  const label = useLabel();
   const [creatingOrg, setCreatingOrg] = useState<string | null>(null);
 
   return (
     <div className="su-layout">
-      <aside className="su-side" aria-label="Projects">
-        <h3 className="su-side-title">Projects</h3>
-        {loading && !tree && <Loading what="projects" />}
+      <aside className="su-side" aria-label={label("projects")}>
+        <h3 className="su-side-title">{label("projects")}</h3>
+        {loading && !tree && <Loading what={label("projects").toLowerCase()} />}
         {error && <ErrorBox message={error} onRetry={onRetry} />}
-        {tree && tree.orgs.length === 0 && <Empty title="No companies yet">Create a company first, then add projects to it.</Empty>}
+        {tree && tree.orgs.length === 0 && <Empty title={`No ${label("companies").toLowerCase()} yet`}>Create a {label("company").toLowerCase()} first, then add {label("projects").toLowerCase()} to it.</Empty>}
         {tree?.orgs.map((o) => (
           <div key={o.name} className="su-group">
             <div className="su-tree__head">
@@ -42,7 +44,7 @@ export function ProjectsView({
             {creatingOrg === o.name && (
               <CreateForm kind="project" org={o.name} onCancel={() => setCreatingOrg(null)} onDone={(s) => { setCreatingOrg(null); onTreeChanged(); onSelect(s); }} />
             )}
-            {o.projects.length === 0 && <p className="su-dim">No projects</p>}
+            {o.projects.length === 0 && <p className="su-dim">No {label("projects").toLowerCase()}</p>}
             <ul className="su-cards">
               {o.projects.map((p) => {
                 const s = projectScope(o.name, p);
@@ -59,7 +61,7 @@ export function ProjectsView({
         ))}
       </aside>
       <div className="su-main">
-        {!selected && <Empty title="Pick a project">Local skills, context and data live here. Global skills come from the agent types.</Empty>}
+        {!selected && <Empty title={`Pick a ${label("project").toLowerCase()}`}>Local {label("skills").toLowerCase()}, context and data live here. {label("global_skills")} come from the {label("agent_types").toLowerCase()}, and {label("company").toLowerCase()} context applies to every {label("project").toLowerCase()}.</Empty>}
         {selected && (
           <>
             <div className="su-main__head">
@@ -68,7 +70,7 @@ export function ProjectsView({
                 label="Project sections"
                 value={tab}
                 onChange={setTab}
-                tabs={[{ id: "skills", label: "Local skills" }, { id: "context", label: "Context" }, { id: "data", label: "Data" }]}
+                tabs={[{ id: "skills", label: `Local ${label("skills").toLowerCase()}` }, { id: "context", label: label("context") }, { id: "data", label: label("data") }]}
               />
             </div>
             <ItemsPanel localFirst key={`${selected.id}|${tab}`} scope={selected} kind={tab} />

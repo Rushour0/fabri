@@ -2,33 +2,43 @@ import { useEffect, useMemo, useState } from "react";
 import {
   allScopes,
   BASELINE,
+  DEFAULT_UI,
   KIND_LABEL,
   KINDS,
   setupsApi,
   type Kind,
   type Scope,
+  type UiConfig,
+  type UiTab,
 } from "../../lib/setups";
 import { CompaniesView } from "./CompaniesView";
 import { GlobalSkillsView } from "./GlobalSkillsView";
 import { OrgTypesView } from "./OrgTypesView";
+import { PreviewView } from "./PreviewView";
 import { ItemsPanel } from "./ItemsPanel";
 import { ProjectsView } from "./ProjectsView";
 import { ResolvedView } from "./ResolvedView";
 import { ScopeTree } from "./ScopeTree";
 import { TabBar, useLoad } from "./shared";
 import { ToolsPanel } from "./ToolsPanel";
+import { UiConfigContext } from "./uiConfig";
 import "./setups.css";
 
-type Mode = "agents" | "skills" | "companies" | "projects" | "tools" | "merged" | "scopes";
+type Mode = UiTab | "scopes";
 
-const BASE_TABS: { id: Mode; label: string }[] = [
-  { id: "agents", label: "Agent types" },
-  { id: "skills", label: "Global skills" },
-  { id: "companies", label: "Companies" },
-  { id: "projects", label: "Projects" },
-  { id: "tools", label: "Tools" },
-  { id: "merged", label: "Merged view" },
-];
+const TAB_LABEL_KEY = {
+  agents: "agent_types",
+  skills: "global_skills",
+  companies: "companies",
+  projects: "projects",
+  tools: "tools",
+  preview: "preview",
+  merged: "merged",
+} as const;
+
+function baseTabs(ui: UiConfig): { id: Mode; label: string }[] {
+  return ui.tabs.map((id) => ({ id, label: ui.labels[TAB_LABEL_KEY[id]] }));
+}
 
 function ScopePicker({ scopes, value, onChange }: { scopes: Scope[]; value: Scope; onChange: (s: Scope) => void }) {
   return (
@@ -87,7 +97,10 @@ function useScopeTree() {
 
 export function SetupsView() {
   const tree = useScopeTree();
-  const [mode, setMode] = useState<Mode>("agents");
+  const uiLoad = useLoad(() => setupsApi.ui(), "ui");
+  const ui = uiLoad.data ?? DEFAULT_UI;
+  const [picked, setMode] = useState<Mode | null>(null);
+  const mode: Mode = picked ?? ui.defaultTab;
   const [advanced, setAdvanced] = useState(false);
   const [project, setProject] = useState<Scope | null>(null);
   const [scope, setScope] = useState<Scope>(BASELINE);
@@ -96,20 +109,19 @@ export function SetupsView() {
 
   // Leaving Advanced while on its tab would strand the view.
   useEffect(() => {
-    if (!advanced && mode === "scopes") setMode("agents");
+    if (!advanced && mode === "scopes") setMode(null);
   }, [advanced, mode]);
 
-  const tabs = advanced ? [...BASE_TABS, { id: "scopes" as Mode, label: "Scopes" }] : BASE_TABS;
+  const base = baseTabs(ui);
+  const tabs = advanced ? [...base, { id: "scopes" as Mode, label: "Scopes" }] : base;
 
   return (
-    <section className="setups" aria-label="Setups">
+    <UiConfigContext.Provider value={ui}>
+    <section className="setups" aria-label={ui.title}>
       <header className="su-head">
         <div>
-          <h2 className="catalog__title">Setups</h2>
-          <p className="catalog__sub">
-            An agent type is the kind of organization served, such as a basketball league or a tennis club. Every type gets the
-            global skills. Each company picks its type. Projects add local skills, context and data.
-          </p>
+          <h2 className="catalog__title">{ui.title}</h2>
+          <p className="catalog__sub">{ui.intro}</p>
         </div>
         <label className="su-adv">
           <input type="checkbox" checked={advanced} onChange={(e) => setAdvanced(e.target.checked)} />
@@ -153,6 +165,11 @@ export function SetupsView() {
             <ToolsPanel key={toolScope.id} scope={toolScope} />
           </div>
         )}
+        {mode === "preview" && (
+          <div className="su-main su-main--full">
+            <PreviewView tree={tree.data} initial={{ org: project?.org, project: project?.project }} />
+          </div>
+        )}
         {mode === "merged" && (
           <div className="su-main su-main--full">
             <ResolvedView tree={tree.data} initial={{ org: project?.org, project: project?.project }} />
@@ -161,5 +178,6 @@ export function SetupsView() {
         {mode === "scopes" && <ScopesMode tree={tree} scope={scope} setScope={setScope} />}
       </div>
     </section>
+    </UiConfigContext.Provider>
   );
 }

@@ -14,6 +14,8 @@ import {
   type SetupItem,
   type SyncDiff,
   type ToolKind,
+  type ToolUsage,
+  type ToolUsageRow,
 } from "../../lib/setups";
 import {
   facet,
@@ -64,16 +66,30 @@ function ToolDetail({ row, colSpan }: { row: ToolRow; colSpan: number }) {
   );
 }
 
-const COLS = 6;
+const COLS = 7;
+
+function UsageCell({ u }: { u?: ToolUsageRow }) {
+  if (!u || u.calls === 0) return <span className="su-dim">-</span>;
+  const bad = u.failures + u.refused;
+  return (
+    <span className={"su-usage" + (bad > 0 ? " su-usage--bad" : "")} title={`${u.calls} calls in ${u.runs} runs, ${u.failures} failed, ${u.refused} refused, ${u.seconds}s total`}>
+      {u.calls}
+      {u.failures > 0 && ` / ${u.failures} failed`}
+      {u.refused > 0 && ` / ${u.refused} refused`}
+    </span>
+  );
+}
 
 export function CatalogTable({
   entries,
   registered = [],
   scopeId = "",
+  usage,
 }: {
   entries: CatalogEntry[];
   registered?: SetupItem[];
   scopeId?: string;
+  usage?: ToolUsage | null;
 }) {
   const [filter, setFilter] = useState<ToolFilter>(NO_FILTER);
   const [size, setSize] = useState<number>(PAGE_SIZES[0]);
@@ -139,6 +155,7 @@ export function CatalogTable({
               <th scope="col">Approval</th>
               <th scope="col">Enabled</th>
               <th scope="col">Layer</th>
+              <th scope="col" title={usage ? `Calls in the last ${usage.runs} runs that reported tool usage` : undefined}>Calls</th>
             </tr>
           </thead>
           <tbody>
@@ -165,6 +182,7 @@ export function CatalogTable({
                     <td><ApprovalBadge approval={r.approval} /></td>
                     <td>{r.enabled ? <span className="su-badge su-badge--on">on</span> : <span className="su-badge su-badge--off">off</span>}</td>
                     <td>{r.layer ? <LayerBadge source={r.layer} inherited={scopeId !== "" && isInherited(r.layer, scopeId)} /> : <span className="su-dim">-</span>}</td>
+                    <td><UsageCell u={usage?.tools[r.name]} /></td>
                   </tr>
                   {isOpen && <ToolDetail row={r} colSpan={COLS} />}
                 </Fragment>
@@ -387,6 +405,7 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
   const ctx = scopeContext(scope);
   const cat = useLoad(() => setupsApi.catalog(ctx.org, ctx.project), scope.id);
   const reg = useLoad(() => setupsApi.items(scope.id, "tools"), scope.id);
+  const usage = useLoad(() => setupsApi.toolUsage(), "tool-usage");
   const [registering, setRegistering] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -519,7 +538,7 @@ export function ToolsPanel({ scope }: { scope: Scope }) {
         {cat.loading && !cat.data && <Loading what="catalog" />}
         {cat.error && <ErrorBox message={cat.error} onRetry={cat.reload} />}
         {cat.data && cat.data.length === 0 && <Empty title="The catalog is empty">Register a tool, or sync sources declared in tools.yaml.</Empty>}
-        {cat.data && cat.data.length > 0 && <CatalogTable entries={cat.data} registered={registered} scopeId={scope.id} />}
+        {cat.data && cat.data.length > 0 && <CatalogTable entries={cat.data} registered={registered} scopeId={scope.id} usage={usage.data} />}
       </section>
     </div>
   );

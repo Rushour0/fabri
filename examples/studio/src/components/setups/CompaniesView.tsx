@@ -14,20 +14,23 @@ import {
   type ScopeTree,
 } from "../../lib/setups";
 import { CreateForm } from "./ScopeTree";
-import { Empty, ErrorBox, Loading, useLoad } from "./shared";
+import { ItemsPanel } from "./ItemsPanel";
+import { useLabel } from "./uiConfig";
+import { Empty, ErrorBox, Loading, TabBar, useLoad } from "./shared";
 
 export function OrgTypeList({ org, types }: { org: string; types: OrgType[] }) {
+  const label = useLabel();
   return (
-    <section className="su-card" aria-label="Agent type for this company">
-      <h3 className="su-h3">Agent type</h3>
+    <section className="su-card" aria-label={`${label("agent_type")} for this ${label("company").toLowerCase()}`}>
+      <h3 className="su-h3">{label("agent_type")}</h3>
       <p className="su-panel__sub">The kind of organization {org} is. Stored in <code>companies/{org}/setup.yaml</code> under <code>packs</code>.</p>
       {types.length === 0 ? (
-        <p className="su-dim">None picked yet, so only the global skills apply.</p>
+        <p className="su-dim">None picked yet, so only the {label("global_skills").toLowerCase()} apply.</p>
       ) : (
         <ul className="su-reslist">
           {types.map((t) => (
             <li key={t.name} className="su-reslist__item">
-              <span><strong>{t.title}</strong> <code>{t.name}</code></span>
+              <span><strong>{t.title}</strong>{t.title !== t.name && <> <code>{t.name}</code></>}</span>
               {t.description && <span className="su-dim">{t.description}</span>}
             </li>
           ))}
@@ -46,6 +49,7 @@ function OrgTypeCard({ org, packs }: { org: string; packs: string[] }) {
 }
 
 function AgentSelection({ org }: { org: string }) {
+  const label = useLabel();
   const scope = orgScope(org);
   const types = useLoad(() => setupsApi.items(BASELINE.id, "agents"), "agent-types");
   const setup = useLoad(() => setupsApi.orgSetup(scope.id), scope.id);
@@ -90,7 +94,7 @@ function AgentSelection({ org }: { org: string }) {
     try {
       const ordered = all.filter((n) => checked.has(n));
       await setupsApi.putOrgSetup(scope.id, setAgentsList(setup.data ?? "", ordered));
-      setNote("Saved. Unchecked types are off for this company.");
+      setNote(`Saved. Unchecked ${label("workers").toLowerCase()} are off for ${org}.`);
       setup.reload();
     } catch (e) {
       setError(errorText(e));
@@ -100,18 +104,18 @@ function AgentSelection({ org }: { org: string }) {
   };
 
   return (
-    <section className="su-card" aria-label="Workers for this company">
-      <h3 className="su-h3">Workers</h3>
-      <p className="su-panel__sub">The workers behind the global skills. Stored in <code>companies/{org}/setup.yaml</code> under <code>agents</code>. Workers left unchecked are off for {org}.</p>
-      {(types.loading || setup.loading) && !setup.data && !types.data && <Loading what="workers" />}
+    <section className="su-card" aria-label={`${label("workers")} for this ${label("company").toLowerCase()}`}>
+      <h3 className="su-h3">{label("workers")}</h3>
+      <p className="su-panel__sub">The agents this {label("company").toLowerCase()} runs. Stored in <code>companies/{org}/setup.yaml</code> under <code>agents</code>. Unchecked ones are off for {org}.</p>
+      {(types.loading || setup.loading) && !setup.data && !types.data && <Loading what={label("workers").toLowerCase()} />}
       {types.error && <ErrorBox message={types.error} onRetry={types.reload} />}
       {setup.error && <ErrorBox message={setup.error} onRetry={setup.reload} />}
-      {types.data && names.length === 0 && <Empty title="No workers defined">Create them under Global skills first.</Empty>}
+      {types.data && names.length === 0 && <Empty title={`No ${label("workers").toLowerCase()} defined`}>Create them under {label("global_skills")} first.</Empty>}
       {types.data && setup.data !== null && (
         <>
-          {implicit && <p className="su-note">No list saved yet, so every worker is on. Save to make this selection explicit.</p>}
+          {implicit && <p className="su-note">No list saved yet, so every {label("worker").toLowerCase()} is on. Save to make this selection explicit.</p>}
           <fieldset className="su-checks">
-            <legend className="su-sr">Workers used by {org}</legend>
+            <legend className="su-sr">{label("workers")} used by {org}</legend>
             {all.map((n) => (
               <label key={n} className="su-check">
                 <input type="checkbox" checked={checked.has(n)} onChange={() => toggle(n)} />
@@ -153,21 +157,23 @@ export function CompaniesView({
 }) {
   const [sel, setSel] = useState<string | null>(initialOrg ?? null);
   const [creating, setCreating] = useState<null | "org" | "project">(null);
+  const [tab, setTab] = useState<"skills" | "context" | "data">("context");
+  const label = useLabel();
   const org = tree?.orgs.find((o) => o.name === sel);
 
   return (
     <div className="su-layout">
       <aside className="su-side" aria-label="Companies">
         <div className="su-tree__head">
-          <h3 className="su-side-title">Companies</h3>
-          <button className="btn" onClick={() => setCreating(creating === "org" ? null : "org")} aria-expanded={creating === "org"}>+ Company</button>
+          <h3 className="su-side-title">{label("companies")}</h3>
+          <button className="btn" onClick={() => setCreating(creating === "org" ? null : "org")} aria-expanded={creating === "org"}>+ {label("company")}</button>
         </div>
         {creating === "org" && (
           <CreateForm kind="org" org={null} onCancel={() => setCreating(null)} onDone={(s) => { setCreating(null); onTreeChanged(); setSel(s.org ?? null); }} />
         )}
         {loading && !tree && <Loading what="companies" />}
         {error && <ErrorBox message={error} onRetry={onRetry} />}
-        {tree && tree.orgs.length === 0 && <Empty title="No companies yet">Create the first one.</Empty>}
+        {tree && tree.orgs.length === 0 && <Empty title={`No ${label("companies").toLowerCase()} yet`}>Create the first one.</Empty>}
         <ul className="su-cards">
           {tree?.orgs.map((o) => (
             <li key={o.name}>
@@ -180,28 +186,40 @@ export function CompaniesView({
         </ul>
       </aside>
       <div className="su-main">
-        {!org && <Empty title="Pick a company">See its agent type, choose its workers and open its projects.</Empty>}
+        {!org && <Empty title={`Pick a ${label("company").toLowerCase()}`}>See its {label("agent_type").toLowerCase()}, its shared context and {label("skills").toLowerCase()}, and open its {label("projects").toLowerCase()}.</Empty>}
         {org && (
           <>
             <div className="su-main__head"><h2 className="su-h2">{org.name}</h2></div>
             <OrgTypeCard key={`type-${org.name}`} org={org.name} packs={org.packs} />
             <AgentSelection key={org.name} org={org.name} />
+            <section className="su-card" aria-label={`${label("company")} context and ${label("skills").toLowerCase()}`}>
+              <div className="su-tree__head">
+                <h3 className="su-h3">Shared with every {label("project").toLowerCase()}</h3>
+                <TabBar
+                  label={`${label("company")} sections`}
+                  value={tab}
+                  onChange={setTab}
+                  tabs={[{ id: "context", label: label("context") }, { id: "skills", label: label("skills") }, { id: "data", label: label("data") }]}
+                />
+              </div>
+              <ItemsPanel localFirst key={`${org.name}|${tab}`} scope={orgScope(org.name)} kind={tab} />
+            </section>
             <section className="su-card" aria-label="Projects">
               <div className="su-tree__head">
-                <h3 className="su-h3">Projects</h3>
-                <button className="btn" onClick={() => setCreating(creating === "project" ? null : "project")} aria-expanded={creating === "project"}>+ Project</button>
+                <h3 className="su-h3">{label("projects")}</h3>
+                <button className="btn" onClick={() => setCreating(creating === "project" ? null : "project")} aria-expanded={creating === "project"}>+ {label("project")}</button>
               </div>
               {creating === "project" && (
                 <CreateForm kind="project" org={org.name} onCancel={() => setCreating(null)} onDone={(s) => { setCreating(null); onTreeChanged(); onOpenProject(s); }} />
               )}
               {org.projects.length === 0 ? (
-                <Empty title="No projects yet">A project holds local skills, context and data for one piece of work.</Empty>
+                <Empty title={`No ${label("projects").toLowerCase()} yet`}>A {label("project").toLowerCase()} holds local {label("skills").toLowerCase()}, context and data for one piece of work.</Empty>
               ) : (
                 <ul className="su-reslist">
                   {org.projects.map((p) => (
                     <li key={p} className="su-reslist__item">
                       <code>{p}</code>
-                      <button className="btn" onClick={() => onOpenProject(projectScope(org.name, p))}>Open project</button>
+                      <button className="btn" onClick={() => onOpenProject(projectScope(org.name, p))}>Open {label("project").toLowerCase()}</button>
                     </li>
                   ))}
                 </ul>

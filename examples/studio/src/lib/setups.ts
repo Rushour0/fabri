@@ -671,7 +671,158 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 const post = <T,>(path: string, body: unknown) =>
   call<T>(path, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
 
+// ---- preview, ui config and tool usage ----
+
+export interface PreviewSkill { name: string; score: number; full: boolean; source: string }
+export interface PreviewTool { name: string; title: string | null; score: number; shown: boolean; approval: string | null }
+export interface Preview {
+  ranking: "embeddings" | "words";
+  skillTopK: number | null;
+  toolTopK: number;
+  always: { name: string; chars: number; source: string }[];
+  onDemand: PreviewSkill[];
+  moved: { name: string; reason: string }[];
+  tools: PreviewTool[];
+  promptChars: number;
+  skillsChars: number;
+  budgets: { prompt_chars: number; skills_total_chars: number; context_chars: number };
+  warnings: string[];
+}
+
+const num = (v: unknown, d = 0): number => (typeof v === "number" && Number.isFinite(v) ? v : d);
+const str = (v: unknown, d = ""): string => (typeof v === "string" ? v : d);
+const arr = (v: unknown): Record<string, unknown>[] =>
+  Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === "object") : [];
+
+export function normPreview(raw: unknown): Preview {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const skills = (r.skills ?? {}) as Record<string, unknown>;
+  const prompt = (r.prompt ?? {}) as Record<string, unknown>;
+  const b = (prompt.budgets ?? {}) as Record<string, unknown>;
+  return {
+    ranking: r.ranking === "embeddings" ? "embeddings" : "words",
+    skillTopK: typeof r.skill_top_k === "number" ? r.skill_top_k : null,
+    toolTopK: num(r.tool_top_k, 6),
+    always: arr(skills.always).map((x) => ({ name: str(x.name), chars: num(x.chars), source: str(x.source) })),
+    onDemand: arr(skills.on_demand).map((x) => ({ name: str(x.name), score: num(x.score), full: x.full === true, source: str(x.source) })),
+    moved: arr(skills.moved).map((x) => ({ name: str(x.name), reason: str(x.reason) })),
+    tools: arr(r.tools).map((x) => ({
+      name: str(x.name),
+      title: typeof x.title === "string" ? x.title : null,
+      score: num(x.score),
+      shown: x.shown === true,
+      approval: typeof x.approval === "string" ? x.approval : null,
+    })),
+    promptChars: num(prompt.chars),
+    skillsChars: num(prompt.skills_chars),
+    budgets: { prompt_chars: num(b.prompt_chars), skills_total_chars: num(b.skills_total_chars), context_chars: num(b.context_chars) },
+    warnings: Array.isArray(r.warnings) ? r.warnings.map(String) : [],
+  };
+}
+
+export const UI_TABS = ["agents", "skills", "companies", "projects", "tools", "preview", "merged"] as const;
+export type UiTab = (typeof UI_TABS)[number];
+export type UiLabelKey =
+  | "agent_type" | "agent_types" | "company" | "companies" | "project" | "projects"
+  | "global_skills" | "skills" | "context" | "data" | "tools" | "merged" | "preview"
+  | "worker" | "workers";
+
+export const DEFAULT_LABELS: Record<UiLabelKey, string> = {
+  agent_type: "Agent type",
+  agent_types: "Agent types",
+  company: "Company",
+  companies: "Companies",
+  project: "Project",
+  projects: "Projects",
+  global_skills: "Global skills",
+  skills: "Skills",
+  context: "Context",
+  data: "Data",
+  tools: "Tools",
+  merged: "Merged view",
+  preview: "Try a task",
+  worker: "Worker",
+  workers: "Workers",
+};
+
+export interface UiConfig {
+  title: string;
+  intro: string;
+  labels: Record<UiLabelKey, string>;
+  tabs: UiTab[];
+  defaultTab: UiTab;
+}
+
+export const DEFAULT_UI: UiConfig = {
+  title: "Setups",
+  intro:
+    "An agent type is the kind of organization served. Workers are the agents every type gets. A company picks its type and adds its own context and skills, and each project adds more for one piece of work.",
+  labels: DEFAULT_LABELS,
+  tabs: [...UI_TABS],
+  defaultTab: "agents",
+};
+
+/** Server `ui:` block over the defaults. Unknown keys and tabs are dropped. */
+export function normUi(raw: unknown): UiConfig {
+  const r = ((raw as Record<string, unknown> | undefined)?.ui ?? {}) as Record<string, unknown>;
+  const labels = { ...DEFAULT_LABELS };
+  const given = (r.labels ?? {}) as Record<string, unknown>;
+  for (const k of Object.keys(DEFAULT_LABELS) as UiLabelKey[]) {
+    if (typeof given[k] === "string" && given[k]) labels[k] = given[k] as string;
+  }
+  const tabs = Array.isArray(r.tabs) ? (r.tabs.filter((t) => (UI_TABS as readonly unknown[]).includes(t)) as UiTab[]) : [];
+  const shown = tabs.length ? tabs : [...UI_TABS];
+  const def = shown.includes(r.default_tab as UiTab) ? (r.default_tab as UiTab) : shown[0];
+  return {
+    title: typeof r.title === "string" && r.title ? r.title : DEFAULT_UI.title,
+    intro: typeof r.intro === "string" && r.intro ? r.intro : DEFAULT_UI.intro,
+    labels,
+    tabs: shown,
+    defaultTab: def,
+  };
+}
+
+export interface ToolUsageRow { calls: number; failures: number; refused: number; seconds: number; runs: number }
+export interface ToolUsage { runs: number; tools: Record<string, ToolUsageRow> }
+
+export function normToolUsage(raw: unknown): ToolUsage {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const tools: Record<string, ToolUsageRow> = {};
+  for (const [name, v] of Object.entries((r.tools ?? {}) as Record<string, unknown>)) {
+    const x = (v ?? {}) as Record<string, unknown>;
+    tools[name] = { calls: num(x.calls), failures: num(x.failures), refused: num(x.refused), seconds: num(x.seconds), runs: num(x.runs) };
+  }
+  return { runs: num(r.runs), tools };
+}
+
 export const setupsApi = {
+  ui: async () => {
+    try {
+      return normUi(await call("/setups/ui"));
+    } catch {
+      return DEFAULT_UI; // older servers have no /setups/ui
+    }
+  },
+  preview: async (q: { org?: string; project?: string; type: string; task: string; skillTopK?: number; toolTopK?: number }) =>
+    normPreview(
+      await call(
+        `/setups/preview${qs({
+          org: q.org,
+          project: q.project,
+          type: q.type,
+          task: q.task,
+          skill_top_k: q.skillTopK ? String(q.skillTopK) : undefined,
+          tool_top_k: q.toolTopK ? String(q.toolTopK) : undefined,
+        })}`,
+      ),
+    ),
+  toolUsage: async () => {
+    try {
+      return normToolUsage(await call("/runs/tool-usage"));
+    } catch {
+      return { runs: 0, tools: {} } as ToolUsage; // no runs store or an older server
+    }
+  },
   scopes: async () => normScopes(await call("/setups/scopes")),
   createScope: (body: { kind: "pack" | "org" | "project"; name: string; org?: string }) => post("/setups/scopes", body),
   items: async (scope: string, kind: Kind) => normItems(await call(`/setups/items${qs({ scope, kind })}`)),

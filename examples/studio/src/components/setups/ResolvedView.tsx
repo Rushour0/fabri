@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { enrichTools, setupsApi, type Resolved, type ResolvedItem, type ScopeTree } from "../../lib/setups";
 import { ApprovalBadge, Empty, ErrorBox, LayerBadge, Loading, useLoad } from "./shared";
+import { useLabel } from "./uiConfig";
 
 const GROUPS: { key: keyof Resolved["groups"]; label: string }[] = [
   { key: "agents", label: "Agent types" },
@@ -37,6 +38,7 @@ export function ResolvedView({ tree, initial }: { tree: ScopeTree | null; initia
   const [org, setOrg] = useState(initial?.org ?? "");
   const [project, setProject] = useState(initial?.project ?? "");
   const [type, setType] = useState("");
+  const label = useLabel();
   const projects = tree?.orgs.find((o) => o.name === org)?.projects ?? [];
   const key = `${org}|${project}|${type}`;
 
@@ -44,6 +46,7 @@ export function ResolvedView({ tree, initial }: { tree: ScopeTree | null; initia
   // Agent type options come from the merged setup without a type picked.
   const types = useLoad(() => setupsApi.resolved(org || undefined, project || undefined), `types|${org}|${project}`);
   const cat = useLoad(() => setupsApi.catalog(org || undefined, project || undefined, type || undefined), `cat|${key}`);
+  const usage = useLoad(() => setupsApi.toolUsage(), "tool-usage");
 
   const typeNames = types.data?.groups.agents.map((a) => a.name) ?? [];
   const tools = res.data ? enrichTools(res.data.tools, cat.data ?? []) : [];
@@ -57,21 +60,21 @@ export function ResolvedView({ tree, initial }: { tree: ScopeTree | null; initia
       </div>
       <div className="su-pickers">
         <div className="su-field">
-          <label className="su-field__label" htmlFor="su-r-org">Company</label>
+          <label className="su-field__label" htmlFor="su-r-org">{label("company")}</label>
           <select id="su-r-org" className="su-input" value={org} onChange={(e) => { setOrg(e.target.value); setProject(""); setType(""); }}>
             <option value="">(none, baseline only)</option>
             {tree?.orgs.map((o) => <option key={o.name} value={o.name}>{o.name}</option>)}
           </select>
         </div>
         <div className="su-field">
-          <label className="su-field__label" htmlFor="su-r-proj">Project</label>
+          <label className="su-field__label" htmlFor="su-r-proj">{label("project")}</label>
           <select id="su-r-proj" className="su-input" value={project} onChange={(e) => setProject(e.target.value)} disabled={!org}>
             <option value="">(none)</option>
             {projects.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
         </div>
         <div className="su-field">
-          <label className="su-field__label" htmlFor="su-r-type">Agent type</label>
+          <label className="su-field__label" htmlFor="su-r-type">{label("worker")}</label>
           <select id="su-r-type" className="su-input" value={type} onChange={(e) => setType(e.target.value)}>
             <option value="">(all types)</option>
             {typeNames.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -108,7 +111,7 @@ export function ResolvedView({ tree, initial }: { tree: ScopeTree | null; initia
             ) : (
               <div className="su-scroll-x">
                 <table className="su-table" aria-label="Resolved tools">
-                  <thead><tr><th scope="col">Title</th><th scope="col">Name</th><th scope="col">Approval</th><th scope="col">Source</th></tr></thead>
+                  <thead><tr><th scope="col">Title</th><th scope="col">Name</th><th scope="col">Approval</th><th scope="col">Source</th><th scope="col">Calls</th></tr></thead>
                   <tbody>
                     {tools.map((t) => (
                       <tr key={t.name}>
@@ -116,6 +119,7 @@ export function ResolvedView({ tree, initial }: { tree: ScopeTree | null; initia
                         <th scope="row"><code>{t.name}</code></th>
                         <td><ApprovalBadge approval={t.approval} /></td>
                         <td>{t.source ? <LayerBadge source={t.source} /> : <span className="su-dim">-</span>}</td>
+                        <td>{usage.data?.tools[t.name] ? <span className="su-usage">{usage.data.tools[t.name].calls}</span> : <span className="su-dim">-</span>}</td>
                       </tr>
                     ))}
                   </tbody>
