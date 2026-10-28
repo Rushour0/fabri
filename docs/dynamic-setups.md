@@ -98,6 +98,13 @@ budget, or one that would push the type past `skills_total_chars`, is listed
 on demand instead, in the order the skills resolve. The setup warnings name
 each skill that moved and why, and `load_skill` still reaches it.
 
+With many on-demand skills the index itself gets long. Set
+`skill_index_top_k: 8` in setup.yaml and pass the task to
+`build_agent_config(..., task=...)`: the 8 skills that best match the task
+get a full index line and the rest are listed by name only. Matching uses
+embeddings when the `embeddings` extra is installed and shared words
+otherwise. Without a task every skill gets a line.
+
 ## Revisions
 
 Each time a skill write changes the skill's files, `put_item` and

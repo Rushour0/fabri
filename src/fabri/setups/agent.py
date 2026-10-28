@@ -30,6 +30,7 @@ def build_agent_config(
     transport: httpx.BaseTransport | None = None,
     store: CredentialStore | None = None,
     dry_run: bool = False,
+    task: str | None = None,
 ) -> tuple[dict[str, Any], ToolRegistry]:
     """Return ``(config, registry)`` for one agent type.
 
@@ -44,7 +45,9 @@ def build_agent_config(
     `registry` holds the type's tools (agent.yaml `tools` plus its skills'
     tools, or every resolved tool when agent.yaml has no `tools` key), plus
     find_tools and describe_tool when `meta_tools` is true, and `load_skill`
-    when the type has on-demand skills.
+    when the type has on-demand skills. Pass `task` so a type with more
+    on-demand skills than setup.yaml `skill_index_top_k` lists only the best
+    matches in full.
     """
     from fabri.config import DEFAULT_CONFIG, _deep_merge, _normalize_llm_roles
 
@@ -55,7 +58,7 @@ def build_agent_config(
     chosen = tool_set.for_type(resolved, agent_type)
     registry = tool_set.registry([t.name for t in chosen], sandbox_root=sandbox_root,
                                  meta_tools=meta_tools and bool(chosen))
-    prompt, warnings = resolved.system_prompt(agent_type)
+    prompt, warnings = resolved.system_prompt(agent_type, task=task)
     has_load_skill = register_load_skill(registry, resolved, agent_type)
 
     cfg = _deep_merge(copy.deepcopy(DEFAULT_CONFIG), dict(base_config or {}))

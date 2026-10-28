@@ -24,6 +24,8 @@ order, for example ``[baseline, pack-a, pack-b, org, project]``.
 """
 from __future__ import annotations
 
+import re
+
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -145,6 +147,23 @@ class ResolvedSetup:
             out[name] = (mode, reason)
         return out
 
+    def rank_skills(self, task: str, names: list[str]) -> list[str]:
+        """`names` ordered by how well each skill's name, description and
+        when_to_use match `task`: embedding similarity when the embeddings
+        extra is installed, else shared-word overlap. Ties keep their order."""
+        texts = {n: " ".join(str(x) for x in (n.replace("-", " "), self.skills[n].get("description"),
+                                               self.skills[n].get("when_to_use")) if x)
+                 for n in names}
+        from fabri.memory.embeddings import embed, embeddings_available
+
+        if embeddings_available():
+            task_vec = embed(task or " ")
+            scores = {n: sum(a * b for a, b in zip(task_vec, embed(texts[n]))) for n in names}
+        else:
+            task_words = set(re.findall(r"[a-z0-9]+", (task or "").lower()))
+            scores = {n: len(task_words & set(re.findall(r"[a-z0-9]+", texts[n].lower()))) for n in names}
+        return sorted(names, key=lambda n: -scores[n])
+
     def on_demand_skills(self, agent_type: str) -> list[str]:
         return [n for n, (mode, _) in self.skill_modes(agent_type).items() if mode == "on_demand"]
 
@@ -187,7 +206,7 @@ class ResolvedSetup:
             names.extend(self.skills[skill].get("tools") or [])
         return list(dict.fromkeys(names))
 
-    def system_prompt(self, agent_type: str, base: str = "") -> tuple[str, list[str]]:
+    def system_prompt(self, agent_type: str, base: str = "", task: str | None = None) -> tuple[str, list[str]]:
         """The type's prompt, then its skills, then its context, inside the
         budgets. A skill over its budget is listed on demand (see
         skill_modes); context is cut
@@ -197,23 +216,33 @@ class ResolvedSetup:
         warnings: list[str] = []
         agent = self.agent(agent_type)
         parts = [p for p in (base.strip(), agent.get("prompt", "").strip()) if p]
-        skill_parts, index_lines = [], []
+        skill_parts, on_demand = [], []
         for name, (mode, reason) in self.skill_modes(agent_type).items():
             if mode == "on_demand":
                 if reason:
                     warnings.append(f"skill {name} moved to on demand: {reason}")
-                index_lines.append(self.skill_index_line(name))
+                on_demand.append(name)
                 continue
             text = (self.skills[name].get("prompt") or "").strip()
             if text:
                 skill_parts.append(f"### {name}\n{text}")
         if skill_parts:
             parts.append("## Skills\n\n" + "\n\n".join(skill_parts))
-        if index_lines:
+        if on_demand:
+            # With a task and more skills than skill_index_top_k, only the
+            # best matches get a full index line; the rest are listed by name.
+            top_k = self.setup.get("skill_index_top_k")
+            rest: list[str] = []
+            if task and isinstance(top_k, int) and len(on_demand) > top_k:
+                ranked = self.rank_skills(task, on_demand)
+                on_demand, rest = ranked[:top_k], ranked[top_k:]
+            index = "\n".join(self.skill_index_line(n) for n in on_demand)
+            if rest:
+                index += "\n\nAlso available to load by name: " + ", ".join(f"`{n}`" for n in rest)
             parts.append("## Skills to load on demand\n\n"
                          "Each skill below holds detailed instructions that are not in this prompt. "
                          "Call `load_skill` with the skill name when a task matches its description, "
-                         "before you act on that task.\n\n" + "\n".join(index_lines))
+                         "before you act on that task.\n\n" + index)
         used, context_parts = 0, []
         for name, item in self.context_for(agent_type).items():
             section = f"### {name}\n{item['text'].strip()}"

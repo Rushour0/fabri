@@ -251,6 +251,9 @@ def validate_setup_yaml(text: str) -> list[str]:
     data = parse_yaml_text(text, "setup.yaml")
     if data.get("skill_load") not in (None, "always", "on_demand"):
         raise SetupError("setup.yaml: skill_load must be always or on_demand")
+    top_k = data.get("skill_index_top_k")
+    if top_k is not None and (not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1):
+        raise SetupError("setup.yaml: skill_index_top_k must be a positive integer")
     budgets = data.get("budgets")
     if budgets is not None:
         if not isinstance(budgets, Mapping):

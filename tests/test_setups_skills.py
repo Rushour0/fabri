@@ -165,3 +165,51 @@ def test_skill_over_its_own_budget_moves_to_on_demand(layer):
     assert "- `grown`" in prompt and warnings[0].startswith("skill grown moved to on demand: prompt is 5 chars")
     config, registry = build_agent_config(resolved, "chat")
     assert "load_skill" in registry.tools and config["setup"]["on_demand_skills"] == ["grown"]
+
+
+def _many_skills(layer):
+    (layer / "setup.yaml").write_text("skill_load: on_demand\nskill_index_top_k: 2\n")
+    skill(layer, "invoices", body="I", when_to_use="billing questions about invoices and refunds")
+    skill(layer, "roster", body="R", when_to_use="adding players to a team roster")
+    skill(layer, "schedule", body="S", when_to_use="building a game schedule for a season")
+    skill(layer, "venues", body="V", when_to_use="booking a field or venue")
+
+
+def test_task_lists_only_the_best_skills_in_full(layer, monkeypatch):
+    import fabri.memory.embeddings as emb
+
+    monkeypatch.setattr(emb, "embeddings_available", lambda: False)  # word-overlap ranking
+    _many_skills(layer)
+    resolved = resolve_setup([("base", layer)])
+    prompt, _ = resolved.system_prompt("chat", task="billing questions about my invoices")
+    assert "- `invoices`" in prompt
+    assert prompt.count("\n- `") == 2
+    tail = prompt.split("Also available to load by name: ")[1]
+    assert tail.count("`") == 4 and "`invoices`" not in tail
+    # every skill stays loadable
+    config, registry = build_agent_config(resolved, "chat", task="refund this invoice")
+    assert set(config["setup"]["on_demand_skills"]) == {"invoices", "roster", "schedule", "venues"}
+
+
+def test_without_task_or_top_k_every_skill_gets_a_line(layer):
+    _many_skills(layer)
+    resolved = resolve_setup([("base", layer)])
+    prompt, _ = resolved.system_prompt("chat")
+    assert prompt.count("\n- `") == 4 and "Also available" not in prompt
+
+
+def test_embedding_ranking_picks_the_matching_skill(layer):
+    from fabri.memory.embeddings import embeddings_available
+
+    if not embeddings_available():
+        pytest.skip("embeddings extra not installed")
+    _many_skills(layer)
+    resolved = resolve_setup([("base", layer)])
+    assert resolved.rank_skills("find a stadium we can rent on saturday", ["invoices", "roster", "schedule", "venues"])[0] == "venues"
+
+
+def test_bad_top_k_is_refused(layer):
+    from fabri.setups.store import validate_setup_yaml
+
+    with pytest.raises(SetupError, match="skill_index_top_k"):
+        validate_setup_yaml("skill_index_top_k: 0\n")
