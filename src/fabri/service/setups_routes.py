@@ -111,6 +111,53 @@ class ApiError(Exception):
         self.reasons = reasons
 
 
+# ---------------------------------------------------------------- ui config
+
+# What a setups config's `ui:` block may set. Studio keeps its own defaults
+# and applies only what is given here.
+UI_LABELS = frozenset({
+    "agent_type", "agent_types", "company", "companies", "project", "projects",
+    "global_skills", "skills", "context", "data", "tools", "merged", "preview", "worker", "workers",
+})
+UI_TABS = ("agents", "skills", "companies", "projects", "tools", "merged", "preview")
+
+
+def check_ui_config(ui: Any) -> dict[str, Any]:
+    """Validate a `ui:` block: `title`, `intro`, `labels` (UI_LABELS keys to
+    strings), `tabs` (an ordered subset of UI_TABS) and `default_tab`."""
+    if ui is None:
+        return {}
+    if not isinstance(ui, Mapping):
+        raise SetupError("ui must be a mapping")
+    unknown = set(ui) - {"title", "intro", "labels", "tabs", "default_tab"}
+    if unknown:
+        raise SetupError(f"ui: unknown keys {sorted(unknown)}")
+    out: dict[str, Any] = {}
+    for key in ("title", "intro"):
+        if key in ui:
+            if not isinstance(ui[key], str) or len(ui[key]) > 600:
+                raise SetupError(f"ui.{key} must be a string of at most 600 characters")
+            out[key] = ui[key]
+    labels = ui.get("labels") or {}
+    if not isinstance(labels, Mapping) or not all(isinstance(v, str) and 0 < len(v) <= 40 for v in labels.values()):
+        raise SetupError("ui.labels must map label keys to strings of 1 to 40 characters")
+    bad = set(labels) - UI_LABELS
+    if bad:
+        raise SetupError(f"ui.labels: unknown keys {sorted(bad)} (known: {sorted(UI_LABELS)})")
+    if labels:
+        out["labels"] = dict(labels)
+    if "tabs" in ui:
+        tabs = ui["tabs"]
+        if not isinstance(tabs, list) or not tabs or any(t not in UI_TABS for t in tabs) or len(set(tabs)) != len(tabs):
+            raise SetupError(f"ui.tabs must be a non-empty list of distinct tabs from {list(UI_TABS)}")
+        out["tabs"] = list(tabs)
+    if "default_tab" in ui:
+        if ui["default_tab"] not in out.get("tabs", UI_TABS):
+            raise SetupError("ui.default_tab must be one of the shown tabs")
+        out["default_tab"] = ui["default_tab"]
+    return out
+
+
 # ---------------------------------------------------------------- scopes
 
 
@@ -249,7 +296,9 @@ class SetupsApi:
         policy: str = "strict",
         transport: Any = None,
         store: Any = None,
+        ui: Mapping[str, Any] | None = None,
     ):
+        self.ui = check_ui_config(ui)
         self.root = Path(root).resolve()
         templates: dict[str, str] = {}
         for item in layers if layers is not None else DEFAULT_LAYERS:
@@ -290,7 +339,7 @@ class SetupsApi:
             config_path = Path(config)
             cfg = read_yaml(config_path)
             base_dir = config_path.resolve().parent
-        unknown = set(cfg) - {"root", "layers", "global_allow", "policy"}
+        unknown = set(cfg) - {"root", "layers", "global_allow", "policy", "ui"}
         if unknown:
             raise SetupError(f"setups config: unknown keys {sorted(unknown)}")
         if root is None:
@@ -304,7 +353,7 @@ class SetupsApi:
         if layers is not None and not isinstance(layers, list):
             raise SetupError("setups config: layers must be a list")
         return cls(root_path, layers=layers, global_allow=cfg.get("global_allow"),
-                   policy=str(cfg.get("policy") or "strict"), **kwargs)
+                   policy=str(cfg.get("policy") or "strict"), ui=cfg.get("ui"), **kwargs)
 
     # ---- paths
 
@@ -397,6 +446,8 @@ class SetupsApi:
             ("DELETE", "/setups/item"): (r.delete_item, True),
             ("POST", "/setups/item/disable"): (r.post_disable, True),
             ("GET", "/setups/resolved"): (r.get_resolved, False),
+            ("GET", "/setups/preview"): (r.get_preview, False),
+            ("GET", "/setups/ui"): (r.get_ui, False),
             ("POST", "/setups/import"): (r.post_import, True),
             ("GET", "/setups/lint"): (r.get_lint, False),
             ("GET", "/setups/agent-types"): (r.get_agent_types, False),
@@ -817,6 +868,78 @@ class SetupsApi:
         if agent_type:
             view["skill_order"] = self._skill_order(resolved, agent_type)
         return 200, view
+
+    def get_ui(self, req: "Request"):
+        return 200, {"ui": self.ui}
+
+    def get_preview(self, req: "Request"):
+        """What one agent type would get for a task: which skills sit in the
+        prompt, which on-demand skills get a full index line, which tools the
+        model is shown, with scores, and how much of each budget is used."""
+        from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, _tool_text
+        from fabri.ranking import rank
+
+        org, project = req.query.get("org") or None, req.query.get("project") or None
+        agent_type = req.query.get("type") or None
+        task = (req.query.get("task") or "").strip()
+        if not agent_type or not task:
+            raise ApiError(400, "type and task are required")
+        scope = self._view_scope(org, project)
+        if scope.kind != "baseline":
+            self._existing(scope)
+        self._check_type_enabled(org, agent_type)
+        setups = self.setups(scope)
+        resolved = setups.resolve()
+        try:
+            resolved.agent(agent_type)
+        except SetupError as exc:
+            raise ApiError(404, str(exc)) from None
+
+        def int_param(key: str, default: int | None) -> int | None:
+            raw = req.query.get(key)
+            if raw in (None, ""):
+                return default
+            try:
+                value = int(raw)
+            except ValueError:
+                raise ApiError(400, f"{key} must be an integer") from None
+            if value < 1:
+                raise ApiError(400, f"{key} must be at least 1")
+            return value
+
+        skill_top_k = int_param("skill_top_k", resolved.setup.get("skill_index_top_k"))
+        tool_top_k = int_param("tool_top_k", DEFAULT_TOOL_TOP_K)
+
+        modes = resolved.skill_modes(agent_type)
+        always = [{"name": n, "chars": len((resolved.skills[n].get("prompt") or "").strip()),
+                   "source": resolved.skills[n].get("source")}
+                  for n, (mode, _) in modes.items() if mode == "always"]
+        moved = [{"name": n, "reason": reason} for n, (mode, reason) in modes.items() if reason]
+        on_demand = [n for n, (mode, _) in modes.items() if mode == "on_demand"]
+        skill_scores, method = resolved.rank_skills_scored(task, on_demand) if on_demand else ([], "words")
+        on_demand_rows = [{"name": n, "score": score, "full": skill_top_k is None or i < skill_top_k,
+                           "source": resolved.skills[n].get("source")}
+                          for i, (n, score) in enumerate(skill_scores)]
+
+        tools = setups.tools()
+        chosen = tools.for_type(resolved, agent_type)
+        tool_scores, tool_method = rank(task, {t.name: _tool_text(t.manifest) for t in chosen}) if chosen else ([], method)
+        by_name = {t.name: t for t in chosen}
+        tool_rows = [{"name": n, "title": by_name[n].manifest.title, "score": score, "shown": i < tool_top_k,
+                      "approval": by_name[n].manifest.approval}
+                     for i, (n, score) in enumerate(tool_scores)]
+
+        prompt, warnings = resolved.system_prompt(agent_type, task=task)
+        budgets = resolved.budgets
+        return 200, {
+            "scope": scope.text, "type": agent_type, "task": task, "ranking": tool_method if chosen else method,
+            "skill_top_k": skill_top_k, "tool_top_k": tool_top_k,
+            "skills": {"always": always, "on_demand": on_demand_rows, "moved": moved},
+            "tools": tool_rows,
+            "prompt": {"chars": len(prompt), "skills_chars": sum(r["chars"] for r in always),
+                       "budgets": {k: budgets[k] for k in ("prompt_chars", "skills_total_chars", "context_chars")}},
+            "warnings": warnings,
+        }
 
     def _view_scope(self, org: str | None, project: str | None) -> Scope:
         if project and not org:

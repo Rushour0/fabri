@@ -288,6 +288,21 @@ class _Handler(BaseHTTPRequestHandler):
             surfaces = getattr(self.service, "surfaces", None)
             self._send_json(200, {"surfaces": [a.health() for a in surfaces or []]})
             return
+        if path in ("/runs/tool-usage", "/runs/tool-usage/"):
+            ok, user_id = self._owner_scope()
+            if not ok:
+                return
+            query = parse_qs(parsed.query)
+            try:
+                limit = int((query.get("limit") or ["200"])[0])
+            except ValueError:
+                limit = 0
+            if not 1 <= limit <= 1000:
+                self._send_json(400, {"error": "limit must be between 1 and 1000"})
+                return
+            agency = (query.get("agency") or [None])[0] or None
+            self._send_json(200, self.service.tool_usage(agency=agency, limit=limit, user_id=user_id))
+            return
         if path in ("/runs", "/runs/"):
             ok, user_id = self._owner_scope()
             if not ok:

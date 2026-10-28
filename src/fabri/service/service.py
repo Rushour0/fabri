@@ -750,6 +750,44 @@ class FabriService:
                 summaries[sid]["status"] = "running"
         return list(summaries.values())
 
+    def tool_usage(
+        self, *, agency: str | None = None, limit: int = 200, user_id: str | None = None,
+    ) -> dict:
+        """Per-tool calls, failures, refusals and seconds summed over the
+        newest `limit` runs, read from each run's final `usage` event."""
+        totals: dict[str, dict[str, float]] = {}
+        counted = 0
+        for run in self.run_store.list_runs(agency=agency, limit=limit, user_id=user_id):
+            trace = self._persisted_trace_path(run["session_id"])
+            if not trace.is_file():
+                continue
+            usage = None
+            with trace.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if '"tool_usage"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if event.get("type") == "usage" and isinstance(event.get("tool_usage"), dict):
+                        usage = event["tool_usage"]
+            if usage is None:
+                continue
+            counted += 1
+            for name, stats in usage.items():
+                if not isinstance(stats, dict):
+                    continue
+                row = totals.setdefault(name, {"calls": 0, "failures": 0, "refused": 0, "seconds": 0.0, "runs": 0})
+                row["runs"] += 1
+                for key in ("calls", "failures", "refused", "seconds"):
+                    value = stats.get(key)
+                    if isinstance(value, (int, float)):
+                        row[key] += value
+        for row in totals.values():
+            row["seconds"] = round(row["seconds"], 3)
+        return {"runs": counted, "tools": dict(sorted(totals.items(), key=lambda kv: -kv[1]["calls"]))}
+
     def list_agencies(self, *, user_id: str | None = None) -> list[dict]:
         """Return per-agency dashboard cost and reuse series, oldest first."""
         return self.run_store.agency_aggregates(user_id=user_id)

@@ -24,8 +24,6 @@ order, for example ``[baseline, pack-a, pack-b, org, project]``.
 """
 from __future__ import annotations
 
-import re
-
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -147,22 +145,22 @@ class ResolvedSetup:
             out[name] = (mode, reason)
         return out
 
-    def rank_skills(self, task: str, names: list[str]) -> list[str]:
-        """`names` ordered by how well each skill's name, description and
-        when_to_use match `task`: embedding similarity when the embeddings
-        extra is installed, else shared-word overlap. Ties keep their order."""
-        texts = {n: " ".join(str(x) for x in (n.replace("-", " "), self.skills[n].get("description"),
-                                               self.skills[n].get("when_to_use")) if x)
-                 for n in names}
-        from fabri.memory.embeddings import embed, embeddings_available
+    def skill_text(self, name: str) -> str:
+        """What ranking reads for a skill: its name, description and when_to_use."""
+        skill = self.skills[name]
+        return " ".join(str(x) for x in (name.replace("-", " "), skill.get("description"),
+                                         skill.get("when_to_use")) if x)
 
-        if embeddings_available():
-            task_vec = embed(task or " ")
-            scores = {n: sum(a * b for a, b in zip(task_vec, embed(texts[n]))) for n in names}
-        else:
-            task_words = set(re.findall(r"[a-z0-9]+", (task or "").lower()))
-            scores = {n: len(task_words & set(re.findall(r"[a-z0-9]+", texts[n].lower()))) for n in names}
-        return sorted(names, key=lambda n: -scores[n])
+    def rank_skills_scored(self, task: str, names: list[str]) -> tuple[list[tuple[str, float]], str]:
+        """`names` best match first with scores, and the ranking method
+        (see fabri.ranking.rank)."""
+        from fabri.ranking import rank
+
+        return rank(task, {n: self.skill_text(n) for n in names})
+
+    def rank_skills(self, task: str, names: list[str]) -> list[str]:
+        """`names` ordered by how well each skill matches `task`."""
+        return [n for n, _ in self.rank_skills_scored(task, names)[0]]
 
     def on_demand_skills(self, agent_type: str) -> list[str]:
         return [n for n, (mode, _) in self.skill_modes(agent_type).items() if mode == "on_demand"]
