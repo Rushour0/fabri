@@ -34,6 +34,9 @@ function Result({ p }: { p: Preview }) {
   const skillMax = Math.max(0, ...p.onDemand.map((s) => s.score));
   const toolMax = Math.max(0, ...p.tools.map((t) => t.score));
   const shownTools = p.tools.filter((t) => t.shown).length;
+  const toolNote = p.retrieval.enabled
+    ? `${shownTools} of ${p.tools.length} shown to the model: the top ${p.retrieval.topK ?? "?"} plus pinned tools`
+    : `all ${p.tools.length} shown to the model; tool retrieval is off`;
   const fullSkills = p.onDemand.filter((s) => s.full).length;
   return (
     <>
@@ -41,9 +44,11 @@ function Result({ p }: { p: Preview }) {
         Ranked by {p.ranking === "embeddings" ? "embedding similarity" : "shared words (install the embeddings extra for semantic ranking)"}.
       </p>
       <div className="su-meters">
-        <Meter label="Prompt" used={p.promptChars} budget={p.budgets.prompt_chars} />
+        <Meter label={`${label("worker")} prompt`} used={p.agentChars} budget={p.budgets.prompt_chars} />
         <Meter label="Always-loaded skills" used={p.skillsChars} budget={p.budgets.skills_total_chars} />
+        <Meter label={label("context")} used={p.contextChars} budget={p.budgets.context_chars} />
       </div>
+      <p className="su-dim">Whole system prompt: {p.promptChars.toLocaleString()} characters.</p>
       {p.warnings.length > 0 && (
         <ul className="su-lint__list" aria-label="Warnings">
           {p.warnings.map((w, i) => (
@@ -89,18 +94,19 @@ function Result({ p }: { p: Preview }) {
         <p className="su-note">Moved to on demand by budget: {p.moved.map((m) => `${m.name} (${m.reason})`).join("; ")}</p>
       )}
       <section aria-label="Tool ranking">
-        <h3 className="su-h3">{label("tools")} <span className="su-dim">{shownTools} of {p.tools.length} shown to the model, top {p.toolTopK}</span></h3>
+        <h3 className="su-h3">{label("tools")} <span className="su-dim">{toolNote}</span></h3>
         {p.tools.length === 0 ? <Empty title="No tools">This {label("worker").toLowerCase()} has no tools in the merged setup.</Empty> : (
           <div className="su-scroll-x">
             <table className="su-table" aria-label="Ranked tools">
-              <thead><tr><th scope="col">#</th><th scope="col">Name</th><th scope="col">Title</th><th scope="col">Approval</th><th scope="col">Score</th><th scope="col">Shown</th></tr></thead>
+              <thead><tr><th scope="col">#</th><th scope="col">Name</th><th scope="col">Title</th><th scope="col">Approval</th><th scope="col">Layer</th><th scope="col">Score</th><th scope="col">Shown</th></tr></thead>
               <tbody>
                 {p.tools.map((t, i) => (
                   <tr key={t.name} className={t.shown ? "" : "su-row--dim"}>
                     <td className="su-num">{i + 1}</td>
-                    <th scope="row"><code>{t.name}</code></th>
+                    <th scope="row"><code>{t.name}</code>{t.pinned && <span className="su-badge su-badge--on su-badge--gap">pinned</span>}</th>
                     <td>{t.title || <span className="su-dim">-</span>}</td>
                     <td>{t.approval ? <ApprovalBadge approval={t.approval} /> : <span className="su-dim">-</span>}</td>
+                    <td>{t.source ? <LayerBadge source={t.source} /> : <span className="su-dim">built in</span>}</td>
                     <td><Score value={t.score} max={toolMax} /></td>
                     <td>{t.shown ? "yes" : <span className="su-dim">find_tools</span>}</td>
                   </tr>
@@ -124,11 +130,13 @@ export function PreviewView({ tree, initial }: { tree: ScopeTree | null; initial
   const [skillTopK, setSkillTopK] = useState("");
   const [toolTopK, setToolTopK] = useState("");
   const [asked, setAsked] = useState<{ key: string; run: () => Promise<Preview> } | null>(null);
+  const [nonce, setNonce] = useState(0);
   const projects = tree?.orgs.find((o) => o.name === org)?.projects ?? [];
   const types = useLoad(() => setupsApi.resolved(org || undefined, project || undefined), `ptypes|${org}|${project}`);
   const typeNames = types.data?.groups.agents.map((a) => a.name) ?? [];
   const pickedType = type || typeNames[0] || "";
-  const result = useLoad(() => (asked ? asked.run() : Promise.resolve(null as unknown as Preview)), asked?.key ?? "none", !!asked);
+  // The nonce makes Rank re-run an unchanged query, so edited setup files show up.
+  const result = useLoad(() => (asked ? asked.run() : Promise.resolve(null as unknown as Preview)), `${asked?.key ?? "none"}|${nonce}`, !!asked);
 
   const submit = () => {
     if (!pickedType || !task.trim()) return;
@@ -141,6 +149,7 @@ export function PreviewView({ tree, initial }: { tree: ScopeTree | null; initial
       toolTopK: Number(toolTopK) || undefined,
     };
     setAsked({ key: JSON.stringify(q), run: () => setupsApi.preview(q) });
+    setNonce((n) => n + 1);
   };
 
   return (
@@ -178,8 +187,8 @@ export function PreviewView({ tree, initial }: { tree: ScopeTree | null; initial
             <input id="su-p-sk" className="su-input" inputMode="numeric" placeholder="setup" value={skillTopK} onChange={(e) => setSkillTopK(e.target.value.replace(/\D/g, ""))} />
           </div>
           <div className="su-field su-field--narrow">
-            <label className="su-field__label" htmlFor="su-p-tk">Tools shown</label>
-            <input id="su-p-tk" className="su-input" inputMode="numeric" placeholder="6" value={toolTopK} onChange={(e) => setToolTopK(e.target.value.replace(/\D/g, ""))} />
+            <label className="su-field__label" htmlFor="su-p-tk">Retrieval top k</label>
+            <input id="su-p-tk" className="su-input" inputMode="numeric" placeholder="all" value={toolTopK} onChange={(e) => setToolTopK(e.target.value.replace(/\D/g, ""))} />
           </div>
         </div>
         <div className="su-field">

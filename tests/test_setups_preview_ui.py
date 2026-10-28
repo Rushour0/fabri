@@ -27,6 +27,9 @@ def starter(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     # Word-overlap ranking keeps the expected order independent of the model.
     monkeypatch.setattr(emb, "embeddings_available", lambda: False)
+    import fabri.orchestrator.retrieval as retrieval
+
+    monkeypatch.setattr(retrieval, "embeddings_available", lambda: False)
     root = tmp_path / "setups"
     shutil.copytree(STARTER, root)
     clear_cache()
@@ -66,14 +69,41 @@ def test_preview_ranks_skills_and_tools(client):
                                             "task": "android app shows duplicates and does not sync"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["ranking"] == "words" and body["skill_top_k"] == 3 and body["tool_top_k"] == 6
+    assert body["ranking"] == "words" and body["skill_top_k"] == 3
     assert {s["name"] for s in body["skills"]["always"]} == {"write-plainly", "acme-voice"}
     on_demand = body["skills"]["on_demand"]
     assert on_demand[0]["name"] == "mobile-sync" and on_demand[0]["full"] is True
     assert [s["full"] for s in on_demand].count(True) == 3
-    assert {t["name"] for t in body["tools"]} == {"tickets_search", "ticket_get", "ticket_reply"}
+    # Retrieval is off by default, so a run shows every tool, meta tools included.
+    assert body["tool_retrieval"]["enabled"] is False
+    names = {t["name"] for t in body["tools"]}
+    assert names == {"tickets_search", "ticket_get", "ticket_reply", "find_tools", "describe_tool", "load_skill"}
     assert all(t["shown"] for t in body["tools"])
-    assert body["prompt"]["chars"] > 0 and body["prompt"]["budgets"]["skills_total_chars"] == 8000
+    layers = {t["name"]: t["source"] for t in body["tools"]}
+    assert layers["ticket_reply"] == "baseline" and layers["load_skill"] is None
+    p = body["prompt"]
+    assert p["agent_chars"] > 0 and p["context_chars"] > 0 and p["chars"] > p["agent_chars"]
+
+
+def test_preview_matches_the_prompt_for_a_skill_top_k_override(client, starter):
+    http, _ = client
+    body = http.get("/setups/preview", params={"org": "acme", "project": "mobile-launch", "type": "support",
+                                               "task": "android app does not sync", "skill_top_k": "1"}).json()
+    full = [s["name"] for s in body["skills"]["on_demand"] if s["full"]]
+    assert full == ["mobile-sync"]
+    layers = [("b", starter / "baseline"), ("p", starter / "packs/saas"), ("o", starter / "companies/acme"),
+              ("j", starter / "companies/acme/projects/mobile-launch")]
+    prompt, _ = resolve_setup(layers).system_prompt("support", task="android app does not sync", skill_top_k=1)
+    assert len(prompt) == body["prompt"]["chars"] and prompt.count("\n- `") == 1
+
+
+def test_preview_with_retrieval_follows_retrieve_tools(client):
+    http, _ = client
+    # Without embeddings retrieve_tools keeps every tool, and so does the preview.
+    body = http.get("/setups/preview", params={"type": "support", "task": "refund", "tool_top_k": "1"}).json()
+    assert body["tool_retrieval"] == {"enabled": True, "top_k": 1, "always_include": sorted(body["tool_retrieval"]["always_include"])}
+    assert all(t["shown"] for t in body["tools"])
+    assert {t["name"] for t in body["tools"] if t["pinned"]} >= {"find_tools", "describe_tool"}
 
 
 def test_preview_validates_input(client):
@@ -81,8 +111,6 @@ def test_preview_validates_input(client):
     assert http.get("/setups/preview", params={"type": "support"}).status_code == 400
     assert http.get("/setups/preview", params={"type": "nope", "task": "x"}).status_code == 404
     assert http.get("/setups/preview", params={"type": "support", "task": "x", "tool_top_k": "0"}).status_code == 400
-    r = http.get("/setups/preview", params={"type": "support", "task": "refund", "tool_top_k": "1"})
-    assert [t["shown"] for t in r.json()["tools"]].count(True) == 1
 
 
 def test_ui_config_is_served(client):
@@ -95,6 +123,7 @@ def test_ui_config_is_served(client):
 @pytest.mark.parametrize("bad", [
     {"labels": {"nope": "x"}}, {"tabs": ["agents", "agents"]}, {"tabs": []}, {"tabs": ["nope"]},
     {"default_tab": "tools", "tabs": ["agents"]}, {"intro": 3}, {"extra": 1}, {"labels": {"company": ""}},
+    {"title": ""}, {"intro": "   "},
 ])
 def test_bad_ui_config_is_refused(bad):
     with pytest.raises(SetupError):
@@ -120,6 +149,21 @@ def test_tool_usage_sums_recent_runs(client, monkeypatch):
     assert body["tools"]["ticket_get"] == {"calls": 3, "failures": 1, "refused": 0, "seconds": 0.75, "runs": 2}
     assert list(body["tools"]) == ["ticket_get", "ticket_reply"]
     assert http.get("/runs/tool-usage", params={"limit": "0"}).status_code == 400
+
+
+def test_tool_usage_reads_only_the_tail_of_long_traces(client, monkeypatch):
+    import fabri.service.service as service_mod
+
+    http, service = client
+    monkeypatch.setattr(service.run_store, "list_runs", lambda **kw: [{"session_id": "long"}])
+    monkeypatch.setattr(service_mod, "TOOL_USAGE_TAIL_BYTES", 4096)
+    trace = service._persisted_trace_path("long")
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    early = json.dumps({"type": "usage", "tool_usage": {"stale": {"calls": 9}}})
+    filler = "\n".join(json.dumps({"type": "thought", "text": "x" * 200}) for _ in range(100))
+    final = json.dumps({"type": "usage", "tool_usage": {"ticket_get": {"calls": 1}}})
+    trace.write_text(f"{early}\n{filler}\n{final}\n")
+    assert list(http.get("/runs/tool-usage").json()["tools"]) == ["ticket_get"]
 
 
 def test_setups_init_copies_the_starter(tmp_path, monkeypatch, capsys):

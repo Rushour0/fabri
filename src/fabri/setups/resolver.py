@@ -204,7 +204,21 @@ class ResolvedSetup:
             names.extend(self.skills[skill].get("tools") or [])
         return list(dict.fromkeys(names))
 
-    def system_prompt(self, agent_type: str, base: str = "", task: str | None = None) -> tuple[str, list[str]]:
+    def split_skill_index(self, names: list[str], task: str | None = None,
+                          top_k: int | None = None) -> tuple[list[str], list[str]]:
+        """``(full, rest)``: on-demand skills that get a full index line and
+        those listed by name only. Only with a task and more skills than the
+        top k (`top_k`, else setup.yaml `skill_index_top_k`) are the best
+        matches picked; otherwise every skill gets a line, in setup order."""
+        if top_k is None:
+            top_k = self.setup.get("skill_index_top_k")
+        if task and isinstance(top_k, int) and len(names) > top_k:
+            ranked = self.rank_skills(task, names)
+            return ranked[:top_k], ranked[top_k:]
+        return list(names), []
+
+    def system_prompt(self, agent_type: str, base: str = "", task: str | None = None,
+                      skill_top_k: int | None = None) -> tuple[str, list[str]]:
         """The type's prompt, then its skills, then its context, inside the
         budgets. A skill over its budget is listed on demand (see
         skill_modes); context is cut
@@ -229,11 +243,7 @@ class ResolvedSetup:
         if on_demand:
             # With a task and more skills than skill_index_top_k, only the
             # best matches get a full index line; the rest are listed by name.
-            top_k = self.setup.get("skill_index_top_k")
-            rest: list[str] = []
-            if task and isinstance(top_k, int) and len(on_demand) > top_k:
-                ranked = self.rank_skills(task, on_demand)
-                on_demand, rest = ranked[:top_k], ranked[top_k:]
+            on_demand, rest = self.split_skill_index(on_demand, task, skill_top_k)
             index = "\n".join(self.skill_index_line(n) for n in on_demand)
             if rest:
                 index += "\n\nAlso available to load by name: " + ", ".join(f"`{n}`" for n in rest)

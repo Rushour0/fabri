@@ -674,17 +674,27 @@ const post = <T,>(path: string, body: unknown) =>
 // ---- preview, ui config and tool usage ----
 
 export interface PreviewSkill { name: string; score: number; full: boolean; source: string }
-export interface PreviewTool { name: string; title: string | null; score: number; shown: boolean; approval: string | null }
+export interface PreviewTool {
+  name: string;
+  title: string | null;
+  score: number;
+  shown: boolean;
+  pinned: boolean;
+  approval: string | null;
+  source: string | null;
+}
 export interface Preview {
   ranking: "embeddings" | "words";
   skillTopK: number | null;
-  toolTopK: number;
+  retrieval: { enabled: boolean; topK: number | null };
   always: { name: string; chars: number; source: string }[];
   onDemand: PreviewSkill[];
   moved: { name: string; reason: string }[];
   tools: PreviewTool[];
   promptChars: number;
+  agentChars: number;
   skillsChars: number;
+  contextChars: number;
   budgets: { prompt_chars: number; skills_total_chars: number; context_chars: number };
   warnings: string[];
 }
@@ -699,10 +709,11 @@ export function normPreview(raw: unknown): Preview {
   const skills = (r.skills ?? {}) as Record<string, unknown>;
   const prompt = (r.prompt ?? {}) as Record<string, unknown>;
   const b = (prompt.budgets ?? {}) as Record<string, unknown>;
+  const tr = (r.tool_retrieval ?? {}) as Record<string, unknown>;
   return {
     ranking: r.ranking === "embeddings" ? "embeddings" : "words",
     skillTopK: typeof r.skill_top_k === "number" ? r.skill_top_k : null,
-    toolTopK: num(r.tool_top_k, 6),
+    retrieval: { enabled: tr.enabled === true, topK: typeof tr.top_k === "number" ? tr.top_k : null },
     always: arr(skills.always).map((x) => ({ name: str(x.name), chars: num(x.chars), source: str(x.source) })),
     onDemand: arr(skills.on_demand).map((x) => ({ name: str(x.name), score: num(x.score), full: x.full === true, source: str(x.source) })),
     moved: arr(skills.moved).map((x) => ({ name: str(x.name), reason: str(x.reason) })),
@@ -711,10 +722,14 @@ export function normPreview(raw: unknown): Preview {
       title: typeof x.title === "string" ? x.title : null,
       score: num(x.score),
       shown: x.shown === true,
+      pinned: x.pinned === true,
       approval: typeof x.approval === "string" ? x.approval : null,
+      source: typeof x.source === "string" ? x.source : null,
     })),
     promptChars: num(prompt.chars),
+    agentChars: num(prompt.agent_chars),
     skillsChars: num(prompt.skills_chars),
+    contextChars: num(prompt.context_chars),
     budgets: { prompt_chars: num(b.prompt_chars), skills_total_chars: num(b.skills_total_chars), context_chars: num(b.context_chars) },
     warnings: Array.isArray(r.warnings) ? r.warnings.map(String) : [],
   };

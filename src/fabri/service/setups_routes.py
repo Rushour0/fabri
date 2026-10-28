@@ -135,8 +135,8 @@ def check_ui_config(ui: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ("title", "intro"):
         if key in ui:
-            if not isinstance(ui[key], str) or len(ui[key]) > 600:
-                raise SetupError(f"ui.{key} must be a string of at most 600 characters")
+            if not isinstance(ui[key], str) or not ui[key].strip() or len(ui[key]) > 600:
+                raise SetupError(f"ui.{key} must be a string of 1 to 600 characters")
             out[key] = ui[key]
     labels = ui.get("labels") or {}
     if not isinstance(labels, Mapping) or not all(isinstance(v, str) and 0 < len(v) <= 40 for v in labels.values()):
@@ -875,9 +875,16 @@ class SetupsApi:
     def get_preview(self, req: "Request"):
         """What one agent type would get for a task: which skills sit in the
         prompt, which on-demand skills get a full index line, which tools the
-        model is shown, with scores, and how much of each budget is used."""
-        from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, _tool_text
+        model is shown, with scores, and how much of each budget is used.
+
+        Skills go through the same split as ResolvedSetup.system_prompt and
+        tools through the same registry and retrieve_tools call as a run built
+        with build_agent_config. Tool retrieval is off by default, and then
+        every tool is shown; `tool_top_k` previews it turned on."""
+        from fabri.memory.embeddings import embeddings_available
+        from fabri.orchestrator.retrieval import _tool_text, retrieve_tools
         from fabri.ranking import rank
+        from fabri.setups.agent import build_agent_config
 
         org, project = req.query.get("org") or None, req.query.get("project") or None
         agent_type = req.query.get("type") or None
@@ -891,14 +898,14 @@ class SetupsApi:
         setups = self.setups(scope)
         resolved = setups.resolve()
         try:
-            resolved.agent(agent_type)
+            agent = resolved.agent(agent_type)
         except SetupError as exc:
             raise ApiError(404, str(exc)) from None
 
-        def int_param(key: str, default: int | None) -> int | None:
+        def int_param(key: str) -> int | None:
             raw = req.query.get(key)
             if raw in (None, ""):
-                return default
+                return None
             try:
                 value = int(raw)
             except ValueError:
@@ -907,36 +914,58 @@ class SetupsApi:
                 raise ApiError(400, f"{key} must be at least 1")
             return value
 
-        skill_top_k = int_param("skill_top_k", resolved.setup.get("skill_index_top_k"))
-        tool_top_k = int_param("tool_top_k", DEFAULT_TOOL_TOP_K)
+        skill_top_k = int_param("skill_top_k")
+        tool_top_k = int_param("tool_top_k")
 
+        # Skills: the same modes and split the prompt uses.
         modes = resolved.skill_modes(agent_type)
         always = [{"name": n, "chars": len((resolved.skills[n].get("prompt") or "").strip()),
                    "source": resolved.skills[n].get("source")}
                   for n, (mode, _) in modes.items() if mode == "always"]
         moved = [{"name": n, "reason": reason} for n, (mode, reason) in modes.items() if reason]
         on_demand = [n for n, (mode, _) in modes.items() if mode == "on_demand"]
-        skill_scores, method = resolved.rank_skills_scored(task, on_demand) if on_demand else ([], "words")
-        on_demand_rows = [{"name": n, "score": score, "full": skill_top_k is None or i < skill_top_k,
-                           "source": resolved.skills[n].get("source")}
-                          for i, (n, score) in enumerate(skill_scores)]
+        full, rest = resolved.split_skill_index(on_demand, task, skill_top_k)
+        scores = dict(resolved.rank_skills_scored(task, on_demand)[0]) if on_demand else {}
+        on_demand_rows = [{"name": n, "score": scores.get(n, 0.0), "full": n in full,
+                           "source": resolved.skills[n].get("source")} for n in [*full, *rest]]
 
+        # Tools: the registry a run gets, then the run's own selection.
         tools = setups.tools()
-        chosen = tools.for_type(resolved, agent_type)
-        tool_scores, tool_method = rank(task, {t.name: _tool_text(t.manifest) for t in chosen}) if chosen else ([], method)
-        by_name = {t.name: t for t in chosen}
-        tool_rows = [{"name": n, "title": by_name[n].manifest.title, "score": score, "shown": i < tool_top_k,
-                      "approval": by_name[n].manifest.approval}
-                     for i, (n, score) in enumerate(tool_scores)]
+        try:
+            config, registry = build_agent_config(resolved, agent_type, tool_set=tools, task=task)
+        except SetupError as exc:
+            raise ApiError(400, str(exc)) from None
+        retrieval = dict(config["tools"].get("retrieval") or {})
+        if tool_top_k is not None:
+            retrieval.update(enabled=True, top_k=tool_top_k)
+        manifests = registry.list()
+        always_include = set(retrieval.get("always_include") or [])
+        if retrieval.get("enabled"):
+            shown = {m.name for m in retrieve_tools(task, registry, top_k=int(retrieval.get("top_k") or 6),
+                                                    always_include=always_include)}
+        else:
+            shown = {m.name for m in manifests}
+        tool_scores, method = rank(task, {m.name: _tool_text(m) for m in manifests}) if manifests else ([], None)
+        by_name = {m.name: m for m in manifests}
+        rows_by_layer = {t.name: t.row() for t in tools.tools.values()}  # meta tools have none
+        tool_rows = [{"name": n, "title": by_name[n].title, "score": score, "shown": n in shown,
+                      "pinned": n in always_include, "approval": by_name[n].approval,
+                      "source": (rows_by_layer.get(n) or {}).get("layer")}
+                     for n, score in tool_scores]
 
-        prompt, warnings = resolved.system_prompt(agent_type, task=task)
+        prompt, warnings = resolved.system_prompt(agent_type, task=task, skill_top_k=skill_top_k)
+        context_chars = sum(len(f"### {n}\n{c['text'].strip()}") for n, c in resolved.context_for(agent_type).items())
         budgets = resolved.budgets
         return 200, {
-            "scope": scope.text, "type": agent_type, "task": task, "ranking": tool_method if chosen else method,
-            "skill_top_k": skill_top_k, "tool_top_k": tool_top_k,
+            "scope": scope.text, "type": agent_type, "task": task,
+            "ranking": "embeddings" if embeddings_available() else "words",
+            "skill_top_k": skill_top_k if skill_top_k is not None else resolved.setup.get("skill_index_top_k"),
+            "tool_retrieval": {"enabled": bool(retrieval.get("enabled")), "top_k": retrieval.get("top_k"),
+                               "always_include": sorted(always_include)},
             "skills": {"always": always, "on_demand": on_demand_rows, "moved": moved},
             "tools": tool_rows,
-            "prompt": {"chars": len(prompt), "skills_chars": sum(r["chars"] for r in always),
+            "prompt": {"chars": len(prompt), "agent_chars": len((agent.get("prompt") or "").strip()),
+                       "skills_chars": sum(r["chars"] for r in always), "context_chars": context_chars,
                        "budgets": {k: budgets[k] for k in ("prompt_chars", "skills_total_chars", "context_chars")}},
             "warnings": warnings,
         }

@@ -31,20 +31,23 @@ describe("preview", () => {
     const p = normPreview({
       ranking: "embeddings",
       skill_top_k: 2,
-      tool_top_k: 6,
+      tool_retrieval: { enabled: false, top_k: 6, always_include: [] },
       skills: {
         always: [{ name: "voice", chars: 70, source: "acme" }],
         on_demand: [{ name: "sync", score: 0.61, full: true, source: "mobile" }, { name: "refund", score: 0.1, full: false }],
         moved: [],
       },
-      tools: [{ name: "ticket_get", title: "Read a ticket", score: 0.5, shown: true, approval: "read" }],
-      prompt: { chars: 1200, skills_chars: 70, budgets: { prompt_chars: 12000, skills_total_chars: 8000, context_chars: 6000 } },
+      tools: [{ name: "ticket_get", title: "Read a ticket", score: 0.5, shown: true, pinned: false, approval: "read", source: "baseline" }],
+      prompt: { chars: 1200, agent_chars: 300, skills_chars: 70, context_chars: 200, budgets: { prompt_chars: 12000, skills_total_chars: 8000, context_chars: 6000 } },
       warnings: [],
     });
     expect(p.ranking).toBe("embeddings");
     expect(p.onDemand.map((s) => s.full)).toEqual([true, false]);
     expect(p.tools[0].approval).toBe("read");
     expect(p.budgets.skills_total_chars).toBe(8000);
+    expect(p.retrieval.enabled).toBe(false);
+    expect(p.tools[0].source).toBe("baseline");
+    expect(p.agentChars).toBe(300);
   });
   it("survives an empty body", () => {
     const p = normPreview({});

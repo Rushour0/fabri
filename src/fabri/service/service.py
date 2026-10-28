@@ -103,6 +103,22 @@ class PersistedRunUnavailableError(RuntimeError):
     """A known persisted run cannot be reconstructed from its trace."""
 
 
+# The usage event is one of the last lines of a trace; reading only the tail
+# keeps /runs/tool-usage cheap however long the runs were.
+TOOL_USAGE_TAIL_BYTES = 256 * 1024
+
+
+def _trace_tail_lines(path: Path, limit: int = TOOL_USAGE_TAIL_BYTES) -> list[str]:
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - limit))
+        data = f.read(limit)
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    # A cut first line is a fragment, never a whole event.
+    return lines[1:] if size > limit else lines
+
+
 class FabriService:
     """Self-contained instance that spawns agents from one template config.
 
@@ -762,16 +778,15 @@ class FabriService:
             if not trace.is_file():
                 continue
             usage = None
-            with trace.open(encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if '"tool_usage"' not in line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if event.get("type") == "usage" and isinstance(event.get("tool_usage"), dict):
-                        usage = event["tool_usage"]
+            for line in _trace_tail_lines(trace):
+                if '"tool_usage"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "usage" and isinstance(event.get("tool_usage"), dict):
+                    usage = event["tool_usage"]
             if usage is None:
                 continue
             counted += 1
