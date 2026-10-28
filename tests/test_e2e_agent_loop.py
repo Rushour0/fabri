@@ -281,7 +281,10 @@ def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
         "subagent_count", "subagent_successful_count", "subagent_failed_count",
         "subagent_max_subtree_cost_usd", "subagent_regret_count",
         "max_token_retries", "provider_transient_retries",
+        # Per-tool calls, failures, refusals and seconds for this run.
+        "tool_usage",
     }
+    assert usage["tool_usage"] == {}  # the scripted run calls no tools
     assert usage["step_count"] == 1
     assert usage["wall_time_s"] >= 0
     # Scripted backend leaves LLMResponse.usage=None, so token totals stay 0 and

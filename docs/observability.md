@@ -86,6 +86,9 @@ force-flushes over OTLP:
 - Thoughts, narration, the M3 `retrieval` event, errors, and cost/usage ride as
   span events / attributes — they export for free because the exporter just
   consumes whatever is in the trace.
+- The run's per-tool counts from the `usage` event land on the root span as
+  `fabri.tool_usage.<tool>.calls`, `.failures`, `.refused` (approval or bad
+  arguments) and `.seconds`. The same numbers are in `result["usage"]["tool_usage"]`.
 - Sub-agent traces nest best-effort (parsed from a spawn tool-call's result
   payload); a child that can't be resolved is skipped.
 

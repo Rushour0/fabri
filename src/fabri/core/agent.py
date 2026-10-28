@@ -365,6 +365,7 @@ def _run_single_attempt(
     subagent_cost_total = [0.0]
     step_count = 0
     run_t0 = time.monotonic()
+    tool_usage_t0 = tools.usage_snapshot() if hasattr(tools, "usage_snapshot") else None
 
     def _accumulate(resp_usage: LLMUsage | None) -> None:
         if resp_usage is None:
@@ -1061,6 +1062,9 @@ def _run_single_attempt(
         "subagent_failed_count": subagent_stats["failed_count"],
         "subagent_max_subtree_cost_usd": subagent_stats["max_subtree_cost_usd"],
         "subagent_regret_count": subagent_stats["regret_count"],
+        # Per tool for this run: calls, failures, refused (approval or bad
+        # args) and seconds. Empty when the registry does not count usage.
+        "tool_usage": tools.usage_since(tool_usage_t0) if tool_usage_t0 is not None else {},
     }
     log_event(session_id, {"type": EventType.USAGE.value, **usage_dict})
 

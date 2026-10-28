@@ -280,6 +280,12 @@ def _set_usage_attrs(root, ev: dict) -> None:
             # post_run_usage adds to totals; expose both under a source-tagged key.
             attr = f"fabri.usage.{key}" if ev.get("type") == "usage" else f"fabri.post_usage.{key}"
             root.set_attribute(attr, val)
+    tool_usage = ev.get("tool_usage")
+    if isinstance(tool_usage, dict):
+        for name, stats in tool_usage.items():
+            for key in ("calls", "failures", "refused", "seconds"):
+                if isinstance(stats, dict) and stats.get(key) is not None:
+                    root.set_attribute(f"fabri.tool_usage.{name}.{key}", stats[key])
 
 
 def _event_attrs(ev: dict) -> dict:

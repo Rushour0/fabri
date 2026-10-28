@@ -132,6 +132,22 @@ class ToolRegistry:
             stats["failures"] += 1
         return result
 
+    def usage_snapshot(self) -> dict[str, dict[str, float]]:
+        return {name: dict(stats) for name, stats in self.usage.items()}
+
+    def usage_since(self, snapshot: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+        """Usage added after `snapshot` (from usage_snapshot), for tools that
+        were called. A registry shared by several runs reports each run's own
+        share this way."""
+        out = {}
+        for name, stats in self.usage.items():
+            before = snapshot.get(name, {})
+            delta = {k: v - before.get(k, 0) for k, v in stats.items()}
+            if delta["calls"]:
+                delta["seconds"] = round(delta["seconds"], 3)
+                out[name] = delta
+        return out
+
     def _check_call(self, name: str, args: object, manifest: ToolManifest) -> dict | None:
         """An error result when the call must not run, else None."""
         if not isinstance(args, dict):

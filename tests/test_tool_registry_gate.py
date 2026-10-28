@@ -113,3 +113,55 @@ def test_python_source_times_out():
         assert m.timeout_s == 0.2
     finally:
         del sys.modules[module.__name__]
+
+
+def test_usage_since_reports_only_this_runs_share():
+    reg, _ = registry()
+    reg.invoke("list_items", {})
+    before = reg.usage_snapshot()
+    reg.invoke("list_items", {})
+    reg.invoke("flaky", {})
+    delta = reg.usage_since(before)
+    assert set(delta) == {"list_items", "flaky"}
+    assert delta["list_items"]["calls"] == 1 and delta["flaky"]["failures"] == 1
+
+
+def test_run_agent_usage_carries_tool_usage(tmp_path):
+    from fabri.core.agent import run_agent
+    from fabri.core.llm import LLMResponse, ScriptedLLMBackend, ToolCall
+
+    reg, _ = registry()
+    script = [LLMResponse(tool_calls=[ToolCall(name="list_items", args={}, id="c1"),
+                                      ToolCall(name="send_email", args={"to": "a@b.c"}, id="c2")]),
+              LLMResponse(final_text="done")]
+    from fabri.memory.embedded_store import SqliteMemoryStore
+
+    store = SqliteMemoryStore(path=tmp_path / "m.db", collection="gate")
+    result = run_agent("list then email", ScriptedLLMBackend(script), reg, store)
+    usage = result["usage"]["tool_usage"]
+    assert usage["list_items"]["calls"] == 1
+    assert usage["send_email"] == {"calls": 1, "failures": 0, "refused": 1, "seconds": 0}
+
+
+def test_otel_root_span_gets_tool_usage_attributes():
+    import pytest
+
+    pytest.importorskip("opentelemetry")
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from fabri.observability import otel as otelmod
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    events = [
+        {"ts": 100.0, "type": "start", "task": "t"},
+        {"ts": 101.0, "type": "usage", "cost_usd": 0.0,
+         "tool_usage": {"send_email": {"calls": 2, "failures": 0, "refused": 2, "seconds": 0.0}}},
+        {"ts": 102.0, "type": "final", "outcome": "success"},
+    ]
+    otelmod._emit_trace_spans(events, provider.get_tracer("test"), "sid")
+    [root] = [s for s in exporter.get_finished_spans() if s.name == "fabri.agent_run"]
+    assert root.attributes["fabri.tool_usage.send_email.refused"] == 2
