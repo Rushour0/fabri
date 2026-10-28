@@ -19,6 +19,28 @@ policy: strict                   # tool registration policy: strict | permissive
 
 An org lists its packs in its own `setup.yaml` under `packs:`.
 
+`fabri setups init DIR` writes a starter folder with this config: a baseline
+with two workers (`support`, `triage`), shared skills and four helpdesk tools,
+a `saas` pack, two companies with their own context and skills, and one
+project. Run `fabri studio --setups-config DIR/setups.yaml` to open it.
+
+The config can also carry a `ui:` block that Studio reads from `GET
+/setups/ui`, so one Studio build fits different products:
+
+```yaml
+ui:
+  title: Support setups
+  intro: One paragraph under the title.
+  labels:                    # any of: agent_type(s), worker(s), company/companies,
+    agent_types: Industries  # project(s), global_skills, skills, context, data,
+    workers: Roles           # tools, merged, preview
+  tabs: [companies, projects, agents, skills, tools, preview, merged]   # order and subset
+  default_tab: companies
+```
+
+Unknown keys, unknown labels and unknown tabs are refused when the server
+starts.
+
 Every route requires the service's existing auth. Writes need the `admin` role. Concretely:
 
 - Reads: a Studio session (when `auth.enabled`), or `Authorization: Bearer $FABRI_SERVICE_TOKEN` (or the admin token). With none of these configured the API is open, like the rest of an un-authed `fabri serve`.
@@ -56,6 +78,9 @@ auth:
 | `DELETE /setups/item?scope=S&kind=K&name=N` | | `204` |
 | `POST /setups/item/disable` | `{scope, kind, name, disabled: bool}` | `{ok}` |
 | `GET /setups/resolved?org=&project=&type=` | | the merged setup, each item tagged with its source layer, the resolved tool set, and the route options |
+| `GET /setups/preview?org=&project=&type=&task=&skill_top_k=&tool_top_k=` | | for one agent type and task: always-loaded skills with sizes, on-demand skills ranked with scores and whether each gets a full index line, tools ranked with scores and whether the model is shown them, prompt size against the budgets, and the ranking method (`embeddings` or `words`) |
+| `GET /setups/ui` | | the config's `ui:` block, or `{}` |
+| `GET /runs/tool-usage?limit=&agency=` | | per-tool calls, failures, refusals, seconds and run count summed over the newest `limit` runs (default 200) that reported tool usage |
 | `POST /setups/import` | `{scope, format: skill-md\|fabri, files: {path: text}, dry_run}` | `{created, updated, skipped, invalid}` |
 | `GET /setups/lint?scope=S` | | `[{severity, kind, name, message}]` |
 | `GET /tools/catalog?org=&project=&type=` | | catalog entries: name, alias, title, description, approval, source, endpoint, params, options |

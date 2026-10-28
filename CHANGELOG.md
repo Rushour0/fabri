@@ -4,6 +4,29 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## Unreleased
+
+**See what an agent gets for a task, and fit Studio to your product.**
+
+- `GET /setups/preview` takes an agent type and a task and returns what that
+  agent would get: always-loaded skills with their sizes, on-demand skills in
+  rank order with scores and whether each gets a full index line, tools in
+  rank order with scores and whether the model is shown them, and prompt size
+  against the budgets. Skills and tools share one ranker, `fabri.ranking`,
+  which uses embeddings when the extra is installed and shared words
+  otherwise.
+- `GET /runs/tool-usage` sums the per-tool `tool_usage` of recent runs.
+- A setups config can carry a `ui:` block (title, intro, labels, tabs and
+  default tab), served at `GET /setups/ui` and validated at startup.
+- `fabri setups init DIR` writes a starter setups folder: a support desk
+  with two workers, shared skills, four helpdesk tools, a `saas` pack, two
+  companies and one project. It lints with no errors or warnings.
+- Studio: a "Try a task" tab shows the preview with budget meters and ranked
+  skills and tools. Companies get Context, Skills and Data tabs for what every
+  project shares. Tool tables show recent call, failure and refusal counts.
+  Every Setups label and the tab order come from the `ui:` block, and the
+  copy no longer names one product's domain.
+
 ## 0.26.0
 
 **Linear installs that keep working, per-source credential grants, and the
