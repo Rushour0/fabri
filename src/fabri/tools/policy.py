@@ -11,6 +11,7 @@ never widen it.
     python_modules: [myapp.tools]    # module prefixes for python callables
     dry_run_header: {name: X-Dry-Run, value: "1"}
     approval_floor: {"*": write, "crm_*": always_approve}   # raise approval classes, never lower
+    credential_grants: {"slack*": ["slack:acme"], "crm": ["crm:*"]}   # secret refs per source; omit = no cap
 
 A policy file can also be a bare list of names, which sets `allow` only.
 """
@@ -27,7 +28,7 @@ import yaml
 
 SOURCE_KINDS: tuple[str, ...] = ("openapi", "mcp", "http", "python")
 _POLICY_KEYS = {"allow", "allowed_kinds", "allowed_hosts", "allow_delete", "python_modules", "dry_run_header",
-                "approval_floor"}
+                "approval_floor", "credential_grants"}
 
 
 class PolicyError(ValueError):
@@ -45,6 +46,9 @@ class ToolPolicy:
     dry_run_header: Mapping[str, Any] | str | None = field(default=None, hash=False, compare=False)
     # (pattern, class) pairs; a matching tool gets at least that class.
     approval_floor: tuple[tuple[str, str], ...] = ()
+    # (source name pattern, granted secret ref patterns) pairs. None = any
+    # ref; otherwise a source may only use refs a matching pattern grants.
+    credential_grants: tuple[tuple[str, tuple[str, ...]], ...] | None = None
 
     @classmethod
     def permissive(cls, allow: Iterable[str] | None = None) -> "ToolPolicy":
@@ -88,7 +92,18 @@ class ToolPolicy:
             except ApprovalError as exc:
                 raise PolicyError(f"approval_floor: {exc}") from None
 
+        grants = base.credential_grants
+        if "credential_grants" in data:
+            raw = data["credential_grants"]
+            if raw is None:
+                grants = None
+            elif not isinstance(raw, Mapping) or not all(isinstance(v, list) for v in raw.values()):
+                raise PolicyError("credential_grants must map source name patterns to lists of provider:handle refs")
+            else:
+                grants = tuple((str(k), tuple(str(r) for r in v)) for k, v in raw.items())
+
         return cls(
+            credential_grants=grants,
             allow=tup("allow", base.allow),
             allowed_kinds=tuple(kinds or ()),
             allowed_hosts=tup("allowed_hosts", base.allowed_hosts),
@@ -128,6 +143,21 @@ class ToolPolicy:
             if any(fnmatch.fnmatchcase(n, pattern) for n in (name, *aliases)):
                 found = value if found is None else stricter(found, value)
         return found
+
+    def grants_for(self, source: str) -> tuple[str, ...] | None:
+        """Secret ref patterns `source` may use, or None for no cap."""
+        if self.credential_grants is None:
+            return None
+        return tuple(r for pattern, refs in self.credential_grants
+                     if fnmatch.fnmatchcase(source, pattern) for r in refs)
+
+    def check_secret_refs(self, source: str, refs: Iterable[str]) -> None:
+        grants = self.grants_for(source)
+        if grants is None:
+            return
+        for ref in refs:
+            if not any(fnmatch.fnmatchcase(ref, g) for g in grants):
+                raise PolicyError(f"source {source}: secret ref {ref} is not in the policy's credential_grants")
 
     def kind_allowed(self, kind: str) -> bool:
         return kind in self.allowed_kinds

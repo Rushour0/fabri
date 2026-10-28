@@ -196,6 +196,19 @@ file:
 approval_floor: {"*": write, "crm_*": always_approve}
 ```
 
+`credential_grants` in the same policy file caps which credentials each
+source may use. Keys are source name patterns, values list `provider:handle`
+refs or patterns:
+
+```yaml
+credential_grants: {"acme_*": ["slack:acme", "linear:acme"], "crm": ["crm:*"]}
+```
+
+A source whose headers or env name a ref outside its grants fails to build,
+and its handlers resolve credentials through a store that refuses anything
+else, so a layer edited at runtime cannot point a tool at another tenant's
+token. Without the key there is no cap. `env:` header specs are not covered.
+
 Loosening is possible only by editing the YAML by hand (`approval: {pet_delete:
 read}`), and then `fabri setup lint`, the add commands and `GET /setups/lint`
 warn that the class is looser than the default.

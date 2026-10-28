@@ -147,6 +147,7 @@ def validate_source_decl(decl: Any, policy: ToolPolicy | None = None) -> list[st
             raise PolicyError(f"http source {name}: DELETE is not allowed by the policy")
         if kind == "python" and not policy.module_allowed(str(decl["callable"])):
             raise PolicyError(f"python source {name}: module is outside the policy's python_modules")
+        policy.check_secret_refs(name, secret_refs(decl))
     unknown = set(decl) - COMMON_KEYS - KIND_KEYS[kind]
     return [f"source {name}: unknown keys {sorted(unknown)}"] if unknown else []
 
@@ -160,6 +161,16 @@ def _check_schema(schema: Any, name: str) -> None:
         raise ToolSourceError(f"source {name}: input_schema.properties must be a mapping")
     if "required" in schema and not isinstance(schema["required"], list):
         raise ToolSourceError(f"source {name}: input_schema.required must be a list")
+
+
+def secret_refs(decl: Mapping[str, Any]) -> list[str]:
+    """Every ``secret_ref`` a declaration's headers and env name."""
+    refs = []
+    for specs in (decl.get("headers"), decl.get("env")):
+        for spec in (specs or {}).values() if isinstance(specs, Mapping) else ():
+            if isinstance(spec, Mapping) and "secret_ref" in spec:
+                refs.append(str(spec["secret_ref"]))
+    return refs
 
 
 def build_source_tools(
@@ -181,6 +192,14 @@ def build_source_tools(
         # sent, so a host can always mark dry runs its own way.
         dry.update(dry_run_headers(decl.get("dry_run_header")))
         dry.update(dry_run_headers(policy.dry_run_header if policy else None))
+    grants = policy.grants_for(decl["name"]) if policy is not None else None
+    if grants is not None:
+        # The build-time check covers the declaration; this covers the store
+        # at call time, so the source can never resolve anything else.
+        from fabri.tools.credential_store import ScopedCredentialStore
+        from fabri.tools.secret_refs import default_credential_store
+
+        store = ScopedCredentialStore(store or default_credential_store(), grants, actor=decl["name"])
     return builder(decl, base_dir=base_dir, policy=policy, transport=transport, store=store, dry=dry)
 
 
