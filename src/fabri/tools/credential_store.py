@@ -10,9 +10,13 @@ replaced with ``_``. For example, ``slack:acme-eng`` maps to
 """
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import re
 import sqlite3
+import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -26,6 +30,10 @@ class CredentialStoreError(RuntimeError):
 
 class CredentialNotFoundError(CredentialStoreError):
     """Raised when a credential handle has no value in the backing store."""
+
+
+class CredentialScopeError(CredentialStoreError):
+    """Raised when a handle is outside the grants of a ScopedCredentialStore."""
 
 
 def credential_env_var(provider: str, handle: str) -> str:
@@ -107,3 +115,64 @@ class SqliteInstallCredentialStore:
 
     def __repr__(self) -> str:
         return "SqliteInstallCredentialStore()"
+
+
+class ScopedCredentialStore:
+    """Wrap a store so it only resolves granted handles, and log every lookup.
+
+    `grants` lists ``provider:handle`` strings, or ``provider:*`` for every
+    handle of one provider. A host builds one of these per run with the
+    tenant's own handles, so a run for workspace A cannot read workspace B's
+    token even when both live in the same backing store. ``grants=None``
+    allows every handle and only audits.
+
+    With `audit_path`, each lookup appends one JSON line: time, actor,
+    provider, handle and result (``ok``, ``denied`` or ``missing``). The
+    secret value is never written.
+    """
+
+    def __init__(
+        self,
+        store: CredentialStore,
+        grants: Iterable[str] | None = None,
+        *,
+        audit_path: str | Path | None = None,
+        actor: str | None = None,
+    ) -> None:
+        self._store = store
+        self._grants = None if grants is None else frozenset(grants)
+        self._audit_path = Path(audit_path) if audit_path else None
+        self._actor = actor
+
+    def allows(self, provider: str, handle: str) -> bool:
+        if self._grants is None:
+            return True
+        return f"{provider}:{handle}" in self._grants or f"{provider}:*" in self._grants
+
+    def get(self, provider: str, handle: str) -> str:
+        if not self.allows(provider, handle):
+            self._audit(provider, handle, "denied")
+            raise CredentialScopeError(
+                f"credential {provider}:{handle} is not granted to this run"
+            )
+        try:
+            value = self._store.get(provider, handle)
+        except CredentialStoreError:
+            self._audit(provider, handle, "missing")
+            raise
+        self._audit(provider, handle, "ok")
+        return value
+
+    def _audit(self, provider: str, handle: str, result: str) -> None:
+        if self._audit_path is None:
+            return
+        line = json.dumps({"ts": round(time.time(), 3), "actor": self._actor, "provider": provider,
+                           "handle": handle, "result": result}, sort_keys=True)
+        self._audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._audit_path.open("a", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.write(line + "\n")
+
+    def __repr__(self) -> str:
+        grants = "all" if self._grants is None else len(self._grants)
+        return f"ScopedCredentialStore({self._store!r}, grants={grants})"

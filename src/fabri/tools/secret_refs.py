@@ -9,6 +9,7 @@ from fabri.tools.credential_store import (
     CredentialStore,
     CredentialStoreError,
     EnvCredentialStore,
+    ScopedCredentialStore,
     SqliteInstallCredentialStore,
 )
 
@@ -18,9 +19,16 @@ class MalformedCredentialRefError(CredentialStoreError, ValueError):
 
 
 def default_credential_store() -> CredentialStore:
+    """The install database when FABRI_INSTALL_DB is set, else env vars.
+    FABRI_CRED_AUDIT_LOG names a JSONL file that records every lookup."""
+    store: CredentialStore
     if p := os.environ.get("FABRI_INSTALL_DB"):
-        return SqliteInstallCredentialStore(Path(p))
-    return EnvCredentialStore()
+        store = SqliteInstallCredentialStore(Path(p))
+    else:
+        store = EnvCredentialStore()
+    if audit := os.environ.get("FABRI_CRED_AUDIT_LOG"):
+        store = ScopedCredentialStore(store, audit_path=audit)
+    return store
 
 
 def resolve_secret(ref: str, store: CredentialStore | None = None) -> str:
