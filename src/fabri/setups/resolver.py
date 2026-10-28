@@ -122,8 +122,31 @@ class ResolvedSetup:
             line += f" ({len(skill['references'])} reference file{'s' if len(skill['references']) != 1 else ''})"
         return line
 
+    def skill_modes(self, agent_type: str) -> dict[str, tuple[str, str | None]]:
+        """``{name: (mode, reason)}`` for the type's skills after budgets.
+        An always-loaded skill over `skill_prompt_chars`, or one that would
+        push the type's always-loaded skills past `skills_total_chars`, moves
+        to on demand so it stays reachable through load_skill instead of
+        bloating the prompt. `reason` says why a skill moved, else None."""
+        budgets = self.budgets
+        used, out = 0, {}
+        for name in self.skills_for(agent_type):
+            mode = self.skill_load_mode(name)
+            reason = None
+            if mode == "always":
+                size = len((self.skills[name].get("prompt") or "").strip())
+                if size > budgets["skill_prompt_chars"]:
+                    mode, reason = "on_demand", f"prompt is {size} chars, budget {budgets['skill_prompt_chars']}"
+                elif used + size > budgets["skills_total_chars"]:
+                    mode, reason = "on_demand", (f"always-loaded skills would reach {used + size} chars, "
+                                                 f"budget {budgets['skills_total_chars']}")
+                else:
+                    used += size
+            out[name] = (mode, reason)
+        return out
+
     def on_demand_skills(self, agent_type: str) -> list[str]:
-        return [n for n in self.skills_for(agent_type) if self.skill_load_mode(n) == "on_demand"]
+        return [n for n, (mode, _) in self.skill_modes(agent_type).items() if mode == "on_demand"]
 
     def load_skill(self, agent_type: str, name: str, reference: str | None = None) -> dict[str, Any]:
         """Full text of one skill (or one of its reference files) for a type.
@@ -166,7 +189,8 @@ class ResolvedSetup:
 
     def system_prompt(self, agent_type: str, base: str = "") -> tuple[str, list[str]]:
         """The type's prompt, then its skills, then its context, inside the
-        budgets. A skill over `skill_prompt_chars` is skipped; context is cut
+        budgets. A skill over its budget is listed on demand (see
+        skill_modes); context is cut
         at the last whole file that fits `context_chars`. Returns the text
         and the warnings."""
         budgets = self.budgets
@@ -174,18 +198,15 @@ class ResolvedSetup:
         agent = self.agent(agent_type)
         parts = [p for p in (base.strip(), agent.get("prompt", "").strip()) if p]
         skill_parts, index_lines = [], []
-        for name in self.skills_for(agent_type):
-            if self.skill_load_mode(name) == "on_demand":
+        for name, (mode, reason) in self.skill_modes(agent_type).items():
+            if mode == "on_demand":
+                if reason:
+                    warnings.append(f"skill {name} moved to on demand: {reason}")
                 index_lines.append(self.skill_index_line(name))
                 continue
             text = (self.skills[name].get("prompt") or "").strip()
-            if not text:
-                continue
-            if len(text) > budgets["skill_prompt_chars"]:
-                warnings.append(f"skill {name} skipped: prompt is {len(text)} chars, budget {budgets['skill_prompt_chars']}"
-                                "; set `load: on_demand` in its skill.yaml to keep it behind load_skill")
-                continue
-            skill_parts.append(f"### {name}\n{text}")
+            if text:
+                skill_parts.append(f"### {name}\n{text}")
         if skill_parts:
             parts.append("## Skills\n\n" + "\n\n".join(skill_parts))
         if index_lines:
@@ -238,8 +259,8 @@ class ResolvedSetup:
             agent = self.agent(agent_type)
             prompt, warnings = self.system_prompt(agent_type)
             out["agent"] = {"type": agent_type, **strip(agent)}
-            out["skills"] = {n: {**strip(self.skills[n]), "load_mode": self.skill_load_mode(n)}
-                             for n in self.skills_for(agent_type)}
+            out["skills"] = {n: {**strip(self.skills[n]), "load_mode": mode}
+                             for n, (mode, _) in self.skill_modes(agent_type).items()}
             out["context"] = {n: strip(c) for n, c in self.context_for(agent_type).items()}
             out["tools_for_type"] = self.tools_for(agent_type)
             out["system_prompt"] = prompt

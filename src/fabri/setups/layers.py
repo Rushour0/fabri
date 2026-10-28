@@ -14,6 +14,7 @@ SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 DEFAULT_BUDGETS: dict[str, int] = {
     "skill_prompt_chars": 4000,  # one always-loaded skill's prompt.md
+    "skills_total_chars": 8000,  # all always-loaded skills for one agent type
     "skill_ondemand_chars": 40000,  # one on-demand skill's prompt.md, and each references/ file
     "context_chars": 6000,  # all context for one agent type after merge
     "prompt_chars": 12000,  # one agent type's merged prompt

@@ -142,3 +142,26 @@ def test_import_keeps_when_to_use_references_and_marks_big_skills(tmp_path, laye
     assert (layer / "skills/chat-canvas/references/blocks.md").read_text() == "BLOCKS"
     assert import_skills(tmp_path / "src", layer).skipped == ["chat-canvas"]
 
+
+
+def test_skills_past_total_budget_move_to_on_demand(layer):
+    (layer / "setup.yaml").write_text("budgets: {skills_total_chars: 25}\n")
+    skill(layer, "first", body="FIRST " * 3)
+    skill(layer, "second", body="SECOND " * 3)
+    resolved = resolve_setup([("base", layer)])
+    prompt, warnings = resolved.system_prompt("chat")
+    assert "FIRST" in prompt and "SECOND" not in prompt
+    assert "- `second`: second description" in prompt
+    assert resolved.on_demand_skills("chat") == ["second"]
+    assert warnings == ["skill second moved to on demand: always-loaded skills would reach 37 chars, budget 25"]
+    assert resolved.load_skill("chat", "second")["text"].startswith("SECOND")
+
+
+def test_skill_over_its_own_budget_moves_to_on_demand(layer):
+    skill(layer, "grown", body="small")
+    (layer / "setup.yaml").write_text("budgets: {skill_prompt_chars: 3}\n")
+    resolved = resolve_setup([("base", layer)])
+    prompt, warnings = resolved.system_prompt("chat")
+    assert "- `grown`" in prompt and warnings[0].startswith("skill grown moved to on demand: prompt is 5 chars")
+    config, registry = build_agent_config(resolved, "chat")
+    assert "load_skill" in registry.tools and config["setup"]["on_demand_skills"] == ["grown"]

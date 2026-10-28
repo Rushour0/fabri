@@ -89,10 +89,14 @@ A 15,700 character skill costs about 15,700 characters on every turn when
 tool round trip. Put long, situational skills on demand and keep short rules
 that must hold on every turn (a write gate, a style rule) `always`.
 
-Budgets: `skill_prompt_chars` (default 4000) applies to `always` skills;
-`skill_ondemand_chars` (default 40000) applies to `on_demand` skills and to
-each reference file. A too-long `always` skill is refused with a hint to use
-`load: on_demand`.
+Budgets: `skill_prompt_chars` (default 4000) applies to one `always` skill,
+`skills_total_chars` (default 8000) to all of a type's `always` skills
+together, and `skill_ondemand_chars` (default 40000) to `on_demand` skills and
+to each reference file. Writing a too-long `always` skill is refused with a
+hint to use `load: on_demand`. At resolve time, an `always` skill over its own
+budget, or one that would push the type past `skills_total_chars`, is listed
+on demand instead, in the order the skills resolve. The setup warnings name
+each skill that moved and why, and `load_skill` still reaches it.
 
 ## Revisions
 
