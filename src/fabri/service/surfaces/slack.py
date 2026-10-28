@@ -66,6 +66,18 @@ class SlackAdapter(SurfaceAdapter):
     def capabilities(self) -> SurfaceCapabilities:
         return SurfaceCapabilities(hitl=True, threads=True)
 
+    def required_env(self) -> list[str]:
+        return [self.slack_cfg.get("signing_secret_env", "SLACK_SIGNING_SECRET")]
+
+    def outbound_env(self) -> list[list[str]]:
+        if self.slack_cfg.get("bot_token"):
+            return []
+        return [[self.slack_cfg.get("bot_token_env", "SLACK_BOT_TOKEN")]]
+
+    def install_count(self) -> int | None:
+        store = getattr(self.service, "install_store", None)
+        return len(store.list()) if store is not None else None
+
     # --- inbound ------------------------------------------------------------
 
     def verify(self, raw_body: bytes, headers: Mapping[str, str]):

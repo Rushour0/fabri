@@ -87,7 +87,7 @@ _AUTH_PASSWORD_MAX_LENGTH = 1024
 # GETs that write install state or start an OAuth install.
 _ADMIN_GETS = frozenset({
     "/slack/install", "/slack/oauth/callback", "/github/setup",
-    "/linear/install", "/linear/oauth/callback",
+    "/linear/install", "/linear/oauth/callback", "/surfaces/health",
 })
 
 
@@ -283,6 +283,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_studio_asset()
             return
         if not self._gate("GET"):
+            return
+        if path in ("/surfaces/health", "/surfaces/health/"):
+            surfaces = getattr(self.service, "surfaces", None)
+            self._send_json(200, {"surfaces": [a.health() for a in surfaces or []]})
             return
         if path in ("/runs", "/runs/"):
             ok, user_id = self._owner_scope()
@@ -808,7 +812,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/surfaces", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")

@@ -11,6 +11,7 @@ conformance suite needs something to enumerate.
 """
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 
@@ -40,6 +41,39 @@ class SurfaceAdapter(ABC):
 
     def capabilities(self) -> SurfaceCapabilities:
         return SurfaceCapabilities()
+
+    # --- health --------------------------------------------------------------
+
+    def required_env(self) -> list[str]:
+        """Env vars this surface cannot run without (names only)."""
+        return []
+
+    def outbound_env(self) -> list[list[str]]:
+        """Ways to post results back, each a list of env vars that must all
+        be set. Any one complete group is enough. Empty means none needed."""
+        return []
+
+    def install_count(self) -> int | None:
+        """Workspaces installed through OAuth, or None when not tracked."""
+        return None
+
+    def health(self) -> dict:
+        """What this surface needs and has, without reading secret values.
+
+        ``ok`` is false when a required variable is missing, or when there is
+        no way to post back: no complete outbound group and no installs.
+        """
+        missing = [name for name in self.required_env() if not os.environ.get(name)]
+        installs = self.install_count()
+        groups = self.outbound_env()
+        can_reply = (not groups or bool(installs)
+                     or any(all(os.environ.get(n) for n in group) for group in groups))
+        issues = [f"{name} is not set" for name in missing]
+        if not can_reply:
+            options = " or ".join("+".join(group) for group in groups)
+            issues.append(f"no way to post results: set {options}, or install the app in a workspace")
+        return {"name": self.name, "webhook_path": self.webhook_path, "ok": not issues,
+                "missing": missing, "installs": installs, "issues": issues}
 
     @abstractmethod
     def verify(

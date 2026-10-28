@@ -52,6 +52,16 @@ class GitHubAdapter(SurfaceAdapter):
     def capabilities(self) -> SurfaceCapabilities:
         return SurfaceCapabilities(hitl=False, threads=True)
 
+    def required_env(self) -> list[str]:
+        return ["GITHUB_APP_WEBHOOK_SECRET"]
+
+    def outbound_env(self) -> list[list[str]]:
+        return [["FABRI_CRED_GITHUB_APP_ID", "FABRI_CRED_GITHUB_PRIVATE_KEY"], ["FABRI_CRED_GITHUB_DEFAULT"]]
+
+    def install_count(self) -> int | None:
+        store = getattr(self.service, "github_install_store", None)
+        return len(store.list()) if store is not None else None
+
     # --- inbound ------------------------------------------------------------
 
     def verify(self, raw_body: bytes, headers: Mapping[str, str]):

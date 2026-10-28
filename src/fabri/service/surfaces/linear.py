@@ -59,6 +59,16 @@ class LinearAdapter(SurfaceAdapter):
     def capabilities(self) -> SurfaceCapabilities:
         return SurfaceCapabilities(hitl=False, threads=True)
 
+    def required_env(self) -> list[str]:
+        return ["LINEAR_WEBHOOK_SECRET"]
+
+    def outbound_env(self) -> list[list[str]]:
+        return [["FABRI_CRED_LINEAR_DEFAULT"], ["LINEAR_API_KEY"]]
+
+    def install_count(self) -> int | None:
+        store = getattr(self.service, "linear_install_store", None)
+        return len(store.list()) if store is not None else None
+
     # --- inbound ------------------------------------------------------------
 
     def verify(self, raw_body: bytes, headers: Mapping[str, str]):

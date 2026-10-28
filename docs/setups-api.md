@@ -25,7 +25,7 @@ Every route requires the service's existing auth. Writes need the `admin` role. 
 - Writes (anything that is not a GET): `Authorization: Bearer $FABRI_ADMIN_TOKEN`, or a session whose email is listed under `auth.admins` in the service config, or `FABRI_SERVICE_TOKEN` when neither an admin token nor session auth is configured. `/tools/probe` and `/tools/sync` count as writes (they call out and write state). 401 means no valid credentials, 403 means authenticated without the admin role.
 - The audit `actor` is the session email, `admin-token`, `service-token`, or `anonymous` when the gate is open.
 
-The same rules cover the rest of `fabri serve` once `auth.enabled` is on: every route except `/health`, `/auth/*` and signed webhooks needs one of the credentials above, and anything that starts or changes work (`POST /runs`, `/fleets`, answer, cancel, install routes) needs admin. `auth.allow_guests: true` brings back anonymous runs.
+The same rules cover the rest of `fabri serve` once `auth.enabled` is on: every route except `/health`, `/auth/*` and signed webhooks needs one of the credentials above, and anything that starts or changes work (`POST /runs`, `/fleets`, answer, cancel, install routes) needs admin. `auth.allow_guests: true` brings back anonymous runs. `GET /surfaces/health` (admin) lists each connected surface (Slack, GitHub, Linear) with the env vars it is missing, by name only, its install count, and whether it has a way to post results back.
 
 Invite-only service config, passed with `fabri serve --auth-config FILE` (or `FABRI_AUTH_CONFIG=FILE`) so it stays out of run configs:
 
