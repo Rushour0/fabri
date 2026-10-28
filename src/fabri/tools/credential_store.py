@@ -11,6 +11,7 @@ replaced with ``_``. For example, ``slack:acme-eng`` maps to
 from __future__ import annotations
 
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -97,17 +98,16 @@ class SqliteInstallCredentialStore:
                 "no Slack install for this workspace"
             )
         if provider == "linear" and handle != "default" and self._db_path and Path(self._db_path).exists():
-            connection = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro", uri=True, timeout=30
-            )
-            try:
-                row = connection.execute(
-                    "SELECT access_token FROM linear_installs WHERE workspace_id=?", (handle,)
-                ).fetchone()
-            finally:
-                connection.close()
-            if row is not None and row[0]:
-                return row[0]
+            # Through the install store so a token near expiry is refreshed
+            # (needs LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in this process).
+            from fabri.service import linear_oauth
+            from fabri.service.install_store import LinearInstallStore
+
+            token = LinearInstallStore(
+                Path(self._db_path), refresher=linear_oauth.refresh_access_token
+            ).get_token(handle)
+            if token:
+                return token
             raise CredentialNotFoundError(
                 "no Linear install for this workspace"
             )
@@ -120,8 +120,8 @@ class SqliteInstallCredentialStore:
 class ScopedCredentialStore:
     """Wrap a store so it only resolves granted handles, and log every lookup.
 
-    `grants` lists ``provider:handle`` strings, or ``provider:*`` for every
-    handle of one provider. A host builds one of these per run with the
+    `grants` lists ``provider:handle`` strings or fnmatch patterns such as
+    ``provider:*`` for every handle of one provider. A host builds one of these per run with the
     tenant's own handles, so a run for workspace A cannot read workspace B's
     token even when both live in the same backing store. ``grants=None``
     allows every handle and only audits.
@@ -147,7 +147,8 @@ class ScopedCredentialStore:
     def allows(self, provider: str, handle: str) -> bool:
         if self._grants is None:
             return True
-        return f"{provider}:{handle}" in self._grants or f"{provider}:*" in self._grants
+        ref = f"{provider}:{handle}"
+        return any(fnmatch.fnmatchcase(ref, grant) for grant in self._grants)
 
     def get(self, provider: str, handle: str) -> str:
         if not self.allows(provider, handle):

@@ -36,6 +36,7 @@ from fabri.memory.output import split_agent_output
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.auth import UserStore
 from fabri.service.binding import bind_run_config, merge_overrides
+from fabri.service import linear_oauth
 from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.run_store import RunStore
@@ -206,7 +207,9 @@ class FabriService:
         )
         self.install_store = SlackInstallStore(self.home_root / "installs.db")
         self.github_install_store = GitHubInstallStore(self.home_root / "installs.db")
-        self.linear_install_store = LinearInstallStore(self.home_root / "installs.db")
+        self.linear_install_store = LinearInstallStore(
+            self.home_root / "installs.db", refresher=linear_oauth.refresh_access_token
+        )
         os.environ.setdefault("FABRI_INSTALL_DB", str(self.home_root / "installs.db"))
 
     @property

@@ -805,6 +805,8 @@ class _Handler(BaseHTTPRequestHandler):
             access_token=access,
             workspace_name=ws.get("name"),
             scopes=tok.get("scope"),
+            refresh_token=tok.get("refresh_token"),
+            expires_in=tok.get("expires_in"),
         )
         self._redirect_studio("/?linear=connected#settings")
 

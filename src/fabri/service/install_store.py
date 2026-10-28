@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Refresh a token this many seconds before it expires.
+REFRESH_MARGIN_S = 300
 
 
 class SlackInstallStore:
@@ -233,7 +240,16 @@ class GitHubInstallStore:
 
 
 class LinearInstallStore:
-    def __init__(self, path: Path) -> None:
+    """Linear workspace installs.
+
+    Linear access tokens last 24 hours and come with a rotating refresh
+    token. With a `refresher` (a callable taking the refresh token and
+    returning Linear's token response), get_token swaps in a new access token
+    when the stored one is within REFRESH_MARGIN_S of expiring.
+    """
+
+    def __init__(self, path: Path, refresher: Callable[[str], dict] | None = None) -> None:
+        self.refresher = refresher
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -258,6 +274,10 @@ class LinearInstallStore:
                 )
                 """
             )
+            columns = {r[1] for r in connection.execute("PRAGMA table_info(linear_installs)")}
+            for column, kind in (("refresh_token", "TEXT"), ("expires_at", "REAL")):
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE linear_installs ADD COLUMN {column} {kind}")
 
     def upsert(
         self,
@@ -266,21 +286,26 @@ class LinearInstallStore:
         access_token: str,
         workspace_name: str | None = None,
         scopes: str | None = None,
+        refresh_token: str | None = None,
+        expires_in: float | None = None,
         now: float | None = None,
     ) -> None:
         now = time.time() if now is None else now
+        expires_at = now + float(expires_in) if expires_in else None
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO linear_installs(
                     workspace_id, access_token, workspace_name, scopes,
-                    installed_at, updated_at
-                ) VALUES(?,?,?,?,?,?)
+                    installed_at, updated_at, refresh_token, expires_at
+                ) VALUES(?,?,?,?,?,?,?,?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                     access_token=excluded.access_token,
                     workspace_name=excluded.workspace_name,
                     scopes=excluded.scopes,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    refresh_token=excluded.refresh_token,
+                    expires_at=excluded.expires_at
                 """,
                 (
                     workspace_id,
@@ -289,16 +314,63 @@ class LinearInstallStore:
                     scopes,
                     now,
                     now,
+                    refresh_token,
+                    expires_at,
                 ),
             )
 
-    def get_token(self, workspace_id: str) -> str | None:
+    def get_token(self, workspace_id: str, *, now: float | None = None) -> str | None:
+        """The workspace's access token, refreshed first when it is about to
+        expire. None when there is no install, or when the token has expired
+        and could not be refreshed."""
+        now = time.time() if now is None else now
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT access_token FROM linear_installs WHERE workspace_id=?",
+                "SELECT access_token, refresh_token, expires_at FROM linear_installs WHERE workspace_id=?",
                 (workspace_id,),
             ).fetchone()
-        return row["access_token"] if row is not None else None
+        if row is None:
+            return None
+        if row["expires_at"] is None or row["expires_at"] - now > REFRESH_MARGIN_S:
+            return row["access_token"]
+        if self.refresher is None or not row["refresh_token"]:
+            return row["access_token"] if row["expires_at"] > now else None
+        return self._refresh(workspace_id, now)
+
+    def _refresh(self, workspace_id: str, now: float) -> str | None:
+        # BEGIN IMMEDIATE takes the write lock before reading, so two servers
+        # sharing the database cannot both spend the same refresh token.
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT access_token, refresh_token, expires_at FROM linear_installs WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            if row["expires_at"] is not None and row["expires_at"] - now > REFRESH_MARGIN_S:
+                connection.rollback()
+                return row["access_token"]
+            try:
+                fresh = self.refresher(row["refresh_token"])
+                access = fresh["access_token"]
+            except Exception as exc:  # noqa: BLE001 -- logged without the token
+                connection.rollback()
+                logger.warning("Linear token refresh failed for a workspace: %s", type(exc).__name__)
+                return row["access_token"] if (row["expires_at"] or 0) > now else None
+            expires_in = fresh.get("expires_in")
+            connection.execute(
+                "UPDATE linear_installs SET access_token=?, refresh_token=?, expires_at=?, updated_at=? "
+                "WHERE workspace_id=?",
+                (access, fresh.get("refresh_token") or row["refresh_token"],
+                 now + float(expires_in) if expires_in else None, now, workspace_id),
+            )
+            connection.commit()
+            return access
+        finally:
+            connection.close()
 
     def get(self, workspace_id: str) -> dict | None:
         with self._connect() as connection:
