@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -52,20 +53,87 @@ def _timeout_from_env(env: Mapping[str, str] | None = None) -> float:
 
 
 _SECRET_KEY_PARTS = ("password", "passwd", "secret", "token", "api_key", "apikey", "authorization",
-                     "cookie", "credential")
+                     "cookie", "credential", "bearer")
 REDACTED = "[redacted]"
+
+# Keys that label a sibling value instead of holding the secret themselves, as
+# in {"name": "Authorization", "value": "Bearer x"} or {"type": "bearer",
+# "value": "..."}. When a label names a secret word, every other entry in that
+# object is redacted. The labels stay visible so the person can see what was
+# hidden.
+_LABEL_KEYS = frozenset({"name", "key", "header", "field", "type"})
+
+# A whole string that is an auth header value: the scheme plus one token.
+_AUTH_HEADER_VALUE = re.compile(r"(?i)^\s*(bearer|basic)\s+(\S+)\s*$")
+
+# Common token shapes, matched anywhere inside a string. Only the token is
+# replaced, so a message body that quotes one stays readable.
+_TOKEN_SHAPES = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:"
+    r"sk-[A-Za-z0-9_-]{8,}"
+    r"|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}"
+    r"|gh[po]_[A-Za-z0-9]{16,}"
+    r"|github_pat_[A-Za-z0-9_]{16,}"
+    r"|xox[bp]-[A-Za-z0-9-]{8,}"
+    r"|ck_pat_[A-Za-z0-9_-]{8,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+    r")"
+)
+
+
+def _names_secret(name: object) -> bool:
+    """True when a key or label names a secret word. Dashes and spaces count
+    as underscores, so "X-Api-Key" matches "api_key"."""
+    text = str(name).lower().replace("-", "_").replace(" ", "_")
+    return any(part in text for part in _SECRET_KEY_PARTS)
+
+
+def _looks_like_basic_credential(token: str) -> bool:
+    """Basic auth carries base64, which a plain word like "question" is not.
+    Mixed case after the first letter, a digit, or a base64 symbol counts."""
+    if not re.fullmatch(r"[A-Za-z0-9+/]{6,}={0,2}", token):
+        return False
+    rest = token[1:]
+    return (any(c.isdigit() or c in "+/=" for c in token)
+            or (any(c.isupper() for c in rest) and any(c.islower() for c in rest)))
+
+
+def _redact_string(text: str) -> str:
+    match = _AUTH_HEADER_VALUE.match(text)
+    if match:
+        scheme, token = match.group(1).lower(), match.group(2)
+        if scheme == "bearer" or _looks_like_basic_credential(token):
+            return REDACTED
+    return _TOKEN_SHAPES.sub(REDACTED, text)
 
 
 def redact_args(value: object) -> object:
-    """A copy of `value` where the value of any key whose name contains a
-    secret-like word (case ignored) is replaced by "[redacted]", at any
-    depth. Message bodies, recipients and other keys stay as they are, since
-    the person deciding needs them."""
+    """A copy of `value` with secrets replaced by "[redacted]", at any depth.
+
+    Three rules apply. The value of any key whose name contains a secret-like
+    word (case ignored) is redacted. In an object whose name, key, header,
+    field or type entry names a secret word, the other entries are redacted.
+    A string that is a Bearer or Basic header value is redacted whole, and
+    common token shapes (sk-, ghp_, xoxb-, AKIA, JWTs and so on) are cut out
+    of any string. Recipients, subjects, message bodies and other fields stay
+    readable, since the person deciding needs them."""
     if isinstance(value, Mapping):
-        return {k: REDACTED if any(p in str(k).lower() for p in _SECRET_KEY_PARTS) else redact_args(v)
-                for k, v in value.items()}
+        labelled = any(
+            str(k).lower() in _LABEL_KEYS and isinstance(v, str) and _names_secret(v)
+            for k, v in value.items()
+        )
+        out = {}
+        for k, v in value.items():
+            if _names_secret(k) or (labelled and str(k).lower() not in _LABEL_KEYS):
+                out[k] = REDACTED
+            else:
+                out[k] = redact_args(v)
+        return out
     if isinstance(value, (list, tuple)):
         return [redact_args(v) for v in value]
+    if isinstance(value, str):
+        return _redact_string(value)
     return value
 
 

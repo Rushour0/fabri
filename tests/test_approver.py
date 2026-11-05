@@ -300,3 +300,51 @@ def test_describe_call_redacts_secret_keys_at_any_depth_but_keeps_message_fields
     for kept in ("ann@example.test", "Hi Ann, the launch is Friday.", "keep me", "\"ok\""):
         assert kept in text
     assert args["Password"] == "hunter2" and args["auth"]["api_key"] == "sk-live-1"
+
+
+@pytest.mark.parametrize("args, secret", [
+    ({"headers": [{"name": "Authorization", "value": "Bearer x"}]}, "Bearer x"),
+    ({"headers": [{"key": "X-Api-Key", "value": "plainvalue1"}]}, "plainvalue1"),
+    ({"auth": {"type": "bearer", "value": "opaque-123"}}, "opaque-123"),
+    ({"fields": [{"field": "client_secret", "content": "shh-42"}]}, "shh-42"),
+    ({"h": "Bearer abc.def"}, "Bearer abc.def"),
+    ({"h": "Basic dXNlcjpwYXNz"}, "dXNlcjpwYXNz"),
+    ({"v": "sk-proj-AbCdEf1234567890"}, "sk-proj-AbCdEf1234567890"),
+    ({"v": "sk_live_51HxYzAbCdEf"}, "sk_live_51HxYzAbCdEf"),
+    ({"v": "pk_live_51HxYzAbCdEf"}, "pk_live_51HxYzAbCdEf"),
+    ({"v": "ghp_" + "a1B2" * 9}, "ghp_" + "a1B2" * 9),
+    ({"v": "gho_" + "a1B2" * 9}, "gho_" + "a1B2" * 9),
+    ({"v": "github_pat_11ABCDEFG0123456789_xyz"}, "github_pat_11ABCDEFG0123456789_xyz"),
+    ({"v": "xoxb-1234-5678-abcdEFGH"}, "xoxb-1234-5678-abcdEFGH"),
+    ({"v": "xoxp-1234-5678-abcdEFGH"}, "xoxp-1234-5678-abcdEFGH"),
+    ({"v": "ck_pat_abc123DEF456"}, "ck_pat_abc123DEF456"),
+    ({"v": "AKIAIOSFODNN7EXAMPLE"}, "AKIAIOSFODNN7EXAMPLE"),
+    ({"v": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"}, "eyJhbGciOiJIUzI1NiJ9"),
+])
+def test_redact_args_catches_labelled_values_and_token_shapes(args, secret):
+    from fabri.tools.approver import describe_call
+
+    text = describe_call("http_call", args, None)
+    assert secret not in text
+    assert "[redacted]" in text
+
+
+def test_redact_args_cuts_a_token_out_of_a_body_and_keeps_the_rest():
+    from fabri.tools.approver import redact_args
+
+    args = {
+        "to": ["ann@example.test", "bob@example.test"],
+        "subject": "Basic question about invoices",
+        "body": "Hi Ann, please rotate sk-proj-AbCdEf1234567890 before Friday. Bearer bonds are fine.",
+        "headers": [{"name": "Content-Type", "value": "application/json"}],
+        "note": "Basic plan",
+    }
+    out = redact_args(args)
+    assert out["to"] == ["ann@example.test", "bob@example.test"]
+    assert out["subject"] == "Basic question about invoices"
+    assert out["note"] == "Basic plan"
+    assert out["body"] == "Hi Ann, please rotate [redacted] before Friday. Bearer bonds are fine."
+    assert out["headers"] == [{"name": "Content-Type", "value": "application/json"}]
+    # The labels stay so the person can see what was hidden.
+    assert redact_args({"name": "Authorization", "value": "Bearer x"}) == {
+        "name": "Authorization", "value": "[redacted]"}

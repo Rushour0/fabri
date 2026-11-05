@@ -26,7 +26,6 @@ REFUSED = {
 ALLOWED = {
     "llm": {"model": "gemini-2.5-flash"},
     "agent": {"max_cost_usd": 0.5, "max_steps": 3, "repair": {"enabled": True, "max_attempts": 1}},
-    "memory": {"collection": "tenant-a"},
     "tools": {
         "result_format": "json",
         "retrieval": {"enabled": True},
@@ -109,6 +108,56 @@ def test_refused_keys_lists_every_hit_and_ignores_non_mappings():
     assert refused_override_keys(None) == []
     assert refused_override_keys(ALLOWED) == []
     assert refused_override_keys({"tools": "x", "agent": {"repair": "y"}}) == []
+
+
+# Overrides that would send a provider key somewhere new, read a different
+# environment variable as the key, or point the run at a new address or file.
+REDIRECTS = {
+    "llm.base_url": {"llm": {"base_url": "https://evil.test/v1", "api_key_env": "AWS_SECRET_ACCESS_KEY"}},
+    "llm.planner.api_key_env": {"llm": {"planner": {"provider": "openai", "api_key_env": "SLACK_BOT_TOKEN"}}},
+    "memory.qdrant_url": {"memory": {"qdrant_url": "http://169.254.169.254/"}},
+    "observability.otlp_endpoint": {"observability": {"otlp_endpoint": "https://evil.test/v1/traces"}},
+    # llm.roles is the normalized alias the loader builds from the role blocks.
+    "llm.roles.main.base_url": {"llm": {"roles": {"main": {"base_url": "https://evil.test/v1"}}}},
+}
+
+
+@pytest.mark.parametrize("key", sorted(REDIRECTS))
+def test_runs_and_fleets_refuse_key_redirects(make_server, key):
+    server, service, submitted = make_server()
+    fleets = []
+    service.submit_fleet = lambda items, overrides, **kw: fleets.append(items) or {"fleet_id": "f"}
+    c = client(server)
+    run = c.post("/runs", json={"task": "t", "overrides": REDIRECTS[key]})
+    assert run.status_code == 400
+    assert key in run.json()["error"]
+    top = c.post("/fleets", json={"items": [{"task": "t"}], "overrides": REDIRECTS[key]})
+    assert top.status_code == 400
+    item = c.post("/fleets", json={"items": [{"task": "t", "overrides": REDIRECTS[key]}]})
+    assert item.status_code == 400
+    assert "items[0].overrides" in item.json()["error"]
+    assert submitted == [] and fleets == []
+
+
+def test_refused_key_names_match_at_any_depth():
+    assert refused_override_keys({"llm": {"base_url": "x", "api_key_env": "Y"}}) == [
+        "llm.base_url", "llm.api_key_env"]
+    assert refused_override_keys({"llm": {"narrator": {"api_base": "x", "api_key": "k"}}}) == [
+        "llm.narrator.api_base", "llm.narrator.api_key"]
+    assert refused_override_keys({"agent": {"extra": [{"socket_path": "/tmp/s"}]}}) == [
+        "agent.extra[0].socket_path"]
+    assert refused_override_keys({"x": {"some_dir": 1, "a_command": 2, "b_endpoint": 3}}) == [
+        "x.some_dir", "x.a_command", "x.b_endpoint"]
+    # A whole section counts even when empty or null.
+    assert refused_override_keys({"memory": {}}) == ["memory"]
+    assert refused_override_keys({"observability": None}) == ["observability"]
+    assert refused_override_keys({"memory": {"collection": "tenant-a"}}) == ["memory.collection"]
+    # A key hit by two rules is named once.
+    assert refused_override_keys({"tools": {"manifest_dir": "/x"}}) == ["tools.manifest_dir"]
+    # Role model and provider changes stay allowed.
+    assert refused_override_keys(
+        {"llm": {"provider": "anthropic", "model": "m", "planner": {"model": "p"}, "narrator": None}}
+    ) == []
 
 
 def test_runs_and_fleets_accept_harmless_overrides(make_server):

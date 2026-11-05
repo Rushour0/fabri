@@ -109,12 +109,49 @@ _REFUSED_OVERRIDE_KEYS = (
 )
 
 
+# Key names a request's overrides may not set at any depth: under llm, under a
+# role block such as llm.planner or llm.roles.main, or anywhere else. They pick
+# where a provider key is sent (base_url, api_base), which environment variable
+# is read and handed to the run as that key (api_key_env), or an address, file
+# or command the run would reach. Matching is by the last segment of the name.
+_REFUSED_OVERRIDE_NAMES = frozenset({"base_url", "api_base", "api_key", "api_key_env"})
+_REFUSED_OVERRIDE_SUFFIXES = ("_url", "_endpoint", "_path", "_dir", "_command")
+
+# Whole sections a request may not touch at all. memory points the run at a
+# vector store or a database file, and observability at an export endpoint, so
+# both stay with the template.
+_REFUSED_OVERRIDE_SECTIONS = ("memory", "observability")
+
+
+def _refused_name(name) -> bool:
+    if not isinstance(name, str):
+        return False
+    lowered = name.lower()
+    return lowered in _REFUSED_OVERRIDE_NAMES or lowered.endswith(_REFUSED_OVERRIDE_SUFFIXES)
+
+
+def _refused_names_within(node, path: str, found: list[str]) -> None:
+    """Add the dotted path of every refused key name inside ``node``. Lists are
+    walked too, so a key inside a list item is still seen."""
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            here = f"{path}.{key}" if path else str(key)
+            if _refused_name(key):
+                found.append(here)
+            _refused_names_within(value, here, found)
+    elif isinstance(node, (list, tuple)):
+        for index, item in enumerate(node):
+            _refused_names_within(item, f"{path}[{index}]", found)
+
+
 def refused_override_keys(overrides) -> list[str]:
     """The keys in `overrides` that a request is not allowed to set.
 
     Any presence counts, including null or an empty value, because an empty
     tools.enabled or a null manifest_dir still changes what the run gets. A
-    non-mapping section is left to the config merge, which rejects it."""
+    non-mapping section is left to the config merge, which rejects it. Three
+    rules apply: the exact dotted paths above, the refused key names at any
+    depth, and any key under the memory or observability sections."""
     if not isinstance(overrides, Mapping):
         return []
     found = []
@@ -125,14 +162,25 @@ def refused_override_keys(overrides) -> list[str]:
             node = node.get(part) if isinstance(node, Mapping) else None
         if isinstance(node, Mapping) and parts[-1] in node:
             found.append(dotted)
-    return found
+    _refused_names_within(overrides, "", found)
+    for section in _REFUSED_OVERRIDE_SECTIONS:
+        if section not in overrides:
+            continue
+        value = overrides[section]
+        if isinstance(value, Mapping) and value:
+            found.extend(f"{section}.{key}" for key in value)
+        else:
+            found.append(section)
+    # A key can match more than one rule; name it once, in first-seen order.
+    return list(dict.fromkeys(found))
 
 
 def _override_refusal(keys: list[str], where: str = "overrides") -> dict:
     return {
         "error": (
-            f"{where} may not set {', '.join(keys)}: these keys start processes "
-            "or widen tool access, so only the agent's own config may set them"
+            f"{where} may not set {', '.join(keys)}: these keys start processes, "
+            "widen tool access, or choose where keys, data or traffic go, so only "
+            "the agent's own config may set them"
         )
     }
 

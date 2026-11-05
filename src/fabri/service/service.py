@@ -902,6 +902,9 @@ def serve_stdio(
     (``{"session_id", "event": {...}}``) followed by a final result line
     (``{"session_id", "result": {...}}``). A non-Python host drives the whole
     run -- submit, stream, cost -- over stdin/stdout with no fabri imports.
+
+    No override filtering is applied here, unlike HTTP, because the caller is
+    the trusted local process that started it.
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
