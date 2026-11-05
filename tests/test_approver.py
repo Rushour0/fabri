@@ -276,3 +276,27 @@ def test_cmd_run_uses_default_approver(monkeypatch):
     with pytest.raises(Stop):
         cli.cmd_run(args)
     assert seen == {"approver": sentinel}
+
+
+def test_describe_call_redacts_secret_keys_at_any_depth_but_keeps_message_fields():
+    from fabri.tools.approver import describe_call
+
+    args = {
+        "to": "ann@example.test",
+        "body": "Hi Ann, the launch is Friday.",
+        "Password": "hunter2",
+        "auth": {"api_key": "sk-live-1", "Authorization": "Bearer abc", "note": "keep me"},
+        "headers": [{"X-Cookie": "sid=9"}, {"name": "ok"}],
+        "client_secret_id": "s3",
+        "db_credentials": {"user": "u"},
+        "apikey": "k",
+        "access_token": "t",
+        "passwd": "p",
+    }
+    text = describe_call("send_mail", args, None)
+    for leaked in ("hunter2", "sk-live-1", "Bearer abc", "sid=9", "s3", "sk-", "\"k\"", "\"t\"", "\"p\""):
+        assert leaked not in text
+    assert text.count("[redacted]") == 9
+    for kept in ("ann@example.test", "Hi Ann, the launch is Friday.", "keep me", "\"ok\""):
+        assert kept in text
+    assert args["Password"] == "hunter2" and args["auth"]["api_key"] == "sk-live-1"

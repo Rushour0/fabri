@@ -190,7 +190,7 @@ editable YAML, so they are not what holds a write behind approval. The floor is 
 A hand-written source on a host no module owns, and without `approval_mode` or `catalog`, can still lower a class,
 and lint warns when it does. Adding a connector's hosts is a change to its module, reviewed as code. Nothing else
 needs editing. The functions live in `fabri.tools.connector_catalog`
-(`catalog_for_url`, `request_floor`). UNVERIFIED: whether the `fabri.tools.connectors` facade re-exports them.
+(`catalog_for_url`, `request_floor`). The `fabri.tools.connectors` facade re-exports both.
 
 ## Approval classes
 
@@ -252,11 +252,11 @@ token. Without the key there is no cap. `env:` header specs are not covered.
 - `fabri run` on a terminal prints the call on stderr and reads `[y/N]`. Only `y` or `yes` approves. Without a
   terminal (a pipe, CI) there is no approver and the call is refused.
 - `fabri serve` and Studio send the call to the run's questions inbox as a question with approve and deny
-  buttons. A run bound to Slack gets the same question there. The run's owner can answer under strict auth (UNCONFIRMED: depends on the strict-auth change in `http_server.py`, not re-read when this was written).
+  buttons. A run bound to Slack gets the same question there. Under strict auth an admin can answer any run, and the run's owner can answer their own run only when signed in as that owner. A run with no owner (submitted by token) is admin only. `POST /runs/<id>/answer` must carry the `question_id` of the question and an `answer`, or it gets a 400.
 - A child agent asks the parent's human. Its own stdin is a pipe, so it can never approve its own call.
 - A Python host passes `approver=` to `build_tools`, `registry(...)` or `build_agent_config`, or sets
   `registry.approver`, as in the example above.
-- `FABRI_APPROVAL_TIMEOUT_S` sets how long a question waits (default 300 seconds). A timeout denies.
+- `FABRI_APPROVAL_TIMEOUT_S` sets how long a question waits (default 300 seconds). A timeout denies. `fabri serve` strips this variable from the runs it starts, so there the default applies unless `FABRI_RUN_ENV_ALLOW=FABRI_APPROVAL_TIMEOUT_S` re-admits it.
 - No environment variable approves anything. There is no standing "yes".
 
 Config-declared MCP servers under `tools.mcp_servers` get approval classes too, so a tool named like
@@ -315,7 +315,6 @@ tools:
 - A source cannot replace a tool that is already registered, or the reserved `decompose` name. The tool is skipped
   with a warning.
 - `tools.enabled` filters the result as it does for other tools, so list the source tool names there if you use it.
-  UNVERIFIED: I read this from `runtime.build_tools`; I did not run it.
 
 Loosening is possible only by editing the YAML by hand (`approval: {pet_delete:
 read}`), and then `fabri setup lint`, the add commands and `GET /setups/lint`

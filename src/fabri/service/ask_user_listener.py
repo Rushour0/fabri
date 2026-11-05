@@ -50,8 +50,10 @@ class _Pending:
         question: str | None,
         options: list[str] | None,
         default: str | None,
+        kind: str = "ask_user",
     ) -> None:
         self.conn = conn
+        self.kind = kind
         self.question = question
         self.options = options
         self.default = default
@@ -142,6 +144,7 @@ class AskUserListener:
             return [
                 {
                     "question_id": question_id,
+                    "kind": pending.kind,
                     "question": pending.question,
                     "options": pending.options,
                     "default": pending.default,
@@ -181,6 +184,7 @@ class AskUserListener:
                 req.get("question"),
                 req.get("options"),
                 req.get("default"),
+                _clean_kind(req.get("kind")),
             )
             with self._lock:
                 self._pending[question_id] = pending
@@ -191,6 +195,7 @@ class AskUserListener:
                 self._on_question(
                     {
                         "question_id": question_id,
+                        "kind": pending.kind,
                         "question": req.get("question"),
                         "options": req.get("options"),
                         "default": req.get("default"),
@@ -217,6 +222,16 @@ class AskUserListener:
                 conn.close()
             except OSError:
                 pass
+
+
+_KINDS = frozenset({"approval", "ask_user"})
+
+
+def _clean_kind(raw: object) -> str:
+    """The question kind a client sent: "approval" (a tool call waiting for a
+    yes or no) or "ask_user" (a free question). Anything else, or nothing,
+    is "ask_user", which is how every question was treated before."""
+    return raw if isinstance(raw, str) and raw in _KINDS else "ask_user"
 
 
 def _read_line(conn: socket.socket, timeout: float = 10.0) -> str:

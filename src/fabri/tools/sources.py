@@ -44,13 +44,12 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
 from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval, safe_approval, stricter
 from fabri.tools.credential_store import CredentialStore
-from fabri.tools.http_call import check_header_specs, dry_run_headers, resolve_headers, send
+from fabri.tools.http_call import PathParamError, check_header_specs, dry_run_headers, render_path_value, resolve_headers, send
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.openapi import (
     OpenAPIOperation,
@@ -367,12 +366,16 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry) -> list[Source
         for key in placeholders:
             if key not in args:
                 return tool_error(f"{name}: missing path parameter {key!r}", result={"status": "error", "code": None})
-            target = target.replace("{" + key + "}", quote(str(args.pop(key)), safe=""))
+            try:
+                rendered = render_path_value(key, args.pop(key))
+            except PathParamError as e:
+                return tool_error(f"{name}: {e}", result={"status": "error", "code": None})
+            target = target.replace("{" + key + "}", rendered)
         if method in ("GET", "HEAD", "OPTIONS", "DELETE"):
             return send(client, method, target, headers=headers, store=store, extra_headers=dry,
-                        params=args, timeout_s=timeout, tool_name=name)
+                        params=args, timeout_s=timeout, tool_name=name, floor_url=url)
         return send(client, method, target, headers=headers, store=store, extra_headers=dry,
-                    json_body=args, timeout_s=timeout, tool_name=name)
+                    json_body=args, timeout_s=timeout, tool_name=name, floor_url=url)
 
     safe = safe_approval(method, name, url)
     manifest = ToolManifest(

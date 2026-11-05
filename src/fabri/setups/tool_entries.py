@@ -364,6 +364,47 @@ def mcp_entry(
                      approval_floor=floor)
 
 
+def _widen_pinned_names(kind: str, data: dict[str, Any], include: Sequence[str], **expand_args: Any) -> None:
+    """For a pinned-spec connector that writes a `names` map (the curated
+    subset only), rebuild the map from every operation in the spec, drop the
+    ones the deny list names, and keep the tools `include` asks for. A name
+    that matches nothing is an error that lists the closest real names."""
+    import difflib
+
+    source = next((s for s in data.get("sources") or [] if s.get("kind") == "openapi"
+                   and isinstance(s.get("names"), dict)), None)
+    if source is None:
+        return
+    try:
+        full = connector_entry(kind, all_tools=True, **expand_args)
+    except ConnectorError as exc:
+        raise EntryError(str(exc)) from None
+    full_source = next((s for s in full.get("sources") or [] if s.get("kind") == "openapi"), None)
+    if full_source is None or not isinstance(full_source.get("names"), dict):
+        return
+    deny = [str(d) for d in full_source.get("deny") or []]
+    available = {op_id: tool for op_id, tool in full_source["names"].items()
+                 if not any(fnmatch.fnmatchcase(n, d) for n in (op_id, tool) for d in deny)}
+    chosen: dict[str, str] = {}
+    unknown = []
+    for want in include:
+        hit = [(op_id, tool) for op_id, tool in available.items() if fnmatch.fnmatchcase(op_id, want) or fnmatch.fnmatchcase(tool, want)]
+        if not hit:
+            unknown.append(want)
+        chosen.update(hit)
+    if unknown:
+        pool = sorted({*available, *available.values()})
+        lines = []
+        for want in unknown:
+            close = difflib.get_close_matches(want, pool, n=3, cutoff=0.5)
+            lines.append(want + (f" (close: {', '.join(close)})" if close else ""))
+        raise EntryError(f"{kind}: no such tool in the pinned spec, or it is denied: {'; '.join(lines)}")
+    source["names"] = dict(full_source["names"])
+    if isinstance(full_source.get("approval"), dict):
+        source["approval"] = dict(full_source["approval"])
+    data["allow"] = list(chosen.values())
+
+
 def connector_tool_entry(kind: str, *, name: str | None = None, token_env: str | None = None,
                          workspace: str | None = None, remote: bool = False, approval: str | None = None,
                          connect: bool = False, url: str | None = None, include: Sequence[str] | None = None,
@@ -405,6 +446,9 @@ def connector_tool_entry(kind: str, *, name: str | None = None, token_env: str |
     if include or all_tools:
         if "openapi" in kinds:
             data["allow"] = list(include) if include else ["*"]
+            if include:
+                _widen_pinned_names(kind, data, include, name=name, token_env=token_env,
+                                    workspace=workspace, remote=remote, url=url)
         elif "mcp" in kinds:
             mcp_name = next(str(s.get("name") or name) for s in sources if s.get("kind") == "mcp")
             data["allow"] = [f"mcp_{mcp_name}_{p}" for p in include] if include else [f"mcp_{mcp_name}_*"]

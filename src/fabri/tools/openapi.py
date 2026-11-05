@@ -37,14 +37,14 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import yaml
 
 from fabri.tools.approval import check_approval, safe_approval, stricter
 from fabri.tools.credential_store import CredentialStore
-from fabri.tools.http_call import dry_run_headers, send
+from fabri.tools.http_call import PathParamError, dry_run_headers, render_path_value, send
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.result import tool_error
 
@@ -661,7 +661,11 @@ def operation_handler(
                 if param.name not in args or args[param.name] in (None, ""):
                     return tool_error(f"{op.name}: missing path parameter {param.name!r}",
                                       result={"status": "error", "code": None})
-                path = path.replace("{" + param.name + "}", quote(str(args[param.name]), safe=""))
+                try:
+                    rendered = render_path_value(param.name, args[param.name])
+                except PathParamError as exc:
+                    return tool_error(f"{op.name}: {exc}", result={"status": "error", "code": None})
+                path = path.replace("{" + param.name + "}", rendered)
             elif param.name in args:
                 value = args[param.name]
                 query[param.name] = ("true" if value else "false") if isinstance(value, bool) else value
@@ -677,7 +681,8 @@ def operation_handler(
             json_body = args["body"]
         return send(client, op.method, base_url.rstrip("/") + path, headers=headers, store=store,
                     extra_headers=extra_headers, params=query, json_body=json_body,
-                    form_body=form_body, timeout_s=timeout_s, tool_name=op.name)
+                    form_body=form_body, timeout_s=timeout_s, tool_name=op.name,
+                    floor_url=base_url.rstrip("/") + op.path)
 
     return handler
 

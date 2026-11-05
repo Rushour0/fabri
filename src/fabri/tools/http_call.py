@@ -25,6 +25,7 @@ import os
 import re
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -105,6 +106,59 @@ def dry_run_headers(spec: Mapping[str, Any] | str | None) -> dict[str, str]:
     return {str(spec["name"]): str(spec.get("value", "true"))}
 
 
+class PathParamError(ValueError):
+    """A path parameter value could leave the path segment it fills."""
+
+
+def render_path_value(name: str, value: Any) -> str:
+    """Encode one path parameter value for its URL segment.
+
+    The value is refused when it is empty, ``.`` or ``..``, or when it holds
+    ``/`` or ``\\`` or decodes (one or more rounds of percent decoding) to
+    any of those. Such a value could turn ``/lists/{id}`` into another path
+    after the client or the server normalizes the URL, which would dodge the
+    approval floor that was checked against the template."""
+    text = str(value)
+    seen = text
+    for _ in range(5):
+        if seen in ("", ".", "..") or "/" in seen or "\\" in seen:
+            raise PathParamError(f"path parameter {name!r} is not allowed (empty, a dot segment or holds a separator)")
+        decoded = unquote(seen)
+        if decoded == seen:
+            break
+        seen = decoded
+    else:
+        raise PathParamError(f"path parameter {name!r} is encoded too many times")
+    return quote(text, safe="")
+
+
+def _has_dot_segment(url: str) -> bool:
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return True
+    return any(seg in (".", "..") for seg in path.split("/"))
+
+
+def _floor_drift(floor_url: str, method: str, url: str) -> bool:
+    """True when the rendered request falls under a stricter catalog floor
+    than the template it was built from. Approval was settled at build time
+    from the template, so a call whose real target the floor would not have
+    allowed must not be sent."""
+    from fabri.tools.connectors import request_floor
+
+    built_owner, built_floor = request_floor(floor_url, method)
+    if built_owner is None or built_floor is not None:
+        # No connector owns the template host, or the tool already needs approval.
+        return False
+    try:
+        final = str(httpx.URL(url))
+    except (httpx.InvalidURL, ValueError):
+        return True
+    owner, floor = request_floor(final, method)
+    return owner != built_owner or floor is not None
+
+
 def _body(resp: httpx.Response) -> Any:
     ctype = resp.headers.get("content-type", "")
     if "json" in ctype:
@@ -141,9 +195,21 @@ def send(
     form_body: Mapping[str, Any] | None = None,
     timeout_s: float = 30.0,
     tool_name: str = "",
+    floor_url: str | None = None,
 ) -> dict:
     """Make one request and map the response. Logs method, URL path and
-    status only."""
+    status only.
+
+    A URL with a ``.`` or ``..`` path segment is refused, since the client
+    would drop it and send to another path. When `floor_url` (the template
+    URL the tool was built from) is given, a call whose rendered target is
+    not one the catalog floor allowed for that template is refused too."""
+    if _has_dot_segment(url):
+        return tool_error("request refused: the URL path holds a dot segment",
+                          result={"status": "error", "code": None})
+    if floor_url is not None and _floor_drift(floor_url, method, url):
+        return tool_error("request refused: the rendered path is outside what this tool was approved for",
+                          result={"status": "error", "code": None})
     try:
         resolved = resolve_headers(headers, store)
     except HeaderSpecError as exc:

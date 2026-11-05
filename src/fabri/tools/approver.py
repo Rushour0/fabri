@@ -51,18 +51,37 @@ def _timeout_from_env(env: Mapping[str, str] | None = None) -> float:
     return value if value > 0 else DEFAULT_TIMEOUT_S
 
 
+_SECRET_KEY_PARTS = ("password", "passwd", "secret", "token", "api_key", "apikey", "authorization",
+                     "cookie", "credential")
+REDACTED = "[redacted]"
+
+
+def redact_args(value: object) -> object:
+    """A copy of `value` where the value of any key whose name contains a
+    secret-like word (case ignored) is replaced by "[redacted]", at any
+    depth. Message bodies, recipients and other keys stay as they are, since
+    the person deciding needs them."""
+    if isinstance(value, Mapping):
+        return {k: REDACTED if any(p in str(k).lower() for p in _SECRET_KEY_PARTS) else redact_args(v)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_args(v) for v in value]
+    return value
+
+
 def describe_call(name: str, args: object, manifest: ToolManifest | None, cap: int = 2000) -> str:
     """The text a person reads before deciding: tool name, approval class,
     title when the manifest has one, and the arguments as sorted JSON. Long
     arguments are cut at `cap` characters with a note of how much was left
-    out."""
+    out. Secret-looking argument values are redacted first, so the question
+    that goes to a trace or a chat surface never holds them."""
     approval = getattr(manifest, "approval", None) or "unknown"
     lines = [f"{name} needs your approval (class {approval})"]
     title = getattr(manifest, "title", None)
     if title:
         lines.append(f"title: {title}")
     lines.append("args:")
-    text = json.dumps(args, indent=2, sort_keys=True, default=str)
+    text = json.dumps(redact_args(args), indent=2, sort_keys=True, default=str)
     if len(text) > cap:
         text = f"{text[:cap]}... ({len(text) - cap} more chars)"
     lines.append(text)

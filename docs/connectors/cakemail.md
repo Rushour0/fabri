@@ -27,6 +27,11 @@ Tool names are the readable names fabri derives from these operation ids, so the
 tools list` may differ. `scheduleCampaign` is what sends a campaign, which is why it is on the approval list.
 `--all-tools` exposes every operation left in the trimmed spec. Each non-GET one is still `always_approve`.
 
+## Prompt cost
+
+The 28 curated tools cost about 15,700 prompt tokens in tool schemas (measured with
+`scripts/measure_tool_tokens.py`). `--include` narrows the set to the tools you name, which cuts that cost.
+
 ## What is denied
 
 The trimmed spec drops the whole credential and account surface, and the YAML deny list repeats it:
@@ -61,7 +66,8 @@ a PAT can be created in the Cakemail web app. Check Cakemail's current documenta
 and test against a throwaway account.
 
 **This release is for the CLI and Python hosts only.** `fabri serve` strips every `FABRI_CRED_*` variable from the
-runs it starts, on purpose, and nothing re-admits them. A Cakemail source added to a setup that `fabri serve` runs
+runs it starts, on purpose. An operator can re-admit them by naming them in `FABRI_RUN_ENV_ALLOW` (for example
+`FABRI_RUN_ENV_ALLOW=FABRI_CRED_*`), which hands those secrets to every run. Without that, a Cakemail source added to a setup that `fabri serve` runs
 builds, but its calls fail for lack of a credential. A host that injects its own `CredentialStore` is the exception.
 `fabri connect cakemail` (a stored, per-user connection) is a later release.
 
@@ -71,11 +77,11 @@ does not encrypt it at rest.
 ## Bumping the pinned spec
 
 1. Download the new full spec and replace `tests/fixtures/cakemail_openapi_<version>.json`.
-2. Run `python scripts/trim_cakemail_spec.py` to regenerate
+2. Run `python scripts/trim_cakemail_spec.py tests/fixtures/cakemail_openapi_<version>.json` to regenerate
    `src/fabri/tools/connector_catalog/specs/cakemail.json`. The output is deterministic.
 3. Run `tests/test_connector_cakemail.py`. One test fails if the packaged spec differs from the script's output,
    another if a curated operation id vanished or a denied family appeared.
 4. Read the diff of the packaged spec. Check any new non-GET operation against the deny list.
 
-UNVERIFIED: the script's arguments and the fixture file name are taken from the work order. Read
-`scripts/trim_cakemail_spec.py` for the real usage.
+The script takes the source file as its argument: `python scripts/trim_cakemail_spec.py
+tests/fixtures/cakemail_openapi_<version>.json [DEST.json]`. DEST defaults to the packaged spec path above.

@@ -91,6 +91,52 @@ _ADMIN_GETS = frozenset({
 })
 
 
+# Config keys a request's "overrides" may not set. Each one either starts a
+# process (MCP server commands, sub-agent configs, the repair verifier), loads
+# tools from somewhere new (manifest dirs, tool sources and their policy), moves
+# the sandbox, or lifts a narrowing the template applied (tools.enabled). Only
+# the reviewed template or catalog config may set them. Paths are dotted.
+_REFUSED_OVERRIDE_KEYS = (
+    "tools.sources",
+    "tools.policy",
+    "tools.mcp_servers",
+    "tools.manifest_dir",
+    "tools.sandbox_root",
+    "tools.agents",
+    "tools.enabled",
+    "agent.repair.verify_command",
+    "agent.repair.verify_cwd",
+)
+
+
+def refused_override_keys(overrides) -> list[str]:
+    """The keys in `overrides` that a request is not allowed to set.
+
+    Any presence counts, including null or an empty value, because an empty
+    tools.enabled or a null manifest_dir still changes what the run gets. A
+    non-mapping section is left to the config merge, which rejects it."""
+    if not isinstance(overrides, Mapping):
+        return []
+    found = []
+    for dotted in _REFUSED_OVERRIDE_KEYS:
+        node = overrides
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, Mapping) else None
+        if isinstance(node, Mapping) and parts[-1] in node:
+            found.append(dotted)
+    return found
+
+
+def _override_refusal(keys: list[str], where: str = "overrides") -> dict:
+    return {
+        "error": (
+            f"{where} may not set {', '.join(keys)}: these keys start processes "
+            "or widen tool access, so only the agent's own config may set them"
+        )
+    }
+
+
 def studio_assets_available() -> bool:
     """Return whether this installation contains a built Studio bundle."""
     return (STUDIO_ASSETS_DIR / "index.html").is_file()
@@ -210,15 +256,27 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _authorize_run(self, session_id: str) -> bool:
-        """Allow capability-style guest runs or the authenticated run owner."""
+    def _authorize_run(self, session_id: str, *, write: bool = False) -> bool:
+        """Allow capability-style guest runs or the authenticated run owner.
+
+        Under strict auth a write (answer, cancel) needs an admin or the exact
+        owner: an unowned run or a caller with no user id never matches. Reads
+        keep the wider rule, so the read-only service token can still stream
+        any run and a signed-in user can read an unowned one by its id."""
         owner_id = self.service.run_owner(session_id)
         if self._strict_auth():
             caller = getattr(self, "_caller", None)
             if caller is None:
                 self._send_json(401, {"error": "auth required"})
                 return False
-            if owner_id is None or caller.user_id is None or owner_id == caller.user_id:
+            if write:
+                if caller.is_admin or (
+                    caller.user_id is not None
+                    and owner_id is not None
+                    and owner_id == caller.user_id
+                ):
+                    return True
+            elif owner_id is None or caller.user_id is None or owner_id == caller.user_id:
                 return True
             self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
             return False
@@ -510,17 +568,21 @@ class _Handler(BaseHTTPRequestHandler):
             caller = getattr(self, "_caller", None)
             admin = caller is not None and caller.is_admin
             if self.service.auth_enabled and not admin:
-                if self._strict_auth() and self.service.run_owner(m.group(1)) != caller.user_id:
-                    # Unowned runs (token-submitted) are for admins only here.
-                    self._send_json(404, {"error": f"unknown session_id {m.group(1)!r}"})
-                    return
-                if not self._authorize_run(m.group(1)):
+                if self._strict_auth():
+                    # Only the owner may answer. An unowned run (token-submitted)
+                    # or a caller with no user id (the service token) never
+                    # matches, so None == None does not count as ownership.
+                    owner_id = self.service.run_owner(m.group(1))
+                    if owner_id is None or caller.user_id is None or owner_id != caller.user_id:
+                        self._send_json(404, {"error": f"unknown session_id {m.group(1)!r}"})
+                        return
+                if not self._authorize_run(m.group(1), write=True):
                     return
             self._answer(m.group(1))
             return
         m = _CANCEL_RE.match(self.path)
         if m:
-            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
+            if self.service.auth_enabled and not self._authorize_run(m.group(1), write=True):
                 return
             self._cancel(m.group(1))
             return
@@ -574,6 +636,10 @@ class _Handler(BaseHTTPRequestHandler):
         task = req.get("task")
         if not task:
             self._send_json(400, {"error": "request missing required field 'task'"})
+            return
+        refused = refused_override_keys(req.get("overrides"))
+        if refused:
+            self._send_json(400, _override_refusal(refused))
             return
         try:
             session_id = self.service.submit(
@@ -633,6 +699,16 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(items, list) or not items:
             self._send_json(400, {"error": "fleet request requires a non-empty 'items' list"})
             return
+        refused = refused_override_keys(req.get("overrides"))
+        if refused:
+            self._send_json(400, _override_refusal(refused))
+            return
+        for index, item in enumerate(items):
+            item_overrides = item.get("overrides") if isinstance(item, Mapping) else None
+            refused = refused_override_keys(item_overrides)
+            if refused:
+                self._send_json(400, _override_refusal(refused, f"items[{index}].overrides"))
+                return
         try:
             result = self.service.submit_fleet(
                 items, req.get("overrides"), user_id=user_id

@@ -59,3 +59,21 @@ def test_spec_fields_filled_for_pinned_spec(monkeypatch):
     assert entry.data["allow"] == ["curated_one"]
     assert connector_tool_entry(kind, include=["listThings"]).data["allow"] == ["listThings"]
     assert connector_tool_entry(kind, all_tools=True).data["allow"] == ["*"]
+
+
+def test_cakemail_include_reaches_a_tool_outside_the_curated_set():
+    from fabri.tools.connector_catalog import cakemail
+
+    entry = connector_tool_entry("cakemail", include=["cakemail_campaign_archive", "listLinks"])
+    assert entry.data["allow"] == ["cakemail_campaign_archive", "cakemail_campaign_link_list"]
+    source = entry.data["sources"][0]
+    assert source["names"]["archiveCampaign"] == "cakemail_campaign_archive"
+    assert source["approval"]["cakemail_campaign_archive"] == "always_approve"
+    assert len(source["names"]) == len(cakemail._spec_ops())
+
+
+def test_cakemail_include_unknown_or_denied_name_lists_close_matches():
+    with pytest.raises(EntryError, match=r"cakemail_list_lisst \(close: .*cakemail_list_list"):
+        connector_tool_entry("cakemail", include=["cakemail_list_lisst"])
+    with pytest.raises(EntryError, match="no such tool"):
+        connector_tool_entry("cakemail", include=["createToken"])
