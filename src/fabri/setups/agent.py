@@ -31,6 +31,7 @@ def build_agent_config(
     store: CredentialStore | None = None,
     dry_run: bool = False,
     task: str | None = None,
+    approver=None,
 ) -> tuple[dict[str, Any], ToolRegistry]:
     """Return ``(config, registry)`` for one agent type.
 
@@ -47,7 +48,9 @@ def build_agent_config(
     find_tools and describe_tool when `meta_tools` is true, and `load_skill`
     when the type has on-demand skills. Pass `task` so a type with more
     on-demand skills than setup.yaml `skill_index_top_k` lists only the best
-    matches in full.
+    matches in full. `approver` goes on the registry and answers calls whose
+    class is always_approve, for example ``fabri.tools.approver.default_approver()``;
+    with None those calls are refused.
     """
     from fabri.config import DEFAULT_CONFIG, _deep_merge, _normalize_llm_roles
 
@@ -57,7 +60,7 @@ def build_agent_config(
                                  store=store, dry_run=dry_run)
     chosen = tool_set.for_type(resolved, agent_type)
     registry = tool_set.registry([t.name for t in chosen], sandbox_root=sandbox_root,
-                                 meta_tools=meta_tools and bool(chosen))
+                                 meta_tools=meta_tools and bool(chosen), approver=approver)
     prompt, warnings = resolved.system_prompt(agent_type, task=task)
     has_load_skill = register_load_skill(registry, resolved, agent_type)
 

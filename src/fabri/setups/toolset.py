@@ -122,11 +122,12 @@ class ResolvedToolSet:
         return self.select(setup.tools_for(agent_type))
 
     def registry(self, names: Iterable[str] | None = None, *, sandbox_root: str | None = None,
-                 meta_tools: bool = False) -> ToolRegistry:
+                 meta_tools: bool = False, approver=None) -> ToolRegistry:
         """A fresh ToolRegistry holding these tools (or the named subset).
         `meta_tools=True` adds find_tools and describe_tool over the
-        catalog."""
-        registry = ToolRegistry([], sandbox_root=sandbox_root)
+        catalog. `approver` answers always_approve calls (see
+        fabri.tools.approver); with None those calls are refused."""
+        registry = ToolRegistry([], sandbox_root=sandbox_root, approver=approver)
         chosen = self.select(names)
         for tool in chosen:
             registry.register_callable(tool.manifest, tool.handler)

@@ -4,7 +4,7 @@ Three kinds of tool source can be added to any scope with one command:
 
 - an OpenAPI 3 spec (a file or a URL)
 - an MCP server (a stdio command or an HTTP URL)
-- a connector (GitHub, Linear, Slack)
+- a connector (GitHub, Linear, Slack, Cakemail; Composio is experimental)
 
 Each command writes one plain YAML file, `<layer>/tools/sources/<name>.yaml`,
 checks that it builds under the host's policy, lints the layer stack and
@@ -137,13 +137,27 @@ fabri setups tools add connector github --scope org:acme --remote --token-env GH
 fabri setups tools add connector linear --scope org:acme             # hosted MCP, LINEAR_API_KEY
 fabri setups tools add connector slack --scope org:acme --workspace T0123   # secret ref slack:T0123
 fabri setups tools add connector slack --scope org:acme --name ops_slack --token-env OPS_SLACK_TOKEN
+fabri setups tools add connector cakemail --scope org:acme --workspace acct1   # 28 curated tools
+fabri setups tools add connector cakemail --scope org:acme --token-env CAKEMAIL_TOKEN --all-tools
+fabri setups tools add connector composio --scope org:acme --url https://example.test/mcp --include GMAIL_SEND_EMAIL
 ```
+
+Three flags apply to some connectors only:
+
+- `--url` is the server URL. Only `composio` takes it, and it needs it (https only).
+- `--include` names the tools to expose. `composio` needs it, with exact tool names (no `*?[`). On
+  other connectors it replaces the curated list.
+- `--all-tools` widens a connector that has a curated list (`cakemail`) to every tool in its pinned spec. The
+  approval floor still applies to each one. It cannot be combined with `--include`, and connectors without a
+  curated list refuse it.
 
 | Connector | Source kind | Default credential | What you get |
 |---|---|---|---|
 | `github` | mcp (Docker, or `--remote`) | `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub's official MCP server: issues, PRs, code, actions |
 | `linear` | mcp (hosted) | `LINEAR_API_KEY` | Linear's MCP server: issues, projects, comments |
 | `slack` | http | `SLACK_BOT_TOKEN` | `slack_channels_list`, `slack_channel_history` (read), `slack_post_message` (always_approve) |
+| `cakemail` | openapi (pinned spec) | `CAKEMAIL_TOKEN` | 28 curated tools: lists, contacts, segments, tags, senders, templates, campaigns. 21 read, 7 always_approve. See [connectors/cakemail.md](connectors/cakemail.md) |
+| `composio` | mcp (experimental, written disabled) | `COMPOSIO_API_KEY` | Tools of the apps connected in your Composio account, every one always_approve. See [connectors/composio.md](connectors/composio.md) |
 
 `--workspace` uses the credential store ref `<provider>:<workspace>`, which
 fabri resolves from `FABRI_CRED_<PROVIDER>_<WORKSPACE>` or from the Slack and
@@ -155,6 +169,28 @@ lookup with the provider, handle, actor and result, never the value. Connectors 
 `--connect` to list the tools of an MCP connector now. A missing token here is
 a warning, not an error: the file is right and the tools build where the
 token is set. The github and linear connectors need `mcp` in `allowed_kinds`.
+
+### How connector approval floors work
+
+Every catalog expansion writes `approval_mode: tighten` and `catalog: <id>` on each source. Those keys sit in
+editable YAML, so they are not what holds a write behind approval. The floor is bound to the request itself:
+
+- A connector module in `src/fabri/tools/connector_catalog/` may set `HOSTS`, a tuple of lower-case host names it
+  owns (Slack sets `("slack.com",)`). A host matches itself and its subdomains.
+- It may also set `READS`, a tuple of `(METHOD, path regex)` pairs trusted as read. The regex must match the whole
+  URL path. Slack lists `GET /api/conversations.list` and `GET /api/conversations.history`.
+- For `http` and `openapi` tools, `request_floor(url, method)` looks up the owner of the request host. A call to an
+  owned host is `always_approve` unless its method and path are in `READS`. The tool's name, the method the YAML
+  claims and the presence of the two keys do not matter. Editing the YAML or the pinned spec copy cannot lower it.
+- Two modules may not claim the same host, and every module is checked when the package loads (`HOSTS` and `READS`
+  are optional; a module with neither has no host floor).
+- MCP tools have no URL per tool, so their floor stays tool-name based through `minimum(tool_name, method)` and the
+  `catalog` key. An http MCP server is matched by the host of its server URL; a stdio server only by its `catalog` key.
+
+A hand-written source on a host no module owns, and without `approval_mode` or `catalog`, can still lower a class,
+and lint warns when it does. Adding a connector's hosts is a change to its module, reviewed as code. Nothing else
+needs editing. The functions live in `fabri.tools.connector_catalog`
+(`catalog_for_url`, `request_floor`). UNVERIFIED: whether the `fabri.tools.connectors` facade re-exports them.
 
 ## Approval classes
 
@@ -179,7 +215,7 @@ Defaults:
 
 | Source | read | write | always_approve |
 |---|---|---|---|
-| OpenAPI and http | GET, HEAD, OPTIONS | other methods | DELETE, and any operation whose name or path sends messages (send, message, email, sms, notify, invite, publish) or moves money (pay, payment, charge, refund, payout, transfer, checkout, purchase) |
+| OpenAPI and http | GET, HEAD, OPTIONS | other methods | DELETE, and any operation whose name or path sends messages (send, message, email, sms, notify, invite, publish), moves money (pay, payment, charge, refund, payout, transfer, checkout, purchase) or starts something that acts later (action, export, import, schedule, resume, activate, trigger, subscribe) |
 | MCP | never by default | other tools | `destructiveHint: true`, or a name that deletes, sends or moves money |
 
 An MCP server's `readOnlyHint` is a claim by the server, so it does not make a
@@ -208,6 +244,78 @@ A source whose headers or env name a ref outside its grants fails to build,
 and its handlers resolve credentials through a store that refuses anything
 else, so a layer edited at runtime cannot point a tool at another tenant's
 token. Without the key there is no cap. `env:` header specs are not covered.
+
+### Who answers an approval
+
+`ToolRegistry` asks the `approver` for every `always_approve` call. Which approver a run has depends on the host:
+
+- `fabri run` on a terminal prints the call on stderr and reads `[y/N]`. Only `y` or `yes` approves. Without a
+  terminal (a pipe, CI) there is no approver and the call is refused.
+- `fabri serve` and Studio send the call to the run's questions inbox as a question with approve and deny
+  buttons. A run bound to Slack gets the same question there. The run's owner can answer under strict auth (UNCONFIRMED: depends on the strict-auth change in `http_server.py`, not re-read when this was written).
+- A child agent asks the parent's human. Its own stdin is a pipe, so it can never approve its own call.
+- A Python host passes `approver=` to `build_tools`, `registry(...)` or `build_agent_config`, or sets
+  `registry.approver`, as in the example above.
+- `FABRI_APPROVAL_TIMEOUT_S` sets how long a question waits (default 300 seconds). A timeout denies.
+- No environment variable approves anything. There is no standing "yes".
+
+Config-declared MCP servers under `tools.mcp_servers` get approval classes too, so a tool named like
+`send_message` prompts or is refused in `fabri run`. Before, it ran with no class and no gate.
+
+## Tool count and token cost
+
+`fabri setup lint` and `GET /setups/lint` warn when a resolved setup has more than 40 tools or about 16000 tokens of
+tool schema. At that point turn on tool retrieval or narrow `allow`. The thresholds are provisional until measured
+on real layers. To see where the tokens go:
+
+```sh
+python scripts/measure_tool_tokens.py --layers baseline_dir pack_dir company_dir
+```
+
+It prints tokens, name and approval class per tool, biggest first, then the totals.
+
+## MCP safety
+
+- Text from an MCP server (tool descriptions, titles, schema strings, results) is cleaned of control characters,
+  capped, and prefixed as data from the server. This does not stop every prompt injection. Treat a server you do
+  not control as untrusted.
+- An oversized schema, or two tools whose names collide after cleaning, is rejected.
+- Values of your env vars and headers are removed from every error message. A server's stderr is never shown to the
+  agent.
+- A stdio source with `env_mode: allowlist` (the catalog default) passes the child only a short list of host
+  variables (`PATH`, `HOME`, locale, proxy and CA settings, `DOCKER_*`) plus the variables you name under `env`.
+  `env_mode: inherit` is the default for hand-written sources.
+- MCP over HTTP refuses redirects and refuses private or loopback hosts unless `FABRI_FETCH_ALLOW_PRIVATE` is set.
+  The private-host check happens before connecting, so DNS rebinding between the check and the connection is not
+  closed.
+
+## Sources in `fabri run`
+
+`fabri run` builds tools from `tools.manifest_dir`, `tools.agents`, `tools.mcp_servers` and `tools.sources`.
+`tools.sources` is a list of source declarations, the same mapping you would put under `sources:` in a setup's
+`tools/sources/*.yaml` file (the format of `tools/tools.yaml`).
+
+```yaml
+tools:
+  policy: policy.yaml        # optional; a file path or an inline mapping
+  sources:
+    - kind: openapi
+      name: pets
+      spec: specs/pets.yaml  # relative to the working directory
+      headers: {Authorization: {env: PETS_TOKEN, prefix: "Bearer "}}
+      methods: [GET]
+```
+
+- Each source goes through the same builder as a setup, so approval classes and the connector host floors apply.
+- Without `tools.policy` the strict default applies: `openapi` and `http` sources only, no DELETE, no `python`.
+  `tools.policy` takes a policy file path or an inline mapping, layered on that default. Its name allow list and
+  `approval_floor` apply to these tools.
+- Relative spec paths resolve against the working directory, like `tools.manifest_dir`.
+- A source that fails to build is logged and skipped. A bad `tools.policy` raises.
+- A source cannot replace a tool that is already registered, or the reserved `decompose` name. The tool is skipped
+  with a warning.
+- `tools.enabled` filters the result as it does for other tools, so list the source tool names there if you use it.
+  UNVERIFIED: I read this from `runtime.build_tools`; I did not run it.
 
 Loosening is possible only by editing the YAML by hand (`approval: {pet_delete:
 read}`), and then `fabri setup lint`, the add commands and `GET /setups/lint`

@@ -2,7 +2,11 @@
 Invoked as: python3 agent_runner_tool.py <config_path>, with {"task": "..."}
 on stdin -- the same stdin-JSON-in/stdout-JSON-out contract every other tool
 uses, so the calling agent's ToolRegistry/runner doesn't need to know this
-"tool" is itself a whole agent."""
+"tool" is itself a whole agent.
+
+A child never approves its own calls. Calls that need approval go to the
+parent's human through the ask-user socket, or are refused when there is
+none."""
 import argparse
 import json
 import os
@@ -24,6 +28,7 @@ from fabri.orchestrator.action_execution import apply_safe_memory_actions
 from fabri.orchestrator.pipeline import process_trace
 from fabri.orchestrator.traces import trace_path
 from fabri.runtime import build_llm, build_memory_store, build_run_llms, build_tool_defs, build_tools
+from fabri.tools.approver import default_approver
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -113,7 +118,10 @@ def main() -> int:
     # Build delegated tools only after applicable safe actions have updated
     # their compiled configs. This makes the very next child invocation use the
     # remembered recovery without mutating source rosters.
-    tools = build_tools(tools_cfg)
+    # A child never approves its own calls: its stdin is the runner's JSON
+    # pipe, not a terminal, so default_approver gives the parent's socket
+    # (when --ask-user-socket was passed) or None, and None refuses them.
+    tools = build_tools(tools_cfg, approver=default_approver())
     decompose_cfg = tools_cfg["decompose"]
     llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
 

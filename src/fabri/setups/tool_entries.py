@@ -46,6 +46,8 @@ from fabri.tools.approval import (
     stricter,
 )
 from fabri.tools.connectors import CONNECTORS, ConnectorError, connector_entry
+from fabri.tools.connectors import spec_rel as _catalog_spec_rel
+from fabri.tools.connectors import spec_text as _catalog_spec_text
 from fabri.tools.openapi import (
     OpenAPIError,
     filter_operations,
@@ -364,7 +366,17 @@ def mcp_entry(
 
 def connector_tool_entry(kind: str, *, name: str | None = None, token_env: str | None = None,
                          workspace: str | None = None, remote: bool = False, approval: str | None = None,
-                         connect: bool = False) -> ToolEntry:
+                         connect: bool = False, url: str | None = None, include: Sequence[str] | None = None,
+                         all_tools: bool = False) -> ToolEntry:
+    """A ToolEntry for a catalog connector. `include` replaces the curated
+    allow list (tool names or fnmatch patterns for openapi; names for mcp);
+    `all_tools` widens it to every tool; the two cannot be combined. A
+    connector that needs an explicit list refuses an empty `include` and any
+    wildcard in it. A connector with a pinned spec writes that spec with the
+    entry."""
+    include = [str(p) for p in include or ()]
+    if include and all_tools:
+        raise EntryError("--include and --all-tools cannot be combined")
     if token_env:
         check_env_name(token_env, "--token-env")
     if workspace and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", workspace):
@@ -372,15 +384,44 @@ def connector_tool_entry(kind: str, *, name: str | None = None, token_env: str |
     if kind not in CONNECTORS:
         raise EntryError(f"unknown connector {kind!r}; known: {', '.join(sorted(CONNECTORS))}")
     name = check_name(name or kind)
+    connector = CONNECTORS[kind]
+    if connector.needs_include:
+        if all_tools:
+            raise EntryError(f"{kind} exposes many tools; --all-tools is not available, pass --include "
+                             "with exact tool names")
+        if not include:
+            raise EntryError(f"{kind} exposes many tools; pass --include with exact tool names")
+        if any(ch in p for p in include for ch in "*?["):
+            raise EntryError(f"{kind} --include takes exact tool names, not patterns")
     try:
-        data = connector_entry(kind, name=name, token_env=token_env, workspace=workspace, remote=remote)
+        data = connector_entry(kind, name=name, token_env=token_env, workspace=workspace, remote=remote,
+                               url=url, all_tools=all_tools)
+        rel = _catalog_spec_rel(kind, name)
+        text = _catalog_spec_text(kind) if rel else None
     except ConnectorError as exc:
         raise EntryError(str(exc)) from None
+    sources = data.get("sources") or []
+    kinds = {str(s.get("kind")) for s in sources}
+    if include or all_tools:
+        if "openapi" in kinds:
+            data["allow"] = list(include) if include else ["*"]
+        elif "mcp" in kinds:
+            mcp_name = next(str(s.get("name") or name) for s in sources if s.get("kind") == "mcp")
+            data["allow"] = [f"mcp_{mcp_name}_{p}" for p in include] if include else [f"mcp_{mcp_name}_*"]
+        elif include:
+            raise EntryError(f"connector {kind} has no tool list to narrow, so --include does not apply")
+    spec_doc = None
+    if rel and text is not None:
+        try:
+            spec_doc = load_openapi(yaml.safe_load(text))
+        except OpenAPIError as exc:
+            raise EntryError(f"packaged spec for {kind} is not valid: {exc}") from None
     floor = _floor(approval)
     if floor == "always_approve":
-        for source in data["sources"]:
+        for source in sources:
             source["approval"] = "always_approve"
-    return ToolEntry(name=name, how=f"connector {kind}", data=data, connect=connect, approval_floor=floor)
+    return ToolEntry(name=name, how=f"connector {kind}", data=data, spec_rel=rel, spec_text=text,
+                     spec_doc=spec_doc, connect=connect, approval_floor=floor)
 
 
 # ---------------------------------------------------------------- preview and write

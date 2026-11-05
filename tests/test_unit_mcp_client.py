@@ -584,3 +584,12 @@ def test_http_client_uses_mock_transport(monkeypatch):
     finally:
         client.close()
     assert client._client is None
+
+
+def test_capped_result_fits_the_limit_even_when_escaping_grows_it():
+    from fabri.tools import mcp_client as mc
+    heavy = {"content": [{"type": "text", "text": "x"}],
+             "structuredContent": {"q": '"\\\\\n' * 60_000}}
+    out = mc._sanitize_result(heavy, [])
+    assert len(json.dumps(out, ensure_ascii=False)) <= mc.RESULT_MAX_CHARS
+    assert "cut by fabri" in out["content"][0]["text"]

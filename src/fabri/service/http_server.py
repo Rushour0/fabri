@@ -171,8 +171,12 @@ class _Handler(BaseHTTPRequestHandler):
         cfg = getattr(service, "auth_cfg", None) or {}
         return bool(getattr(service, "auth_enabled", False)) and not cfg.get("allow_guests")
 
-    def _gate(self, method: str) -> bool:
-        """Under strict auth: a caller for every route, admin for any change."""
+    def _gate(self, method: str, owner_may_write: bool = False) -> bool:
+        """Under strict auth: a caller for every route, admin for any change.
+
+        owner_may_write skips the admin check for one route whose handler then
+        checks run ownership itself (answering a question on your own run).
+        """
         self._caller = None
         if not self._strict_auth():
             return True
@@ -181,7 +185,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "auth required"})
             return False
         path = urlsplit(self.path).path.rstrip("/")
-        if (method != "GET" or path in _ADMIN_GETS) and not principal.is_admin:
+        needs_admin = method != "GET" or path in _ADMIN_GETS
+        if needs_admin and not owner_may_write and not principal.is_admin:
             self._send_json(403, {"error": "admin role required"})
             return False
         self._caller = principal
@@ -496,12 +501,21 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(encoded)
             return
-        if not self._gate("POST"):
-            return
         m = _ANSWER_RE.match(self.path)
+        if not self._gate("POST", owner_may_write=m is not None):
+            return
         if m:
-            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
-                return
+            # Under strict auth the run owner may answer, not only an admin.
+            # An admin may answer any run.
+            caller = getattr(self, "_caller", None)
+            admin = caller is not None and caller.is_admin
+            if self.service.auth_enabled and not admin:
+                if self._strict_auth() and self.service.run_owner(m.group(1)) != caller.user_id:
+                    # Unowned runs (token-submitted) are for admins only here.
+                    self._send_json(404, {"error": f"unknown session_id {m.group(1)!r}"})
+                    return
+                if not self._authorize_run(m.group(1)):
+                    return
             self._answer(m.group(1))
             return
         m = _CANCEL_RE.match(self.path)

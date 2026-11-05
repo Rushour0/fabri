@@ -46,6 +46,7 @@ from fabri.runtime import (
 from fabri.repo import detect_provider, get_provider
 from fabri.scaffold import SCAFFOLD_TEMPLATES, next_steps, scaffold
 from fabri.tool_scaffold import SUPPORTED_LANGUAGES, scaffold_tool
+from fabri.tools.approver import default_approver
 
 
 logger = logging.getLogger("fabri")
@@ -295,7 +296,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         except Exception:
             logger.warning("ActionMemory preparation failed closed", exc_info=True)
 
-    tools = build_tools(tools_cfg)
+    # A terminal run asks y/N; under fabri serve the socket routes the
+    # question to the inbox; anything else has no approver and gated calls
+    # are refused.
+    tools = build_tools(tools_cfg, approver=default_approver())
 
     decompose_cfg = tools_cfg["decompose"]
     llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))

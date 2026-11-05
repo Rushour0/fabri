@@ -93,7 +93,7 @@ auth:
 | `POST /tools/sources` | `{scope, source: openapi\|mcp\|connector, ..., dry_run?, replace?}` | `{name, file, tool_count, approvals, tools, hidden, errors, warnings, lint, written, yaml}` |
 | `POST /tools/sources/enable` | `{scope, name, enabled}` | `{ok, changed}` |
 | `DELETE /tools/sources?scope=S&name=N` | | `{ok, removed: [path]}` |
-| `GET /tools/connectors` | | `[{name, title, summary, kinds, env_var, store_provider, remote_option}]` |
+| `GET /tools/connectors` | | `[{name, title, summary, kinds, env_var, store_provider, remote_option, auth_kind, curated, pinned_spec, needs_include, needs_url, experimental}]`. `POST /tools/sources` for a connector also takes `url`, `include` and `all_tools`. |
 | `GET /setups/agent-types` | | `[{type, title, route?, global_skills: [name], used_by: [org]}]` |
 | `GET /setups/agent-types/{type}` | | `{type, title, prompt, global_skills: [name]}` |
 | `PUT /setups/agent-types/{type}` | `{prompt?, global_skills?: [name]}` | the same object after the write |
@@ -117,7 +117,7 @@ Details that the table leaves out:
 - `/tools/sources` manages `<layer>/tools/sources/<name>.yaml`, one plain YAML file per added source (see [adding-tools.md](adding-tools.md)). `POST` body fields by `source`:
   - `openapi`: `spec_url` or `spec_text` (the spec as text; server paths are not accepted), `name?`, `include?`, `exclude?`, `methods?`, `allow_delete?`, `base_url?`, `snapshot?`, `strip_prefixes?`.
   - `mcp`: `name`, `command` (string or list) or `url`, `env?` (`["NAME", "CHILD=PARENT"]` or a mapping, stdio only), `include?`, `connect?` (default true: start or call the server to list its tools).
-  - `connector`: `connector` (`github`, `linear`, `slack`), `name?`, `token_env?`, `workspace?`, `remote?`, `connect?` (default false).
+  - `connector`: `connector` (`github`, `linear`, `slack`, `cakemail`, `composio`), `name?`, `token_env?`, `workspace?`, `remote?`, `url?`, `include?` (list), `all_tools?`, `connect?` (default false).
   - All: `approval?` (a floor: `read`, `write` or `always_approve`), `auth?: {env | secret_ref, header?, prefix?}`, `headers?: {Name: ENV_VAR}`, `dry_run?`, `replace?`. Credentials are env var names or secret refs only; anything else is 400.
 - `POST /tools/sources` checks the source builds under the server's policy before writing. With `dry_run: true` it always returns 200 with `written: false` and any `errors`; otherwise a source that does not build is 400 with `reasons`, and a name that exists is 409 unless `replace: true`. `yaml` is the file text that was (or would be) written. `lint` holds findings for this source after the write; a credential that is not set on the server is a warning.
 - `GET /tools/sources` builds the scope's tools to count them, so MCP servers in the scope are started or called. `tools` and `approvals` count tools that source builds in this layer. Entries from `tools/tools.yaml` and `tools/registered/` are listed too; enable and delete work on `tools/sources` files and registered tools only.

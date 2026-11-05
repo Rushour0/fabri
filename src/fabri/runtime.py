@@ -251,7 +251,14 @@ def build_run_llms(config: dict, tool_defs: list[dict]) -> dict:
     }
 
 
-def build_tools(tools_cfg: dict) -> ToolRegistry:
+def build_tools(tools_cfg: dict, *, approver=None) -> ToolRegistry:
+    """Build the run's ToolRegistry from the ``tools`` block of a config.
+
+    `approver` answers calls whose approval class is ``always_approve``
+    (see fabri.tools.approver); with None those calls are refused.
+    Config-declared MCP servers get an approval class per tool, and
+    ``tools.sources`` entries are built the same way setups build theirs,
+    approval floors included (see _register_config_sources)."""
     # sandbox_root is threaded to each tool spawn via env= (see
     # registry.invoke) rather than os.environ, so a parent registry and a
     # sub-agent registry with a tighter sandbox can coexist.
@@ -260,7 +267,7 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
     if isinstance(manifest_dirs, str):
         manifest_dirs = [manifest_dirs]
     registry = ToolRegistry(
-        [_resolve_manifest_dir(d) for d in manifest_dirs], sandbox_root=sandbox_root
+        [_resolve_manifest_dir(d) for d in manifest_dirs], sandbox_root=sandbox_root, approver=approver
     )
     # `decompose` is a synthetic meta-tool the agent loop injects; a
     # user-shipped tool of the same name would shadow it. Refuse loudly.
@@ -275,8 +282,13 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
     # MCP server shouldn't take down an otherwise-working agent.
     for server_cfg in tools_cfg.get("mcp_servers", []) or []:
         try:
+            from fabri.tools.approval import mcp_approval
             from fabri.tools.mcp_client import build_mcp_tools
-            client, pairs = build_mcp_tools(server_cfg)
+            client, pairs = build_mcp_tools(
+                server_cfg,
+                approval_for=lambda remote, spec: mcp_approval(
+                    remote, str(spec.get("description") or ""), spec.get("annotations")),
+            )
             for manifest, handler in pairs:
                 registry.register_callable(manifest, handler, owns=client)
         except Exception as e:
@@ -285,6 +297,67 @@ def build_tools(tools_cfg: dict) -> ToolRegistry:
                 "MCP server %r failed to start (skipping): %s",
                 server_cfg.get("name") or "?", e,
             )
+    if tools_cfg.get("sources"):
+        _register_config_sources(registry, tools_cfg["sources"], tools_cfg.get("policy"))
     if tools_cfg["enabled"] is not None:
         registry.tools = {name: m for name, m in registry.tools.items() if name in tools_cfg["enabled"]}
     return registry
+
+
+class _CollectedTools(list):
+    """Stands in for a registry so register_tool_sources hands back what it
+    built, letting build_tools check names and policy before registering."""
+
+    def register_callable(self, manifest, handler, owns=None) -> None:
+        self.append((manifest, handler))
+
+
+def _tool_policy(raw):
+    """The ToolPolicy for ``tools.sources``: ``tools.policy`` as a policy file
+    path or an inline mapping (or list of names), layered on the strict
+    default. With no ``tools.policy`` the strict default applies: openapi
+    and http sources only, no DELETE, no python callables."""
+    from fabri.tools.policy import ToolPolicy
+
+    if raw is None:
+        return ToolPolicy()
+    if isinstance(raw, (str, Path)):
+        return ToolPolicy.from_file(raw, base=ToolPolicy())
+    return ToolPolicy.from_data(raw, base=ToolPolicy())
+
+
+def _register_config_sources(registry: ToolRegistry, decls, raw_policy) -> None:
+    """Register ``tools.sources`` declarations (the format setups use in
+    tools.yaml) into `registry`.
+
+    Each source is built by fabri.tools.sources, so its approval class and
+    the catalog host floors are applied there. The policy's name allow list
+    and approval_floor are applied here, as the setups tool set does. Relative
+    spec paths resolve against the working directory, like
+    ``tools.manifest_dir``. A source that fails to build is logged and
+    skipped; a bad ``tools.policy`` raises, since ignoring it would hide
+    what the operator asked for. A source may not replace a tool that is
+    already registered or the reserved decompose name."""
+    import logging
+
+    from fabri.tools.approval import stricter
+    from fabri.tools.sources import register_tool_sources
+
+    log = logging.getLogger(__name__)
+    policy = _tool_policy(raw_policy)
+    if not isinstance(decls, (list, tuple)):
+        raise ValueError("tools.sources must be a list of tool source declarations")
+    collected = _CollectedTools()
+    for error in register_tool_sources(collected, decls, policy=policy):
+        log.warning("tool source failed to build (skipping): %s", error)
+    for manifest, handler in collected:
+        aliases = manifest.aliases or ()
+        if not policy.name_allowed(manifest.name, aliases):
+            continue
+        if manifest.name == DECOMPOSE_TOOL_NAME or manifest.name in registry.tools:
+            log.warning("tool source tool %r skipped: the name is already taken", manifest.name)
+            continue
+        floor = policy.floor_for(manifest.name, aliases)
+        if floor is not None:
+            manifest.approval = stricter(manifest.approval or "write", floor)
+        registry.register_callable(manifest, handler)

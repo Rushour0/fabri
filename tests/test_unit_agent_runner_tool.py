@@ -77,7 +77,7 @@ def _install_agent_runner_fakes(monkeypatch, *, process_trace_side_effect=None):
     stack. Returns the recorder dict the test asserts against."""
     import fabri.tools.agent_runner_tool as art
 
-    calls = {"process_trace": [], "ingest_guideline": []}
+    calls = {"process_trace": [], "ingest_guideline": [], "build_tools": []}
 
     fake_config = {
         "llm": {}, "memory": {
@@ -90,7 +90,11 @@ def _install_agent_runner_fakes(monkeypatch, *, process_trace_side_effect=None):
     }
 
     monkeypatch.setattr(art, "load_config", lambda path: fake_config)
-    monkeypatch.setattr(art, "build_tools", lambda tools_cfg: object())
+    def fake_build_tools(tools_cfg, **kwargs):
+        calls["build_tools"].append(kwargs)
+        return object()
+
+    monkeypatch.setattr(art, "build_tools", fake_build_tools)
     monkeypatch.setattr(art, "build_tool_defs", lambda tools, decompose_cfg: [])
     monkeypatch.setattr(
         art, "build_run_llms",
@@ -129,11 +133,11 @@ def _install_agent_runner_fakes(monkeypatch, *, process_trace_side_effect=None):
     return calls, fake_store
 
 
-def _run_main(monkeypatch, config_path="cfg.yaml", env=None):
+def _run_main(monkeypatch, config_path="cfg.yaml", env=None, extra_argv=()):
     import fabri.tools.agent_runner_tool as art
     import io
 
-    monkeypatch.setattr(sys, "argv", ["agent_runner_tool", config_path])
+    monkeypatch.setattr(sys, "argv", ["agent_runner_tool", config_path, *extra_argv])
     monkeypatch.setattr(sys, "stdin", io.StringIO('{"task": "do the thing"}'))
     if env:
         for k, v in env.items():
@@ -255,3 +259,31 @@ def test_main_applies_safe_action_before_run(monkeypatch, capsys):
         "previous_max_tokens": 128,
         "new_max_tokens": 256,
     }]
+
+
+# --- D0: a child never approves its own calls ------------------------------
+
+
+def test_agent_runner_child_without_socket_has_no_approver(monkeypatch):
+    # stdin is the runner's JSON pipe (not a terminal) and no socket is set,
+    # so gated calls in the child are refused rather than self-approved.
+    monkeypatch.delenv("FABRI_ASK_USER_SOCKET", raising=False)
+    calls, _ = _install_agent_runner_fakes(monkeypatch)
+    assert _run_main(monkeypatch) == 0
+    assert calls["build_tools"] == [{"approver": None}]
+
+
+def test_agent_runner_child_with_socket_gets_socket_approver(monkeypatch):
+    from fabri.tools.approver import SocketApprover
+
+    # main() writes the socket path into os.environ; setenv first so the
+    # monkeypatch undo removes it after the test.
+    monkeypatch.setenv("FABRI_ASK_USER_SOCKET", "unused")
+    monkeypatch.delenv("FABRI_ASK_USER_SOCKET")
+    calls, _ = _install_agent_runner_fakes(monkeypatch)
+    rc = _run_main(monkeypatch, extra_argv=("--ask-user-socket", "/tmp/fabri-parent.sock"))
+    assert rc == 0
+    [kwargs] = calls["build_tools"]
+    approver = kwargs["approver"]
+    assert isinstance(approver, SocketApprover)
+    assert approver.socket_path == "/tmp/fabri-parent.sock"

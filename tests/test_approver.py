@@ -164,14 +164,15 @@ def test_socket_question_id_must_match(short_socket_dir, capsys):
     cases = [
         ({"question_id": "other", "selected_option": "approve"}, False),
         ({"question_id": "other", "answer": "yes"}, False),
-        ({"selected_option": "approve"}, True),  # no id in the reply is accepted
+        ({"selected_option": "approve"}, False),  # a reply must carry the id
+        ({"question_id": None, "answer": "yes"}, False),
     ]
     for i, (reply, expected) in enumerate(cases):
         path = str(short_socket_dir / f"q{i}.sock")
         t = _serve_once(path, lambda p, r=reply: r, [])
         assert SocketApprover(path, timeout_s=5)("send_campaign", {}, _manifest()) is expected, reply
         t.join(5)
-    assert capsys.readouterr().err.count("different question_id") == 2
+    assert capsys.readouterr().err.count("did not carry this question's id") == 4
 
 
 def test_socket_timeout_denies(short_socket_dir, capsys):
@@ -239,3 +240,39 @@ def test_describe_call_caps_args():
     short = describe_call("t", {"b": 2, "a": 1}, _manifest(approval="write"))
     assert short.splitlines()[0] == "t needs your approval (class write)"
     assert short.index('"a"') < short.index('"b"')
+
+
+def test_cmd_run_uses_default_approver(monkeypatch):
+    """fabri run builds its registry with default_approver(), so a terminal
+    run asks y/N and a run under fabri serve asks through the socket."""
+    import argparse
+
+    from fabri import cli
+
+    sentinel = TtyApprover(stdin=FakeTty(), stderr=FakeTty())
+    seen: dict = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_build_tools(tools_cfg, **kwargs):
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(cli, "load_config", lambda _p: {
+        "llm": {"api_key_env": "FAKE_KEY"},
+        "memory": {"qdrant_url": "x", "collection": "c"},
+        "tools": {"decompose": {"max_subquestions": 1}},
+        "agent": {"max_steps": 1},
+    })
+    monkeypatch.setattr(cli, "_require_role_api_keys", lambda _c: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_open_store", lambda _c: object())
+    monkeypatch.setattr(cli, "default_approver", lambda: sentinel)
+    monkeypatch.setattr(cli, "build_tools", fake_build_tools)
+    monkeypatch.setattr(cli, "run_agent", lambda *a, **k: pytest.fail("run_agent must not be reached"))
+
+    args = argparse.Namespace(config=None, task="t", session_id="sid", verbose=False, ask_user_socket=None)
+    with pytest.raises(Stop):
+        cli.cmd_run(args)
+    assert seen == {"approver": sentinel}

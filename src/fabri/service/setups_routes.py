@@ -1418,7 +1418,9 @@ class SetupsApi:
             return connector_tool_entry(
                 connector, name=self._opt_str(body, "name"), token_env=self._opt_str(body, "token_env"),
                 workspace=self._opt_str(body, "workspace"), remote=self._opt_bool(body, "remote", False),
-                approval=approval, connect=self._opt_bool(body, "connect", False))
+                approval=approval, connect=self._opt_bool(body, "connect", False),
+                url=self._opt_str(body, "url"), include=self._opt_list(body, "include"),
+                all_tools=self._opt_bool(body, "all_tools", False))
         raise ApiError(400, "source must be openapi, mcp or connector")
 
     def post_tool_source(self, req: "Request"):

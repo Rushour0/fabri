@@ -176,7 +176,9 @@ on an operation can only raise the class; a layer's `approval` map can set
 any class, and lint warns when it is looser than the default. A policy's
 `approval_floor: {pattern: class}` raises classes for every layer. fabri
 records the class; the host's approval gate reads it from
-`tool_set.approvals()` or `manifest.approval`.
+`tool_set.approvals()` or `manifest.approval`. Catalog connectors (cakemail,
+slack and the rest) add a floor bound to the request host and path, which a layer's `approval` map cannot lower; see
+[adding-tools.md](adding-tools.md#how-connector-approval-floors-work).
 
 `fabri setups tools add openapi|mcp|connector` writes a source file for you;
 see [adding-tools.md](adding-tools.md).

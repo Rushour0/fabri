@@ -350,11 +350,31 @@ def _sanitize_result(result: Any, secrets: Iterable[str]) -> Any:
         serialized = str(result)
     if len(serialized) <= RESULT_MAX_CHARS:
         return result
-    extra = len(serialized) - RESULT_MAX_CHARS
-    note = f"[cut by fabri: result was {len(serialized)} characters as JSON, {extra} more not shown]"
     is_error = bool(result.get("isError")) if isinstance(result, dict) else False
-    return {"content": [{"type": "text", "text": serialized[:RESULT_MAX_CHARS] + "\n" + note}],
-            "isError": is_error}
+    return _excerpt_result(serialized, is_error)
+
+
+def _excerpt_result(serialized: str, is_error: bool) -> dict:
+    """One text block holding the start of ``serialized`` plus a note, sized so
+    the whole returned object, serialized as JSON, fits in RESULT_MAX_CHARS.
+    Escaping can grow the excerpt, so the length is measured on the final
+    object and the excerpt shrinks until it fits."""
+    def build(n: int) -> dict:
+        note = (f"[cut by fabri: result was {len(serialized)} characters as JSON, "
+                f"{len(serialized) - n} more not shown]")
+        return {"content": [{"type": "text", "text": serialized[:n] + "\n" + note}], "isError": is_error}
+
+    def size(n: int) -> int:
+        return len(json.dumps(build(n), ensure_ascii=False))
+
+    lo, hi = 0, min(len(serialized), RESULT_MAX_CHARS)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if size(mid) <= RESULT_MAX_CHARS:
+            lo = mid
+        else:
+            hi = mid - 1
+    return build(lo)
 
 
 # ---------------------------------------------------------------- stdio

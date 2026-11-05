@@ -159,13 +159,11 @@ class SocketApprover:
             raise RuntimeError("approval reply was not a JSON object")
         # The ask_user listener echoes question_id in every reply it builds
         # (question_id, answer, and selected_option when a button was used).
-        # A reply with no question_id is still accepted, since other hosts may
-        # omit it. A reply whose id differs from the one sent is a stale or
-        # misrouted answer, so it denies.
-        reply_id = reply.get("question_id")
-        if reply_id is not None and reply_id != payload["question_id"]:
+        # A reply must carry the id that was sent. A missing or different id
+        # is a stale, misrouted or uncorrelated answer, so it denies.
+        if reply.get("question_id") != payload["question_id"]:
             sys.stderr.write(
-                f"approval: reply for {name} had a different question_id; "
+                f"approval: reply for {name} did not carry this question's id; "
                 "the call was denied\n"
             )
             sys.stderr.flush()

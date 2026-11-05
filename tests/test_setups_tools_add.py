@@ -328,6 +328,32 @@ def test_http_client_reads_sse_and_keeps_session(loopback):
 # ---------------------------------------------------------------- connectors
 
 
+def test_connector_flags_parse(monkeypatch, capsys, layer):
+    seen = {}
+
+    def fake(kind, **kwargs):
+        seen["kind"], seen["kwargs"] = kind, kwargs
+        raise EntryError("stop here")
+
+    monkeypatch.setattr("fabri.setups.tool_entries.connector_tool_entry", fake)
+    code, _, err = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "composio",
+                       "--url", "https://example.test/mcp", "--include", "GMAIL_SEND_EMAIL", "GITHUB_LIST_ISSUES",
+                       "--layer", str(layer))
+    assert code == 1 and "stop here" in err
+    assert seen["kind"] == "composio"
+    assert seen["kwargs"]["url"] == "https://example.test/mcp"
+    assert seen["kwargs"]["include"] == ["GMAIL_SEND_EMAIL", "GITHUB_LIST_ISSUES"]
+    assert seen["kwargs"]["all_tools"] is False
+    run(monkeypatch, capsys, "setups", "tools", "add", "connector", "cakemail", "--all-tools", "--layer", str(layer))
+    assert seen["kwargs"]["all_tools"] is True and seen["kwargs"]["url"] is None and seen["kwargs"]["include"] is None
+
+
+def test_connectors_table_has_auth_and_note_columns(monkeypatch, capsys):
+    code, out, _ = run(monkeypatch, capsys, "setups", "tools", "connectors")
+    header = out.splitlines()[0]
+    assert code == 0 and "AUTH" in header and "NOTE" in header
+
+
 def test_add_connectors(monkeypatch, capsys, layer):
     code, out, _ = run(monkeypatch, capsys, "setups", "tools", "connectors")
     assert code == 0 and "github" in out and "slack" in out and "linear" in out
@@ -476,5 +502,5 @@ def test_api_tool_sources_refusals(api):
     assert mcp.status_code == 400 and any("not allowed by the policy" in r for r in mcp.json()["reasons"])
     assert client.post("/tools/sources", json={"scope": "org:acme", "source": "ftp"}).status_code == 400
     connectors = client.get("/tools/connectors").json()
-    assert [c["name"] for c in connectors] == ["github", "linear", "slack"]
+    assert {"github", "linear", "slack", "cakemail", "composio"} <= {c["name"] for c in connectors}
     assert connectors[2]["env_var"] == "SLACK_BOT_TOKEN" and connectors[2]["store_provider"] == "slack"
