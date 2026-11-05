@@ -25,6 +25,7 @@ REFUSED = {
 
 ALLOWED = {
     "llm": {"model": "gemini-2.5-flash"},
+    "memory": {"collection": "tenant-a"},
     "agent": {"max_cost_usd": 0.5, "max_steps": 3, "repair": {"enabled": True, "max_attempts": 1}},
     "tools": {
         "result_format": "json",
@@ -151,7 +152,11 @@ def test_refused_key_names_match_at_any_depth():
     # A whole section counts even when empty or null.
     assert refused_override_keys({"memory": {}}) == ["memory"]
     assert refused_override_keys({"observability": None}) == ["observability"]
-    assert refused_override_keys({"memory": {"collection": "tenant-a"}}) == ["memory.collection"]
+    assert refused_override_keys({"memory": {"collection": "tenant-a"}}) == []
+    for bad in ("../x", "a b", "", "x" * 65, 5, None, ["a"]):
+        assert refused_override_keys({"memory": {"collection": bad}}) == ["memory.collection"]
+    assert refused_override_keys({"memory": {"collection": "ok", "qdrant_url": "u"}}) == [
+        "memory.qdrant_url"]
     # A key hit by two rules is named once.
     assert refused_override_keys({"tools": {"manifest_dir": "/x"}}) == ["tools.manifest_dir"]
     # Role model and provider changes stay allowed.
@@ -251,3 +256,33 @@ def test_admin_user_cancels_any_run(make_server, monkeypatch):
     assert boss.post("/runs/theirs/cancel").status_code == 200
     assert boss.post("/runs/orphan/cancel").status_code == 200
     assert cancelled == ["theirs", "orphan"]
+
+
+def test_stdio_refuses_a_job_with_refused_overrides_and_runs_the_next(tmp_path):
+    import io
+    import json
+
+    submitted = []
+
+    class Fake:
+        def submit(self, task, overrides):
+            submitted.append((task, overrides))
+            return "sid"
+
+        def stream(self, session_id):
+            return iter(())
+
+        def result(self, session_id):
+            return {"ok": True}
+
+    from fabri.service.service import serve_stdio
+
+    bad = {"task": "a", "overrides": REDIRECTS["llm.base_url"]}
+    good = {"task": "b", "overrides": ALLOWED}
+    stdin = io.StringIO(json.dumps(bad) + "\n" + json.dumps(good) + "\n")
+    stdout = io.StringIO()
+    serve_stdio(Fake(), stdin=stdin, stdout=stdout)
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert "llm.base_url" in lines[0]["error"] and "llm.api_key_env" in lines[0]["error"]
+    assert lines[1]["status"] == "submitted"
+    assert submitted == [("b", ALLOWED)]

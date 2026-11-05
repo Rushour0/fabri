@@ -304,7 +304,12 @@ def test_describe_call_redacts_secret_keys_at_any_depth_but_keeps_message_fields
 
 @pytest.mark.parametrize("args, secret", [
     ({"headers": [{"name": "Authorization", "value": "Bearer x"}]}, "Bearer x"),
-    ({"headers": [{"key": "X-Api-Key", "value": "plainvalue1"}]}, "plainvalue1"),
+    ({"headers": [{"name": "X-Api-Key", "value": "plainvalue1"}]}, "plainvalue1"),
+    ({"auth": {"type": "bearer", "key": "opaque-123"}}, "opaque-123"),
+    ({"headers": [{"name": "X-Api-Key", "key": "opaque-123"}]}, "opaque-123"),
+    ({"h": "Authorization: Bearer opaque-123"}, "opaque-123"),
+    ({"h": "x-api-key: opaque-123"}, "opaque-123"),
+    ({"h": "COOKIE: sid=opaque-123; a=b"}, "opaque-123"),
     ({"auth": {"type": "bearer", "value": "opaque-123"}}, "opaque-123"),
     ({"fields": [{"field": "client_secret", "content": "shh-42"}]}, "shh-42"),
     ({"h": "Bearer abc.def"}, "Bearer abc.def"),
@@ -348,3 +353,18 @@ def test_redact_args_cuts_a_token_out_of_a_body_and_keeps_the_rest():
     # The labels stay so the person can see what was hidden.
     assert redact_args({"name": "Authorization", "value": "Bearer x"}) == {
         "name": "Authorization", "value": "[redacted]"}
+
+
+def test_header_strings_keep_the_name_and_other_fields_stay_visible():
+    from fabri.tools.approver import redact_args
+
+    out = redact_args({
+        "to": "ann@example.test",
+        "subject": "Quarterly numbers",
+        "body": "Hi Ann, see attached.",
+        "h": "Authorization: Bearer opaque-123",
+    })
+    assert out["h"] == "Authorization: [redacted]"
+    assert out["to"] == "ann@example.test"
+    assert out["subject"] == "Quarterly numbers"
+    assert out["body"] == "Hi Ann, see attached."

@@ -35,7 +35,7 @@ from fabri.events import EventType
 from fabri.memory.output import split_agent_output
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.auth import UserStore
-from fabri.service.binding import bind_run_config, merge_overrides
+from fabri.service.binding import bind_run_config, merge_overrides, refused_override_keys
 from fabri.service import linear_oauth
 from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
 from fabri.service.launcher import RunHandle, launch_run
@@ -903,8 +903,8 @@ def serve_stdio(
     (``{"session_id", "result": {...}}``). A non-Python host drives the whole
     run -- submit, stream, cost -- over stdin/stdout with no fabri imports.
 
-    No override filtering is applied here, unlike HTTP, because the caller is
-    the trusted local process that started it.
+    Overrides are checked the same way HTTP checks them: a job that sets a
+    refused key gets an error line and is skipped.
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
@@ -925,6 +925,14 @@ def serve_stdio(
         task = req.get("task")
         if not task:
             _write({"error": "request missing required field 'task'"})
+            continue
+        refused = refused_override_keys(req.get("overrides"))
+        if refused:
+            _write({"error": (
+                f"overrides may not set {', '.join(refused)}: these keys start processes, "
+                "widen tool access, or choose where keys, data or traffic go, so only "
+                "the agent's own config may set them"
+            )})
             continue
         session_id = service.submit(task, req.get("overrides"))
         _write({"session_id": session_id, "status": "submitted"})

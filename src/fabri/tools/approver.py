@@ -61,7 +61,14 @@ REDACTED = "[redacted]"
 # "value": "..."}. When a label names a secret word, every other entry in that
 # object is redacted. The labels stay visible so the person can see what was
 # hidden.
-_LABEL_KEYS = frozenset({"name", "key", "header", "field", "type"})
+_LABEL_KEYS = frozenset({"name", "header", "field", "type"})
+
+# A header written as one string, "Authorization: Bearer x". Only the value is
+# replaced, so the header name stays visible.
+_HEADER_LINE = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token)"
+    r"(\s*:\s*)[^\r\n]+"
+)
 
 # A whole string that is an auth header value: the scheme plus one token.
 _AUTH_HEADER_VALUE = re.compile(r"(?i)^\s*(bearer|basic)\s+(\S+)\s*$")
@@ -100,6 +107,7 @@ def _looks_like_basic_credential(token: str) -> bool:
 
 
 def _redact_string(text: str) -> str:
+    text = _HEADER_LINE.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
     match = _AUTH_HEADER_VALUE.match(text)
     if match:
         scheme, token = match.group(1).lower(), match.group(2)
