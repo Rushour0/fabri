@@ -159,13 +159,16 @@ Three flags apply to some connectors only:
 | `cakemail` | openapi (pinned spec) | `CAKEMAIL_TOKEN` | 28 curated tools: lists, contacts, segments, tags, senders, templates, campaigns. 21 read, 7 always_approve. See [connectors/cakemail.md](connectors/cakemail.md) |
 | `composio` | mcp (experimental, written disabled) | `COMPOSIO_API_KEY` | Tools of the apps connected in your Composio account, every one always_approve. See [connectors/composio.md](connectors/composio.md) |
 
-`--workspace` uses the credential store ref `<provider>:<workspace>`, which
-fabri resolves from `FABRI_CRED_<PROVIDER>_<WORKSPACE>` or from the Slack and
-Linear install database. To keep tenants apart, wrap the store a run gets in
+`--workspace` uses the credential store ref `<provider>:<workspace>`. fabri resolves it from a stored connection
+(`fabri connect <provider> --handle <workspace>`, see [connections.md](connections.md)), or from
+`FABRI_CRED_<PROVIDER>_<WORKSPACE>` when there is no stored row. Stored tokens are plain text in a 0600 file. Under
+`fabri serve`, a run receives only the tokens its own sources declare and its grants allow, as `FABRI_CRED_*` variables
+in its environment; a run with a shell tool can read them. To keep tenants apart, wrap the store a run gets in
 `ScopedCredentialStore(store, ["slack:acme", "linear:*"])`: any other ref
 fails with `CredentialScopeError`. Pass `audit_path=` (or set
 `FABRI_CRED_AUDIT_LOG` for the default store) to append one JSON line per
-lookup with the provider, handle, actor and result, never the value. Connectors do not reach the service when added; pass
+lookup with the provider, handle, actor and result, never the value. To write a new connector, see
+[adding-a-connector.md](adding-a-connector.md). Connectors do not reach the service when added; pass
 `--connect` to list the tools of an MCP connector now. A missing token here is
 a warning, not an error: the file is right and the tools build where the
 token is set. The github and linear connectors need `mcp` in `allowed_kinds`.

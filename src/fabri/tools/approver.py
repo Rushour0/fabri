@@ -127,13 +127,16 @@ def redact_args(value: object) -> object:
     of any string. Recipients, subjects, message bodies and other fields stay
     readable, since the person deciding needs them."""
     if isinstance(value, Mapping):
+        # "key" is a label only when the object also has a "value" entry,
+        # as in {"key": "X-Api-Key", "value": "..."}; on its own it is a value.
+        labels = _LABEL_KEYS | ({"key"} if any(str(k).lower() == "value" for k in value) else set())
         labelled = any(
-            str(k).lower() in _LABEL_KEYS and isinstance(v, str) and _names_secret(v)
+            str(k).lower() in labels and isinstance(v, str) and _names_secret(v)
             for k, v in value.items()
         )
         out = {}
         for k, v in value.items():
-            if _names_secret(k) or (labelled and str(k).lower() not in _LABEL_KEYS):
+            if _names_secret(k) or (labelled and str(k).lower() not in labels):
                 out[k] = REDACTED
             else:
                 out[k] = redact_args(v)

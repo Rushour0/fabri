@@ -80,6 +80,7 @@ class Connector:
     needs_url: bool = False  # the caller must give the server URL
     experimental: bool = False  # the expansion is written disabled
     verify_path: str | None = None
+    scope_default: str = "org"  # org | user: who a connection belongs to by default
 
 
 def _credential(connector: Connector, token_env: str | None, workspace: str | None,
@@ -178,7 +179,8 @@ def list_connectors() -> list[dict[str, Any]]:
              "remote_option": c.name == "github",
              "auth_kind": c.auth_kind, "curated": c.default_allow is not None,
              "pinned_spec": c.spec_file is not None, "needs_include": c.needs_include,
-             "needs_url": c.needs_url, "experimental": c.experimental} for c in CONNECTORS.values()]
+             "needs_url": c.needs_url, "experimental": c.experimental,
+             "scope_default": c.scope_default} for c in CONNECTORS.values()]
 
 
 def connector_entry(

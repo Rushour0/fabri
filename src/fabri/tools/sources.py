@@ -49,7 +49,16 @@ import httpx
 
 from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval, safe_approval, stricter
 from fabri.tools.credential_store import CredentialStore
-from fabri.tools.http_call import PathParamError, check_header_specs, dry_run_headers, render_path_value, resolve_headers, send
+from fabri.tools.http_call import (
+    PathParamError,
+    check_header_specs,
+    credential_refused_hint,
+    dry_run_headers,
+    render_path_value,
+    resolve_headers,
+    secret_ref_provider,
+    send,
+)
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.openapi import (
     OpenAPIOperation,
@@ -429,7 +438,14 @@ def _build_mcp(decl, *, base_dir, policy, transport, store, dry) -> list[SourceT
     cfg: dict[str, Any] = {"name": decl["name"], "timeout_s": float(decl.get("timeout_s") or 30.0)}
     if decl.get("url"):
         cfg["url"] = decl["url"]
-        cfg["headers"] = {**resolve_headers(decl.get("headers"), store), **dry}
+        specs = decl.get("headers")
+        # Resolved once here so a missing credential fails the build, then
+        # again before every request so a refreshed or replaced token is used.
+        cfg["headers"] = {**resolve_headers(specs, store), **dry}
+        cfg["header_source"] = lambda: {**resolve_headers(specs, store), **dry}
+        provider = secret_ref_provider(specs)
+        if provider:
+            cfg["credential_hint"] = credential_refused_hint(provider)
     else:
         cfg["command"] = list(decl["command"])
         if decl.get("env"):

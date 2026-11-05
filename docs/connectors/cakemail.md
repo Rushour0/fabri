@@ -55,24 +55,37 @@ With no approver the write is refused.
 
 ## Credentials
 
-- `--workspace acct1` writes a secret ref `cakemail:acct1`. fabri resolves it from `FABRI_CRED_CAKEMAIL_ACCT1`.
+- `--workspace acct1` writes a secret ref `cakemail:acct1`. fabri resolves it from the stored connection, or from
+  `FABRI_CRED_CAKEMAIL_ACCT1` when there is none.
 - Without `--workspace` the header reads the environment variable `CAKEMAIL_TOKEN` (or the one named by
   `--token-env`).
 - The value is sent as `Authorization: Bearer <token>`.
 - A missing credential at add time is a warning. The file is right and the tools build where the credential is set.
 
-**Where the token comes from is UNVERIFIED.** The plan assumes a personal access token. I could not confirm that
-a PAT can be created in the Cakemail web app. Check Cakemail's current documentation before telling anyone to do it,
-and test against a throwaway account.
+Store the token with `fabri connect`:
 
-**This release is for the CLI and Python hosts only.** `fabri serve` strips every `FABRI_CRED_*` variable from the
-runs it starts, on purpose. An operator can re-admit them by naming them in `FABRI_RUN_ENV_ALLOW` (for example
-`FABRI_RUN_ENV_ALLOW=FABRI_CRED_*`), which hands those secrets to every run. Without that, a Cakemail source added to a setup that `fabri serve` runs
-builds, but its calls fail for lack of a credential. A host that injects its own `CredentialStore` is the exception.
-`fabri connect cakemail` (a stored, per-user connection) is a later release.
+```sh
+printf '%s\n' "$CAKEMAIL_PAT" | fabri connect cakemail --handle acct1 --token-stdin
+fabri connect cakemail --handle acct1 --login      # username and password once, fabri makes the token
+```
 
-The token is stored in plain text wherever you keep it (your shell environment or the credential store file). fabri
-does not encrypt it at rest.
+`--login` calls `POST /token` (password grant) and then `POST /users/self/pats`, both confirmed against the pinned
+1.30.2 spec. The password and the login token stay in memory; only the personal access token is stored. It carries
+the 14 scopes the 28 tools need: `campaign_blueprints:read`, `campaigns:read`, `campaigns:send`,
+`campaigns:send-test`, `campaigns:write`, `contacts:read`, `contacts:write`, `lists:read`, `logs:read`, `reports:read`,
+`segments:read`, `senders:read`, `tags:read`, `templates:read`. Without `--no-verify`, connect checks the token with
+`GET /users/self` first and stores nothing if Cakemail refuses it. Whether the Cakemail web app can also create such a
+token by hand is not checked; `--login` does not depend on it.
+
+Under `fabri serve`, a run does not get the install database. When the service starts a run whose sources use
+`cakemail:acct1`, it resolves that one credential and passes it to that run as `FABRI_CRED_CAKEMAIL_ACCT1`. The run
+gets no other Cakemail handle and no other provider's token. A run that has a shell tool can read the variable it was
+given. A token broker that keeps the token in the service is planned for a later release.
+
+If Cakemail answers 401, the error says to run `fabri connect cakemail` again. See [../connections.md](../connections.md).
+
+The token is stored in plain text wherever you keep it: your shell environment, or the connections file
+(`installs.db`, mode 0600). fabri does not encrypt it at rest.
 
 ## Bumping the pinned spec
 

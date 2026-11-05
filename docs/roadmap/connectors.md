@@ -90,7 +90,9 @@ in agency YAML or the sandbox. Proposed:
 ## Proposed cards (for the `agentic-pm` pass to refine)
 
 - **C1 • Credential store** • protocol + env-backed local impl + named-handle
-  resolution. Blocks everything else.
+  resolution. Blocks everything else. *Shipped as the connections table:* `fabri connect`,
+  `fabri connections`, and stored `provider:handle` tokens in `installs.db` (plaintext, 0600). See
+  [../connections.md](../connections.md). Encryption at rest and a token broker are later items.
 - **C2 • Git connector** • clone → branch → commit → push → open PR, through the
   sandbox, propose-don't-apply default. Walking skeleton of the whole track.
 - **C3 • Slack connector** • read channel/thread + post reply, reusing Track A;

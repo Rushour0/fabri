@@ -79,7 +79,7 @@ import select
 import subprocess
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -602,6 +602,14 @@ class MCPHttpClient:
     sends text/event-stream. ``transport`` lets tests pass an
     ``httpx.MockTransport``. ``start()`` runs the SSRF guard; a request made
     before ``start()`` starts the client first, so the guard always runs.
+
+    ``header_source``, when set, is called before every POST and its result
+    replaces ``headers`` for that request, so a token that was refreshed or
+    replaced in the store is picked up without rebuilding the client. Every
+    value it ever returned is kept for redaction. On HTTP 401 the client
+    drops its session id, asks ``header_source`` again and resends once; a
+    second 401 raises with ``credential_hint`` (plain text, never a value)
+    appended.
     """
 
     url: str
@@ -609,13 +617,17 @@ class MCPHttpClient:
     name: str = "mcp"
     timeout_s: float = 30.0
     transport: httpx.BaseTransport | None = None
+    header_source: Callable[[], Mapping[str, str]] | None = None
+    credential_hint: str = ""
     _next_id: int = field(default=0, init=False, repr=False)
     _session_id: str | None = field(default=None, init=False, repr=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
+    _seen_values: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def _secrets(self) -> tuple[str, ...]:
-        return tuple(v for v in (self.headers or {}).values() if v)
+        static = [v for v in (self.headers or {}).values() if v]
+        return tuple(dict.fromkeys([*static, *sorted(self._seen_values)]))
 
     def _where(self) -> str:
         return redact(self.url, self._secrets)
@@ -634,26 +646,51 @@ class MCPHttpClient:
             self.start()
         assert self._client is not None
         body = json.dumps(msg).encode("utf-8")
-        # Streamable HTTP servers answer with JSON or an SSE stream; they
-        # refuse requests that do not accept both.
-        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-        if self._session_id:
-            headers["Mcp-Session-Id"] = self._session_id
-        if self.headers:
-            headers.update(self.headers)
-        try:
-            resp = self._client.post(self.url, content=body, headers=headers)
-        except httpx.HTTPError as e:
-            raise MCPProtocolError(f"MCP HTTP {self._where()} -> {type(e).__name__}") from None
-        status = resp.status_code
+        for attempt in (1, 2):
+            # Streamable HTTP servers answer with JSON or an SSE stream; they
+            # refuse requests that do not accept both.
+            headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+            if self._session_id:
+                headers["Mcp-Session-Id"] = self._session_id
+            headers.update(self._auth_headers())
+            try:
+                resp = self._client.post(self.url, content=body, headers=headers)
+            except httpx.HTTPError as e:
+                raise MCPProtocolError(f"MCP HTTP {self._where()} -> {type(e).__name__}") from None
+            status = resp.status_code
+            if status == 401 and attempt == 1:
+                # The token may have been refreshed or replaced since the last
+                # call. The session was opened under the old one, so drop it.
+                self._session_id = None
+                continue
+            break
         if 300 <= status < 400:
             raise MCPProtocolError(f"MCP HTTP {self._where()} -> redirect refused (HTTP {status})")
+        if status == 401 and self.credential_hint:
+            raise MCPProtocolError(f"MCP HTTP {self._where()} -> HTTP 401 ({self.credential_hint})")
         if status >= 400:
             raise MCPProtocolError(f"MCP HTTP {self._where()} -> HTTP {status}")
         session = resp.headers.get("Mcp-Session-Id")
         if session:
             self._session_id = session
         return resp.headers.get("Content-Type") or "", resp.content
+
+    def _auth_headers(self) -> dict[str, str]:
+        """The configured headers for one request: ``header_source()`` when
+        set, else the static ``headers``. A failure names the error, never a
+        value."""
+        if self.header_source is None:
+            return dict(self.headers or {})
+        try:
+            extra = {str(k): str(v) for k, v in dict(self.header_source()).items()}
+        except ValueError as e:
+            # HeaderSpecError and friends carry the header name and provider only.
+            raise MCPProtocolError(
+                f"MCP HTTP {self._where()} -> headers unavailable: {redact(str(e), self._secrets)}") from None
+        except Exception as e:
+            raise MCPProtocolError(f"MCP HTTP {self._where()} -> headers unavailable ({type(e).__name__})") from None
+        self._seen_values.update(v for v in extra.values() if v)
+        return extra
 
     def _request(self, method: str, params=None):
         self._next_id += 1
@@ -750,8 +787,9 @@ def build_mcp_tools(
     approval class from the server's tools/list entry (after cleaning).
 
     Reads ``name``, ``command``, ``url``, ``env``, ``headers``, ``timeout_s``,
-    ``inherit_env`` (stdio, default True) and ``transport`` (http, an
-    ``httpx.BaseTransport`` for tests). Picks the transport by which of
+    ``inherit_env`` (stdio, default True), ``transport`` (http, an
+    ``httpx.BaseTransport`` for tests), ``header_source`` and
+    ``credential_hint`` (http, see ``MCPHttpClient``). Picks the transport by which of
     `command` / `url` is set. Tools with oversized or nameless specs, and
     tools whose fabri name collides with one already built, are skipped with
     a warning in the log. The caller is responsible for `close()`-ing the
@@ -772,6 +810,8 @@ def build_mcp_tools(
         client = MCPHttpClient(
             url=url, headers=server_cfg.get("headers"), name=name,
             timeout_s=timeout_s, transport=server_cfg.get("transport"),
+            header_source=server_cfg.get("header_source"),
+            credential_hint=str(server_cfg.get("credential_hint") or ""),
         )
     elif command:
         inherit = server_cfg.get("inherit_env")
@@ -790,8 +830,6 @@ def build_mcp_tools(
     except Exception:
         client.close()
         raise
-    secrets = client._secrets
-
     pairs = []
     seen: set[str] = set()
     for raw_spec in remote_tools:
@@ -828,7 +866,10 @@ def build_mcp_tools(
             try:
                 result = client.call_tool(_remote_name, args)
             except MCPProtocolError as e:
-                return tool_error(f"mcp {name}.{_remote_name}: {redact(str(e), secrets)}")
+                return tool_error(f"mcp {name}.{_remote_name}: {redact(str(e), client._secrets)}")
+            # Read the secrets after the call: an HTTP client may have
+            # resolved a new header value for it.
+            secrets = client._secrets
             # MCP's tools/call returns {"content": [{...}], "isError": bool}.
             # Surface the shape as is, with every string redacted and the size capped.
             result = _sanitize_result(result, secrets)

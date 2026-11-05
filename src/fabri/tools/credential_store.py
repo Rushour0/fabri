@@ -15,7 +15,6 @@ import fnmatch
 import json
 import os
 import re
-import sqlite3
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -70,48 +69,47 @@ class EnvCredentialStore:
 
 
 class SqliteInstallCredentialStore:
-    """Read per-workspace Slack/Linear credentials from the install database."""
+    """Read stored connections (any provider) from the install database.
+
+    A handle other than ``default`` is looked up in the ``connections`` table,
+    so Slack, Linear, Cakemail and every later provider resolve the same way.
+    A token near expiry is refreshed on the way out. No row, or a token that
+    is dead, falls back to the environment store. If that has nothing either,
+    the error names the fix and the environment variable, never the token.
+    """
 
     def __init__(self, db_path=None, fallback=None) -> None:
         self._db_path = db_path or os.environ.get("FABRI_INSTALL_DB")
         self._fallback = fallback or EnvCredentialStore()
 
-    def get(self, provider: str, handle: str) -> str:
-        if (
-            provider == "slack"
-            and handle != "default"
-            and self._db_path
-            and Path(self._db_path).exists()
-        ):
-            connection = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro", uri=True, timeout=30
-            )
-            try:
-                row = connection.execute(
-                    "SELECT bot_token FROM installs WHERE team_id=?", (handle,)
-                ).fetchone()
-            finally:
-                connection.close()
-            if row is not None and row[0]:
-                return row[0]
-            raise CredentialNotFoundError(
-                "no Slack install for this workspace"
-            )
-        if provider == "linear" and handle != "default" and self._db_path and Path(self._db_path).exists():
-            # Through the install store so a token near expiry is refreshed
-            # (needs LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in this process).
-            from fabri.service import linear_oauth
-            from fabri.service.install_store import LinearInstallStore
+    def _has_db(self, handle: str) -> bool:
+        return bool(handle != "default" and self._db_path and Path(self._db_path).exists())
 
-            token = LinearInstallStore(
-                Path(self._db_path), refresher=linear_oauth.refresh_access_token
-            ).get_token(handle)
-            if token:
-                return token
+    def _connections(self):
+        # Lazy imports: the service package imports this module's siblings.
+        from fabri.service.connection_store import ConnectionStore, default_refreshers
+
+        return ConnectionStore(Path(self._db_path), refreshers=default_refreshers())
+
+    def get(self, provider: str, handle: str) -> str:
+        if not self._has_db(handle):
+            return self._fallback.get(provider, handle)
+        token = self._connections().get_token(provider, handle)
+        if token:
+            return token
+        try:
+            return self._fallback.get(provider, handle)
+        except CredentialNotFoundError:
             raise CredentialNotFoundError(
-                "no Linear install for this workspace"
-            )
-        return self._fallback.get(provider, handle)
+                f"no {provider} connection for this handle; run `fabri connect {provider}` "
+                f"or set {credential_env_var(provider, handle)}"
+            ) from None
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """Return ``org`` or ``user`` for a stored connection, None when there is no row or no db."""
+        if not self._has_db(handle):
+            return None
+        return self._connections().scope_kind(provider, handle)
 
     def __repr__(self) -> str:
         return "SqliteInstallCredentialStore()"

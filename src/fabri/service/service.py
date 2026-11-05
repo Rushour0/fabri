@@ -37,6 +37,7 @@ from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.auth import UserStore
 from fabri.service.binding import bind_run_config, merge_overrides, refused_override_keys
 from fabri.service import linear_oauth
+from fabri.service.connection_store import ConnectionStore, default_refreshers
 from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
 from fabri.service.launcher import RunHandle, launch_run
 from fabri.service.run_store import RunStore
@@ -220,6 +221,11 @@ class FabriService:
             self.home_root / "runs.db",
             index_path=self._index_path,
             default_agency=self._default_agency,
+        )
+        # One installs.db holds every connection; the three legacy stores open
+        # the same file (Slack and Linear are wrappers over connection_store).
+        self.connection_store = ConnectionStore(
+            self.home_root / "installs.db", refreshers=default_refreshers()
         )
         self.install_store = SlackInstallStore(self.home_root / "installs.db")
         self.github_install_store = GitHubInstallStore(self.home_root / "installs.db")
@@ -921,6 +927,13 @@ def serve_stdio(
             req = json.loads(raw)
         except json.JSONDecodeError as e:
             _write({"error": f"invalid request JSON: {e}"})
+            continue
+        if not isinstance(req, dict):
+            _write({"error": "request must be a JSON object"})
+            continue
+        overrides = req.get("overrides")
+        if overrides is not None and not isinstance(overrides, dict):
+            _write({"error": "overrides must be a JSON object"})
             continue
         task = req.get("task")
         if not task:

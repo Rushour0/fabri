@@ -593,3 +593,190 @@ def test_capped_result_fits_the_limit_even_when_escaping_grows_it():
     out = mc._sanitize_result(heavy, [])
     assert len(json.dumps(out, ensure_ascii=False)) <= mc.RESULT_MAX_CHARS
     assert "cut by fabri" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------- per-call headers and 401 retry
+
+
+class _Rotating:
+    """A header source whose token changes on every call."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def token(self, n: int) -> str:
+        return f"rotated_secret_value_{n:04d}"
+
+    def __call__(self):
+        self.calls += 1
+        return {"Authorization": f"Bearer {self.token(self.calls)}"}
+
+
+def _rpc_ok(msg, **headers):
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": []}}, headers=headers)
+
+
+def test_http_client_resolves_headers_per_call(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    source = _Rotating()
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("Authorization"))
+        return _rpc_ok(json.loads(request.content))
+
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", headers={"Authorization": "Bearer static_value_x"},
+                           header_source=source, transport=_mock(handler))
+    client.list_tools()
+    client.list_tools()
+    client.close()
+    assert seen == [f"Bearer {source.token(1)}", f"Bearer {source.token(2)}"]
+    # Every value ever resolved stays in the redaction set, plus the static one.
+    assert {"Bearer static_value_x", f"Bearer {source.token(1)}", f"Bearer {source.token(2)}"} <= set(client._secrets)
+
+
+def test_http_401_retries_once_with_fresh_headers_and_cleared_session(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    source = _Rotating()
+    sent = []
+
+    def handler(request):
+        msg = json.loads(request.content)
+        sent.append((msg["method"], request.headers.get("Mcp-Session-Id"), request.headers.get("Authorization")))
+        if msg["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {}},
+                                  headers={"Mcp-Session-Id": "sess-1"})
+        if len(sent) == 2:
+            return httpx.Response(401)
+        return _rpc_ok(msg)
+
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", header_source=source, transport=_mock(handler))
+    client._request("initialize", {})
+    assert client._session_id == "sess-1"
+    assert client.list_tools() == []
+    client.close()
+    assert sent == [
+        ("initialize", None, f"Bearer {source.token(1)}"),
+        ("tools/list", "sess-1", f"Bearer {source.token(2)}"),
+        ("tools/list", None, f"Bearer {source.token(3)}"),
+    ]
+
+
+def test_http_401_twice_raises_with_hint_and_no_values(monkeypatch, caplog):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    source = _Rotating()
+    calls = []
+
+    def handler(request):
+        calls.append(request.headers.get("Authorization"))
+        return httpx.Response(401, text=f"refused {request.headers.get('Authorization')}")
+
+    hint = "the stored cakemail credential was refused, run fabri connect cakemail"
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", header_source=source, credential_hint=hint,
+                           transport=_mock(handler))
+    with pytest.raises(MCPProtocolError) as exc:
+        client.list_tools()
+    client.close()
+    assert len(calls) == 2
+    assert str(exc.value) == f"MCP HTTP http://127.0.0.1:9/mcp -> HTTP 401 ({hint})"
+    for n in (1, 2):
+        assert source.token(n) not in str(exc.value)
+        assert source.token(n) not in caplog.text
+
+
+def test_rotated_header_values_are_redacted_from_errors(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    source = _Rotating()
+
+    def handler(request):
+        msg = json.loads(request.content)
+        if "id" not in msg:
+            return httpx.Response(202)
+        auth = request.headers.get("Authorization")
+        if msg["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+        if msg["method"] == "tools/list":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [
+                {"name": "echo", "description": "e", "inputSchema": {"type": "object"}}]}})
+        # The server echoes the token it got in a JSON-RPC error, a value the
+        # build never saw.
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"],
+                                         "error": {"code": -1, "message": f"bad {auth}"}})
+
+    client, pairs = build_mcp_tools({"name": "ck", "url": "http://127.0.0.1:9/mcp", "headers": {},
+                                     "header_source": source, "transport": _mock(handler)})
+    try:
+        out = pairs[0][1]({})
+    finally:
+        client.close()
+    assert source.calls >= 4
+    assert out["ok"] is False and "[redacted]" in out["error"]
+    for n in range(1, source.calls + 1):
+        assert source.token(n) not in out["error"]
+
+
+def test_header_source_failure_names_no_value(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    from fabri.tools.http_call import HeaderSpecError
+
+    def broken():
+        raise HeaderSpecError("header Authorization: credential unavailable (no cakemail connection)")
+
+    def weird():
+        raise RuntimeError(f"leak {TOKEN}")
+
+    calls = []
+    for source in (broken, weird):
+        client = MCPHttpClient(url="http://127.0.0.1:9/mcp", header_source=source,
+                               transport=_mock(lambda r: calls.append(r)))
+        with pytest.raises(MCPProtocolError) as exc:
+            client.list_tools()
+        client.close()
+        assert TOKEN not in str(exc.value) and "headers unavailable" in str(exc.value)
+    assert calls == []
+
+
+def test_build_mcp_sets_header_source_and_hint(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    from fabri.tools.sources import build_source_tools
+
+    class Store:
+        def __init__(self):
+            self.n = 0
+
+        def get(self, provider, handle):
+            assert (provider, handle) == ("cakemail", "main")
+            self.n += 1
+            return f"store_token_value_{self.n:03d}"
+
+    store = Store()
+    sent = []
+
+    def handler(request):
+        msg = json.loads(request.content)
+        sent.append((msg.get("method"), request.headers.get("Authorization")))
+        if "id" not in msg:
+            return httpx.Response(202)
+        if msg["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+        if msg["method"] == "tools/list":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [
+                {"name": "list_lists", "description": "lists", "inputSchema": {"type": "object"}}]}})
+        return httpx.Response(401)
+
+    tools = build_source_tools({"kind": "mcp", "name": "ck", "url": "http://127.0.0.1:9/mcp",
+                                "headers": {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}}},
+                               transport=_mock(handler), store=store)
+    client = tools[0].extra["client"]
+    try:
+        assert client.credential_hint == "the stored cakemail credential was refused, run fabri connect cakemail"
+        # One resolution at build for the static headers, then one per request.
+        assert [a for _, a in sent[:3]] == [f"Bearer store_token_value_{n:03d}" for n in (2, 3, 4)]
+        out = tools[0].handler({})
+    finally:
+        client.close()
+    assert [m for m, _ in sent[3:]] == ["tools/call", "tools/call"]
+    assert sent[3][1] != sent[4][1]
+    assert out["ok"] is False
+    assert out["error"].endswith("HTTP 401 (the stored cakemail credential was refused, run fabri connect cakemail)")
+    assert "store_token_value" not in out["error"]

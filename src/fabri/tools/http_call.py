@@ -30,7 +30,7 @@ from urllib.parse import quote, unquote, urlsplit
 import httpx
 
 from fabri.tools.credential_store import CredentialStore, CredentialStoreError
-from fabri.tools.result import tool_error, tool_ok
+from fabri.tools.result import ERROR_KEY, tool_error, tool_ok
 from fabri.tools.secret_refs import resolve_secret
 
 logger = logging.getLogger("fabri.tools.http")
@@ -63,6 +63,20 @@ def check_header_specs(specs: Mapping[str, Any] | None) -> None:
         unknown = set(spec) - {"secret_ref", "env", "value", "prefix"}
         if unknown:
             raise HeaderSpecError(f"header {header}: unknown keys {sorted(unknown)}")
+
+
+def secret_ref_provider(specs: Mapping[str, Any] | None) -> str | None:
+    """The provider (text before the colon) of the first header spec that
+    names a ``secret_ref``, or None."""
+    for spec in (specs or {}).values():
+        if isinstance(spec, Mapping) and spec.get("secret_ref"):
+            return str(spec["secret_ref"]).split(":", 1)[0]
+    return None
+
+
+def credential_refused_hint(provider: str) -> str:
+    """The plain text shown when a vendor answers 401 to a stored credential."""
+    return f"the stored {provider} credential was refused, run fabri connect {provider}"
 
 
 def resolve_headers(
@@ -230,4 +244,9 @@ def send(
             f"request failed: {type(exc).__name__}", result={"status": "error", "code": None}
         )
     logger.debug("tool %s: %s %s -> %s", tool_name, method.upper(), resp.request.url.path, resp.status_code)
-    return map_response(resp)
+    out = map_response(resp)
+    if resp.status_code == 401:
+        provider = secret_ref_provider(headers)
+        if provider:
+            out[ERROR_KEY] = f"HTTP 401; {credential_refused_hint(provider)}"
+    return out

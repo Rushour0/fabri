@@ -268,3 +268,45 @@ def test_mcp_http_source_matched_by_server_host(monkeypatch):
     other = build_source_tools({"kind": "mcp", "name": "x", "url": "https://mcp.other.test/mcp",
                                 "approval": "read"})[0]
     assert other.manifest.approval == "read" and seen == []
+
+
+# ---------------------------------------------------- 401 hint for stored credentials
+
+
+def _refusing_transport(seen):
+    def handle(request):
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(401, json={"detail": "invalid token"})
+
+    return httpx.MockTransport(handle)
+
+
+def test_http_401_with_secret_ref_names_provider_and_fabri_connect(caplog):
+    token = "pat_live_0123456789abcdef"
+
+    class Store:
+        def get(self, provider, handle):
+            return token
+
+    seen: list = []
+    tool = build_source_tools({"kind": "http", "name": "ck_lists", "url": "https://api.example.test/lists",
+                               "method": "GET",
+                               "headers": {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}}},
+                              transport=_refusing_transport(seen), store=Store())[0]
+    out = tool.handler({})
+    assert seen == [f"Bearer {token}"]
+    assert out["ok"] is False
+    assert out["error"] == "HTTP 401; the stored cakemail credential was refused, run fabri connect cakemail"
+    assert out["result"]["code"] == 401 and out["result"]["status"] == "error"
+    assert token not in out["error"] and token not in caplog.text
+
+
+def test_http_401_with_env_header_keeps_plain_message(monkeypatch):
+    monkeypatch.setenv("ACME_TOKEN", "env_token_value_123")
+    seen: list = []
+    tool = build_source_tools({"kind": "http", "name": "acme_get", "url": "https://api.example.test/things",
+                               "method": "GET", "headers": {"Authorization": {"env": "ACME_TOKEN"}}},
+                              transport=_refusing_transport(seen))[0]
+    out = tool.handler({})
+    assert seen == ["env_token_value_123"]
+    assert out["ok"] is False and out["error"] == "HTTP 401"

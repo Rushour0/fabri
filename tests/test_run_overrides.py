@@ -286,3 +286,62 @@ def test_stdio_refuses_a_job_with_refused_overrides_and_runs_the_next(tmp_path):
     assert "llm.base_url" in lines[0]["error"] and "llm.api_key_env" in lines[0]["error"]
     assert lines[1]["status"] == "submitted"
     assert submitted == [("b", ALLOWED)]
+
+
+# Overrides that would pick which stored credential or connection a run uses, or
+# widen what its policy grants. Matched by name at any depth, plus any _ref name.
+CREDENTIAL_OVERRIDES = {
+    "agent.secret_ref": {"agent": {"secret_ref": "slack:globex"}},
+    "tools.retrieval.credential_grants": {"tools": {"retrieval": {"credential_grants": {"*": ["*"]}}}},
+    "llm.header_source": {"llm": {"header_source": "slack:globex"}},
+    "agent.extra[0].my_ref": {"agent": {"extra": [{"my_ref": "linear:globex"}]}},
+}
+
+
+@pytest.mark.parametrize("key", sorted(CREDENTIAL_OVERRIDES))
+def test_runs_and_fleets_refuse_credential_names(make_server, key):
+    server, service, submitted = make_server()
+    fleets = []
+    service.submit_fleet = lambda items, overrides, **kw: fleets.append(items) or {"fleet_id": "f"}
+    c = client(server)
+    run = c.post("/runs", json={"task": "t", "overrides": CREDENTIAL_OVERRIDES[key]})
+    assert run.status_code == 400
+    assert key in run.json()["error"]
+    top = c.post("/fleets", json={"items": [{"task": "t"}], "overrides": CREDENTIAL_OVERRIDES[key]})
+    assert top.status_code == 400
+    assert key in top.json()["error"]
+    item = c.post("/fleets", json={"items": [{"task": "t", "overrides": CREDENTIAL_OVERRIDES[key]}]})
+    assert item.status_code == 400
+    assert "items[0].overrides" in item.json()["error"]
+    assert submitted == [] and fleets == []
+
+
+def test_refused_credential_names_match_at_any_depth_and_any_case():
+    assert refused_override_keys({"a": {"Secret_Ref": "x", "CREDENTIAL_GRANTS": {}}}) == [
+        "a.Secret_Ref", "a.CREDENTIAL_GRANTS"]
+    assert refused_override_keys({"x": [{"y": {"header_source": None}}]}) == ["x[0].y.header_source"]
+    assert refused_override_keys({"llm": {"token_ref": "", "planner": {"key_ref": None}}}) == [
+        "llm.token_ref", "llm.planner.key_ref"]
+    # A name that only contains "ref" is not refused.
+    assert refused_override_keys({"agent": {"prefer": 1, "refresh": True, "ref": "x"}}) == []
+
+
+def test_collection_with_trailing_newline_is_refused():
+    from fabri.service.binding import refused_override_keys
+    assert refused_override_keys({"memory": {"collection": "tenant-a\n"}})
+    assert not refused_override_keys({"memory": {"collection": "tenant-a"}})
+
+
+def test_stdio_rejects_non_object_jobs_and_overrides():
+    import io, json
+    from fabri.service.service import serve_stdio
+
+    class _Svc:
+        def submit(self, *a, **k):
+            raise AssertionError("must not submit")
+
+    out = io.StringIO()
+    serve_stdio(_Svc(), stdin=io.StringIO('[1,2]\n"x"\n{"task":"t","overrides":[1]}\n'), stdout=out)
+    lines = [json.loads(x) for x in out.getvalue().splitlines()]
+    assert [l["error"] for l in lines] == ["request must be a JSON object", "request must be a JSON object",
+                                          "overrides must be a JSON object"]

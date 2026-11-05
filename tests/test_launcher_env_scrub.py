@@ -233,3 +233,233 @@ def test_real_service_run_is_scrubbed(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "FABRI_INSTALL_DB" not in seen
     # The config named a key the launcher has never heard of; it survived.
     assert "MY_CUSTOM_KEY" in seen
+
+
+# --- scoped credentials: a run gets the refs its own sources declare ---------
+
+# Stand-in token values. Tests compare digests so no value is ever printed,
+# even in a failure message.
+ACME = "acme-token-value"
+GLOBEX = "globex-token-value"
+
+
+def _digest(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+@pytest.fixture
+def cred_dumping_agent(tmp_path: Path) -> Path:
+    """Prints every env name the run sees, and a digest of each FABRI_CRED_* value."""
+    script = tmp_path / "dump_creds.py"
+    script.write_text(textwrap.dedent("""
+        import hashlib, json, os
+        print(json.dumps({
+            "names": sorted(os.environ),
+            "creds": {k: hashlib.sha256(v.encode()).hexdigest()
+                      for k, v in os.environ.items() if k.startswith("FABRI_CRED_")},
+        }))
+    """))
+    return script
+
+
+def _run_yaml(path: Path, sources: list, policy=None) -> Path:
+    import yaml
+
+    tools: dict = {"sources": sources}
+    if policy is not None:
+        tools["policy"] = policy
+    path.write_text(yaml.safe_dump({"tools": tools}))
+    return path
+
+
+def _http_source(name: str, ref: str) -> dict:
+    return {
+        "name": name,
+        "kind": "http",
+        "url": "https://api.example.test/x",
+        "method": "GET",
+        "headers": {"Authorization": {"secret_ref": ref, "prefix": "Bearer "}},
+    }
+
+
+@pytest.fixture
+def two_tenants(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The service process holds both tenants' tokens and an install db path
+    (that does not exist, so lookups fall to the env store)."""
+    monkeypatch.setenv("FABRI_CRED_SLACK_ACME", ACME)
+    monkeypatch.setenv("FABRI_CRED_SLACK_GLOBEX", GLOBEX)
+    monkeypatch.setenv("FABRI_INSTALL_DB", str(tmp_path / "absent-installs.db"))
+    monkeypatch.delenv("FABRI_RUN_ENV_ALLOW", raising=False)
+    monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+
+
+def _launch(tmp_path: Path, config: Path, script: Path, sid: str, **kw) -> dict:
+    handle = launch_run(
+        "t",
+        config_path=config,
+        fabri_home=tmp_path / sid,
+        session_id=sid,
+        command=[sys.executable, str(script)],
+        **kw,
+    )
+    return handle.result(timeout=30)
+
+
+def test_run_gets_only_its_own_refs_never_another_tenants(
+    tmp_path: Path, cred_dumping_agent: Path, two_tenants
+):
+    acme_yaml = _run_yaml(tmp_path / "acme.yaml", [_http_source("chat", "slack:acme")])
+    globex_yaml = _run_yaml(tmp_path / "globex.yaml", [_http_source("chat", "slack:globex")])
+
+    acme = _launch(tmp_path, acme_yaml, cred_dumping_agent, "sess-acme")
+    globex = _launch(tmp_path, globex_yaml, cred_dumping_agent, "sess-globex")
+
+    assert sorted(acme["creds"]) == ["FABRI_CRED_SLACK_ACME"]
+    acme_ok = acme["creds"]["FABRI_CRED_SLACK_ACME"] == _digest(ACME)
+    assert acme_ok, "acme run did not get the acme value"
+    assert sorted(globex["creds"]) == ["FABRI_CRED_SLACK_GLOBEX"]
+    globex_ok = globex["creds"]["FABRI_CRED_SLACK_GLOBEX"] == _digest(GLOBEX)
+    assert globex_ok, "globex run did not get the globex value"
+    for seen in (acme, globex):
+        assert "FABRI_INSTALL_DB" not in seen["names"]
+
+
+def test_credential_grants_filter_the_declared_refs(
+    tmp_path: Path, cred_dumping_agent: Path, two_tenants
+):
+    """A source that declares a ref its policy does not grant gets nothing for it."""
+    config = _run_yaml(
+        tmp_path / "run.yaml",
+        [_http_source("acme_chat", "slack:acme"), _http_source("other_chat", "slack:globex")],
+        policy={"credential_grants": {"acme_*": ["slack:acme"], "other_*": ["linear:*"]}},
+    )
+
+    seen = _launch(tmp_path, config, cred_dumping_agent, "sess-grants")
+
+    assert sorted(seen["creds"]) == ["FABRI_CRED_SLACK_ACME"]
+    assert "FABRI_INSTALL_DB" not in seen["names"]
+
+
+def test_run_with_no_secret_refs_gets_no_credentials(
+    tmp_path: Path, cred_dumping_agent: Path, two_tenants
+):
+    plain = {"name": "pub", "kind": "http", "url": "https://api.example.test/x", "method": "GET"}
+    with_sources = _run_yaml(tmp_path / "plain.yaml", [plain])
+    no_tools = tmp_path / "bare.yaml"
+    no_tools.write_text("llm:\n  model: m\n")
+
+    for sid, config in (("sess-plain", with_sources), ("sess-bare", no_tools),
+                        ("sess-missing", tmp_path / "missing.yaml")):
+        seen = _launch(tmp_path, config, cred_dumping_agent, sid)
+        assert seen["creds"] == {}, sid
+        assert "FABRI_INSTALL_DB" not in seen["names"], sid
+
+
+def test_install_db_never_reaches_a_run_even_when_named(
+    tmp_path: Path, cred_dumping_agent: Path, two_tenants, monkeypatch: pytest.MonkeyPatch
+):
+    """No allowlist, operator setting or caller env puts the install db in a run."""
+    monkeypatch.setenv("FABRI_RUN_ENV_ALLOW", "FABRI_INSTALL_DB,FABRI_INSTALL_*")
+    config = _run_yaml(tmp_path / "run.yaml", [_http_source("chat", "slack:acme")])
+
+    seen = _launch(
+        tmp_path, config, cred_dumping_agent, "sess-db",
+        allow_env=("FABRI_INSTALL_DB",),
+        env={"FABRI_INSTALL_DB": "/elsewhere/installs.db"},
+    )
+
+    assert "FABRI_INSTALL_DB" not in seen["names"]
+    assert "FABRI_INSTALL_DB" not in build_child_env(
+        {"FABRI_INSTALL_DB": "/x", "FABRI_RUN_ENV_ALLOW": "FABRI_INSTALL_DB"}, allow=["FABRI_*"])
+
+
+class _FakeStore:
+    """A store with one org row and one user row per provider; records lookups."""
+
+    def __init__(self) -> None:
+        self.rows = {("gmail", "u1"): ("user", "u1-token"), ("gmail", "u2"): ("user", "u2-token"),
+                     ("cakemail", "main"): ("org", "org-token")}
+        self.lookups: list[tuple[str, str]] = []
+
+    def scope_kind(self, provider, handle):
+        row = self.rows.get((provider, handle))
+        return row[0] if row else None
+
+    def get(self, provider, handle):
+        from fabri.tools.credential_store import CredentialNotFoundError
+
+        self.lookups.append((provider, handle))
+        if (provider, handle) not in self.rows:
+            raise CredentialNotFoundError("missing")
+        return self.rows[(provider, handle)][1]
+
+
+def test_actor_refs_and_user_rows_go_only_to_that_actor(tmp_path: Path):
+    from fabri.service.launcher import scoped_credential_env
+
+    config = _run_yaml(tmp_path / "run.yaml", [
+        _http_source("mail", "gmail:${actor}"),
+        _http_source("other_mail", "gmail:u2"),
+        _http_source("news", "cakemail:main"),
+        _http_source("gone", "cakemail:nobody"),
+    ])
+
+    store = _FakeStore()
+    got = scoped_credential_env(config, store=store, actor="u1")
+    assert sorted(got) == ["FABRI_CRED_CAKEMAIL_MAIN", "FABRI_CRED_GMAIL_U1"]
+    # u2's row was never even read for u1's run.
+    assert ("gmail", "u2") not in store.lookups
+
+    no_actor = scoped_credential_env(config, store=_FakeStore(), actor=None)
+    assert sorted(no_actor) == ["FABRI_CRED_CAKEMAIL_MAIN"]
+
+
+def test_scoped_credentials_skip_malformed_refs_and_bad_policy(tmp_path: Path):
+    from fabri.service.launcher import granted_secret_refs
+
+    sources = [_http_source("a", "no-colon"), _http_source("b", "x:y:z"), _http_source("c", ":h"),
+               _http_source("d", "slack:acme")]
+    assert granted_secret_refs({"tools": {"sources": sources}}) == [("slack", "acme")]
+    # A policy that does not parse passes nothing rather than everything.
+    assert granted_secret_refs({"tools": {"sources": sources, "policy": {"not_a_key": 1}}}) == []
+    assert granted_secret_refs({"tools": {"sources": sources, "policy": str(tmp_path / "nope.yaml")}}) == []
+    assert granted_secret_refs({"tools": "x"}) == []
+
+
+def test_real_service_run_gets_only_its_declared_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, two_tenants
+):
+    """FabriService.submit -> launch_run: the bound run.yaml decides what the run gets."""
+    from fabri.service.service import FabriService
+
+    script = tmp_path / "dump.py"
+    script.write_text(textwrap.dedent("""
+        import hashlib, json, os, pathlib
+        home = pathlib.Path(os.environ["FABRI_HOME"])
+        sid = os.environ["FABRI_SESSION_ID"]
+        trace = home / ".fabri" / "traces" / f"{sid}.jsonl"
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        trace.write_text("")
+        creds = {k: hashlib.sha256(v.encode()).hexdigest()
+                 for k, v in os.environ.items() if k.startswith("FABRI_CRED_")}
+        print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                          "final_text": json.dumps({"names": sorted(os.environ), "creds": creds})}))
+    """))
+    template = _run_yaml(tmp_path / "template.yaml", [_http_source("chat", "slack:acme")])
+
+    svc = FabriService(
+        template_config=str(template),
+        home_root=tmp_path / "runs",
+        command_builder=lambda task, cfg, sid, home: [sys.executable, str(script)],
+    )
+    try:
+        seen = json.loads(svc.result(svc.submit("t"), timeout=30)["final_text"])
+    finally:
+        svc.close()
+
+    assert sorted(seen["creds"]) == ["FABRI_CRED_SLACK_ACME"]
+    acme_ok = seen["creds"]["FABRI_CRED_SLACK_ACME"] == _digest(ACME)
+    assert acme_ok, "the run did not get its declared value"
+    assert "FABRI_INSTALL_DB" not in seen["names"]

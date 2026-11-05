@@ -1770,12 +1770,7 @@ _INSTALL_KINDS = ("slack", "github", "linear")
 def _install_stores(args: argparse.Namespace) -> dict:
     from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
 
-    if args.home_root:
-        db = Path(args.home_root) / "installs.db"
-    elif os.environ.get("FABRI_INSTALL_DB"):
-        db = Path(os.environ["FABRI_INSTALL_DB"])
-    else:
-        db = Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve" / "installs.db"
+    db = _install_db_path(args)
     if not db.exists():
         print(f"no install database at {db}", file=sys.stderr)
         sys.exit(1)
@@ -1807,6 +1802,176 @@ def cmd_installs_remove(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"removed {args.surface} install {args.install_id} and its stored token. "
           f"The app stays in that workspace until someone removes it there.")
+
+
+
+def _install_db_path(args: argparse.Namespace) -> Path:
+    """--home-root/installs.db, else $FABRI_INSTALL_DB, else $FABRI_HOME/serve/installs.db."""
+    if getattr(args, "home_root", None):
+        return Path(args.home_root) / "installs.db"
+    if os.environ.get("FABRI_INSTALL_DB"):
+        return Path(os.environ["FABRI_INSTALL_DB"])
+    return Path(os.environ.get("FABRI_HOME") or (Path.home() / ".fabri")) / "serve" / "installs.db"
+
+
+def _connection_store(args: argparse.Namespace, *, create: bool):
+    """Open the connection store. A file or directory that other users can
+    reach is reported on stderr; the store itself sets the file to 0600."""
+    import stat
+
+    from fabri.service.connection_store import ConnectionStore, default_refreshers
+
+    db = _install_db_path(args)
+    if not db.exists():
+        if not create:
+            print(f"no install database at {db}", file=sys.stderr)
+            sys.exit(1)
+        db.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        file_was_open = db.exists() and bool(db.stat().st_mode & 0o077)
+    except OSError:
+        file_was_open = False
+    store = ConnectionStore(db, refreshers=default_refreshers())
+    try:
+        file_open = bool(db.stat().st_mode & 0o077)
+        dir_open = bool(db.parent.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    except OSError:
+        file_open = dir_open = False
+    if file_open:
+        print(f"warning: {db} is readable by other users; run chmod 600 {db}", file=sys.stderr)
+    elif file_was_open:
+        print(f"warning: {db} was readable by other users; it is now 0600", file=sys.stderr)
+    if dir_open:
+        print(f"warning: {db.parent} is writable by other users; run chmod 700 {db.parent}", file=sys.stderr)
+    return store
+
+
+def _read_connect_token(args: argparse.Namespace) -> str:
+    """The token from stdin or a prompt. It is never echoed, logged or taken from argv."""
+    import getpass
+
+    if args.token_stdin:
+        return sys.stdin.readline().strip()
+    if not sys.stdin.isatty():
+        print("stdin is not a terminal; pass --token-stdin", file=sys.stderr)
+        sys.exit(2)
+    return getpass.getpass("token: ").strip()
+
+
+def _cakemail_login_pat(args: argparse.Namespace) -> str:
+    import getpass
+    import socket
+    import time
+
+    from fabri.tools import connections
+    from fabri.tools.connections.cakemail_login import create_pat
+
+    username = input("Cakemail username: ").strip()
+    password = getpass.getpass("Cakemail password: ")
+    return create_pat(username, password, name=f"fabri {socket.gethostname()} {time.strftime('%Y-%m-%d')}",
+                      expires_days=args.expires_days or 365, account_ids=args.account_ids or (),
+                      transport=connections._transport)
+
+
+def cmd_connect(args: argparse.Namespace) -> None:
+    from fabri.tools import connections
+    from fabri.tools.connections import ConnectError, connect_static, handle_ok, next_step, store_provider
+    from fabri.tools.connector_catalog import CONNECTORS
+
+    entry = CONNECTORS.get(args.provider)
+    if entry is None:
+        print(f"unknown connector {args.provider!r}; known: {', '.join(sorted(CONNECTORS))}", file=sys.stderr)
+        sys.exit(2)
+    if args.scope == "user":
+        print(f"user-scoped connections are made through the server (GET /connect/{entry.name}) "
+              f"and land in wave 4", file=sys.stderr)
+        sys.exit(2)
+    if not handle_ok(args.handle):
+        print(f"bad --handle: {connections.HANDLE_RULE}", file=sys.stderr)
+        sys.exit(2)
+    if args.handle in connections.RESERVED_HANDLES:
+        print(f"bad --handle: {args.handle!r} is reserved; pick another, such as {connections.DEFAULT_HANDLE}",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        provider = store_provider(entry)
+    except ConnectError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    if args.login:
+        if entry.name != "cakemail":
+            print("--login is for cakemail", file=sys.stderr)
+            sys.exit(2)
+        if args.token_stdin:
+            print("--login and --token-stdin cannot be combined", file=sys.stderr)
+            sys.exit(2)
+        if not sys.stdin.isatty():
+            print("--login needs a terminal to ask for the username and password", file=sys.stderr)
+            sys.exit(2)
+    elif args.expires_days is not None or args.account_ids:
+        print("--expires-days and --account-id go with --login", file=sys.stderr)
+        sys.exit(2)
+    try:
+        token = _cakemail_login_pat(args) if args.login else _read_connect_token(args)
+    except KeyboardInterrupt:
+        print("", file=sys.stderr)
+        sys.exit(130)
+    except EOFError:
+        print("no input", file=sys.stderr)
+        sys.exit(1)
+    except ConnectError as exc:
+        print(f"connect failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not token:
+        print("no token given", file=sys.stderr)
+        sys.exit(2)
+    store = _connection_store(args, create=True)
+    existed = store.get(provider, args.handle) is not None
+    try:
+        connect_static(store, entry, handle=args.handle, token=token, scope_kind=args.scope,
+                       transport=connections._transport, verify=not args.no_verify)
+    except ConnectError as exc:
+        print(f"connect failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        del token
+    print(f"{'replaced' if existed else 'connected'} {entry.name}:{args.handle}")
+    print("next, add it to a setup:")
+    print(f"  {next_step(entry, args.handle)}")
+
+
+def cmd_connections_list(args: argparse.Namespace) -> None:
+    store = _connection_store(args, create=False)
+    rows = store.list(args.provider)
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        print("no connections")
+        return
+    import time
+
+    def expires(value) -> str:
+        if not value:
+            return "-"
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))
+
+    table = [("PROVIDER", "HANDLE", "SCOPE", "NAME", "STATUS", "EXPIRES")]
+    table += [(str(r.get("provider") or ""), str(r.get("handle") or ""), str(r.get("scope_kind") or ""),
+               str(r.get("display_name") or "-"), str(r.get("status") or ""), expires(r.get("expires_at")))
+              for r in rows]
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    for row in table:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+
+
+def cmd_connections_remove(args: argparse.Namespace) -> None:
+    store = _connection_store(args, create=False)
+    if not store.delete(args.provider, args.handle):
+        print(f"no connection {args.provider}:{args.handle}", file=sys.stderr)
+        sys.exit(1)
+    print(f"removed {args.provider}:{args.handle} and its stored token. The app or grant stays with "
+          f"{args.provider} until someone revokes it there.")
 
 
 def main() -> None:
@@ -2291,7 +2456,7 @@ def main() -> None:
                            help="The server's --home-root (default: $FABRI_HOME/serve)")
         p_cmd.set_defaults(func=func)
 
-    p_installs = sub.add_parser("installs", help="List or remove Slack, GitHub and Linear workspace installs offline")
+    p_installs = sub.add_parser("installs", help="List or remove Slack, GitHub and Linear workspace installs offline (see fabri connections)")
     installs_sub = p_installs.add_subparsers(dest="installs_command", required=True)
     p_inst_list = installs_sub.add_parser("list", help="List installs (no tokens are printed)")
     p_inst_list.add_argument("--surface", choices=_INSTALL_KINDS, default=None)
@@ -2302,6 +2467,38 @@ def main() -> None:
     p_inst_rm.add_argument("install_id", help="Slack team id, GitHub installation id or Linear workspace id")
     p_inst_rm.set_defaults(func=cmd_installs_remove)
     for p_cmd in (p_inst_list, p_inst_rm):
+        p_cmd.add_argument("--home-root", dest="home_root", default=None,
+                           help="The server's --home-root (default: $FABRI_INSTALL_DB, then $FABRI_HOME/serve)")
+
+    p_connect = sub.add_parser("connect", help="Store a credential for a connector as <provider>:<handle>")
+    p_connect.add_argument("provider", help="A connector name; see `fabri setups tools connectors`")
+    p_connect.add_argument("--handle", default="main",
+                           help="Name for this connection, used as --workspace in setups (default: main)")
+    p_connect.add_argument("--scope", choices=("org", "user"), default="org",
+                           help="org (default); user-scoped connections are made through the server")
+    p_connect.add_argument("--token-stdin", dest="token_stdin", action="store_true",
+                           help="Read the token from the first line of stdin instead of a prompt")
+    p_connect.add_argument("--login", action="store_true",
+                           help="cakemail only: log in with username and password and create a scoped PAT")
+    p_connect.add_argument("--no-verify", dest="no_verify", action="store_true",
+                           help="Store the token without checking it against the vendor")
+    p_connect.add_argument("--expires-days", dest="expires_days", type=int, default=None,
+                           help="With --login: days until the PAT expires (default: 365)")
+    p_connect.add_argument("--account-id", dest="account_ids", type=int, action="append", default=None,
+                           metavar="ID", help="With --login: limit the PAT to this account id (repeatable)")
+    p_connect.set_defaults(func=cmd_connect)
+
+    p_conns = sub.add_parser("connections", help="List or remove stored connections offline (no tokens are printed)")
+    conns_sub = p_conns.add_subparsers(dest="connections_command", required=True)
+    p_conn_list = conns_sub.add_parser("list", help="List connections")
+    p_conn_list.add_argument("--provider", default=None)
+    p_conn_list.add_argument("--json", action="store_true")
+    p_conn_list.set_defaults(func=cmd_connections_list)
+    p_conn_rm = conns_sub.add_parser("remove", help="Delete one connection and its stored token")
+    p_conn_rm.add_argument("provider")
+    p_conn_rm.add_argument("handle")
+    p_conn_rm.set_defaults(func=cmd_connections_remove)
+    for p_cmd in (p_connect, p_conn_list, p_conn_rm):
         p_cmd.add_argument("--home-root", dest="home_root", default=None,
                            help="The server's --home-root (default: $FABRI_INSTALL_DB, then $FABRI_HOME/serve)")
 

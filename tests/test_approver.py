@@ -368,3 +368,11 @@ def test_header_strings_keep_the_name_and_other_fields_stay_visible():
     assert out["to"] == "ann@example.test"
     assert out["subject"] == "Quarterly numbers"
     assert out["body"] == "Hi Ann, see attached."
+
+
+def test_key_value_header_pair_is_redacted_but_plain_key_is_not():
+    from fabri.tools.approver import redact_args
+    out = redact_args({"headers": [{"key": "X-Api-Key", "value": "opaque-123"}], "key": "list-7"})
+    assert "opaque-123" not in str(out)
+    assert out["key"] == "list-7"
+    assert out["headers"][0]["key"] == "X-Api-Key"

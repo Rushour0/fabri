@@ -102,8 +102,14 @@ _REFUSED_OVERRIDE_KEYS = (
 # where a provider key is sent (base_url, api_base), which environment variable
 # is read and handed to the run as that key (api_key_env), or an address, file
 # or command the run would reach. Matching is by the last segment of the name.
-_REFUSED_OVERRIDE_NAMES = frozenset({"base_url", "api_base", "api_key", "api_key_env"})
-_REFUSED_OVERRIDE_SUFFIXES = ("_url", "_endpoint", "_path", "_dir", "_command")
+# The credential names (secret_ref, credential_grants, header_source and any
+# name ending in _ref) are refused too: a request may never pick which stored
+# connection or credential a run uses, or widen what its policy grants.
+_REFUSED_OVERRIDE_NAMES = frozenset({
+    "base_url", "api_base", "api_key", "api_key_env",
+    "secret_ref", "credential_grants", "header_source",
+})
+_REFUSED_OVERRIDE_SUFFIXES = ("_url", "_endpoint", "_path", "_dir", "_command", "_ref")
 
 # Whole sections a request may not touch at all, except the keys listed in
 # _ALLOWED_SECTION_KEYS. memory points the run at a vector store or a database
@@ -163,7 +169,7 @@ def refused_override_keys(overrides) -> list[str]:
         if isinstance(value, Mapping) and value:
             for key, item in value.items():
                 if section == "memory" and key == "collection" and (
-                    isinstance(item, str) and _COLLECTION_NAME.match(item)
+                    isinstance(item, str) and _COLLECTION_NAME.fullmatch(item)
                 ):
                     continue
                 found.append(f"{section}.{key}")
