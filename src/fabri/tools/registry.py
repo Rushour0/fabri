@@ -53,6 +53,7 @@ class ToolRegistry:
         # Tools marked `always_approve` run only when the approver says yes.
         # With no approver they are refused: a human has to be in the loop.
         self.approver = approver
+        self._broker_gated_names: set[str] = set()
         # Per tool: calls, failures, refused (approval or bad args), seconds.
         self.usage: dict[str, dict[str, float]] = {}
         for manifest_dir in dirs:
@@ -148,14 +149,29 @@ class ToolRegistry:
                 out[name] = delta
         return out
 
+    def mark_broker_gated(self, name: str) -> None:
+        """Record that `name` sends through the credential broker, which asks a
+        human itself before any always_approve request. Only the source
+        builder calls this, and only when it wired the tool to a live broker
+        client, so a callable cannot opt itself out of the approver."""
+        self._broker_gated_names.add(name)
+
+    def _broker_gated(self, name: str) -> bool:
+        """True only for names the source builder marked with
+        `mark_broker_gated`. Manifest (subprocess) tools and every other
+        callable are gated here as before."""
+        return name in self._broker_gated_names
+
     def _check_call(self, name: str, args: object, manifest: ToolManifest) -> dict | None:
-        """An error result when the call must not run, else None."""
+        """An error result when the call must not run, else None. The approver
+        step is skipped for a broker-gated handler (see `_broker_gated`); the
+        manifest still shows the class for lint and Studio."""
         if not isinstance(args, dict):
             return tool_error(f"{name}: arguments must be a JSON object")
         missing = [k for k in (manifest.input_schema or {}).get("required") or [] if k not in args]
         if missing:
             return tool_error(f"{name}: missing required argument(s): {', '.join(missing)}")
-        if manifest.approval == "always_approve":
+        if manifest.approval == "always_approve" and not self._broker_gated(name):
             if self.approver is None:
                 return tool_error(f"{name} needs human approval and no approver is configured; "
                                   "the call was not made")

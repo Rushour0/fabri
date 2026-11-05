@@ -42,11 +42,15 @@ _ACCEPT_POLL_S = 0.5
 
 
 class _Pending:
-    """One question awaiting an answer: the live connection + a latch."""
+    """One question awaiting an answer: the live connection + a latch.
+
+    ``conn`` is None for a question asked inside the service process through
+    :meth:`AskUserListener.ask_local`; there is no client socket to reply on.
+    """
 
     def __init__(
         self,
-        conn: socket.socket,
+        conn: socket.socket | None,
         question: str | None,
         options: list[str] | None,
         default: str | None,
@@ -107,6 +111,8 @@ class AskUserListener:
             self._pending.clear()
         for p in pendings:
             p.event.set()  # unblock the handler; reply stays None -> no write
+            if p.conn is None:
+                continue
             try:
                 p.conn.close()
             except OSError:
@@ -115,6 +121,49 @@ class AskUserListener:
             Path(self.socket_path).unlink()
         except FileNotFoundError:
             pass
+
+    # -- local questions ------------------------------------------------------
+
+    def ask_local(
+        self,
+        *,
+        question_id: str,
+        question: str,
+        options: list[str] | None,
+        default: str | None,
+        kind: str = "ask_user",
+    ) -> _Pending:
+        """Ask a question from inside the service process (no client socket).
+
+        Registers a pending entry, fires ``on_question`` with the same dict
+        shape a socket question gets, and returns the entry. The caller waits
+        on ``.event`` and reads ``.reply``, then calls :meth:`forget`. A
+        ``question_id`` that is already pending raises ``ValueError``.
+        """
+        pending = _Pending(None, question, options, default, _clean_kind(kind))
+        with self._lock:
+            if question_id in self._pending:
+                raise ValueError("question_id is already pending")
+            self._pending[question_id] = pending
+        try:
+            self._on_question(
+                {
+                    "question_id": question_id,
+                    "kind": pending.kind,
+                    "question": question,
+                    "options": options,
+                    "default": default,
+                }
+            )
+        except Exception:
+            # A failing hook must not lose the entry; the caller still waits.
+            logger.debug("ask_user on_question hook failed", exc_info=True)
+        return pending
+
+    def forget(self, question_id: str) -> None:
+        """Drop a pending question without answering it. Safe to repeat."""
+        with self._lock:
+            self._pending.pop(question_id, None)
 
     # -- answering ------------------------------------------------------------
 

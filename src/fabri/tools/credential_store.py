@@ -24,6 +24,13 @@ ENV_CREDENTIAL_PREFIX = "FABRI_CRED_"
 # Shares the prefix but holds a log file path, not a secret, so it is never
 # stripped from a child's environment.
 CREDENTIAL_AUDIT_LOG_ENV = "FABRI_CRED_AUDIT_LOG"
+# The two variables a run gets when the service holds its credentials in a
+# broker: the ask socket path and the capability key. They share the
+# FABRI_CRED_ prefix on purpose, so the default strip below removes them from
+# every tool subprocess. Only a sub-agent (or a nested run) is meant to keep them.
+BROKER_SOCKET_ENV = "FABRI_CRED_BROKER_SOCKET"
+BROKER_KEY_ENV = "FABRI_CRED_BROKER_KEY"
+BROKER_ENV_NAMES = frozenset({BROKER_SOCKET_ENV, BROKER_KEY_ENV})
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
 
 
@@ -66,17 +73,51 @@ def credential_env_names(refs: Iterable[str], *, actor: str | None = None) -> fr
     return frozenset(names)
 
 
+def wildcard_credential_names(
+    patterns: Iterable[str], granted_refs: Iterable[tuple[str, str]]
+) -> frozenset[str]:
+    """The ``FABRI_CRED_*`` names a manifest's ``provider:*`` patterns reach.
+
+    The names come from the run's granted ``(provider, handle)`` refs, and a
+    pattern matches a ref only when the provider is exactly equal, so
+    ``slack:*`` does not reach ``slack_bot``. A pattern that is not a
+    ``provider:*`` wildcard is ignored here, and the broker names are never
+    returned, so ``broker:*`` reaches nothing.
+    """
+    providers = set()
+    for pattern in patterns:
+        if isinstance(pattern, str) and pattern.count(":") == 1:
+            provider, handle = pattern.split(":", 1)
+            if provider and handle == "*":
+                providers.add(provider)
+    names = {
+        credential_env_var(provider, handle)
+        for provider, handle in granted_refs
+        if provider in providers
+    }
+    return frozenset(names - BROKER_ENV_NAMES)
+
+
 def env_without_credentials(
-    env: Mapping[str, str] | None = None, *, keep: Iterable[str] = ()
+    env: Mapping[str, str] | None = None,
+    *,
+    keep: Iterable[str] = (),
+    keep_broker: bool = False,
 ) -> dict[str, str]:
     """A copy of ``env`` (default: this process's) with every ``FABRI_CRED_*``
     variable removed, except the exact names in ``keep``.
+
+    ``keep_broker=True`` also keeps the two broker names. Only the sub-agent
+    and nested-run paths set it; a manifest tool, ``bash`` and ``python_exec``
+    never do.
 
     Every subprocess a run starts gets its environment through this, so a tool
     the model drives cannot print a token the run holds for a source.
     """
     base = os.environ if env is None else env
     keep = frozenset(keep)
+    if keep_broker:
+        keep = keep | BROKER_ENV_NAMES
     return {
         key: value
         for key, value in base.items()
@@ -84,11 +125,23 @@ def env_without_credentials(
     }
 
 
+def broker_mode(env: Mapping[str, str] | None = None) -> bool:
+    """True when both broker variables are set, so this process talks to a broker."""
+    source = os.environ if env is None else env
+    return all(source.get(name) for name in BROKER_ENV_NAMES)
+
+
 def subagent_credential_names(config_path: str | Path, *, actor: str | None = None) -> frozenset[str]:
-    """The ``FABRI_CRED_*`` names a sub-agent's own config may receive: the
-    refs its ``tools.sources`` declare that its ``tools.policy`` grants, read
-    the same way the service reads a run's bound config. An unreadable config
-    or policy gives an empty set."""
+    """The ``FABRI_CRED_*`` names a sub-agent may receive.
+
+    Under a broker (both broker variables set) that is exactly the two broker
+    names, always. The broker answers from the parent run's own binding, so
+    nothing is derived from the child config, which a model may have chosen.
+    Without a broker it is the refs the child's ``tools.sources`` declare that
+    its ``tools.policy`` grants, read the same way the service reads a run's
+    bound config. An unreadable config or policy gives an empty set."""
+    if broker_mode():
+        return BROKER_ENV_NAMES
     from fabri.service.launcher import _load_bound_config, granted_secret_refs
 
     refs = granted_secret_refs(_load_bound_config(config_path), actor=actor)
