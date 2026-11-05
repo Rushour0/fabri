@@ -40,7 +40,9 @@ Hardening:
 - Environment. ``inherit_env=False`` gives a stdio server only an allowlisted
   copy of the parent environment (``ENV_ALLOW_EXACT``, ``ENV_ALLOW_PREFIXES``,
   and proxy variables without a user:password part) plus its own ``env``. The default ``True`` merges
-  ``env`` onto the full parent environment, as before.
+  ``env`` onto the parent environment. In both modes every ``FABRI_CRED_*``
+  variable is removed from the parent part except the names in
+  ``credential_env``.
 - Remote text. Tool descriptions and titles, top level and inside an
   ``inputSchema``, are cleaned (control characters removed, whitespace
   collapsed, length capped). Other schema strings and keys (enum, const,
@@ -86,6 +88,7 @@ from typing import Any
 import httpx
 
 from fabri.core.logging_setup import get_logger
+from fabri.tools.credential_store import env_without_credentials
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.result import tool_error, tool_ok
 from fabri.tools.security.ssrf import validate_url
@@ -418,6 +421,9 @@ class MCPStdioClient:
     name: str = "mcp"
     timeout_s: float = 30.0
     inherit_env: bool = True
+    # FABRI_CRED_* names this server's own declaration references. Every other
+    # FABRI_CRED_* variable is removed from the inherited environment.
+    credential_env: frozenset[str] = frozenset()
     proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
     _next_id: int = field(default=0, init=False, repr=False)
     _buf: bytes = field(default=b"", init=False, repr=False)
@@ -430,11 +436,13 @@ class MCPStdioClient:
         # Popen's `env=` replaces the whole environment. With inherit_env the
         # overrides are merged onto the parent environment (None when there
         # are none, so the child inherits it as is). Without it the child gets
-        # only the allowlisted parent variables plus its own env.
+        # only the allowlisted parent variables plus its own env. Either way
+        # the run's FABRI_CRED_* tokens are removed, except the exact names in
+        # `credential_env`, so a server cannot read another source's token.
         if self.inherit_env:
-            child_env = {**os.environ, **self.env} if self.env else None
+            child_env = {**env_without_credentials(keep=self.credential_env), **(self.env or {})}
         else:
-            child_env = {**_allowlisted_env(), **(self.env or {})}
+            child_env = {**env_without_credentials(_allowlisted_env()), **(self.env or {})}
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
@@ -787,7 +795,8 @@ def build_mcp_tools(
     approval class from the server's tools/list entry (after cleaning).
 
     Reads ``name``, ``command``, ``url``, ``env``, ``headers``, ``timeout_s``,
-    ``inherit_env`` (stdio, default True), ``transport`` (http, an
+    ``inherit_env`` (stdio, default True), ``credential_env`` (stdio, the
+    FABRI_CRED_* names the server may inherit; default none), ``transport`` (http, an
     ``httpx.BaseTransport`` for tests), ``header_source`` and
     ``credential_hint`` (http, see ``MCPHttpClient``). Picks the transport by which of
     `command` / `url` is set. Tools with oversized or nameless specs, and
@@ -818,6 +827,7 @@ def build_mcp_tools(
         client = MCPStdioClient(
             command=command, env=server_cfg.get("env"), name=name, timeout_s=timeout_s,
             inherit_env=True if inherit is None else bool(inherit),
+            credential_env=frozenset(server_cfg.get("credential_env") or ()),
         )
     else:
         raise ValueError(

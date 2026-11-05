@@ -153,14 +153,18 @@ def test_stdio_start_merges_env_instead_of_replacing(monkeypatch):
     assert captured["env"]["PATH"] == "/usr/bin:/bin"  # inherited, not stripped
 
 
-def test_stdio_start_uses_none_env_when_no_overrides(monkeypatch):
+def test_stdio_start_inherits_parent_env_without_credentials(monkeypatch):
     import fabri.tools.mcp_client as mc
 
+    monkeypatch.setenv("SOME_PARENT_VAR", "kept")
+    monkeypatch.setenv("FABRI_CRED_OTHER_SOURCE", "other-token-value")
     captured = {}
     monkeypatch.setattr(mc.subprocess, "Popen",
                         lambda command, **kw: captured.update(env=kw.get("env")) or _FakeProc([]))
     MCPStdioClient(command=["s"], name="t").start()  # no env=
-    assert captured["env"] is None  # inherit the parent env wholesale
+    # The parent env is inherited, minus every connector credential.
+    assert captured["env"]["SOME_PARENT_VAR"] == "kept"
+    assert not [k for k in captured["env"] if k.startswith("FABRI_CRED_") and k != "FABRI_CRED_AUDIT_LOG"]
 
 
 # ---------------------------------------------------------------- hardening (C2)
@@ -191,7 +195,8 @@ class _ScriptedClient:
     tools: list = []
     call_result: dict = {}
 
-    def __init__(self, command, env=None, name="mcp", timeout_s=30.0, inherit_env=True):
+    def __init__(self, command, env=None, name="mcp", timeout_s=30.0, inherit_env=True,
+                 credential_env=frozenset()):
         self.env = env
         self.name = name
         self.inherit_env = inherit_env

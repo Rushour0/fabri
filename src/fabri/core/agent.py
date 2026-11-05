@@ -1104,14 +1104,19 @@ def _run_verifier(command: list[str] | str, cwd: str | None) -> dict:
     one override: stdout that parses as JSON carrying ``{"ok": true|false}``
     wins over the exit code (some verifiers exit 0 but report failures in body).
     """
+    # Host code still gets no connector tokens: its output goes back to the
+    # model as the repair hint, so a token it printed would reach the trace.
+    from fabri.tools.credential_store import env_without_credentials
+
+    env = env_without_credentials()
     try:
         if isinstance(command, str):
             proc = subprocess.run(
-                command, cwd=cwd, shell=True, capture_output=True, text=True
+                command, cwd=cwd, shell=True, capture_output=True, text=True, env=env
             )
         else:
             proc = subprocess.run(
-                list(command), cwd=cwd, capture_output=True, text=True
+                list(command), cwd=cwd, capture_output=True, text=True, env=env
             )
     except (OSError, ValueError) as e:
         # A verifier that can't even launch (missing binary, bad cwd) is a

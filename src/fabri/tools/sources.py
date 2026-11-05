@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import re
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -48,7 +49,7 @@ from typing import Any
 import httpx
 
 from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval, safe_approval, stricter
-from fabri.tools.credential_store import CredentialStore
+from fabri.tools.credential_store import CredentialStore, credential_env_names
 from fabri.tools.http_call import (
     PathParamError,
     check_header_specs,
@@ -450,6 +451,10 @@ def _build_mcp(decl, *, base_dir, policy, transport, store, dry) -> list[SourceT
         cfg["command"] = list(decl["command"])
         if decl.get("env"):
             cfg["env"] = resolve_headers(decl.get("env"), store)
+        # The server may inherit only the FABRI_CRED_* names its own
+        # declaration references; the run's other tokens are removed.
+        cfg["credential_env"] = credential_env_names(
+            secret_refs(decl), actor=os.environ.get("FABRI_RUN_ACTOR") or None)
     cfg["inherit_env"] = decl.get("env_mode") != "allowlist"
     cfg["transport"] = transport
     client, pairs = build_mcp_tools(

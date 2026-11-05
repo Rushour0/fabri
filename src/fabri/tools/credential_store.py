@@ -16,11 +16,14 @@ import json
 import os
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 ENV_CREDENTIAL_PREFIX = "FABRI_CRED_"
+# Shares the prefix but holds a log file path, not a secret, so it is never
+# stripped from a child's environment.
+CREDENTIAL_AUDIT_LOG_ENV = "FABRI_CRED_AUDIT_LOG"
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
 
 
@@ -43,6 +46,55 @@ def credential_env_var(provider: str, handle: str) -> str:
     return f"{ENV_CREDENTIAL_PREFIX}{normalized_provider}_{normalized_handle}"
 
 
+def credential_env_names(refs: Iterable[str], *, actor: str | None = None) -> frozenset[str]:
+    """The ``FABRI_CRED_*`` names a list of ``provider:handle`` refs maps to.
+
+    A ``${actor}`` handle becomes ``actor`` and is dropped when there is none.
+    Malformed refs are dropped.
+    """
+    names = set()
+    for ref in refs:
+        if not isinstance(ref, str) or ref.count(":") != 1:
+            continue
+        provider, handle = ref.split(":", 1)
+        if handle == "${actor}":
+            if not actor:
+                continue
+            handle = actor
+        if provider and handle:
+            names.add(credential_env_var(provider, handle))
+    return frozenset(names)
+
+
+def env_without_credentials(
+    env: Mapping[str, str] | None = None, *, keep: Iterable[str] = ()
+) -> dict[str, str]:
+    """A copy of ``env`` (default: this process's) with every ``FABRI_CRED_*``
+    variable removed, except the exact names in ``keep``.
+
+    Every subprocess a run starts gets its environment through this, so a tool
+    the model drives cannot print a token the run holds for a source.
+    """
+    base = os.environ if env is None else env
+    keep = frozenset(keep)
+    return {
+        key: value
+        for key, value in base.items()
+        if not key.startswith(ENV_CREDENTIAL_PREFIX) or key in keep or key == CREDENTIAL_AUDIT_LOG_ENV
+    }
+
+
+def subagent_credential_names(config_path: str | Path, *, actor: str | None = None) -> frozenset[str]:
+    """The ``FABRI_CRED_*`` names a sub-agent's own config may receive: the
+    refs its ``tools.sources`` declare that its ``tools.policy`` grants, read
+    the same way the service reads a run's bound config. An unreadable config
+    or policy gives an empty set."""
+    from fabri.service.launcher import _load_bound_config, granted_secret_refs
+
+    refs = granted_secret_refs(_load_bound_config(config_path), actor=actor)
+    return frozenset(credential_env_var(provider, handle) for provider, handle in refs)
+
+
 @runtime_checkable
 class CredentialStore(Protocol):
     """Backend-independent lookup contract for connector credentials."""
@@ -63,6 +115,10 @@ class EnvCredentialStore:
                 f"Credential is unavailable; set environment variable {env_var}"
             )
         return value
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """Environment variables are set by the operator and carry no user scope."""
+        return None
 
     def __repr__(self) -> str:
         return "EnvCredentialStore()"
@@ -161,6 +217,15 @@ class ScopedCredentialStore:
             raise
         self._audit(provider, handle, "ok")
         return value
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """The wrapped store's scope for a row. Raises AttributeError when the
+        wrapped store cannot say, so a caller that checks user rows fails closed
+        instead of treating an unknown scope as org."""
+        inner = getattr(self._store, "scope_kind", None)
+        if not callable(inner):
+            raise AttributeError("the wrapped credential store does not report scope_kind")
+        return inner(provider, handle)
 
     def _audit(self, provider: str, handle: str, result: str) -> None:
         if self._audit_path is None:

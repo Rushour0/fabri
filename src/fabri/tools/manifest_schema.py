@@ -17,6 +17,24 @@ def _is_path_shaped(part: str) -> bool:
     return "/" in part or bool(_SCRIPT_EXT_RE.search(part))
 
 
+# One "provider:handle" credential pattern. The handle may be a lone "*".
+# Neither side may hold a colon, a star elsewhere, or whitespace.
+_CREDENTIAL_PATTERN_RE = re.compile(r"^[^\s:*]+:(\*|[^\s:*]+)$")
+
+
+def _validate_credentials(value: object) -> list[str]:
+    """Check the optional ``credentials`` field: a list of ``provider:handle``
+    patterns, where the handle may be ``*``. Raises ValueError on a bad shape."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("manifest 'credentials' must be a list of provider:handle patterns")
+    for item in value:
+        if not isinstance(item, str) or not _CREDENTIAL_PATTERN_RE.match(item):
+            raise ValueError("manifest 'credentials' entries must look like provider:handle or provider:*")
+    return list(value)
+
+
 @dataclass
 class ToolManifest:
     name: str
@@ -32,6 +50,10 @@ class ToolManifest:
     approval: str | None = None
     aliases: list[str] = field(default_factory=list)
     title: str | None = None
+    # Credential patterns ("provider:handle", handle may be "*") whose
+    # FABRI_CRED_* variables the runner puts back into this tool's environment.
+    # Empty means the tool sees no connector token at all.
+    credentials: list[str] = field(default_factory=list)
 
     @classmethod
     def from_file(cls, path: Path) -> "ToolManifest":
@@ -58,4 +80,5 @@ class ToolManifest:
             approval=data.get("approval"),
             aliases=list(data.get("aliases") or []),
             title=data.get("title"),
+            credentials=_validate_credentials(data.get("credentials")),
         )

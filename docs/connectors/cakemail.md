@@ -79,8 +79,8 @@ token by hand is not checked; `--login` does not depend on it.
 
 Under `fabri serve`, a run does not get the install database. When the service starts a run whose sources use
 `cakemail:acct1`, it resolves that one credential and passes it to that run as `FABRI_CRED_CAKEMAIL_ACCT1`. The run
-gets no other Cakemail handle and no other provider's token. A run that has a shell tool can read the variable it was
-given. A token broker that keeps the token in the service is planned for a later release.
+gets no other Cakemail handle and no other provider's token. The run's tool subprocesses, `bash` included, get the
+variable removed; a `kind: python` source can still read it. A token broker that keeps the token in the service is planned for a later release.
 
 If Cakemail answers 401, the error says to run `fabri connect cakemail` again. See [../connections.md](../connections.md).
 

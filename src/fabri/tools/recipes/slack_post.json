@@ -47,5 +47,6 @@
     "required": ["ok"],
     "additionalProperties": false
   },
+  "credentials": ["slack:*"],
   "timeout_s": 10
 }

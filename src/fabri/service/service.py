@@ -298,13 +298,21 @@ class FabriService:
         trace_path = run_trace_path(run_home, session_id)
         listener = self._start_ask_listener(session_id, trace_path)
 
+        run_env = {"FABRI_ASK_USER_SOCKET": listener.socket_path}
+        if user_id:
+            # The run's actor: ${actor} refs resolve to this user, and a
+            # user-scoped connection reaches only this user's runs.
+            run_env["FABRI_RUN_ACTOR"] = str(user_id)
         handle = launch_run(
             task,
             config_path=config_path,
             fabri_home=run_home,
             session_id=session_id,
             command=command,
-            env={"FABRI_ASK_USER_SOCKET": listener.socket_path},
+            env=run_env,
+            # Resolve the run's refs from this service's own database, never
+            # from whatever FABRI_INSTALL_DB the process env happens to hold.
+            install_db=self.home_root / "installs.db",
             # The child env is an allowlist (launcher.build_child_env), so a crew
             # naming a provider key the launcher has never heard of would lose
             # it. Re-admit exactly the keys this run's own config asks for.

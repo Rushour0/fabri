@@ -9,8 +9,12 @@ Every connection has a scope kind. `org` connections belong to the whole install
 `user` connections belong to one signed-in person and come with the server-side connect routes in a later release.
 
 A setup refers to a connection by name only. `fabri setups tools add connector cakemail --workspace acct1` writes the
-secret ref `cakemail:acct1`, and fabri looks the token up when a call is made. The token never appears in the setup
-file, the agent's prompt, a trace or a log line.
+secret ref `cakemail:acct1`, and fabri looks the token up when a call is made. The token is not written to the setup
+file, the agent's prompt or a log line, and the model's tools cannot read it: the run process holds the tokens its own
+sources declare, but every tool subprocess it starts (`bash`, `python_exec`, MCP servers, sub-agents) gets an
+environment with those tokens removed, except the ones an MCP server or sub-agent declares for itself. `kind: python` sources are the exception. They run inside the run process and
+can read every token it holds, so only declare python callables you trust. See
+[What a run can see](#what-a-run-can-see) below.
 
 ## Connect a service
 
@@ -100,11 +104,24 @@ fabri that opens the file can still read it. Nothing is migrated twice.
 - Overrides sent with `POST /runs` or `/fleets` cannot name a credential or a connection. Keys such as `secret_ref`,
   `credential_grants`, `header_source` and anything ending in `_ref` are refused.
 
-**A run that has a shell tool can read the tokens passed to it.** The token sits in the run's environment, and a
-`bash` tool can print it. Scoped passing limits the damage to the tokens that run declared, but it does not hide them
-from the run. If a run must not see a token, do not give it a shell tool, or keep its approval floor on. A token broker,
-where the service makes the call on the run's behalf and the token never leaves the service, is planned for a later
-release.
+### What a run can see
+
+The tokens a run receives sit in the run process's environment. The `http` and `openapi` source tools read them there
+and send them in the request, inside the run process. A subprocess the run starts gets only what it declared:
+
+- Every manifest tool (`bash`, `python_exec`, `slack_post` and any tool in a `manifest_dir`) starts with every
+  `FABRI_CRED_*` variable removed. A manifest tool that used to read a credential from the environment, such as the
+  `slack_post`, `webhook_post` and `send_email` recipes, finds nothing there; use an `http` source for those calls.
+- A stdio MCP server with `env_mode: inherit` (the default) keeps only the `FABRI_CRED_*` names its own declaration
+  references through `env` or a `secret_ref`; with `env_mode: allowlist` it inherits none. Either way the values its
+  `env` names are resolved by the run and passed under the names you chose.
+- A sub-agent keeps only the refs its own config declares and its `credential_grants` allow.
+- A `verify` command gets no `FABRI_CRED_*` variable.
+
+`kind: python` sources run in the run process, so they can read every token the run holds. Only declare python
+callables you trust. This is a mitigation, not isolation: revoking or rotating a connection does not reach a run that
+has already started. A token broker, where the service makes the call on the run's behalf and the token never enters
+the run, is planned for a later release.
 
 ## When a token stops working
 

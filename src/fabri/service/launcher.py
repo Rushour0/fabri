@@ -230,17 +230,22 @@ def granted_secret_refs(config: Mapping, *, actor: str | None = None) -> list[tu
     return list(dict.fromkeys(found))
 
 
-def _service_credential_store():
-    """The store the service resolves a run's refs through: the install
-    database when FABRI_INSTALL_DB is set (falling back to env vars), else env
-    vars, with the audit log when FABRI_CRED_AUDIT_LOG is set."""
+def _service_credential_store(install_db: str | Path | None = None):
+    """The store the service resolves a run's refs through, with the audit log
+    when FABRI_CRED_AUDIT_LOG is set.
+
+    ``install_db`` is the service's own install database; FabriService always
+    passes it, so a FABRI_INSTALL_DB left in the process env (by an operator or
+    by another service in the same process) never picks the database. Without
+    it (a direct caller outside the service) the old rule applies: the database
+    FABRI_INSTALL_DB names, else env vars."""
     from fabri.tools.credential_store import (
         EnvCredentialStore,
         ScopedCredentialStore,
         SqliteInstallCredentialStore,
     )
 
-    db = os.environ.get("FABRI_INSTALL_DB")
+    db = install_db if install_db is not None else os.environ.get("FABRI_INSTALL_DB")
     store = SqliteInstallCredentialStore(Path(db)) if db else EnvCredentialStore()
     if audit := os.environ.get("FABRI_CRED_AUDIT_LOG"):
         store = ScopedCredentialStore(store, audit_path=audit, actor="fabri serve launcher")
@@ -252,13 +257,16 @@ def scoped_credential_env(
     *,
     store=None,
     actor: str | None = None,
+    install_db: str | Path | None = None,
 ) -> dict[str, str]:
     """``FABRI_CRED_<PROVIDER>_<HANDLE>`` values for one run, and nothing else.
 
     Reads the run's bound config, keeps the refs :func:`granted_secret_refs`
-    allows, and resolves each through ``store`` (default: the service's own
-    store) here in the service process. A connection stored with user scope is
-    passed only to a run whose actor is that user. A ref that does not resolve
+    allows, and resolves each through ``store`` (default: the store for
+    ``install_db``, see :func:`_service_credential_store`) here in the service
+    process. A connection stored with user scope is passed only to a run whose
+    actor is that user. A store that cannot report a row's scope passes nothing,
+    since a user row could not be told apart from an org row. A ref that does not resolve
     is left out, so the run fails on it the usual way. Two refs that map to the
     same variable name are both left out rather than guessing. No value is
     logged; a skip logs the provider and the error type only.
@@ -268,8 +276,11 @@ def scoped_credential_env(
     refs = granted_secret_refs(_load_bound_config(config_path), actor=actor)
     if not refs:
         return {}
-    store = store if store is not None else _service_credential_store()
+    store = store if store is not None else _service_credential_store(install_db)
     scope_kind = getattr(store, "scope_kind", None)
+    if not callable(scope_kind):
+        logger.warning("the credential store cannot report scope; no credentials are passed to the run")
+        return {}
 
     by_var: dict[str, tuple[str, str]] = {}
     clashed: set[str] = set()
@@ -285,9 +296,14 @@ def scoped_credential_env(
             logger.warning("two %s refs map to one variable name; neither is passed to the run", provider)
             continue
         try:
-            if callable(scope_kind) and scope_kind(provider, handle) == "user" and handle != actor:
-                logger.warning("a user-scoped %s connection was not passed to a run of another actor", provider)
-                continue
+            kind = scope_kind(provider, handle)
+        except Exception as exc:  # noqa: BLE001 -- an unknown scope must not pass a user row
+            logger.warning("%s credential scope unknown, not passed to the run (%s)", provider, type(exc).__name__)
+            continue
+        if kind == "user" and handle != actor:
+            logger.warning("a user-scoped %s connection was not passed to a run of another actor", provider)
+            continue
+        try:
             value = store.get(provider, handle)
         except CredentialStoreError as exc:
             logger.info("%s credential not resolved for this run (%s)", provider, type(exc).__name__)
@@ -416,6 +432,8 @@ def launch_run(
     env: dict | None = None,
     allow_env: Sequence[str] = (),
     scrub_env: bool = True,
+    install_db: str | Path | None = None,
+    credential_store=None,
 ) -> RunHandle:
     """Spawn one agent run and return a :class:`RunHandle`.
 
@@ -432,8 +450,10 @@ def launch_run(
     credentials the run's own sources declare (and its policy grants) are
     resolved here and passed as ``FABRI_CRED_*`` variables (see
     :func:`scoped_credential_env`); ``FABRI_RUN_ACTOR`` in ``env`` names the
-    actor for ``${actor}`` refs and user-scoped rows. ``FABRI_INSTALL_DB``
-    never reaches a scrubbed run.
+    actor for ``${actor}`` refs and user-scoped rows. ``credential_store`` or
+    ``install_db`` picks the store those refs resolve through; the service
+    passes its own install database so process env never chooses it.
+    ``FABRI_INSTALL_DB`` never reaches a scrubbed run.
     """
     session_id = session_id or str(uuid.uuid4())
     home = Path(fabri_home).resolve()
@@ -444,7 +464,10 @@ def launch_run(
     child_env = build_child_env(dict(os.environ), allow=allow_env, scrub=scrub_env)
     if scrub_env:
         actor = (env or {}).get("FABRI_RUN_ACTOR") or None
-        child_env.update(scoped_credential_env(config_path, actor=str(actor) if actor else None))
+        child_env.update(scoped_credential_env(
+            config_path, store=credential_store, install_db=install_db,
+            actor=str(actor) if actor else None,
+        ))
     child_env["FABRI_HOME"] = str(home)
     child_env["FABRI_SESSION_ID"] = session_id
     if env:

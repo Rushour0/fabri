@@ -74,5 +74,6 @@
     },
     "required": ["ok"]
   },
+  "credentials": ["smtp:*"],
   "timeout_s": 30
 }

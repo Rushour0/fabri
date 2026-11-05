@@ -245,6 +245,13 @@ def send(
         )
     logger.debug("tool %s: %s %s -> %s", tool_name, method.upper(), resp.request.url.path, resp.status_code)
     out = map_response(resp)
+    # An upstream body can echo request headers back (some 401 pages do).
+    # Strip every resolved header value before the model sees the result.
+    if resolved:
+        from fabri.tools.mcp_client import _redact_tree, _secret_pieces
+        pieces = _secret_pieces([v for v in resolved.values() if isinstance(v, str)])
+        if pieces:
+            out = _redact_tree(out, pieces)
     if resp.status_code == 401:
         provider = secret_ref_provider(headers)
         if provider:

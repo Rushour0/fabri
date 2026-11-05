@@ -161,7 +161,16 @@ def main() -> int:
     # Hand the child its depth so ITS spawn_subagent calls (if any) count from
     # here, not from zero. This is what makes the recursion cap actually bound
     # the whole subtree rather than just the immediate parent.
-    child_env = os.environ.copy()
+    # The child keeps only the FABRI_CRED_* values its own config declares and
+    # its policy grants; the runner already did this, and doing it again here
+    # keeps the rule when this script is started some other way.
+    from fabri.tools.credential_store import env_without_credentials, subagent_credential_names
+
+    try:
+        keep = subagent_credential_names(Path(args["config_path"]).resolve(), actor=os.environ.get("FABRI_RUN_ACTOR") or None)
+    except Exception:  # noqa: BLE001 -- an unreadable config passes no credentials
+        keep = frozenset()
+    child_env = env_without_credentials(keep=keep)
     child_env[DEPTH_ENV] = str(depth + 1)
 
     try:

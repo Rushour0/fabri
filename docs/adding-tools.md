@@ -163,7 +163,8 @@ Three flags apply to some connectors only:
 (`fabri connect <provider> --handle <workspace>`, see [connections.md](connections.md)), or from
 `FABRI_CRED_<PROVIDER>_<WORKSPACE>` when there is no stored row. Stored tokens are plain text in a 0600 file. Under
 `fabri serve`, a run receives only the tokens its own sources declare and its grants allow, as `FABRI_CRED_*` variables
-in its environment; a run with a shell tool can read them. To keep tenants apart, wrap the store a run gets in
+in its environment. Tool subprocesses (`bash`, MCP servers, sub-agents) get them removed, and `kind: python`
+sources can read them (see [connections.md](connections.md#what-a-run-can-see)). To keep tenants apart, wrap the store a run gets in
 `ScopedCredentialStore(store, ["slack:acme", "linear:*"])`: any other ref
 fails with `CredentialScopeError`. Pass `audit_path=` (or set
 `FABRI_CRED_AUDIT_LOG` for the default store) to append one JSON line per
@@ -194,6 +195,8 @@ A hand-written source on a host no module owns, and without `approval_mode` or `
 and lint warns when it does. Adding a connector's hosts is a change to its module, reviewed as code. Nothing else
 needs editing. The functions live in `fabri.tools.connector_catalog`
 (`catalog_for_url`, `request_floor`). The `fabri.tools.connectors` facade re-exports both.
+
+A manifest tool sees no `FABRI_CRED_*` variable unless it lists `provider:handle` patterns (handle may be `*`) in an optional `credentials` field, and then only the matching variables are passed to its process.
 
 ## Approval classes
 
