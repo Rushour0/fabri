@@ -62,6 +62,7 @@ SECRET_REF = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}:[A-Za-z0-9][A-Za-z0-9_.-]{0,
 HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _SECRET_QUERY_KEYS = frozenset({"key", "api_key", "apikey", "token", "access_token", "secret", "password",
                                 "sig", "signature", "auth"})
+_MAIL_WORDS = ("mail", "sms", "campaign", "message", "notif")
 _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
 HEADER = "# Added with `fabri setups tools add {how}`. Plain YAML: edit, review and commit it like code.\n" \
          "# Credentials are env var names or secret refs only.\n"
@@ -446,6 +447,7 @@ def preview_entry(
         client = built[0].extra.get("client") if built else None
         if client is not None and hasattr(client, "close"):
             client.close()
+    _mail_hint(entry, report)
     built_names = {t["name"] for t in report.tools} | set(report.hidden)
     missing = [a for a in allow if not any(ch in a for ch in "*?[") and a not in built_names]
     if missing and not report.errors and (entry.connect or "mcp" not in report.kinds):
@@ -453,6 +455,23 @@ def preview_entry(
     if entry.connect and not report.errors:
         _pin_mcp(entry, report)
     return report
+
+
+def _mail_hint(entry: ToolEntry, report: EntryReport) -> None:
+    """For an OpenAPI entry, say so when non-GET operations sit at `write` and the API
+    looks like one that sends mail, messages or campaigns. A word match is a hint, not a proof."""
+    if entry.spec_doc is None or "openapi" not in report.kinds:
+        return
+    writes = [t for t in report.tools
+              if str(t.get("method") or "").upper() != "GET" and t["approval"] == "write"]
+    if not writes:
+        return
+    title = str((entry.spec_doc.get("info") or {}).get("title") or "").lower()
+    haystack = [title] + [f"{t['name']} {t.get('path') or ''}".lower() for t in report.tools]
+    if any(word in text for word in _MAIL_WORDS for text in haystack):
+        report.warnings.append(
+            f"{len(writes)} non-GET operations are classed write; pass --approval always_approve "
+            "if this API sends mail, messages or campaigns")
 
 
 def _pin_mcp(entry: ToolEntry, report: EntryReport) -> None:

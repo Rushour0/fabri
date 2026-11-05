@@ -138,3 +138,133 @@ def test_register_tool_sources_reports_errors():
     ])
     assert "echo" in registry.tools
     assert len(errors) == 1 and errors[0].startswith("missing:")
+
+
+# ---------------------------------------------------- tighten clamp and catalog minimum
+
+
+def test_tighten_clamp_http_and_python():
+    decl = {"kind": "http", "name": "mail_send", "url": "https://a.test/send", "method": "POST", "approval": "read"}
+    assert build_source_tools(decl)[0].manifest.approval == "read"
+    tool = build_source_tools({**decl, "approval_mode": "tighten"})[0]
+    assert tool.safe_approval == "always_approve" and tool.manifest.approval == "always_approve"
+    py = build_source_tools({"kind": "python", "name": "echo", "callable": "tests.test_tool_sources:echo_tool",
+                             "approval": "read", "approval_mode": "tighten"})[0]
+    assert py.manifest.approval == "write"
+
+
+def test_tighten_clamp_openapi_map():
+    base = {"kind": "openapi", "name": "pets", "spec": str(FIXTURES / "petstore.yaml"),
+            "approval": {"pet_create": "read", "pet_list": "read"}}
+    loose = {t.manifest.name: t for t in build_source_tools(base, transport=_transport([]))}
+    assert loose["pet_create"].manifest.approval == "read"
+    tight = {t.manifest.name: t for t in build_source_tools({**base, "approval_mode": "tighten"},
+                                                            transport=_transport([]))}
+    assert tight["pet_create"].manifest.approval == tight["pet_create"].safe_approval != "read"
+    assert tight["pet_list"].manifest.approval == "read"
+    with pytest.raises(ToolSourceError):
+        validate_source_decl({**base, "approval_mode": "loosen"})
+
+
+def test_catalog_minimum_applied(monkeypatch):
+    from fabri.tools import connectors
+
+    seen = []
+
+    def fake_minimum(kind, tool_name, method):
+        seen.append((kind, tool_name, method))
+        return "always_approve" if method == "POST" else None
+
+    monkeypatch.setattr(connectors, "CONNECTORS", {**connectors.CONNECTORS, "fake": object()})
+    monkeypatch.setattr(connectors, "catalog_minimum", fake_minimum, raising=False)
+    post = build_source_tools({"kind": "http", "name": "note_add", "url": "https://a.test/n", "method": "POST",
+                               "approval": "read", "catalog": "fake"})[0]
+    assert post.manifest.approval == "always_approve" and post.safe_approval == "always_approve"
+    get = build_source_tools({"kind": "http", "name": "note_get", "url": "https://a.test/n", "catalog": "fake"})[0]
+    assert get.manifest.approval == "read" and seen == [("fake", "note_add", "POST"), ("fake", "note_get", "GET")]
+
+
+def test_unknown_catalog_id_rejected():
+    with pytest.raises(ToolSourceError, match="catalog"):
+        validate_source_decl({"kind": "http", "name": "x", "url": "https://a.test", "catalog": "nope"})
+
+
+def test_new_keys_are_known_keys():
+    assert validate_source_decl({"kind": "mcp", "name": "x", "command": ["c"], "env_mode": "allowlist",
+                                 "approval_mode": "tighten"}) == []
+    with pytest.raises(ToolSourceError, match="env_mode"):
+        validate_source_decl({"kind": "mcp", "name": "x", "command": ["c"], "env_mode": "all"})
+
+
+def test_mcp_source_passes_env_mode_and_transport(monkeypatch):
+    from fabri.tools import mcp_client
+
+    got = {}
+
+    def fake_build(cfg, approval_for=None):
+        got.update(cfg)
+        return object(), []
+
+    monkeypatch.setattr(mcp_client, "build_mcp_tools", fake_build)
+    transport = _transport([])
+    build_source_tools({"kind": "mcp", "name": "a", "command": ["c"], "env_mode": "allowlist"}, transport=transport)
+    assert got["inherit_env"] is False and got["transport"] is transport
+    build_source_tools({"kind": "mcp", "name": "a", "command": ["c"]})
+    assert got["inherit_env"] is True
+
+
+def test_sensitive_words():
+    from fabri.tools.approval import mcp_approval, safe_approval
+
+    for name in ("scheduleCampaign", "exportContacts", "createAction", "patchSender"):
+        assert safe_approval("POST", name) == "always_approve", name
+    assert safe_approval("GET", "listSenders") == "read"
+    assert mcp_approval("GMAIL_SEND_EMAIL") == "always_approve"
+    assert mcp_approval("resume_workflow") == "always_approve"
+
+
+# ---------------------------------------------------- floor bound to the request host
+
+
+def test_slack_host_floor_ignores_name_method_and_markers():
+    post = build_source_tools({"kind": "http", "name": "ops_note", "url": "https://slack.com/api/chat.postMessage",
+                               "method": "GET", "approval": "read"})[0]
+    assert post.manifest.approval == "always_approve" and post.safe_approval == "always_approve"
+    read = build_source_tools({"kind": "http", "name": "ops_list",
+                               "url": "https://slack.com/api/conversations.list", "method": "GET"})[0]
+    assert read.manifest.approval == "read"
+    # A host the caller fills in could be slack.com, so it gets the floor too.
+    templated = build_source_tools({"kind": "http", "name": "ops_any", "url": "https://{host}/api/chat.postMessage",
+                                    "method": "GET", "approval": "read"})[0]
+    assert templated.manifest.approval == "always_approve"
+
+
+def test_openapi_on_slack_host_gets_floor():
+    base = {"kind": "openapi", "name": "pets", "spec": str(FIXTURES / "petstore.yaml"),
+            "base_url": "https://slack.com/api", "approval": "read"}
+    tools = build_source_tools(base, transport=_transport([]))
+    assert tools and all(t.manifest.approval == "always_approve" for t in tools)
+
+
+def test_mcp_http_source_matched_by_server_host(monkeypatch):
+    from fabri.tools import connectors, mcp_client
+    from fabri.tools.manifest_schema import ToolManifest
+
+    def fake_build(cfg, approval_for=None):
+        manifest = ToolManifest(name="mcp_x_save_issue", description="d", command=[],
+                                input_schema={"type": "object"}, output_schema={"type": "object"},
+                                approval="write")
+        return object(), [(manifest, lambda args: {})]
+
+    seen = []
+    monkeypatch.setattr(mcp_client, "build_mcp_tools", fake_build)
+    monkeypatch.setattr(connectors, "catalog_minimum",
+                        lambda kind, name, method: seen.append(kind) or "always_approve")
+    # No markers, approval lowered in the YAML: the server host still binds the linear floor.
+    tool = build_source_tools({"kind": "mcp", "name": "x", "url": "https://mcp.linear.app/mcp",
+                               "approval": "read"})[0]
+    assert tool.manifest.approval == "always_approve" and seen == ["linear"]
+    seen.clear()
+    other = build_source_tools({"kind": "mcp", "name": "x", "url": "https://mcp.other.test/mcp",
+                                "approval": "read"})[0]
+    assert other.manifest.approval == "read" and seen == []

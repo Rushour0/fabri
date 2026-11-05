@@ -114,7 +114,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def loopback():
+def loopback(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
     _Handler.sessions = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -183,6 +184,39 @@ def test_add_openapi_file_writes_yaml_and_spec_copy(monkeypatch, capsys, layer):
     assert sorted(names) == sorted(data["allow"])
     audit = [json.loads(line) for line in (layer / ".fabri-audit.jsonl").read_text().splitlines()]
     assert audit[-1]["action"] == "add-tool-source" and audit[-1]["name"] == "pets"
+
+
+MAIL_SPEC = """
+openapi: 3.0.3
+info: {title: Mail API, version: "1"}
+servers: [{url: "https://mail.test"}]
+paths:
+  /campaigns:
+    get: {operationId: listCampaigns, responses: {"200": {description: ok}}}
+    post: {operationId: createCampaign, responses: {"200": {description: ok}}}
+  /campaigns/{id}/launch:
+    post:
+      operationId: launchCampaign
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok}}
+"""
+
+
+def test_openapi_preview_hints_always_approve_for_mail_apis(monkeypatch, capsys, layer):
+    spec = layer.parent / "mail.yaml"
+    spec.write_text(MAIL_SPEC)
+    code, out, err = run(monkeypatch, capsys, "setups", "tools", "add", "openapi", str(spec),
+                         "--layer", str(layer), "--dry-run")
+    assert code == 0, err
+    assert "pass --approval always_approve if this API sends mail, messages or campaigns" in out
+    code, out, err = run(monkeypatch, capsys, "setups", "tools", "add", "openapi", str(spec),
+                         "--layer", str(layer), "--dry-run", "--approval", "always_approve")
+    assert code == 0, err
+    assert "pass --approval always_approve" not in out
+    code, out, err = run(monkeypatch, capsys, "setups", "tools", "add", "openapi", str(PETSTORE),
+                         "--layer", str(layer), "--dry-run")
+    assert code == 0, err
+    assert "pass --approval always_approve" not in out
 
 
 def test_add_openapi_delete_is_always_approve_and_floor_applies(monkeypatch, capsys, layer):

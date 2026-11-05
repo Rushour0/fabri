@@ -9,9 +9,12 @@ checks the merged result:
 - skills imported with ``types: []``, which load for every type
 - ``slop_report`` tells in prompts and context (warnings, never errors)
 - tools whose approval class is looser than fabri's default (warnings)
+- a tool set past ``TOOL_COUNT_WARN`` tools or ``TOOL_SCHEMA_TOKENS_WARN``
+  tokens of schema (one warning)
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,6 +32,11 @@ from fabri.setups.store import (
 )
 from fabri.tools.policy import ToolPolicy
 
+# Provisional limits. scripts/measure_tool_tokens.py prints the numbers for a
+# layer stack so they can be tuned against real setups.
+TOOL_COUNT_WARN = 40
+TOOL_SCHEMA_TOKENS_WARN = 16000
+
 
 @dataclass
 class LintFinding:
@@ -39,6 +47,19 @@ class LintFinding:
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
+
+
+def tool_set_tokens(tool_set) -> int:
+    """Tokens the provider sees for the tool schemas of a ResolvedToolSet:
+    name, description and input schema per tool."""
+    from fabri.memory.compress import count_tokens
+
+    total = 0
+    for tool in tool_set.tools.values():
+        payload = {"name": tool.name, "description": tool.manifest.description,
+                   "input_schema": tool.manifest.input_schema}
+        total += count_tokens(json.dumps(payload, sort_keys=True, default=str))
+    return total
 
 
 def _files(directory: Path, names: Iterable[str]) -> dict[str, str]:
@@ -121,6 +142,14 @@ def lint_setup(
 
         for tool, message in approval_warnings(tool_set):
             findings.append(LintFinding("warning", tool.layer, f"tools/{tool.source}", message))
+        count = len(tool_set.tools)
+        tokens = tool_set_tokens(tool_set) if count else 0
+        if count > TOOL_COUNT_WARN or tokens > TOOL_SCHEMA_TOKENS_WARN:
+            findings.append(LintFinding(
+                "warning", "", "tools",
+                f"{count} tools resolve for this setup, about {tokens} tokens of schema; above "
+                f"{TOOL_COUNT_WARN} tools or {TOOL_SCHEMA_TOKENS_WARN} tokens turn on tool retrieval "
+                "or narrow allow"))
     return _dedupe(findings)
 
 
@@ -138,4 +167,4 @@ def has_errors(findings: Iterable[LintFinding]) -> bool:
     return any(f.level == "error" for f in findings)
 
 
-__all__ = ["LintFinding", "has_errors", "lint_setup"]
+__all__ = ["TOOL_COUNT_WARN", "TOOL_SCHEMA_TOKENS_WARN", "LintFinding", "has_errors", "lint_setup", "tool_set_tokens"]

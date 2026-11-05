@@ -1,0 +1,30 @@
+"""Linear's hosted MCP server."""
+from __future__ import annotations
+
+from typing import Any
+
+from fabri.tools.connector_catalog import Connector, _credential
+
+ENTRY = Connector(
+    "linear", "Linear", "Linear's hosted MCP server: issues, projects, comments and cycles.",
+    ("mcp",), "LINEAR_API_KEY", "linear", "https://mcp.linear.app/mcp")
+
+
+# The hosted MCP endpoint. An http MCP source pointed here gets this
+# connector's floor even with its markers removed. No http call to it is
+# trusted as read, so READS is empty.
+HOSTS = ("mcp.linear.app",)
+READS: tuple[tuple[str, str], ...] = ()
+
+
+def expand(name: str, *, token_env: str | None = None, workspace: str | None = None, remote: bool = False,
+           url: str | None = None, all_tools: bool = False) -> dict[str, Any]:
+    source = {"kind": "mcp", "name": name, "description": ENTRY.summary,
+              "url": ENTRY.remote_url,
+              "headers": {"Authorization": _credential(ENTRY, token_env, workspace)},
+              "approval_mode": "tighten", "catalog": "linear"}
+    return {"sources": [source], "allow": [f"mcp_{name}_*"]}
+
+
+def minimum(tool_name: str, method: str | None) -> str | None:
+    return None

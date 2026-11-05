@@ -17,6 +17,9 @@
       - kind: mcp                  # an MCP server (stdio `command` or http `url`)
         name: files
         command: [mcp-files, /srv/data]
+        env_mode: allowlist        # pass the child only a short list of host variables
+        approval_mode: tighten     # the class can only go up from fabri's own pick
+        catalog: github            # id of a built-in connector: applies its name-based minimum
       - kind: python               # an in-process callable
         name: score_lead
         callable: myapp.tools:score_lead
@@ -25,6 +28,10 @@
 `build_tool_source(decl)` returns ``[(manifest, handler), ...]`` ready for
 ``ToolRegistry.register_callable``. `register_tool_sources` does that for a
 list. A ToolPolicy, when given, is enforced while building.
+
+An http or openapi tool whose request URL is on a catalog connector's host
+(slack.com, for example) gets that connector's approval floor whatever the
+declaration says; see ``_apply_floors``.
 """
 from __future__ import annotations
 
@@ -41,7 +48,7 @@ from urllib.parse import quote
 
 import httpx
 
-from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval, safe_approval
+from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval, safe_approval, stricter
 from fabri.tools.credential_store import CredentialStore
 from fabri.tools.http_call import check_header_specs, dry_run_headers, resolve_headers, send
 from fabri.tools.manifest_schema import ToolManifest
@@ -62,12 +69,13 @@ Handler = Callable[[dict], dict]
 TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 _PARAM = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-COMMON_KEYS = frozenset({"kind", "name", "description", "approval", "enabled", "timeout_s", "version", "title"})
+COMMON_KEYS = frozenset({"kind", "name", "description", "approval", "enabled", "timeout_s", "version", "title",
+                         "approval_mode", "catalog"})
 KIND_KEYS: dict[str, frozenset[str]] = {
     "openapi": frozenset({"spec", "base_url", "allow", "deny", "methods", "tags", "headers",
                           "dry_run_header", "description_cap", "naming", "names", "strip_prefixes"}),
     "http": frozenset({"url", "method", "input_schema", "headers", "dry_run_header"}),
-    "mcp": frozenset({"command", "url", "env", "headers"}),
+    "mcp": frozenset({"command", "url", "env", "headers", "env_mode"}),
     "python": frozenset({"callable", "input_schema"}),
 }
 
@@ -148,6 +156,16 @@ def validate_source_decl(decl: Any, policy: ToolPolicy | None = None) -> list[st
         if kind == "python" and not policy.module_allowed(str(decl["callable"])):
             raise PolicyError(f"python source {name}: module is outside the policy's python_modules")
         policy.check_secret_refs(name, secret_refs(decl))
+    if decl.get("approval_mode") not in (None, "tighten"):
+        raise ToolSourceError(f"source {name}: approval_mode must be 'tighten' (got {decl['approval_mode']!r})")
+    catalog = decl.get("catalog")
+    if catalog is not None:
+        from fabri.tools.connectors import CONNECTORS
+
+        if not isinstance(catalog, str) or catalog not in CONNECTORS:
+            raise ToolSourceError(f"source {name}: unknown catalog id {catalog!r}")
+    if kind == "mcp" and decl.get("env_mode") not in (None, "inherit", "allowlist"):
+        raise ToolSourceError(f"mcp source {name}: env_mode must be 'inherit' or 'allowlist' (got {decl['env_mode']!r})")
     unknown = set(decl) - COMMON_KEYS - KIND_KEYS[kind]
     return [f"source {name}: unknown keys {sorted(unknown)}"] if unknown else []
 
@@ -200,7 +218,81 @@ def build_source_tools(
         from fabri.tools.secret_refs import default_credential_store
 
         store = ScopedCredentialStore(store or default_credential_store(), grants, actor=decl["name"])
-    return builder(decl, base_dir=base_dir, policy=policy, transport=transport, store=store, dry=dry)
+    built = builder(decl, base_dir=base_dir, policy=policy, transport=transport, store=store, dry=dry)
+    _apply_floors(decl, built)
+    return built
+
+
+def _request_url(tool: SourceTool) -> str | None:
+    """The URL a built http or openapi tool sends to, placeholders and all."""
+    if tool.kind == "http":
+        return tool.path
+    if tool.kind == "openapi" and tool.path is not None:
+        return str(tool.extra.get("base_url") or "").rstrip("/") + tool.path
+    return None
+
+
+def _raise_to(tool: SourceTool, floor: str) -> None:
+    tool.manifest.approval = stricter(tool.manifest.approval or "write", floor)
+    # So approval_warnings and lint see the true default.
+    tool.safe_approval = stricter(tool.safe_approval, floor)
+
+
+def _apply_floors(decl: Mapping[str, Any], built: list[SourceTool]) -> None:
+    """Raise approval classes to the floors fabri trusts.
+
+    http and openapi tools: the floor is bound to the request target. When
+    the URL's host belongs to a catalog connector, the call is always_approve
+    unless its (method, path) is in that connector's read list, and the class
+    can never drop below fabri's own pick. This does not look at the tool
+    name, the ``catalog`` key or ``approval_mode``, so editing or removing
+    them in the YAML does not remove the floor. A URL whose host is a
+    placeholder could reach any host, so it is treated the same way.
+
+    MCP tools have no URL per tool, so their floor is tool-name based and
+    keyed on the connector: an http MCP source is matched by the host of its
+    server URL, a stdio MCP source only by its ``catalog`` marker. A stdio
+    MCP source with its markers removed is the operator's own responsibility;
+    lint warns about any class looser than fabri's pick.
+
+    Any source may also opt in with ``approval_mode: tighten`` (the class can
+    only go up from fabri's own pick) and ``catalog: <id>`` (that connector's
+    name-based ``minimum`` applies). Both still work as before.
+    """
+    from fabri.tools import connectors
+
+    tighten = decl.get("approval_mode") == "tighten"
+    marker = decl.get("catalog")
+    mcp_catalogs: list[str] = []
+    if decl.get("kind") == "mcp" and decl.get("url"):
+        owner = connectors.catalog_for_url(str(decl["url"]))
+        if owner:
+            mcp_catalogs.append(owner)
+    for tool in built:
+        url = _request_url(tool)
+        bound = bool(mcp_catalogs)
+        floor = None
+        if url is not None:
+            owner, floor = connectors.request_floor(url, tool.method)
+            if owner is None and _templated_host(url):
+                owner, floor = "?", "always_approve"
+            bound = owner is not None
+        if tighten or bound:
+            # Whatever the layer wrote, the class can only go up from fabri's own pick.
+            tool.manifest.approval = stricter(tool.manifest.approval or "write", tool.safe_approval)
+        if floor:
+            _raise_to(tool, floor)
+        for kind in dict.fromkeys([*([marker] if marker else []), *mcp_catalogs]):
+            minimum = connectors.catalog_minimum(kind, tool.manifest.name, tool.method)
+            if minimum:
+                _raise_to(tool, minimum)
+
+
+def _templated_host(url: str) -> bool:
+    """True when the host part of `url` holds a ``{placeholder}`` that the
+    caller fills in at call time."""
+    rest = url.split("://", 1)[-1]
+    return "{" in re.split(r"[/?#]", rest, maxsplit=1)[0]
 
 
 def build_tool_source(decl: Mapping[str, Any], **kwargs: Any) -> list[tuple[ToolManifest, Handler]]:
@@ -339,6 +431,8 @@ def _build_mcp(decl, *, base_dir, policy, transport, store, dry) -> list[SourceT
         cfg["command"] = list(decl["command"])
         if decl.get("env"):
             cfg["env"] = resolve_headers(decl.get("env"), store)
+    cfg["inherit_env"] = decl.get("env_mode") != "allowlist"
+    cfg["transport"] = transport
     client, pairs = build_mcp_tools(
         cfg, approval_for=lambda remote, spec: mcp_approval(remote, str(spec.get("description") or ""),
                                                             spec.get("annotations")))

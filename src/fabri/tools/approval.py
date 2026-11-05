@@ -43,6 +43,8 @@ _SENSITIVE = frozenset({
     "notifications", "broadcast", "publish", "post_message", "postmessage", "reply", "dm", "invite",
     "pay", "pays", "payment", "payments", "charge", "charges", "refund", "refunds", "payout", "payouts",
     "transfer", "transfers", "checkout", "purchase", "purchases", "withdraw", "withdrawal",
+    "schedule", "reschedule", "resume", "activate", "launch", "trigger", "import", "subscribe", "unsubscribe",
+    "sender", "export", "action",
 })
 _DESTRUCTIVE = frozenset({"delete", "deletes", "remove", "destroy", "drop", "purge", "erase", "wipe", "truncate"})
 
