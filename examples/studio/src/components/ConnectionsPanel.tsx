@@ -376,7 +376,7 @@ export default function ConnectionsPanel({
                           {row.scope_kind === "org" ? "org" : row.mine ? "only you" : "user"}
                         </span>
                         {info?.experimental && <span className="su-badge conn__badge--exp">experimental</span>}
-                        {row.status !== "active" && <span className="su-badge conn__badge--warn">{row.status}</span>}
+                        {row.status !== "ok" && row.status !== "active" && <span className="su-badge conn__badge--warn">{row.status}</span>}
                         {row.display_name && <span className="conn__dim">{row.display_name}</span>}
                         <span className={"conn__dim" + (expiry === "expired" ? " conn__dim--err" : "")}>{expiry}</span>
                       </span>
