@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 from itertools import pairwise
-from urllib.parse import urlsplit
 
 APPROVAL_CLASSES: tuple[str, ...] = ("read", "write", "always_approve")
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -84,58 +83,21 @@ def _gated(words: set[str]) -> bool:
     return bool(words & (_GATED | _DESTRUCTIVE))
 
 
-def _path_forms(names: tuple[object, ...]) -> list[str]:
-    """The URL paths among `names`, in the form FastAPI folds them into an
-    operation id: every non-word character becomes "_" ("/brands/{id}" ->
-    "_brands__id_")."""
-    forms = []
-    for text in names:
-        text = str(text or "")
-        if "://" in text:
-            text = urlsplit(text).path
-        if text.startswith("/"):
-            forms.append(re.sub(r"\W", "_", text).lower())
-    return forms
-
-
-def _strip_method_suffix(text: object, verb: str, forms: list[str]) -> object:
-    """`text` without a generated trailing "_<method>" segment.
-
-    FastAPI builds operation ids as ``<function><path>_<method>``
-    ("create_key_keys_post" for POST /keys). Only that exact shape loses its
-    last segment: a snake_case id that ends in "_" plus the call's own method
-    and, before it, a function name followed by the folded form of one of the
-    call's paths. "create_post" keeps its "post", since nothing before it is a
-    path."""
-    if not verb or not forms or not isinstance(text, str) or not re.fullmatch(r"[A-Za-z0-9_]+", text):
-        return text
-    suffix = f"_{verb}"
-    if not text.lower().endswith(suffix):
-        return text
-    head = text[: -len(suffix)]
-    lowered = head.lower()
-    for form in forms:
-        if lowered.endswith(form) and len(lowered) > len(form) and lowered[: -len(form)].strip("_"):
-            return head
-    return text
-
-
 def safe_approval(method: str | None, *names: object) -> str:
     """The default class for an HTTP operation: ``read`` for GET, HEAD and
     OPTIONS; ``always_approve`` for DELETE and for anything whose name or path
     sends messages, posts a comment, review or share, or moves money;
     ``write`` otherwise. A read verb in the name does not lift the gate for
-    a method that is not a read. A generated operation id's trailing method
-    segment ("create_key_keys_post" for POST /keys) is dropped, since the
-    method is already known; see `_strip_method_suffix`."""
+    a method that is not a read. Names are not reshaped first: a generated
+    operation id such as "create_key_keys_post" gates on its "post" like any
+    other name, since telling a generated method suffix from a real word
+    ("create_blog_post") is a guess."""
     verb = (method or "").upper()
     if verb in READ_METHODS:
         return "read"
     if verb == "DELETE":
         return "always_approve"
-    forms = _path_forms(names)
-    words = _tokens(*(_strip_method_suffix(n, verb.lower(), forms) for n in names))
-    return "always_approve" if _gated(words) else "write"
+    return "always_approve" if _gated(_tokens(*names)) else "write"
 
 
 def mcp_approval(name: str, description: str = "", annotations: object = None) -> str:

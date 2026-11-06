@@ -91,6 +91,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -396,10 +397,13 @@ def _excerpt_result(serialized: str, is_error: bool) -> dict:
 # ---------------------------------------------------------------- stdio
 
 
-# Inherited values shorter than this are not redacted even under a secret
-# name: a flag like TOKENIZERS_PARALLELISM=false is not a credential, and
-# redacting a short common string would mangle unrelated output.
-_MIN_INHERITED_SECRET_LEN = 8
+# Inherited values under a secret-looking name that are still not redacted:
+# a flag or a number (TOKENIZERS_PARALLELISM=false, MAX_TOKENS=4096) is not a
+# credential, and redacting a common word would mangle unrelated output.
+# Every other value under such a name is, however short (DB_PASSWORD=hunter2).
+_TRIVIAL_ENV_VALUE = re.compile(r"(?i)true|false|yes|no|on|off|\d+")
+# Names whose value is a connection string that may carry user:password.
+_CONNECTION_NAME_SUFFIXES = ("_url", "_dsn", "_uri")
 
 # Name endings the approver's secret words miss: STRIPE_KEY, AWS_PRIVATE_KEY,
 # SMTP_PASS, NPM_PAT.
@@ -412,6 +416,47 @@ def _env_name_is_secret(name: str) -> bool:
 
     lower = name.lower()
     return _names_secret(lower) or lower.endswith(_SECRET_NAME_SUFFIXES)
+
+
+def _url_credentials(value: str) -> list[str]:
+    """The secret parts of a connection string with a user:password part
+    (``postgresql://user:secret@host/db``): the password, as written and
+    decoded. Empty when there is no password."""
+    try:
+        parts = urlsplit(value)
+        password = parts.password
+    except ValueError:
+        return []
+    if not parts.scheme or not password:
+        return []
+    raw = parts.netloc.rpartition("@")[0].partition(":")[2]
+    return [p for p in {raw, unquote(raw), password} if p]
+
+
+def _inherited_secrets(name: str, value: str) -> list[str]:
+    """The values to redact for one variable the child inherits. Under a name
+    that says it holds a credential, the whole value unless it is a flag or a
+    number. Under any name, a URL with a password gives the whole value and
+    the password. A ``*_URL``, ``*_DSN`` or ``*_URI`` value with a user part
+    and no password (``https://token@host``) gives the whole value and that
+    user part, which is then usually a token."""
+    out: list[str] = []
+    stripped = value.strip()
+    if not stripped:
+        return out
+    if _env_name_is_secret(name) and not _TRIVIAL_ENV_VALUE.fullmatch(stripped):
+        out.append(value)
+    passwords = _url_credentials(stripped)
+    if passwords:
+        out.append(value)
+        out.extend(passwords)
+    elif name.lower().endswith(_CONNECTION_NAME_SUFFIXES) and "@" in stripped:
+        rest = stripped.split("://", 1)[-1]
+        userinfo = rest.split("/", 1)[0].rpartition("@")[0]
+        if userinfo:
+            out.append(value)
+            out.extend(p for p in {userinfo, unquote(userinfo)} if p)
+    return out
 
 
 def _allowlisted_env() -> dict[str, str]:
@@ -490,12 +535,14 @@ class MCPStdioClient:
         # the values in `env`. That includes an inherited variable whose name
         # says it holds a secret (OPENAI_API_KEY, GITHUB_TOKEN, ...): with
         # inherit_env the child gets the whole parent environment.
-        self._child_secrets = tuple(
-            value for key, value in child_env.items()
-            if value and key != CREDENTIAL_AUDIT_LOG_ENV
-            and (key.startswith(ENV_CREDENTIAL_PREFIX) or key in (self.env or {})
-                 or (_env_name_is_secret(key) and len(value) >= _MIN_INHERITED_SECRET_LEN))
-        )
+        secrets: list[str] = []
+        for key, value in child_env.items():
+            if not value or key == CREDENTIAL_AUDIT_LOG_ENV:
+                continue
+            if key.startswith(ENV_CREDENTIAL_PREFIX) or key in (self.env or {}):
+                secrets.append(value)
+            secrets.extend(_inherited_secrets(key, value))
+        self._child_secrets = tuple(dict.fromkeys(secrets))
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,

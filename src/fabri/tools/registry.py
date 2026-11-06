@@ -118,11 +118,18 @@ class ToolRegistry:
 
     def invoke(self, name: str, args: dict) -> dict:
         if name == BATCH_TOOL_NAME and BATCH_TOOL_NAME in self.tools:
-            return self.invoke_batch(args.get("calls") or [])
-        canonical = self.canonical_name(name)
-        if canonical is None:
-            return tool_error(f"unknown tool: {name}")
-        name = canonical
+            # The batch call is checked like any other call (its own approval
+            # class, its required arguments) before any inner call runs. Each
+            # inner call is then checked on its own when invoke_batch hands it
+            # back to invoke(). The batch row's seconds include its inner calls.
+            name = BATCH_TOOL_NAME
+            run = lambda: self.invoke_batch(args.get("calls") or [])  # noqa: E731
+        else:
+            canonical = self.canonical_name(name)
+            if canonical is None:
+                return tool_error(f"unknown tool: {name}")
+            name = canonical
+            run = None
         manifest = self.tools[name]
         stats = self.usage.setdefault(name, {"calls": 0, "failures": 0, "refused": 0, "seconds": 0.0})
         stats["calls"] += 1
@@ -132,7 +139,7 @@ class ToolRegistry:
             return refusal
         t0 = time.monotonic()
         try:
-            result = self._run(name, args, manifest)
+            result = run() if run is not None else self._run(name, args, manifest)
         finally:
             stats["seconds"] += time.monotonic() - t0
         if not result.get("ok"):

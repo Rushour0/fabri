@@ -105,15 +105,20 @@ def test_http_non_read_methods_gate_outbound_words(method, names):
     assert safe_approval(method, *names) == "always_approve"
 
 
-def test_http_method_suffix_in_operation_id_does_not_gate():
-    # FastAPI-generated ids end in the method ("..._post"); that word is not
-    # a sign the call posts to people.
-    assert safe_approval("POST", "create_dkim_key_brands_default_dkim_post", "/brands/default/dkim") == "write"
-    assert safe_approval("POST", "create_pat_endpoint_users_self_pats_post", "/users/self/pats") == "write"
-    # The plural resource still gates.
+def test_http_method_suffix_in_operation_id_gates():
+    # No name-shape guessing: a FastAPI-style id ending in "_post" gates like
+    # a name that means a post ("create_blog_post"). The cost is a few
+    # generated Cakemail ids (create dkim key, deactivate dkim key, create
+    # PAT) that now ask every call.
+    assert safe_approval("POST", "create_blog_post", "/blog") == "always_approve"
+    assert safe_approval("POST", "create_dkim_key_brands_default_dkim_post", "/brands/default/dkim") == "always_approve"
+    assert safe_approval("POST", "deactivate_dkim_key_brands_default_dkim__id__deactivate_post",
+                         "/brands/default/dkim/{id}/deactivate") == "always_approve"
+    assert safe_approval("POST", "create_pat_endpoint_users_self_pats_post", "/users/self/pats") == "always_approve"
     assert safe_approval("POST", "create_post_posts_post", "/posts") == "always_approve"
-    # A full URL counts as the path, as for http sources.
-    assert safe_approval("POST", "create_key_keys_post", "https://api.example.com/keys") == "write"
+    assert safe_approval("POST", "create_key_keys_post", "https://api.example.com/keys") == "always_approve"
+    # Without a gated word the method alone gives write.
+    assert safe_approval("POST", "create_key", "/keys") == "write"
 
 
 # --- Finding 3: no cut approval cards -------------------------------------
@@ -238,3 +243,62 @@ def test_registry_refuses_long_call_before_custom_approver(tmp_path):
     # A short call goes through the same approver.
     assert reg.invoke("send_email", {"to": "a@example.com"})["ok"] is True
     assert asked == ["send_email"]
+
+
+# --- PR #100 third review: an always_approve batch asks first -------------
+
+def _batch_registry(tmp_path: Path, approver) -> tuple[ToolRegistry, list[dict]]:
+    examples = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
+    data = json.loads((examples / "batch.json").read_text())
+    data["approval"] = "always_approve"
+    (tmp_path / "batch.json").write_text(json.dumps(data))
+    reg = ToolRegistry(tmp_path, approver=approver)
+    ran: list[dict] = []
+    ping = ToolManifest(name="ping", description="ping", command=[],
+                        input_schema={"type": "object", "properties": {}}, output_schema={},
+                        approval="write")
+    reg.register_callable(ping, lambda args: (ran.append(args), tool_ok({"pong": True}))[1])
+    assert reg.tools["batch"].approval == "always_approve"
+    return reg, ran
+
+
+def test_always_approve_batch_does_not_run_when_denied(tmp_path):
+    asked: list[str] = []
+    reg, ran = _batch_registry(tmp_path, lambda name, args, manifest: asked.append(name) or False)
+    out = reg.invoke("batch", {"calls": [{"name": "ping", "args": {}}]})
+    assert out["ok"] is False
+    assert "declined" in out["error"]
+    assert asked == ["batch"]
+    assert ran == []
+    assert reg.usage["batch"]["refused"] == 1
+    assert "ping" not in reg.usage
+
+
+def test_always_approve_batch_without_approver_does_not_run(tmp_path):
+    reg, ran = _batch_registry(tmp_path, None)
+    out = reg.invoke("batch", {"calls": [{"name": "ping", "args": {}}]})
+    assert out["ok"] is False
+    assert ran == []
+
+
+def test_always_approve_batch_runs_when_approved(tmp_path):
+    asked: list[str] = []
+    reg, ran = _batch_registry(tmp_path, lambda name, args, manifest: asked.append(name) or True)
+    out = reg.invoke("batch", {"calls": [{"name": "ping", "args": {"n": 1}}]})
+    assert out["ok"] is True
+    assert out["result"]["results"][0]["ok"] is True
+    assert ran == [{"n": 1}]
+    # Only the batch asked: the inner call is write, checked on its own.
+    assert asked == ["batch"]
+    assert reg.usage["batch"]["calls"] == 1 and reg.usage["ping"]["calls"] == 1
+
+
+def test_inner_always_approve_call_still_asks_inside_batch(tmp_path):
+    asked: list[str] = []
+    reg, ran = _batch_registry(tmp_path, lambda name, args, manifest: asked.append(name) or name == "batch")
+    reg.tools["ping"].approval = "always_approve"
+    out = reg.invoke("batch", {"calls": [{"name": "ping", "args": {}}]})
+    assert out["ok"] is True
+    assert out["result"]["results"][0]["ok"] is False
+    assert asked == ["batch", "ping"]
+    assert ran == []
