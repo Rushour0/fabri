@@ -239,27 +239,25 @@ def _resolve_memory_scope(args: argparse.Namespace, mem_cfg: dict) -> MemoryScop
     )
 
 
-def _use_connect_db_for_run(args: argparse.Namespace) -> None:
-    """Let a direct `fabri run` resolve secret refs from the install database
-    `fabri connect` writes, when that file exists. The path stays in this
-    process (not os.environ), so tool subprocesses never inherit it. A run
-    `fabri serve` launched (broker env or FABRI_SESSION_ID) keeps the old
-    behaviour and never opens the database."""
-    from fabri.tools.secret_refs import is_service_child, use_cli_install_db
+def _connect_db_for_run(args: argparse.Namespace):
+    """The install database `fabri connect` writes, for a direct `fabri run`
+    to resolve secret refs from (None when the file does not exist). A run
+    `fabri serve` launched (broker env or FABRI_SESSION_ID) gets None and
+    never opens the database."""
+    from fabri.tools.secret_refs import is_service_child
 
-    use_cli_install_db(None if is_service_child() else _install_db_path(args))
+    return None if is_service_child() else _install_db_path(args)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    # The install-db path is held only for this call, so an in-process caller
-    # (a library host, a test) does not keep it after the run returns.
-    from fabri.tools.secret_refs import use_cli_install_db
+    # The install-db path is selected for this run's context only: it is not
+    # exported to os.environ (so tool subprocesses never inherit it), it is
+    # gone after the run returns, and another run in the same process, in its
+    # own thread or context, keeps its own.
+    from fabri.tools.secret_refs import cli_install_db
 
-    _use_connect_db_for_run(args)
-    try:
+    with cli_install_db(_connect_db_for_run(args)):
         _cmd_run(args)
-    finally:
-        use_cli_install_db(None)
 
 
 def _cmd_run(args: argparse.Namespace) -> None:

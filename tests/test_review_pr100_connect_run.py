@@ -4,8 +4,10 @@ $FABRI_HOME/serve/installs.db) resolves in a direct `fabri run`, while a run
 from __future__ import annotations
 
 import argparse
+import contextvars
 import os
 import sqlite3
+import threading
 
 import pytest
 
@@ -24,8 +26,9 @@ def home(tmp_path, monkeypatch):
                  "FABRI_CRED_LINEAR_ACME", *BROKER_ENV_NAMES):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FABRI_HOME", str(tmp_path))
-    monkeypatch.setattr(secret_refs, "_cli_install_db", None)
-    return tmp_path
+    token = secret_refs._cli_install_db.set(None)
+    yield tmp_path
+    secret_refs._cli_install_db.reset(token)
 
 
 def _connect(home) -> None:
@@ -77,7 +80,7 @@ def test_missing_db_falls_back_to_env(home, monkeypatch):
     monkeypatch.setenv("FABRI_CRED_LINEAR_ACME", "from-env-value")
     cli.cmd_run(_run_args())
     assert seen == {"value": "from-env-value"}
-    assert secret_refs._cli_install_db is None
+    assert secret_refs._cli_install_db.get() is None
 
 
 def _forbid_db(monkeypatch, home):
@@ -107,18 +110,18 @@ def test_service_child_never_opens_the_db(home, monkeypatch, env_name):
     cli.cmd_run(_run_args())
     assert "value" not in seen
     assert "error" in seen
-    assert secret_refs._cli_install_db is None
+    assert secret_refs._cli_install_db.get() is None
 
 
 def test_store_refuses_db_if_broker_env_appears_later(home, monkeypatch):
     # Even with the process-level path set, a broker env at lookup time wins.
     _connect(home)
-    secret_refs.use_cli_install_db(home / "serve" / "installs.db")
-    assert secret_refs._cli_install_db is not None
-    monkeypatch.setenv(sorted(BROKER_ENV_NAMES)[0], "/tmp/broker.sock")
-    _forbid_db(monkeypatch, home)
-    with pytest.raises(CredentialNotFoundError):
-        resolve_secret("linear:acme")
+    with secret_refs.cli_install_db(home / "serve" / "installs.db"):
+        assert secret_refs._cli_install_db.get() is not None
+        monkeypatch.setenv(sorted(BROKER_ENV_NAMES)[0], "/tmp/broker.sock")
+        _forbid_db(monkeypatch, home)
+        with pytest.raises(CredentialNotFoundError):
+            resolve_secret("linear:acme")
 
 
 def test_explicit_install_db_env_still_wins(home, tmp_path, monkeypatch):
@@ -131,3 +134,111 @@ def test_explicit_install_db_env_still_wins(home, tmp_path, monkeypatch):
     _dry_run_resolving(monkeypatch, seen)
     cli.cmd_run(_run_args())
     assert seen == {"value": "other-db-token-77"}
+
+
+@pytest.mark.parametrize("env_name", [*sorted(BROKER_ENV_NAMES), "FABRI_SESSION_ID"])
+def test_service_child_ignores_install_db_env_too(home, monkeypatch, env_name):
+    # FABRI_INSTALL_DB in a service child's env (an operator export, a
+    # re-admitted var) still does not open the database.
+    _connect(home)
+    monkeypatch.setenv("FABRI_INSTALL_DB", str(home / "serve" / "installs.db"))
+    monkeypatch.setenv(env_name, "set-by-the-launcher")
+    _forbid_db(monkeypatch, home)
+    with pytest.raises(CredentialNotFoundError):
+        resolve_secret("linear:acme")
+    seen: dict = {}
+    _dry_run_resolving(monkeypatch, seen)
+    cli.cmd_run(_run_args())
+    assert "value" not in seen and "error" in seen
+
+
+def test_service_child_snapshot_values_still_resolve(home, monkeypatch):
+    # FABRI_CRED_SNAPSHOT mode: the launcher hands the child FABRI_CRED_*
+    # values, which the env store reads even with FABRI_INSTALL_DB present.
+    _connect(home)
+    monkeypatch.setenv("FABRI_INSTALL_DB", str(home / "serve" / "installs.db"))
+    monkeypatch.setenv("FABRI_SESSION_ID", "s-1")
+    monkeypatch.setenv("FABRI_CRED_LINEAR_ACME", "snapshot-value-1234")
+    _forbid_db(monkeypatch, home)
+    assert resolve_secret("linear:acme") == "snapshot-value-1234"
+
+
+def _store_token(db_dir, token: str) -> None:
+    store = cli._connection_store(argparse.Namespace(home_root=str(db_dir)), create=True)
+    store.upsert(provider="linear", handle="acme", access_token=token)
+
+
+def test_concurrent_runs_each_resolve_their_own_db(home, tmp_path, monkeypatch):
+    # Two direct runs in one process, in separate threads, overlap in time:
+    # each resolves from its own --home-root database, never the other's.
+    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    _store_token(a_dir, "token-from-db-a-111")
+    _store_token(b_dir, "token-from-db-b-222")
+    monkeypatch.setattr(cli, "load_config", lambda path: {})
+    both_inside = threading.Barrier(2, timeout=10)
+    seen: dict[str, object] = {}
+
+    def fake_dry_run(config, task):
+        # Both runs have selected their db before either resolves.
+        both_inside.wait()
+        seen[task] = resolve_secret("linear:acme")
+        # The agent's parallel tool pool runs each call in a copied context;
+        # a lookup there still sees this run's db.
+        ctx = contextvars.copy_context()
+        result: dict = {}
+        worker = threading.Thread(target=ctx.run, args=(lambda: result.update(v=resolve_secret("linear:acme")),))
+        worker.start()
+        worker.join()
+        seen[task + ":worker"] = result.get("v")
+        both_inside.wait()
+
+    monkeypatch.setattr(cli, "_print_dry_run", fake_dry_run)
+
+    def run(task, root):
+        try:
+            cli.cmd_run(argparse.Namespace(config="unused.yaml", task=task, dry_run=True, home_root=str(root)))
+        except Exception as exc:  # noqa: BLE001
+            seen[task] = exc
+
+    threads = [threading.Thread(target=run, args=("a", a_dir)), threading.Thread(target=run, args=("b", b_dir))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    assert seen == {
+        "a": "token-from-db-a-111", "a:worker": "token-from-db-a-111",
+        "b": "token-from-db-b-222", "b:worker": "token-from-db-b-222",
+    }
+    # Nothing leaked into the calling context.
+    assert secret_refs._cli_install_db.get() is None
+
+
+def test_agent_parallel_tool_pool_keeps_the_runs_db(home, tmp_path):
+    # Parallel-group calls run on a ThreadPoolExecutor; each runs in a copy of
+    # the run's context, so a lookup inside the tool still sees the run's db.
+    import uuid
+
+    from fabri import ScriptedLLMBackend, ToolRegistry
+    from fabri.core.agent import _dispatch_tool_calls
+    from fabri.core.llm import ToolCall
+    from fabri.tools.manifest_schema import ToolManifest
+    from fabri.tools.result import tool_ok
+
+    _store_token(tmp_path / "p", "token-in-pool-333")
+    seen: list[str] = []
+
+    def handler(args: dict) -> dict:
+        seen.append(resolve_secret("linear:acme"))
+        return tool_ok({"done": True})
+
+    reg = ToolRegistry([])
+    reg.register_callable(ToolManifest(
+        name="spawn_subagent", description="stub", command=[],
+        input_schema={"type": "object", "properties": {"parallel_group": {"type": "string"}}},
+        output_schema={"type": "object"}, timeout_s=10,
+    ), handler)
+    calls = [ToolCall(name="spawn_subagent", args={"parallel_group": "g"}, id=f"c{i}") for i in range(3)]
+    with secret_refs.cli_install_db(tmp_path / "p" / "installs.db"):
+        _dispatch_tool_calls(calls, reg, llm=ScriptedLLMBackend([]), default_task="t", max_subquestions=3,
+                             session_id=f"ctx-{uuid.uuid4().hex[:8]}", messages=[], step_num=0)
+    assert seen == ["token-in-pool-333"] * 3

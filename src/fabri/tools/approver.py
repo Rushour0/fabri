@@ -168,6 +168,18 @@ def fits_card(args: object, cap: int = CARD_CAP) -> bool:
     return len(_args_text(args)) <= cap
 
 
+def check_fits_card(args: object, cap: int = CARD_CAP) -> str:
+    """The redacted argument text, or ArgsTooLong when it does not fit on an
+    approval card in full."""
+    text = _args_text(args)
+    if len(text) > cap:
+        raise ArgsTooLong(
+            f"arguments too long to show in full ({len(text)} chars, limit {cap}); "
+            "the call was not made"
+        )
+    return text
+
+
 def describe_call(name: str, args: object, manifest: ToolManifest | None, cap: int = CARD_CAP) -> str:
     """The text a person reads before deciding: tool name, approval class,
     title when the manifest has one, and the arguments as sorted JSON.
@@ -175,12 +187,7 @@ def describe_call(name: str, args: object, manifest: ToolManifest | None, cap: i
     goes to a trace or a chat surface never holds them. Arguments longer than
     `cap` characters raise ArgsTooLong: the card is never cut short, since
     the call would still run with the part nobody saw."""
-    text = _args_text(args)
-    if len(text) > cap:
-        raise ArgsTooLong(
-            f"arguments too long to show in full ({len(text)} chars, limit {cap}); "
-            "the call was not made"
-        )
+    text = check_fits_card(args, cap)
     approval = getattr(manifest, "approval", None) or "unknown"
     lines = [f"{name} needs your approval (class {approval})"]
     title = getattr(manifest, "title", None)

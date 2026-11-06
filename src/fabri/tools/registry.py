@@ -171,7 +171,9 @@ class ToolRegistry:
     def _check_call(self, name: str, args: object, manifest: ToolManifest) -> dict | None:
         """An error result when the call must not run, else None. The approver
         step is skipped for a broker-gated handler (see `_broker_gated`); the
-        manifest still shows the class for lint and Studio."""
+        manifest still shows the class for lint and Studio. Arguments too long
+        to show in full on an approval card are refused before any approver
+        is called."""
         if not isinstance(args, dict):
             return tool_error(f"{name}: arguments must be a JSON object")
         missing = [k for k in (manifest.input_schema or {}).get("required") or [] if k not in args]
@@ -181,6 +183,13 @@ class ToolRegistry:
             if self.approver is None:
                 return tool_error(f"{name} needs human approval and no approver is configured; "
                                   "the call was not made")
+            # Checked here, not only in describe_call: a custom approver that
+            # never builds a card must not approve arguments no card could show.
+            from fabri.tools.approver import check_fits_card
+            try:
+                check_fits_card(args)
+            except ApprovalRefused as e:
+                return tool_error(f"{name}: {e}")
             try:
                 approved = bool(self.approver(name, args, manifest))
             except ApprovalRefused as e:

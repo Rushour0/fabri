@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import json
 import re
@@ -1441,7 +1442,9 @@ def _dispatch_tool_calls(
         workers = max(1, min(len(idx_list), max_parallel_spawns))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_idx = {
-                pool.submit(_dispatch_one, calls[i]): i for i in idx_list
+                # Each call runs in a copy of this run's context, so context
+                # variables (the run's install database, memory scope) hold.
+                pool.submit(contextvars.copy_context().run, _dispatch_one, calls[i]): i for i in idx_list
             }
             for future in as_completed(future_to_idx):
                 i = future_to_idx[future]

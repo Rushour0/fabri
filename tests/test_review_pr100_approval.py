@@ -47,14 +47,21 @@ def test_mcp_outbound_posts_are_always_approve(name):
     assert mcp_approval(name) == "always_approve"
 
 
-@pytest.mark.parametrize("name", [
-    "list_comments", "get_comment", "get_pull_request_reviews", "search_issues",
-    "get_issue", "list_issues", "fetch_review",
-])
-def test_mcp_reads_of_posts_stay_write(name):
-    # MCP tools are never read by default; reading comments must not turn
-    # into a per-call prompt.
+@pytest.mark.parametrize("name", ["search_issues", "get_issue", "list_issues"])
+def test_mcp_plain_reads_stay_write(name):
+    # MCP tools are never read by default.
     assert mcp_approval(name) == "write"
+
+
+@pytest.mark.parametrize("name", [
+    "list_comments", "get_comment", "get_pull_request_reviews", "fetch_review",
+    "get_and_post_comment", "list_then_share",
+])
+def test_mcp_read_verb_does_not_lift_outbound_gate(name):
+    # The name is a claim; "get_and_post_comment" posts. No read-verb
+    # exception, and the catalog cannot lower a class, so reads of comments
+    # and reviews also ask every call.
+    assert mcp_approval(name) == "always_approve"
 
 
 @pytest.mark.parametrize("name", ["create_issue", "update_issue", "add_label"])
@@ -84,6 +91,20 @@ def test_http_reads_stay_read(method):
     assert safe_approval(method, "get_review", "/reviews/{id}") == "read"
 
 
+@pytest.mark.parametrize("method,names", [
+    ("POST", ("get_and_post_comment",)),
+    ("POST", ("list_comments", "/issues/{n}/comments")),
+    ("PUT", ("get_review", "/reviews/{id}")),
+    ("POST", ("create_post",)),
+    ("POST", ("create_post", "/blog")),
+    ("POST", ("submit_post", "/submit")),
+    ("PUT", ("create_key_keys_post", "/keys")),  # suffix is not this call's method
+    ("POST", ("create_key_keys_post",)),         # no path to match the id against
+])
+def test_http_non_read_methods_gate_outbound_words(method, names):
+    assert safe_approval(method, *names) == "always_approve"
+
+
 def test_http_method_suffix_in_operation_id_does_not_gate():
     # FastAPI-generated ids end in the method ("..._post"); that word is not
     # a sign the call posts to people.
@@ -91,6 +112,8 @@ def test_http_method_suffix_in_operation_id_does_not_gate():
     assert safe_approval("POST", "create_pat_endpoint_users_self_pats_post", "/users/self/pats") == "write"
     # The plural resource still gates.
     assert safe_approval("POST", "create_post_posts_post", "/posts") == "always_approve"
+    # A full URL counts as the path, as for http sources.
+    assert safe_approval("POST", "create_key_keys_post", "https://api.example.com/keys") == "write"
 
 
 # --- Finding 3: no cut approval cards -------------------------------------
@@ -190,3 +213,28 @@ def test_registry_short_call_still_asks(tmp_path):
     reg.register_callable(_manifest(), lambda a: calls.append(a) or tool_ok({}))
     assert reg.invoke("send_email", {"to": "a@example.com"})["ok"] is True
     assert calls == [{"to": "a@example.com"}]
+
+
+def test_registry_refuses_long_call_before_custom_approver(tmp_path):
+    # A custom approver that never builds a card still cannot approve a call
+    # whose arguments no card could show in full.
+    asked: list[str] = []
+    calls: list[dict] = []
+
+    def yes(name, args, manifest):
+        asked.append(name)
+        return True
+
+    reg = ToolRegistry(tmp_path, approver=yes)
+    reg.register_callable(_manifest(), lambda a: calls.append(a) or tool_ok({}))
+    args = {"to": "a@example.com", "body": "x" * 25000}
+    assert not fits_card(args)
+    result = reg.invoke("send_email", args)
+    assert result["ok"] is False
+    assert "arguments too long to show in full" in result["error"]
+    assert "the call was not made" in result["error"]
+    assert asked == []
+    assert calls == []
+    # A short call goes through the same approver.
+    assert reg.invoke("send_email", {"to": "a@example.com"})["ok"] is True
+    assert asked == ["send_email"]

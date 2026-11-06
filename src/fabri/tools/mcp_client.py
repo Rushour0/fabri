@@ -396,6 +396,24 @@ def _excerpt_result(serialized: str, is_error: bool) -> dict:
 # ---------------------------------------------------------------- stdio
 
 
+# Inherited values shorter than this are not redacted even under a secret
+# name: a flag like TOKENIZERS_PARALLELISM=false is not a credential, and
+# redacting a short common string would mangle unrelated output.
+_MIN_INHERITED_SECRET_LEN = 8
+
+# Name endings the approver's secret words miss: STRIPE_KEY, AWS_PRIVATE_KEY,
+# SMTP_PASS, NPM_PAT.
+_SECRET_NAME_SUFFIXES = ("_key", "_pass", "_pat", "_pwd")
+
+
+def _env_name_is_secret(name: str) -> bool:
+    """True when an environment variable's name says it holds a credential."""
+    from fabri.tools.approver import _names_secret
+
+    lower = name.lower()
+    return _names_secret(lower) or lower.endswith(_SECRET_NAME_SUFFIXES)
+
+
 def _allowlisted_env() -> dict[str, str]:
     """The parent variables a stdio server may see when ``inherit_env`` is off.
     A proxy variable is left out when it has an ``@``, since that means a
@@ -469,11 +487,14 @@ class MCPStdioClient:
             child_env.pop(broker_name, None)
         # The child can echo any credential it was given (in a result, an
         # error or its stderr), so every one of them is redacted, not only
-        # the values in `env`.
+        # the values in `env`. That includes an inherited variable whose name
+        # says it holds a secret (OPENAI_API_KEY, GITHUB_TOKEN, ...): with
+        # inherit_env the child gets the whole parent environment.
         self._child_secrets = tuple(
             value for key, value in child_env.items()
             if value and key != CREDENTIAL_AUDIT_LOG_ENV
-            and (key.startswith(ENV_CREDENTIAL_PREFIX) or key in (self.env or {}))
+            and (key.startswith(ENV_CREDENTIAL_PREFIX) or key in (self.env or {})
+                 or (_env_name_is_secret(key) and len(value) >= _MIN_INHERITED_SECRET_LEN))
         )
         self.proc = subprocess.Popen(
             self.command,

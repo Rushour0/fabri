@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from itertools import pairwise
+from urllib.parse import urlsplit
 
 APPROVAL_CLASSES: tuple[str, ...] = ("read", "write", "always_approve")
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -48,15 +49,14 @@ _SENSITIVE = frozenset({
     "sender", "export", "action",
 })
 # Words for posts other people read: a comment, a review, a reply, a share, a
-# forward. They gate like _SENSITIVE, except on a name that starts with a read
-# verb ("list_comments", "get_pull_request_reviews"), which only reads them.
+# forward. They gate like _SENSITIVE. A read verb in front ("list_comments")
+# does not lift the gate: the name is a claim, and the HTTP read methods are
+# already read before these words are looked at.
 _OUTBOUND = frozenset({
     "comment", "comments", "review", "reviews", "post", "posts", "replies", "share", "shares",
     "forward", "forwards",
 })
-_READ_VERBS = frozenset({
-    "get", "list", "search", "read", "fetch", "find", "query", "view", "show", "describe", "count",
-})
+_GATED = _SENSITIVE | _OUTBOUND
 _DESTRUCTIVE = frozenset({"delete", "deletes", "remove", "destroy", "drop", "purge", "erase", "wipe", "truncate"})
 
 
@@ -78,33 +78,64 @@ def _tokens(*texts: object) -> set[str]:
     return out
 
 
-def _gated(words: set[str], name: object) -> bool:
-    """True when `words` hold a word that sends to people, moves money or
-    deletes. `name` is the tool's own name, whose first word decides whether
-    the _OUTBOUND words count."""
-    if words & (_SENSITIVE | _DESTRUCTIVE):
-        return True
-    if not words & _OUTBOUND:
-        return False
-    lead = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name or "")).lower()
-    first = next((p for p in re.split(r"[^a-z0-9]+", lead) if p), "")
-    return first not in _READ_VERBS
+def _gated(words: set[str]) -> bool:
+    """True when `words` hold a word that sends to people, posts something
+    others read, moves money or deletes."""
+    return bool(words & (_GATED | _DESTRUCTIVE))
+
+
+def _path_forms(names: tuple[object, ...]) -> list[str]:
+    """The URL paths among `names`, in the form FastAPI folds them into an
+    operation id: every non-word character becomes "_" ("/brands/{id}" ->
+    "_brands__id_")."""
+    forms = []
+    for text in names:
+        text = str(text or "")
+        if "://" in text:
+            text = urlsplit(text).path
+        if text.startswith("/"):
+            forms.append(re.sub(r"\W", "_", text).lower())
+    return forms
+
+
+def _strip_method_suffix(text: object, verb: str, forms: list[str]) -> object:
+    """`text` without a generated trailing "_<method>" segment.
+
+    FastAPI builds operation ids as ``<function><path>_<method>``
+    ("create_key_keys_post" for POST /keys). Only that exact shape loses its
+    last segment: a snake_case id that ends in "_" plus the call's own method
+    and, before it, a function name followed by the folded form of one of the
+    call's paths. "create_post" keeps its "post", since nothing before it is a
+    path."""
+    if not verb or not forms or not isinstance(text, str) or not re.fullmatch(r"[A-Za-z0-9_]+", text):
+        return text
+    suffix = f"_{verb}"
+    if not text.lower().endswith(suffix):
+        return text
+    head = text[: -len(suffix)]
+    lowered = head.lower()
+    for form in forms:
+        if lowered.endswith(form) and len(lowered) > len(form) and lowered[: -len(form)].strip("_"):
+            return head
+    return text
 
 
 def safe_approval(method: str | None, *names: object) -> str:
     """The default class for an HTTP operation: ``read`` for GET, HEAD and
     OPTIONS; ``always_approve`` for DELETE and for anything whose name or path
     sends messages, posts a comment, review or share, or moves money;
-    ``write`` otherwise. The bare method word is dropped from the name
-    tokens, since generated operation ids often end in it
-    ("create_key_keys_post") and the method is already known."""
+    ``write`` otherwise. A read verb in the name does not lift the gate for
+    a method that is not a read. A generated operation id's trailing method
+    segment ("create_key_keys_post" for POST /keys) is dropped, since the
+    method is already known; see `_strip_method_suffix`."""
     verb = (method or "").upper()
     if verb in READ_METHODS:
         return "read"
     if verb == "DELETE":
         return "always_approve"
-    words = _tokens(*names) - {verb.lower()}
-    return "always_approve" if _gated(words, names[0] if names else "") else "write"
+    forms = _path_forms(names)
+    words = _tokens(*(_strip_method_suffix(n, verb.lower(), forms) for n in names))
+    return "always_approve" if _gated(words) else "write"
 
 
 def mcp_approval(name: str, description: str = "", annotations: object = None) -> str:
@@ -115,4 +146,4 @@ def mcp_approval(name: str, description: str = "", annotations: object = None) -
     hints = annotations if isinstance(annotations, dict) else {}
     if hints.get("destructiveHint") is True:
         return "always_approve"
-    return "always_approve" if _gated(_tokens(name), name) else "write"
+    return "always_approve" if _gated(_tokens(name)) else "write"

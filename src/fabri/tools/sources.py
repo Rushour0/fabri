@@ -57,6 +57,7 @@ a human itself before any ``always_approve`` request. Sources with only
 """
 from __future__ import annotations
 
+import contextvars
 import importlib
 import logging
 import os
@@ -540,7 +541,9 @@ def _build_python(decl, *, base_dir, policy, transport, store, dry, broker=None)
         # in the background; the agent gets an error and moves on.
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{name}")
         try:
-            return pool.submit(call, args).result(timeout=timeout)
+            # In a copy of the run's context, so a credential lookup inside
+            # the callable sees the run's install database.
+            return pool.submit(contextvars.copy_context().run, call, args).result(timeout=timeout)
         except FuturesTimeout:
             return tool_error(f"{name}: timed out after {timeout:g}s")
         finally:

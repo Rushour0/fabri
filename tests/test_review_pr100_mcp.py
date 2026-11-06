@@ -19,7 +19,7 @@ CRED = "FABRI_CRED_X"
 _CHILD = textwrap.dedent(
     """
     import json, os, sys
-    tok = os.environ.get("FABRI_CRED_X", "")
+    tok = os.environ.get(sys.argv[1], "")
     for line in sys.stdin:
         msg = json.loads(line)
         mid = msg.get("id")
@@ -54,13 +54,21 @@ _CHILD = textwrap.dedent(
 )
 
 
-@pytest.fixture
-def server(monkeypatch):
-    monkeypatch.setenv(CRED, SENTINEL)
+# The env var the child echoes, and the credential_env it is declared with.
+# FABRI_CRED_X comes through credential_env; OPENAI_API_KEY is an ordinary
+# inherited variable (inherit_env defaults to True) whose name marks it as a
+# secret, so it must be redacted although nothing declared it.
+_ECHOED = [(CRED, [CRED]), ("OPENAI_API_KEY", [])]
+
+
+@pytest.fixture(params=_ECHOED, ids=[name for name, _ in _ECHOED])
+def server(request, monkeypatch):
+    var, credential_env = request.param
+    monkeypatch.setenv(var, SENTINEL)
     client, pairs = build_mcp_tools({
         "name": "leaky",
-        "command": [sys.executable, "-c", _CHILD],
-        "credential_env": [CRED],
+        "command": [sys.executable, "-c", _CHILD, var],
+        "credential_env": credential_env,
         "timeout_s": 10,
     })
     handler = dict((m.name, h) for m, h in pairs)["mcp_leaky_echo"]
@@ -130,3 +138,29 @@ def test_names_not_in_credential_env_are_not_inherited_or_needed(monkeypatch):
 def test_env_values_still_redacted_before_start():
     c = MCPStdioClient(command=["unused"], env={"T": SENTINEL})
     assert c._secrets == (SENTINEL,)
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY",
+                                  "DB_PASSWORD", "STRIPE_KEY", "SMTP_PASS"])
+def test_inherited_secret_named_vars_are_redaction_secrets(monkeypatch, name):
+    monkeypatch.setenv(name, SENTINEL)
+    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"])
+    c.start()
+    try:
+        assert SENTINEL in c._secrets
+    finally:
+        c.close()
+
+
+def test_short_or_plain_inherited_values_are_not_redaction_secrets(monkeypatch):
+    # Short values under a secret name, and long values under a plain name,
+    # stay out of the redaction set.
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "false")
+    monkeypatch.setenv("FABRI_TEST_PLAIN_SETTING", "plain-long-value-123456")
+    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"])
+    c.start()
+    try:
+        assert "false" not in c._secrets
+        assert "plain-long-value-123456" not in c._secrets
+    finally:
+        c.close()
