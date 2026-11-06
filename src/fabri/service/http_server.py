@@ -84,6 +84,8 @@ _SLACK_UNINSTALL_RE = re.compile(r"^/slack/installs/([A-Za-z0-9_.-]+)/delete/?$"
 _GITHUB_UNINSTALL_RE = re.compile(r"^/github/installs/([A-Za-z0-9_.-]+)/delete/?$")
 _LINEAR_UNINSTALL_RE = re.compile(r"^/linear/installs/([A-Za-z0-9_.-]+)/delete/?$")
 _AUTH_BODY_MAX_BYTES = 8 * 1024
+# A query string inside a logged request line, up to the next space or quote.
+_QUERY_RE = re.compile(r"\?[^\s\"']*")
 _AUTH_EMAIL_MAX_LENGTH = 254
 _AUTH_PASSWORD_MAX_LENGTH = 1024
 # GETs that write install state. The Slack and Linear install paths moved
@@ -121,8 +123,21 @@ class _Handler(BaseHTTPRequestHandler):
     def slack_cfg(self) -> dict:
         return self.service._slack_cfg
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        # Method and path only. OAuth callbacks carry the authorization code
+        # and state in the query string, so no query is ever logged.
+        command = getattr(self, "command", None) or "-"
+        path = urlsplit(getattr(self, "path", "") or "").path or "-"
+        logger.debug("fabri serve: %s %s %s", command, path, code)
+
     def log_message(self, fmt: str, *args) -> None:  # quiet the default stderr spam
-        logger.debug("fabri serve: " + fmt, *args)
+        # Error lines (a bad request line, say) can quote the raw request
+        # line, so any query string in the text is cut before logging.
+        try:
+            text = fmt % args
+        except (TypeError, ValueError):
+            text = fmt
+        logger.debug("fabri serve: %s", _QUERY_RE.sub("?[query removed]", text))
 
     def _send_json(
         self, code: int, payload: dict, *, extra_headers: Mapping[str, str] | None = None
@@ -826,6 +841,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class StartRefused(SystemExit):
+    """``serve_http`` will not start with this configuration. A SystemExit,
+    so ``fabri serve`` and ``fabri studio`` print the message and exit 1
+    without a traceback."""
+
+
 class FabriHTTPServer(ThreadingHTTPServer):
     """Threading HTTP server carrying a :class:`FabriService`."""
 
@@ -871,7 +892,16 @@ def serve_http(
     With no ``connections_api``, a service that has a ``connection_store``
     gets a default ``ConnectionsApi``, so the Slack and Linear install paths
     keep working for hosts that call this function directly.
+
+    Raises StartRefused when FABRI_PUBLIC_BASE_URL is not usable (not http or
+    https, or plain http on a non-loopback host), or names a hosted address
+    while auth is off.
     """
+    from fabri.service.connections_routes import hosted_start_refusal
+
+    refusal = hosted_start_refusal(service)
+    if refusal:
+        raise StartRefused(f"fabri serve refused to start: {refusal}")
     if connections_api is None and getattr(service, "connection_store", None) is not None:
         from fabri.service.connections_routes import ConnectionsApi
 

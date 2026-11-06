@@ -267,6 +267,35 @@ def test_finish_user_scope_forces_handle_to_user_id(store, monkeypatch):
     assert store.get("slack", "T123") is None
 
 
+def test_finish_refuses_to_cross_an_existing_scope(store, monkeypatch):
+    monkeypatch.setenv("ZZ_CLIENT_ID", "cid")
+    provider = OAuthCodeProvider(_pkce_entry(), transport=Recorder(_slack_ok).transport())
+
+    # A user flow cannot replace an org row whose handle is the user's id.
+    store.upsert(provider="slack", handle="u0a1b2c3", access_token="org-token", now=T0)
+    state = _begin(store, provider, scope_kind="user", handle=None, user_id="u0a1b2c3")
+    with pytest.raises(ConnectError, match="exists with another scope") as caught:
+        provider.finish(store, state=state, code=CODE, now=T0)
+    _no_secret_text(str(caught.value))
+    assert store.get_token("slack", "u0a1b2c3", now=T0) == "org-token"
+    assert store.scope_kind("slack", "u0a1b2c3") == "org"
+
+    # An org flow cannot replace a user row that has the handle the vendor named.
+    store.upsert(provider="slack", handle="T123", access_token="user-token", scope_kind="user", now=T0)
+    state = _begin(store, provider, scope_kind="org", handle=None, user_id=None)
+    with pytest.raises(ConnectError, match="exists with another scope"):
+        provider.finish(store, state=state, code=CODE, now=T0)
+    assert store.get_token("slack", "T123", now=T0) == "user-token"
+    assert store.scope_kind("slack", "T123") == "user"
+
+    # The same scope still replaces the row.
+    store.delete("slack", "T123")
+    store.upsert(provider="slack", handle="T123", access_token="old-org", now=T0)
+    state = _begin(store, provider, scope_kind="org", handle=None, user_id=None)
+    assert provider.finish(store, state=state, code=CODE, now=T0)["scope_kind"] == "org"
+    assert store.get_token("slack", "T123", now=T0) == ACCESS
+
+
 def test_slack_identity_uses_team_id_and_rejects_not_ok(store, monkeypatch, caplog):
     assert slack_module.identity({"ok": True, "team": {"id": "T9", "name": "Nine"}}, None) == ("T9", "Nine")
     with pytest.raises(ConnectorError, match=r"\(invalid_code\)") as info:

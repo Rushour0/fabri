@@ -16,14 +16,17 @@ import pytest
 from fabri.service import linear_oauth
 from fabri.service.auth import sign_session
 from fabri.service.connections_routes import ConnectionsApi
-from fabri.service.http_server import _ADMIN_GETS, _Handler, serve_http
+from fabri.service.http_server import _ADMIN_GETS, StartRefused, _Handler, serve_http
 from fabri.service.service import FabriService
 from fabri.tools import connector_catalog
 from fabri.tools.connector_catalog import Connector, OAuthSpec
 
 pytestmark = pytest.mark.unit
 
-BASE = "https://fabri.example.test"
+# A loopback base: most tests run with auth off, and serve_http refuses a
+# hosted (non-loopback) base with auth off. HOSTED is for the auth-on cases.
+BASE = "http://127.0.0.1:8080"
+HOSTED = "https://fabri.example.test"
 ACME_TOKEN_URL = "https://acme.example.test/oauth/token"
 ACME_ACCESS = "acme-access-value-never-shown-0001"
 ACME_REFRESH = "acme-refresh-value-never-shown-0001"
@@ -126,7 +129,17 @@ def make_server(tmp_path, vendor):
         service.close()
 
 
+SAME_ORIGIN = {"Sec-Fetch-Site": "same-origin"}
+
+
 def client(server, headers=None) -> httpx.Client:
+    """A client that looks like Studio in a browser: same-origin requests."""
+    return httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                        headers={**SAME_ORIGIN, **(headers or {})}, follow_redirects=False)
+
+
+def bare(server, headers=None) -> httpx.Client:
+    """A client with no browser headers at all (curl, a script)."""
     return httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
                         headers=headers or {}, follow_redirects=False)
 
@@ -250,21 +263,26 @@ def test_callback_rejects_principal_mismatch(make_server, vendor):
     boss_headers, _ = session(service, BOSS)
     dev, boss, anon = client(server, dev_headers), client(server, boss_headers), client(server)
 
-    # A user flow dev started cannot be finished in boss's browser, and the
-    # nonce is spent, so dev cannot replay it either.
+    # A user flow dev started cannot be finished in boss's browser. The
+    # refused callers leave the pending row alone, so dev still can.
     _, query = location(dev.get("/connect/acme?scope=user"))
     params = {"state": query["state"], "code": CODE}
     assert anon.get("/connect/acme/callback", params=params).headers["location"].endswith("status=error#settings")
     assert boss.get("/connect/acme/callback", params=params).headers["location"].endswith("status=error#settings")
-    assert dev.get("/connect/acme/callback", params=params).headers["location"].endswith("status=error#settings")
     assert token_posts(vendor, ACME_TOKEN_URL) == []
     assert service.connection_store.list() == []
+    assert dev.get("/connect/acme/callback", params=params).headers["location"].endswith("status=connected#settings")
+    assert len(token_posts(vendor, ACME_TOKEN_URL)) == 1
+    service.connection_store.delete("acme", dev_id)
 
-    # An org flow boss started cannot be finished by dev.
+    # An org flow boss started cannot be finished by dev, and boss still can.
     _, query = location(boss.get("/connect/acme?scope=org"))
     params = {"state": query["state"], "code": CODE}
     assert dev.get("/connect/acme/callback", params=params).headers["location"].endswith("status=error#settings")
-    assert token_posts(vendor, ACME_TOKEN_URL) == []
+    assert len(token_posts(vendor, ACME_TOKEN_URL)) == 1
+    assert boss.get("/connect/acme/callback", params=params).headers["location"].endswith("status=connected#settings")
+    assert len(token_posts(vendor, ACME_TOKEN_URL)) == 2
+    service.connection_store.delete("acme", "acct-1")
 
     # The same principal finishes its own user flow, under its own user id.
     _, query = location(dev.get("/connect/acme?scope=user"))
@@ -515,6 +533,173 @@ def test_connections_body_never_echoes_token(make_server, caplog):
     for text in texts:
         assert_clean(text)
     assert_clean(caplog.text)
+
+
+# ---- cross-site requests
+
+
+def _pending_count(service) -> int:
+    import sqlite3
+
+    with sqlite3.connect(service.connection_store.path) as c:
+        count = c.execute("SELECT COUNT(*) FROM pending_oauth").fetchone()[0]
+    c.close()
+    return count
+
+
+def test_auth_off_mutations_refuse_cross_site_requests(make_server, monkeypatch):
+    server, service = make_server()
+    port = server.server_address[1]
+    store = service.connection_store
+    body = {"provider": "cakemail", "handle": "ops", "token": PASTED, "verify": False}
+    raw = b'{"provider": "cakemail", "handle": "ops", "token": "' + PASTED.encode() + b'", "verify": false}'
+
+    # A CORS-simple text/plain POST, the shape a malicious page can send.
+    resp = bare(server, SAME_ORIGIN).post("/connections", content=raw, headers={"Content-Type": "text/plain"})
+    assert resp.status_code == 415
+    assert bare(server).post("/connections", content=raw,
+                             headers={"Content-Type": "text/plain"}).status_code == 415
+    # Another origin, an opaque origin, and Sec-Fetch-Site: cross-site.
+    for headers in ({"Origin": "https://evil.example"}, {"Origin": "null"},
+                    {"Sec-Fetch-Site": "cross-site"}, {"Origin": f"http://127.0.0.1:{port + 1}"}):
+        resp = bare(server, headers).post("/connections", json=body)
+        assert resp.status_code == 403, headers
+        assert_clean(resp.text)
+    # No browser headers and no token: not shown to be same-origin.
+    assert bare(server).post("/connections", json=body).status_code == 403
+    # A DNS-rebound page: same-origin to the browser, but under its own host name.
+    rebound = {"Host": f"evil.example:{port}", "Sec-Fetch-Site": "same-origin"}
+    assert bare(server, rebound).post("/connections", json=body).status_code == 403
+    rebound_origin = {"Host": f"evil.example:{port}", "Origin": f"http://evil.example:{port}"}
+    assert bare(server, rebound_origin).post("/connections", json=body).status_code == 403
+    assert store.list() == []
+
+    # The service's own origin, or Studio's same-origin fetch, is accepted.
+    assert bare(server, {"Origin": f"http://127.0.0.1:{port}"}).post("/connections", json=body).status_code == 200
+    assert bare(server, {"Origin": BASE}).post("/connections", json=body).status_code == 200
+    assert client(server).post("/connections", json=body).status_code == 200
+
+    # DELETE follows the same rules.
+    gone = {"provider": "cakemail", "handle": "ops"}
+    assert bare(server, {"Sec-Fetch-Site": "cross-site"}).delete("/connections", params=gone).status_code == 403
+    assert bare(server, {"Origin": "https://evil.example"}).delete("/connections", params=gone).status_code == 403
+    assert bare(server).delete("/connections", params=gone).status_code == 403
+    assert store.get("cakemail", "ops") is not None
+
+    # A token stands in for the same-origin proof, but not for a cross-site request.
+    monkeypatch.setenv("FABRI_ADMIN_TOKEN", "adm")
+    token = {"Authorization": "Bearer adm"}
+    assert bare(server, token).post("/connections", json=body).status_code == 200
+    assert bare(server, {**token, "Sec-Fetch-Site": "cross-site"}).post(
+        "/connections", json=body).status_code == 403
+    assert bare(server, token).delete("/connections", params=gone).json() == {"deleted": True}
+
+
+def test_auth_off_connect_start_refuses_cross_site_pages(make_server, monkeypatch):
+    monkeypatch.setenv("SLACK_CLIENT_ID", "slack-client")
+    monkeypatch.setenv("SLACK_CLIENT_SECRET", CLIENT_SECRET)
+    server, service = make_server()
+    for path in ("/connect/acme", "/slack/install", "/linear/install"):
+        assert bare(server, {"Sec-Fetch-Site": "cross-site"}).get(path).status_code == 403, path
+        assert bare(server, {"Sec-Fetch-Site": "same-site"}).get(path).status_code == 403, path
+        assert bare(server, {"Origin": "https://evil.example"}).get(path).status_code == 403, path
+        assert bare(server).get(path).status_code == 403, path
+    assert _pending_count(service) == 0
+    # Studio's link (same-origin) and a typed URL (none) start the flow.
+    assert location(client(server).get("/connect/acme"))[0].startswith("https://acme.example.test/")
+    assert location(bare(server, {"Sec-Fetch-Site": "none"}).get("/slack/install"))[0].startswith(
+        "https://slack.com/")
+    assert _pending_count(service) == 2
+
+
+def test_auth_on_refuses_cross_site_even_for_an_admin(make_server, monkeypatch):
+    monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", HOSTED)
+    server, service = make_server(INVITE_ONLY)
+    boss_headers, _ = session(service, BOSS)
+    body = {"provider": "cakemail", "token": PASTED, "verify": False}
+    cross = {**boss_headers, "Sec-Fetch-Site": "cross-site"}
+    assert bare(server, cross).get("/connect/acme").status_code == 403
+    assert bare(server, cross).post("/connections", json=body).status_code == 403
+    assert bare(server, {**boss_headers, "Origin": "https://evil.example"}).post(
+        "/connections", json=body).status_code == 403
+    assert bare(server, boss_headers).post("/connections", content=b"{}",
+                                           headers={"Content-Type": "text/plain"}).status_code == 415
+    assert service.connection_store.list() == []
+    # The public base URL's origin is the service's own; auth on needs no other proof.
+    assert bare(server, {**boss_headers, "Origin": HOSTED}).post("/connections", json=body).status_code == 200
+    assert bare(server, boss_headers).post("/connections", json=body).status_code == 200
+    target, query = location(bare(server, boss_headers).get("/connect/acme"))
+    assert query["redirect_uri"] == f"{HOSTED}/connect/acme/callback"
+
+
+def test_callbacks_accept_the_vendor_navigation_and_send_no_referrer(make_server, vendor):
+    server, service = make_server()
+    _, query = location(client(server).get("/connect/acme"))
+    vendor_nav = bare(server, {"Sec-Fetch-Site": "cross-site"})
+    resp = vendor_nav.get("/connect/acme/callback", params={"state": query["state"], "code": CODE})
+    assert resp.headers["location"] == "/?connect=acme&status=connected#settings"
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    resp = vendor_nav.get("/connect/acme/callback", params={"state": query["state"], "code": CODE})
+    assert resp.headers["location"].endswith("status=error#settings")
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    resp = vendor_nav.get("/slack/oauth/callback", params={"error": "access_denied"})
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    resp = vendor_nav.get("/connect/nope/callback", params={"state": "s", "code": CODE})
+    assert resp.status_code == 404
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    assert_clean(resp.text)
+
+
+def test_callback_query_strings_never_reach_the_log(make_server, vendor, caplog):
+    caplog.set_level(logging.DEBUG)
+    server, service = make_server()
+    _, query = location(client(server).get("/connect/acme"))
+    state = query["state"]
+    for path in ("/connect/acme/callback", "/slack/oauth/callback", "/linear/oauth/callback"):
+        client(server).get(path, params={"state": state, "code": CODE})
+    # A malformed request line goes through log_message with the raw line.
+    with socket.create_connection(("127.0.0.1", server.server_address[1])) as sock:
+        sock.sendall(f"GET /connect/acme/callback?code={CODE}&state={state} x HTTP/1.1\r\n\r\n".encode())
+        sock.recv(4096)
+    # The server's own log lines (the test client logs its URLs separately).
+    text = "\n".join(r.getMessage() for r in caplog.records if r.name.split(".")[0] == "fabri")
+    assert "GET /connect/acme/callback 302" in text
+    assert "Bad request syntax" in text and "[query removed]" in text
+    assert CODE not in text
+    assert state not in text
+
+
+# ---- startup
+
+
+def test_serve_refuses_a_hosted_base_with_auth_off(tmp_path, monkeypatch):
+    service = FabriService(home_root=tmp_path / "home")
+    try:
+        monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", HOSTED)
+        with pytest.raises(StartRefused, match="auth is off") as caught:
+            serve_http(service, port=0)
+        assert caught.value.code.startswith("fabri serve refused to start: ")
+        for bad, why in (("http://fabri.example.test", "must use https"),
+                         ("ftp://fabri.example.test", "http or https"),
+                         ("fabri.example.test", "http or https"),
+                         ("https://fabri.example.test/?x=1", "plain origin")):
+            monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", bad)
+            with pytest.raises(StartRefused, match=why):
+                serve_http(service, port=0)
+        for good in ("http://127.0.0.1:8080", "http://localhost:8080/", "http://[::1]:9000", ""):
+            monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", good)
+            serve_http(service, port=0).server_close()
+    finally:
+        service.close()
+
+
+def test_serve_starts_hosted_with_auth_on(make_server, monkeypatch):
+    monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", HOSTED)
+    server, _ = make_server(INVITE_ONLY)
+    assert client(server).get("/health").status_code == 200
+    monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", "http://fabri.example.test")
+    with pytest.raises(StartRefused, match="must use https"):
+        make_server(INVITE_ONLY)
 
 
 # ---- mounting

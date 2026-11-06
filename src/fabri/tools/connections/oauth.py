@@ -270,18 +270,28 @@ class OAuthCodeProvider:
         except (TypeError, ValueError):
             expires_in = None
         provider = store_provider(self.entry)
-        store.upsert(
-            provider=provider,
-            handle=handle,
-            access_token=access,
-            scope_kind=row["scope_kind"],
-            refresh_token=refresh_token if isinstance(refresh_token, str) and refresh_token else None,
-            expires_in=expires_in,
-            scopes=self._scope_text(tok.get("scope")) or row["scopes"],
-            display_name=display_name,
-            meta={"source": "oauth", "redirect_uri": row["redirect_uri"]},
-            now=now,
-        )
+        from fabri.service.connection_store import ScopeConflict
+
+        try:
+            # keep_scope reads the stored row's scope kind in the upsert's own
+            # write transaction, the same rule POST /connections applies: a
+            # user flow cannot replace an org row that has the same handle,
+            # nor the reverse.
+            store.upsert(
+                provider=provider,
+                handle=handle,
+                access_token=access,
+                scope_kind=row["scope_kind"],
+                refresh_token=refresh_token if isinstance(refresh_token, str) and refresh_token else None,
+                expires_in=expires_in,
+                scopes=self._scope_text(tok.get("scope")) or row["scopes"],
+                display_name=display_name,
+                meta={"source": "oauth", "redirect_uri": row["redirect_uri"]},
+                now=now,
+                keep_scope=True,
+            )
+        except ScopeConflict as exc:
+            raise ConnectError(str(exc)) from None
         stored = store.get(provider, handle)
         if stored is None:  # pragma: no cover -- the upsert above wrote it
             raise ConnectError(f"{name} connection was not stored")

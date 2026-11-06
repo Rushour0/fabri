@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import stat
+import threading
 
 import pytest
 
@@ -188,6 +189,87 @@ def test_failed_refresh_keeps_live_token_and_drops_dead_one(tmp_path, caplog):
     assert (access, refresh, expires_at) == ("old-access", "r1", pytest.approx(T0 + 86399))
     assert "OSError" in caplog.text
     assert "old-access" not in caplog.text and "r1" not in caplog.text
+
+
+def test_refresh_does_not_hold_the_write_lock_during_the_vendor_call(tmp_path):
+    other_writes = []
+
+    def refresher(refresh_token):
+        # Under BEGIN IMMEDIATE for the whole refresh this write would wait
+        # out its timeout and fail with "database is locked".
+        with sqlite3.connect(store.path, timeout=0.2, isolation_level=None) as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("UPDATE connections SET display_name='during' WHERE provider='linear'")
+            c.execute("COMMIT")
+        c.close()
+        other_writes.append(True)
+        return {"access_token": "new-access", "refresh_token": "r2", "expires_in": 86399}
+
+    store = _linear(tmp_path, refresher)
+    due = T0 + 86399 - REFRESH_MARGIN_S + 1
+    assert store.get_token("linear", "ws1", now=due) == "new-access"
+    assert other_writes == [True]
+    with sqlite3.connect(store.path) as c:
+        [(refresh_token, lease)] = c.execute(
+            "SELECT refresh_token, refresh_lease_until FROM connections").fetchall()
+    c.close()
+    assert refresh_token == "r2" and lease is None
+
+
+def test_concurrent_refresh_spends_the_refresh_token_once(tmp_path):
+    calls, entered, release = [], threading.Event(), threading.Event()
+
+    def refresher(refresh_token):
+        calls.append(refresh_token)
+        entered.set()
+        assert release.wait(5)
+        return {"access_token": "new-access", "refresh_token": "r2", "expires_in": 86399}
+
+    store = _linear(tmp_path, refresher)
+    expired = T0 + 86399 + 10
+    results = {}
+    first = threading.Thread(target=lambda: results.update(a=store.get_token("linear", "ws1", now=expired)))
+    first.start()
+    assert entered.wait(5)
+    # A second caller, here a second store on the same file, finds the lease
+    # and waits for the result instead of spending r1 again.
+    other = ConnectionStore(store.path, refreshers={"linear": refresher})
+    second = threading.Thread(target=lambda: results.update(b=other.get_token("linear", "ws1", now=expired)))
+    second.start()
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert results == {"a": "new-access", "b": "new-access"}
+    assert calls == ["r1"]
+
+
+def test_refresh_result_is_dropped_when_the_row_changed_meanwhile(tmp_path):
+    def refresher(refresh_token):
+        store.upsert(provider="linear", handle="ws1", access_token="reinstalled",
+                     refresh_token="r-new", expires_in=86399, now=due)
+        return {"access_token": "from-refresh", "refresh_token": "r2", "expires_in": 86399}
+
+    store = _linear(tmp_path, refresher)
+    due = T0 + 86399 - REFRESH_MARGIN_S + 1
+    assert store.get_token("linear", "ws1", now=due) == "reinstalled"
+    with sqlite3.connect(store.path) as c:
+        [(access, refresh_token, lease)] = c.execute(
+            "SELECT access_token, refresh_token, refresh_lease_until FROM connections").fetchall()
+    c.close()
+    assert (access, refresh_token, lease) == ("reinstalled", "r-new", None)
+
+
+def test_a_live_lease_skips_the_refresh_and_a_stale_one_does_not(tmp_path):
+    calls = []
+    store = _linear(tmp_path, lambda r: calls.append(r) or {"access_token": "new-access"})
+    due = T0 + 86399 - REFRESH_MARGIN_S + 1
+    with sqlite3.connect(store.path) as c:
+        c.execute("UPDATE connections SET refresh_lease_until=?", (due + 30,))
+    c.close()
+    # Another caller holds the lease and the token is still valid: use it.
+    assert store.get_token("linear", "ws1", now=due) == "old-access" and calls == []
+    # The lease ran out (its holder died): this caller takes it over.
+    assert store.get_token("linear", "ws1", now=due + 31) == "new-access" and calls == ["r1"]
 
 
 def test_expired_token_without_refresher_is_not_handed_out(tmp_path):
@@ -403,6 +485,42 @@ def test_pending_pop_is_single_use_and_keeps_fields(tmp_path):
     assert store.list() == []
     with pytest.raises(ValueError):
         _pending(store, "n2", now=T0, scope_kind="team")
+
+
+def test_pending_pop_check_refusal_leaves_the_row(tmp_path):
+    store = ConnectionStore(tmp_path / "installs.db")
+    _pending(store, "n1", now=T0, scope_kind="user", user_id="u1")
+    seen = []
+
+    def not_yours(row):
+        seen.append(row["user_id"])
+        raise PermissionError("someone else's flow")
+
+    with pytest.raises(PermissionError):
+        store.pending_pop("n1", now=T0 + 1, check=not_yours)
+    assert seen == ["u1"]
+    # The owner's check passes and takes the row, once.
+    row = store.pending_pop("n1", now=T0 + 2, check=lambda r: None)
+    assert row["user_id"] == "u1"
+    assert store.pending_pop("n1", now=T0 + 3, check=lambda r: None) is None
+    # An expired row is removed without calling the check.
+    _pending(store, "old", now=T0)
+    assert store.pending_pop("old", now=T0 + cs_module.PENDING_TTL_S + 1,
+                             check=lambda r: pytest.fail("no check for expired rows")) is None
+
+
+def test_upsert_keep_scope_refuses_a_scope_change(tmp_path):
+    store = ConnectionStore(tmp_path / "installs.db")
+    store.upsert(provider="acme", handle="u1", access_token="org-token")
+    with pytest.raises(cs_module.ScopeConflict):
+        store.upsert(provider="acme", handle="u1", access_token="user-token", scope_kind="user",
+                     keep_scope=True)
+    assert store.get_token("acme", "u1") == "org-token"
+    store.upsert(provider="acme", handle="u1", access_token="org-2", keep_scope=True)
+    assert store.get_token("acme", "u1") == "org-2"
+    # Without keep_scope the older replace-whole rule still applies.
+    store.upsert(provider="acme", handle="u1", access_token="user-token", scope_kind="user")
+    assert store.scope_kind("acme", "u1") == "user"
 
 
 def test_pending_pop_of_expired_nonce_deletes_it(tmp_path):

@@ -86,13 +86,14 @@ def _alias_handler(path: str, store: ConnectionStore, transport=None) -> tuple[_
     handler.server = SimpleNamespace(service=service, serve_studio=False,
                                      connections_api=ConnectionsApi(service, transport=transport))
     handler.path = path
-    handler.headers = {}
+    # A same-origin browser request to a loopback fabri, as Studio sends.
+    handler.headers = {"Host": "127.0.0.1:8080", "Sec-Fetch-Site": "same-origin"}
     sent: list = []
     json_sent: list = []
     handler.send_response = lambda code: sent.append(("status", code))
     handler.send_header = lambda name, value: sent.append((name, value))
     handler.end_headers = lambda: None
-    handler._send_json = lambda code, payload: json_sent.append((code, payload))
+    handler._send_json = lambda code, payload, **kwargs: json_sent.append((code, payload))
     return handler, sent, json_sent
 
 

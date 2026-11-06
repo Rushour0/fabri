@@ -32,11 +32,21 @@ REFRESH_MARGIN_S = 300
 PENDING_TTL_S = 600
 # Environment variable that pins the OAuth state signing secret (wave 4).
 STATE_SECRET_ENV = "FABRI_OAUTH_STATE_SECRET"
+# How long one caller may hold a connection's refresh lease. Longer than the
+# refresh request's own timeout, so a live refresh never loses its lease.
+REFRESH_LEASE_S = 60.0
+# How long a caller whose token has already expired waits for another
+# caller's refresh to land before giving up.
+REFRESH_WAIT_S = 20.0
 
 # refresh_token -> token response {access_token, refresh_token?, expires_in?}
 Refresher = Callable[[str], dict]
 
 SCOPE_KINDS = ("org", "user")
+
+
+class ScopeConflict(ValueError):
+    """An upsert that would change an existing row's scope kind."""
 
 _ROW_COLUMNS = (
     "provider, handle, scope_kind, scopes, display_name, status, "
@@ -215,10 +225,14 @@ class ConnectionStore:
                         meta TEXT,
                         installed_at REAL,
                         updated_at REAL,
+                        refresh_lease_until REAL,
                         PRIMARY KEY(provider, handle)
                     )
                     """
                 )
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(connections)")}
+                if "refresh_lease_until" not in columns:
+                    connection.execute("ALTER TABLE connections ADD COLUMN refresh_lease_until REAL")
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS service_secrets("
                     "name TEXT PRIMARY KEY, value TEXT NOT NULL, created_at REAL)"
@@ -290,6 +304,7 @@ class ConnectionStore:
         meta: Mapping | None = None,
         status: str = "ok",
         now: float | None = None,
+        keep_scope: bool = False,
     ) -> None:
         """Insert or replace one connection.
 
@@ -297,7 +312,13 @@ class ConnectionStore:
         replaced with what is passed, ``refresh_token`` and ``expires_at``
         included (None clears them). A pasted static token therefore replaces
         an OAuth row whole, refresh token and expiry gone. ``expires_in`` of
-        None or 0 means the token does not expire.
+        None or 0 means the token does not expire. Any refresh lease on the
+        old row is dropped.
+
+        With ``keep_scope`` the existing row's scope kind is read in the same
+        write transaction, and ScopeConflict is raised (nothing written) when
+        it differs from ``scope_kind``. A user flow then cannot replace an org
+        row that has the same handle, nor the reverse.
         """
         if scope_kind not in SCOPE_KINDS:
             raise ValueError("scope_kind must be 'org' or 'user'")
@@ -307,31 +328,60 @@ class ConnectionStore:
         expires_at = now + float(expires_in) if expires_in else None
         meta_json = json.dumps(dict(meta)) if meta is not None else None
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO connections(
-                    provider, handle, scope_kind, access_token, refresh_token,
-                    expires_at, scopes, display_name, status, meta,
-                    installed_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(provider, handle) DO UPDATE SET
-                    scope_kind=excluded.scope_kind,
-                    access_token=excluded.access_token,
-                    refresh_token=excluded.refresh_token,
-                    expires_at=excluded.expires_at,
-                    scopes=excluded.scopes,
-                    display_name=excluded.display_name,
-                    status=excluded.status,
-                    meta=excluded.meta,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    provider, handle, scope_kind, access_token, refresh_token,
-                    expires_at, scopes, display_name, status, meta_json,
-                    now, now,
-                ),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if keep_scope:
+                    existing = connection.execute(
+                        "SELECT scope_kind FROM connections WHERE provider=? AND handle=?",
+                        (provider, handle),
+                    ).fetchone()
+                    if existing is not None and existing["scope_kind"] != scope_kind:
+                        raise ScopeConflict(
+                            f"{provider}:{handle} exists with another scope; remove it first"
+                        )
+                self._write_row(
+                    connection, provider, handle, scope_kind, access_token, refresh_token,
+                    expires_at, scopes, display_name, status, meta_json, now,
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
         self._secure_sidecars()
+
+    @staticmethod
+    def _write_row(
+        connection: sqlite3.Connection, provider: str, handle: str, scope_kind: str,
+        access_token: str, refresh_token: str | None, expires_at: float | None,
+        scopes: str | None, display_name: str | None, status: str, meta_json: str | None,
+        now: float,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO connections(
+                provider, handle, scope_kind, access_token, refresh_token,
+                expires_at, scopes, display_name, status, meta,
+                installed_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(provider, handle) DO UPDATE SET
+                scope_kind=excluded.scope_kind,
+                access_token=excluded.access_token,
+                refresh_token=excluded.refresh_token,
+                expires_at=excluded.expires_at,
+                scopes=excluded.scopes,
+                display_name=excluded.display_name,
+                status=excluded.status,
+                meta=excluded.meta,
+                updated_at=excluded.updated_at,
+                refresh_lease_until=NULL
+            """,
+            (
+                provider, handle, scope_kind, access_token, refresh_token,
+                expires_at, scopes, display_name, status, meta_json,
+                now, now,
+            ),
+        )
 
     def delete(self, provider: str, handle: str) -> bool:
         with self._connect() as connection:
@@ -411,9 +461,22 @@ class ConnectionStore:
             )
         self._secure_sidecars()
 
-    def pending_pop(self, nonce: str, *, now: float | None = None) -> dict | None:
-        """Take the pending handshake for `nonce`, once. The row is deleted
-        whether or not it is still valid; an expired row returns None."""
+    def pending_pop(
+        self,
+        nonce: str,
+        *,
+        now: float | None = None,
+        check: Callable[[dict], None] | None = None,
+    ) -> dict | None:
+        """Take the pending handshake for `nonce`, once. An expired row is
+        deleted and None is returned.
+
+        ``check`` is called with a live row inside the same write
+        transaction, before the row is deleted. When it raises, the
+        transaction rolls back, the row stays for its rightful owner and the
+        exception propagates. That is how a callback that reaches the wrong
+        caller is refused without spending the other caller's flow.
+        """
         now = time.time() if now is None else now
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -424,6 +487,9 @@ class ConnectionStore:
                     "FROM pending_oauth WHERE nonce=?",
                     (nonce,),
                 ).fetchone()
+                live = dict(row) if row is not None and row["expires_at"] >= now else None
+                if live is not None and check is not None:
+                    check(dict(live))
                 if row is not None:
                     connection.execute("DELETE FROM pending_oauth WHERE nonce=?", (nonce,))
                 connection.execute("COMMIT")
@@ -431,9 +497,7 @@ class ConnectionStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
-        if row is None or row["expires_at"] < now:
-            return None
-        return dict(row)
+        return live
 
     # -- reads -------------------------------------------------------------
 
@@ -513,50 +577,133 @@ class ConnectionStore:
     def _refresh(
         self, provider: str, handle: str, refresher: Refresher, now: float
     ) -> str | None:
-        # BEGIN IMMEDIATE takes the write lock before reading, so two servers
-        # sharing the database cannot both spend the same refresh token.
+        """Refresh one token without holding the write lock during the call.
+
+        A short write transaction takes a lease on the row (it sets
+        ``refresh_lease_until``) and reads the refresh token. The vendor call
+        then runs with no transaction open. A second short transaction stores
+        the result only when the stored refresh token is still the one that
+        was spent, and drops the lease. Two servers sharing the database
+        therefore spend a refresh token once, and a slow vendor never blocks
+        other writes to the file.
+        """
+        state, row = self._claim_refresh(provider, handle, now)
+        if state == "done":
+            return row
+        if state == "busy":
+            return self._await_refresh(provider, handle, now, row)
+        spent = row["refresh_token"]
+        try:
+            fresh = refresher(spent)
+            access = fresh["access_token"]
+            if not access:
+                raise KeyError("access_token")
+        except Exception as exc:  # noqa: BLE001 -- logged without the token
+            self._release_lease(provider, handle, spent)
+            logger.warning(
+                "%s token refresh failed for a connection: %s", provider, type(exc).__name__,
+            )
+            return row["access_token"] if (row["expires_at"] or 0) > now else None
+        expires_in = fresh.get("expires_in")
+        with self._connect() as connection:
+            cur = connection.execute(
+                "UPDATE connections SET access_token=?, refresh_token=?, expires_at=?, "
+                "updated_at=?, refresh_lease_until=NULL "
+                "WHERE provider=? AND handle=? AND refresh_token=? AND status!='revoked'",
+                (
+                    access,
+                    fresh.get("refresh_token") or spent,
+                    now + float(expires_in) if expires_in else None,
+                    now,
+                    provider,
+                    handle,
+                    spent,
+                ),
+            )
+        self._secure_sidecars()
+        if cur.rowcount == 1:
+            return access
+        # The row was replaced, removed or revoked while the call ran. What is
+        # stored now wins over the token that just came back.
+        logger.warning(
+            "%s token refresh result was dropped: the connection changed meanwhile", provider,
+        )
+        return self._live_token(provider, handle, now)
+
+    def _claim_refresh(self, provider: str, handle: str, now: float) -> tuple[str, object]:
+        """("done", token or None), ("busy", row) when another caller holds
+        the lease, or ("claimed", row) once this caller holds it."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = connection.execute(
-                    "SELECT access_token, refresh_token, expires_at, status FROM connections "
-                    "WHERE provider=? AND handle=?",
+                found = connection.execute(
+                    "SELECT access_token, refresh_token, expires_at, status, refresh_lease_until "
+                    "FROM connections WHERE provider=? AND handle=?",
                     (provider, handle),
                 ).fetchone()
+                row = dict(found) if found is not None else None
                 if row is None or row["status"] == "revoked":
                     connection.execute("ROLLBACK")
-                    return None
+                    return "done", None
                 if row["expires_at"] is None or row["expires_at"] - now > REFRESH_MARGIN_S:
                     connection.execute("ROLLBACK")
-                    return row["access_token"]
-                try:
-                    fresh = refresher(row["refresh_token"])
-                    access = fresh["access_token"]
-                    if not access:
-                        raise KeyError("access_token")
-                except Exception as exc:  # noqa: BLE001 -- logged without the token
+                    return "done", row["access_token"]
+                if not row["refresh_token"]:
                     connection.execute("ROLLBACK")
-                    logger.warning(
-                        "%s token refresh failed for a connection: %s",
-                        provider, type(exc).__name__,
-                    )
-                    return row["access_token"] if (row["expires_at"] or 0) > now else None
-                expires_in = fresh.get("expires_in")
+                    return "done", row["access_token"] if row["expires_at"] > now else None
+                lease = row["refresh_lease_until"]
+                if lease is not None and lease > now:
+                    connection.execute("ROLLBACK")
+                    return "busy", row
                 connection.execute(
-                    "UPDATE connections SET access_token=?, refresh_token=?, expires_at=?, "
-                    "updated_at=? WHERE provider=? AND handle=?",
-                    (
-                        access,
-                        fresh.get("refresh_token") or row["refresh_token"],
-                        now + float(expires_in) if expires_in else None,
-                        now,
-                        provider,
-                        handle,
-                    ),
+                    "UPDATE connections SET refresh_lease_until=? WHERE provider=? AND handle=?",
+                    (now + REFRESH_LEASE_S, provider, handle),
                 )
                 connection.execute("COMMIT")
-                return access
             except BaseException:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+        return "claimed", row
+
+    def _release_lease(self, provider: str, handle: str, spent: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE connections SET refresh_lease_until=NULL "
+                "WHERE provider=? AND handle=? AND refresh_token=?",
+                (provider, handle, spent),
+            )
+
+    def _live_token(self, provider: str, handle: str, now: float) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT access_token, expires_at, status FROM connections "
+                "WHERE provider=? AND handle=?",
+                (provider, handle),
+            ).fetchone()
+        if row is None or row["status"] == "revoked":
+            return None
+        if row["expires_at"] is not None and row["expires_at"] <= now:
+            return None
+        return row["access_token"]
+
+    def _await_refresh(self, provider: str, handle: str, now: float, row: dict) -> str | None:
+        """Another caller is refreshing. A token that is still valid is used
+        at once; an expired one waits up to REFRESH_WAIT_S for the result."""
+        if (row["expires_at"] or 0) > now:
+            return row["access_token"]
+        spent = row["refresh_token"]
+        deadline = time.monotonic() + REFRESH_WAIT_S
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            with self._connect() as connection:
+                current = connection.execute(
+                    "SELECT refresh_token, refresh_lease_until FROM connections "
+                    "WHERE provider=? AND handle=?",
+                    (provider, handle),
+                ).fetchone()
+            if current is None:
+                return None
+            if current["refresh_lease_until"] is None or current["refresh_token"] != spent:
+                return self._live_token(provider, handle, now)
+        return None

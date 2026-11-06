@@ -5,8 +5,11 @@ A connection is a stored credential for one outside service. It is named `provid
 [adding-tools.md](adding-tools.md)). The handle is a label you pick (it defaults to `main`) or, for Slack and Linear,
 the team or workspace id.
 
-Every connection has a scope kind. `org` connections belong to the whole install and are what this release makes.
-`user` connections belong to one signed-in person and come with the server-side connect routes in a later release.
+Every connection has a scope kind. `org` connections belong to the whole install. `user` connections belong to one
+person: the handle is that person's user id. Under `fabri serve` with auth on they are made through
+`GET /connect/<provider>?scope=user` or `POST /connections` with `"scope": "user"` (see
+[Connect through the server](#connect-through-the-server)). On the command line, `fabri connect <provider> --scope user`
+works for connectors that use loopback OAuth, such as Gmail.
 
 A setup refers to a connection by name only. `fabri setups tools add connector cakemail --workspace acct1` writes the
 secret ref `cakemail:acct1`, and fabri looks the token up when a call is made. The token is not written to the setup
@@ -34,7 +37,7 @@ Flags:
 | Flag | Meaning |
 |---|---|
 | `--handle H` | The label. Letters, digits, `_`, `.`, `-`, up to 80 characters, starting with a letter or digit. Default `main`. A bad handle exits 2. |
-| `--scope org\|user` | Default `org`. `user` exits 2 in this release: user connections are made through the server. |
+| `--scope org\|user` | Default `org`. `user` works for loopback OAuth connectors such as `gmail`, and `--handle` is then the user id the connection belongs to. For every other connector `user` exits 2 and points at `GET /connect/<provider>` on `fabri serve`. |
 | `--token-stdin` | Read the token from the first line of stdin. Without it a terminal gets a hidden prompt, and a non-terminal stdin exits 2. |
 | `--login` | Cakemail only. Needs a terminal. Asks for your username and password, creates a personal access token, stores it. |
 | `--no-verify` | Skip the check call. Without this flag fabri calls the provider's identity endpoint (Cakemail: `GET /users/self`) and stores nothing if the token is refused. |
@@ -56,6 +59,63 @@ The new token carries the 14 scopes that the 28 curated tools need, read from th
 `contacts:read`, `contacts:write`, `lists:read`, `logs:read`, `reports:read`, `segments:read`, `senders:read`,
 `tags:read`, `templates:read`. If you would rather make the token yourself, give it those scopes and use
 `--token-stdin`.
+
+## Connect through the server
+
+`fabri serve` and `fabri studio` serve these routes:
+
+| Route | What it does |
+|---|---|
+| `GET /connections` | The rows, without tokens. A non-admin sees org rows and their own user rows. |
+| `POST /connections` | Body `{provider, handle?, token, scope?, verify?}`. Stores a pasted token. |
+| `DELETE /connections?provider=P&handle=H` | Removes one row. Answers `{"deleted": true\|false}`. |
+| `GET /connect/<provider>?scope=org\|user` | Starts the OAuth flow: a 302 to the vendor's sign-in page. |
+| `GET /connect/<provider>/callback` | Where the vendor sends the browser back. Stores the row. |
+| `GET /slack/install`, `/linear/install` and their `/oauth/callback` paths | The older install paths, now aliases of the two above. |
+
+With auth on, an org change needs an admin, and a user connection belongs to the signed-in user who made it. The
+callback completes only for the person who started the flow. A callback that reaches anyone else is refused before the
+code is exchanged, and the pending flow stays for its owner.
+
+### Cross-site requests
+
+Any web page you open can make your browser send a request to a fabri on `localhost`. So every connection change
+(`POST` and `DELETE /connections`, starting `/connect/<provider>`, and the older install paths) is checked before
+anything else, whether auth is on or off:
+
+- `Sec-Fetch-Site: cross-site` is refused with 403.
+- An `Origin` header that is not the service's own origin is refused with 403. The own origins are the origin of
+  `FABRI_PUBLIC_BASE_URL` and, when the `Host` header names a loopback address, `http://<Host>` and `https://<Host>`.
+  `Origin: null` is refused too.
+- `POST /connections` needs `Content-Type: application/json`. Anything else gets 415, so a page cannot send the body
+  as a plain form or `text/plain`.
+
+With auth off there is no signed-in user to check, so a change must also show that it comes from the service's own
+pages, or carry the service or admin token. It counts as same-origin when it has a matching `Origin`, or
+`Sec-Fetch-Site: same-origin` with a `Host` that is a loopback address or the public base URL's host (this stops a
+DNS-rebound page). To start a flow, `Sec-Fetch-Site: none` (a URL typed into the address bar) also counts. Studio's own
+links and requests pass. A script such as `curl` sends none of these headers, so with auth off it needs
+`Authorization: Bearer $FABRI_ADMIN_TOKEN` (or the service token when no admin token is set), or an `Origin` header
+with the service's own origin. A same-site page on another port of `localhost` is not same-origin and is refused.
+
+The callbacks are not checked this way. They are top-level navigations from the vendor's site, and the pending flow
+already ties each one to the person who started it. Callback responses carry `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`, and the service's request log holds the method and path only, never the query string with
+the code and state. A reverse proxy in front of fabri keeps its own access log: set it to drop query strings for
+`/connect/*/callback`, `/slack/oauth/callback` and `/linear/oauth/callback`.
+
+### Hosted deploys need auth
+
+`fabri serve` and `fabri studio` check `FABRI_PUBLIC_BASE_URL` at start:
+
+- It must be an `http` or `https` URL with no user, query or fragment, and it must use `https` unless its host is a
+  loopback address (`localhost`, `127.0.0.1`, `::1`).
+- When it names a hosted address (anything that is not loopback) and auth is off, the service refuses to start:
+  `fabri serve refused to start: FABRI_PUBLIC_BASE_URL names a hosted address but auth is off, ...`. Turn auth on in the
+  service config, or use a loopback base URL for local work. A bearer token alone does not lift this, because a browser
+  that starts a connect flow cannot send one.
+
+Leaving `FABRI_PUBLIC_BASE_URL` unset is allowed. The OAuth routes then answer that OAuth is not configured.
 
 ## List and remove
 
@@ -255,5 +315,8 @@ If the provider answers 401 to a call that used a stored credential, the tool er
 token. Run the command again with a fresh token; the new one replaces the old row whole, refresh token and expiry
 included.
 
-Slack and Linear tokens made through the server install flow keep working as before. Linear access tokens are renewed
-by the service when they are within 5 minutes of expiry.
+Slack and Linear tokens made through the server install flow keep working as before. Linear access tokens, and any
+other OAuth token that has a refresh token, are renewed by the service when they are within 5 minutes of expiry. The
+caller that renews takes a short lease on the row, makes the vendor call with no database lock held, and stores the new
+token only if the stored refresh token is still the one it spent. A second caller meanwhile uses the current token if it
+is still valid, or waits up to 20 seconds for the renewal.
