@@ -11,6 +11,8 @@ checks the merged result:
 - tools whose approval class is looser than fabri's default (warnings)
 - a tool set past ``TOOL_COUNT_WARN`` tools or ``TOOL_SCHEMA_TOKENS_WARN``
   tokens of schema (one warning)
+- sources whose secret refs use ``${actor}``, which resolve per user and
+  are skipped for a run without an actor (warnings)
 """
 from __future__ import annotations
 
@@ -137,6 +139,15 @@ def lint_setup(
                 if tool not in known:
                     findings.append(LintFinding("error", skill["source"], f"skills/{name}",
                                                 f"tool {tool!r} is not in the resolved tool set"))
+    from fabri.setups.toolset import uses_actor
+
+    for item in resolved.tools.get("sources") or []:
+        decl = item.get("decl") or {}
+        for ref in dict.fromkeys(uses_actor(decl)):
+            source = decl.get("name")
+            findings.append(LintFinding(
+                "warning", item.get("source") or "", f"tools/{source}",
+                f"tools/{source}: credential {ref} resolves per user; runs without an actor cannot use it"))
     if tool_set is not None:
         from fabri.setups.toolset import approval_warnings
 

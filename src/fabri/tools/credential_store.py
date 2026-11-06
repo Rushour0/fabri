@@ -224,6 +224,78 @@ class SqliteInstallCredentialStore:
         return "SqliteInstallCredentialStore()"
 
 
+ACTOR_SENTINEL = "${actor}"
+
+
+class ActorCredentialStore:
+    """Wrap a store so it resolves for one run actor.
+
+    A ``${actor}`` handle becomes the actor's id, so ``gmail:${actor}`` reads
+    the signed-in user's own row. A run with no actor gets a
+    CredentialScopeError for such a handle. Any other handle is checked
+    against the wrapped store's ``scope_kind``: a row stored with user scope
+    resolves only when the handle is this actor's own id, so a run without
+    an actor never receives a user-scoped row. A store with no
+    ``scope_kind`` (environment variables, a host's own store) has no user
+    rows and passes literal handles through. A store whose ``scope_kind``
+    fails is treated as unknown and refused, since a user row could not be
+    told apart from an org row.
+
+    Wrapping an ActorCredentialStore again replaces its actor rather than
+    stacking a second check. Messages name the provider only, never a handle
+    or a value.
+    """
+
+    def __init__(self, store: CredentialStore, actor: str | None) -> None:
+        if isinstance(store, ActorCredentialStore):
+            store = store._store
+        self._store = store
+        self._actor = actor or None
+
+    @property
+    def actor(self) -> str | None:
+        return self._actor
+
+    @property
+    def inner(self) -> CredentialStore:
+        """The wrapped store."""
+        return self._store
+
+    def _handle(self, provider: str, handle: str) -> str:
+        if handle == ACTOR_SENTINEL:
+            if not self._actor:
+                raise CredentialScopeError(
+                    f"credential {provider}:{ACTOR_SENTINEL} needs an actor; this run has none"
+                )
+            return self._actor
+        return handle
+
+    def get(self, provider: str, handle: str) -> str:
+        handle = self._handle(provider, handle)
+        scope_kind = getattr(self._store, "scope_kind", None)
+        if callable(scope_kind):
+            try:
+                kind = scope_kind(provider, handle)
+            except Exception:  # noqa: BLE001 -- an unknown scope must not pass a user row
+                raise CredentialScopeError(
+                    f"credential {provider} has an unknown scope; it is not used for this run"
+                ) from None
+            if kind == "user" and handle != self._actor:
+                raise CredentialScopeError(f"credential {provider} belongs to another user")
+        return self._store.get(provider, handle)
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """The wrapped store's scope for the handle after substitution. Raises
+        AttributeError when the wrapped store cannot say."""
+        inner = getattr(self._store, "scope_kind", None)
+        if not callable(inner):
+            raise AttributeError("the wrapped credential store does not report scope_kind")
+        return inner(provider, self._handle(provider, handle))
+
+    def __repr__(self) -> str:
+        return f"ActorCredentialStore({self._store!r}, actor={'set' if self._actor else 'none'})"
+
+
 class ScopedCredentialStore:
     """Wrap a store so it only resolves granted handles, and log every lookup.
 

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from fabri.tools.credential_store import (
+    ActorCredentialStore,
     CredentialNotFoundError,
     CredentialStore,
     CredentialStoreError,
@@ -18,9 +19,18 @@ class MalformedCredentialRefError(CredentialStoreError, ValueError):
     """Raised when a secret reference is not exactly ``provider:handle``."""
 
 
-def default_credential_store() -> CredentialStore:
+_ACTOR_FROM_ENV = object()
+
+
+def default_credential_store(*, actor: str | None | object = _ACTOR_FROM_ENV) -> CredentialStore:
     """The install database when FABRI_INSTALL_DB is set, else env vars.
-    FABRI_CRED_AUDIT_LOG names a JSONL file that records every lookup."""
+    FABRI_CRED_AUDIT_LOG names a JSONL file that records every lookup.
+
+    The store resolves for one run actor: ``actor`` when given, else
+    FABRI_RUN_ACTOR. A ``${actor}`` handle becomes that id, and a row stored
+    with user scope resolves only for its own user (see
+    ActorCredentialStore). The actor wrapper sits outside the audit wrapper,
+    so an audit line records the substituted handle."""
     store: CredentialStore
     if p := os.environ.get("FABRI_INSTALL_DB"):
         store = SqliteInstallCredentialStore(Path(p))
@@ -28,7 +38,9 @@ def default_credential_store() -> CredentialStore:
         store = EnvCredentialStore()
     if audit := os.environ.get("FABRI_CRED_AUDIT_LOG"):
         store = ScopedCredentialStore(store, audit_path=audit)
-    return store
+    if actor is _ACTOR_FROM_ENV:
+        actor = os.environ.get("FABRI_RUN_ACTOR") or None
+    return ActorCredentialStore(store, actor if isinstance(actor, str) else None)
 
 
 def resolve_secret(ref: str, store: CredentialStore | None = None) -> str:

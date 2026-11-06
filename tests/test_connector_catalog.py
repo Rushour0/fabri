@@ -233,3 +233,32 @@ def test_setups_cli_connectors_and_route(monkeypatch, capsys, tmp_path):
 
     status, body = SetupsApi(tmp_path).get_connectors(None)
     assert status == 200 and body == list_connectors()
+
+
+_OAUTH_HEADER = (
+    "from fabri.tools.connector_catalog import Connector, OAuthSpec\n"
+    "ENTRY = Connector({name!r}, 'T', 'S', ('mcp',), 'X_TOKEN', oauth=OAuthSpec(\n"
+    "    'https://a.test/authorize', 'https://a.test/token', ('read',), client_id_env='ZZ_ID'))\n"
+    "def minimum(tool_name, method):\n    return None\n"
+    "def expand(name, **kw):\n"
+    "    return {{'sources': [{{'kind': 'mcp', 'name': name, 'approval_mode': 'tighten',\n"
+    "                          'catalog': {name!r}}}], 'allow': ['mcp_x_*']}}\n"
+)
+
+
+def test_loader_needs_identity_when_oauth_is_set(temp_catalog):
+    temp_catalog("zz_noident", _OAUTH_HEADER.format(name="zz_noident"))
+    temp_catalog("zz_ident", _OAUTH_HEADER.format(name="zz_ident")
+                 + "def identity(tok, get_json):\n    return None, None\n")
+    with pytest.raises(connector_catalog.ConnectorError, match="identity must be callable"):
+        connector_catalog._load_modules(("zz_noident",))
+    assert list(connector_catalog._load_modules(("zz_ident",))) == ["zz_ident"]
+
+
+def test_slack_and_linear_carry_oauth_and_expand_is_unchanged():
+    for kind in ("slack", "linear"):
+        entry = connector_catalog.CONNECTORS[kind]
+        assert entry.oauth is not None and entry.oauth.client_id_env == f"{kind.upper()}_CLIENT_ID"
+        assert entry.auth_kind == "pat"
+        assert callable(connector_catalog.connector_module(kind).identity)
+    assert connector_catalog.CONNECTORS["github"].oauth is None

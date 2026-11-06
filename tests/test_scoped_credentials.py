@@ -116,3 +116,53 @@ def test_granted_source_sends_its_own_token(two_tenants):
 def test_bad_grants_shape_is_rejected():
     with pytest.raises(PolicyError, match="credential_grants"):
         ToolPolicy.from_data({"credential_grants": {"x": "slack:acme"}})
+
+
+# -- actor scope composes with grants ------------------------------------
+
+
+def test_actor_store_composes_with_grants_either_way(monkeypatch):
+    from fabri.tools.credential_store import ActorCredentialStore
+
+    monkeypatch.delenv("FABRI_INSTALL_DB", raising=False)
+    monkeypatch.setenv("FABRI_CRED_GMAIL_U1", "gmail-u1-secret")
+    monkeypatch.setenv("FABRI_CRED_GMAIL_U2", "gmail-u2-secret")
+
+    # Grants outside: the literal ${actor} grant matches the declared ref,
+    # and the actor store inside picks the run's own handle.
+    outer = ScopedCredentialStore(ActorCredentialStore(EnvCredentialStore(), "u1"), ["gmail:${actor}"])
+    assert resolve_secret("gmail:${actor}", outer) == "gmail-u1-secret"
+    with pytest.raises(CredentialScopeError, match="not granted"):
+        resolve_secret("gmail:u2", outer)
+
+    # Grants inside: the grant sees the substituted handle.
+    inner = ActorCredentialStore(ScopedCredentialStore(EnvCredentialStore(), ["gmail:u1"]), "u1")
+    assert resolve_secret("gmail:${actor}", inner) == "gmail-u1-secret"
+    other = ActorCredentialStore(ScopedCredentialStore(EnvCredentialStore(), ["gmail:u1"]), "u2")
+    with pytest.raises(CredentialScopeError, match="not granted"):
+        resolve_secret("gmail:${actor}", other)
+
+
+def test_actor_ref_source_sends_the_run_actors_token(monkeypatch):
+    seen = []
+
+    def handle(request):
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.delenv("FABRI_INSTALL_DB", raising=False)
+    monkeypatch.setenv("FABRI_CRED_GMAIL_U1", "gmail-u1-secret")
+    monkeypatch.setenv("FABRI_RUN_ACTOR", "u1")
+    [(_, handler)] = build_tool_source(_http_source("mail_me", "gmail:${actor}"),
+                                       policy=_policy({"mail_*": ["gmail:${actor}"]}),
+                                       transport=httpx.MockTransport(handle))
+    assert handler({})["ok"] and seen == ["Bearer gmail-u1-secret"]
+
+    # A run with no actor: the same source cannot resolve its ref.
+    monkeypatch.delenv("FABRI_RUN_ACTOR")
+    [(_, handler)] = build_tool_source(_http_source("mail_me", "gmail:${actor}"),
+                                       policy=_policy({"mail_*": ["gmail:${actor}"]}),
+                                       transport=httpx.MockTransport(handle))
+    result = handler({})
+    assert result["ok"] is False and "needs an actor" in result["error"]
+    assert "secret" not in result["error"] and len(seen) == 1

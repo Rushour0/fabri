@@ -1,13 +1,25 @@
 """Three Slack Web API calls: list channels, read history, post a message."""
 from __future__ import annotations
 
+import re
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from fabri.tools.connector_catalog import Connector, _credential
+from fabri.tools.connector_catalog import Connector, ConnectorError, OAuthSpec, _credential
+
+# The bot scopes the Slack app asks for; the same list as
+# fabri.service.slack_oauth.SLACK_BOT_SCOPES (that module is service side and
+# is not imported here).
+SLACK_BOT_SCOPES = ("chat:write", "channels:read", "app_mentions:read", "channels:history")
 
 ENTRY = Connector(
     "slack", "Slack", "Slack Web API: list channels, read channel history, post a message.",
-    ("http",), "SLACK_BOT_TOKEN", "slack")
+    ("http",), "SLACK_BOT_TOKEN", "slack",
+    oauth=OAuthSpec(
+        "https://slack.com/oauth/v2/authorize", "https://slack.com/api/oauth.v2.access",
+        scopes_default=SLACK_BOT_SCOPES, client_id_env="SLACK_CLIENT_ID",
+        secret_env="SLACK_CLIENT_SECRET", pkce=False, refresh=False,
+        callback_alias="/slack/oauth/callback", scope_separator=","))
 
 _SLACK = "https://slack.com/api"
 _READ_METHODS = frozenset({"GET", "HEAD"})
@@ -60,3 +72,19 @@ def minimum(tool_name: str, method: str | None) -> str | None:
     if method and method.upper() not in _READ_METHODS:
         return "always_approve"
     return None
+
+
+def identity(token_response: Mapping[str, Any],
+             get_json: Callable[[str, Mapping[str, str]], Mapping[str, Any]]) -> tuple[str | None, str | None]:
+    """The workspace (team id, team name) from Slack's oauth.v2.access body.
+    Slack answers a refused exchange with HTTP 200 and ``ok: false``; that
+    raises with Slack's short error code only, never the body."""
+    if not token_response.get("ok"):
+        code = str(token_response.get("error") or "unknown")
+        code = re.sub(r"[^a-z0-9_]", "", code.lower())[:60] or "unknown"
+        raise ConnectorError(f"slack refused the code exchange ({code})")
+    team = token_response.get("team")
+    if not isinstance(team, Mapping) or not team.get("id"):
+        raise ConnectorError("slack token response has no team id")
+    name = team.get("name")
+    return str(team["id"]), str(name) if name else None

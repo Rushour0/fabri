@@ -28,6 +28,8 @@ fabri imports, no websockets dependency. Three endpoints:
 - ``GET  /catalog``         ``{"catalog": {...} | null}`` -- installed roster entries.
 - ``GET  /auth/check``      204 when the caller may read, 401 otherwise (for a
                             reverse proxy's forward-auth).
+- ``/connections``, ``/connect/<provider>`` and the Slack and Linear install
+  paths are served by :class:`fabri.service.connections_routes.ConnectionsApi`.
 
 With ``auth.enabled`` every route except ``/health``, ``/auth/*`` and signed
 webhooks needs a session or a service/admin bearer token, and anything that
@@ -52,8 +54,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
-from fabri.service import github_app, linear_oauth
-from fabri.service import slack_oauth
+from fabri.service import github_app
 from fabri.service.github_events import handle_github_event
 from fabri.service.surfaces import pipeline as surface_pipeline
 from fabri.service.binding import refused_override_keys
@@ -85,11 +86,9 @@ _LINEAR_UNINSTALL_RE = re.compile(r"^/linear/installs/([A-Za-z0-9_.-]+)/delete/?
 _AUTH_BODY_MAX_BYTES = 8 * 1024
 _AUTH_EMAIL_MAX_LENGTH = 254
 _AUTH_PASSWORD_MAX_LENGTH = 1024
-# GETs that write install state or start an OAuth install.
-_ADMIN_GETS = frozenset({
-    "/slack/install", "/slack/oauth/callback", "/github/setup",
-    "/linear/install", "/linear/oauth/callback", "/surfaces/health",
-})
+# GETs that write install state. The Slack and Linear install paths moved
+# to ConnectionsApi, which gates them itself.
+_ADMIN_GETS = frozenset({"/github/setup", "/surfaces/health"})
 
 
 def _override_refusal(keys: list[str], where: str = "overrides") -> dict:
@@ -267,6 +266,15 @@ class _Handler(BaseHTTPRequestHandler):
         api.handle(self, method)
         return True
 
+    def _connections_dispatch(self, method: str) -> bool:
+        """Serve /connections, /connect/* and the Slack and Linear install
+        paths when the server has a ConnectionsApi."""
+        api = getattr(self.server, "connections_api", None)
+        if api is None or not api.matches(self.path):
+            return False
+        api.handle(self, method)
+        return True
+
     def do_PUT(self) -> None:  # noqa: N802
         if self._setups_dispatch("PUT"):
             return
@@ -274,13 +282,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"no route for PUT {self.path}"})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if self._setups_dispatch("DELETE"):
+        if self._setups_dispatch("DELETE") or self._connections_dispatch("DELETE"):
             return
         if self._gate("DELETE"):
             self._send_json(404, {"error": f"no route for DELETE {self.path}"})
 
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
-        if self._setups_dispatch("GET"):
+        if self._setups_dispatch("GET") or self._connections_dispatch("GET"):
             return
         parsed = urlsplit(self.path)
         path = parsed.path
@@ -391,19 +399,6 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_result(m.group(1))
             return
-        if path in ("/slack/install", "/slack/install/"):
-            url = slack_oauth.build_install_redirect()
-            if url is None:
-                self._send_json(500, {"error": "Slack install is not configured"})
-                return
-            self.send_response(302)
-            self.send_header("Location", url)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if path in ("/slack/oauth/callback", "/slack/oauth/callback/"):
-            self._slack_oauth_callback(parse_qs(parsed.query))
-            return
         if path in ("/slack/installs", "/slack/installs/"):
             ok, user_id = self._owner_scope()
             if not ok:
@@ -438,19 +433,6 @@ class _Handler(BaseHTTPRequestHandler):
                 for r in self.service.github_install_store.list()
             ]})
             return
-        if path in ("/linear/install", "/linear/install/"):
-            url = linear_oauth.build_install_redirect()
-            if url is None:
-                self._send_json(500, {"error": "Linear install is not configured"})
-                return
-            self.send_response(302)
-            self.send_header("Location", url)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if path in ("/linear/oauth/callback", "/linear/oauth/callback/"):
-            self._linear_oauth_callback(parse_qs(parsed.query))
-            return
         if path in ("/linear/installs", "/linear/installs/"):
             ok, user_id = self._owner_scope()
             if not ok:
@@ -477,7 +459,7 @@ class _Handler(BaseHTTPRequestHandler):
         return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
-        if self._setups_dispatch("POST"):
+        if self._setups_dispatch("POST") or self._connections_dispatch("POST"):
             return
         if self.service.auth_enabled and self.path.rstrip("/") in {
             "/auth/signup",
@@ -815,76 +797,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _slack_oauth_callback(self, q: dict) -> None:
-        secret = os.environ.get("SLACK_SIGNING_SECRET", "")
-        state = (q.get("state") or [""])[0]
-        if q.get("error") or not slack_oauth.verify_state(state, secret):
-            self._redirect_studio("/?slack=error#settings")
-            return
-        code = (q.get("code") or [""])[0]
-        if not code:
-            self._redirect_studio("/?slack=error#settings")
-            return
-        try:
-            tok = slack_oauth.exchange_code(code)
-        except Exception:
-            logger.warning("Slack OAuth code exchange failed")
-            self._redirect_studio("/?slack=error#settings")
-            return
-        if not tok.get("ok"):
-            logger.warning("Slack OAuth rejected: %s", tok.get("error"))
-            self._redirect_studio("/?slack=error#settings")
-            return
-        team = tok.get("team") or {}
-        if not team.get("id"):
-            self._redirect_studio("/?slack=error#settings")
-            return
-        self.service.install_store.upsert(
-            team_id=team["id"],
-            bot_token=tok["access_token"],
-            team_name=team.get("name"),
-            scopes=tok.get("scope"),
-        )
-        self._redirect_studio("/?slack=connected#settings")
-
-    def _linear_oauth_callback(self, q: dict) -> None:
-        secret = os.environ.get("LINEAR_CLIENT_SECRET", "")
-        state = (q.get("state") or [""])[0]
-        if q.get("error") or not slack_oauth.verify_state(state, secret):
-            self._redirect_studio("/?linear=error#settings")
-            return
-        code = (q.get("code") or [""])[0]
-        if not code:
-            self._redirect_studio("/?linear=error#settings")
-            return
-        try:
-            tok = linear_oauth.exchange_code(code)
-            access = tok.get("access_token")
-            if not access:
-                raise ValueError("no access_token")
-            ws = linear_oauth.fetch_workspace(access)
-        except Exception:
-            logger.warning("Linear OAuth exchange failed")
-            self._redirect_studio("/?linear=error#settings")
-            return
-        if not ws.get("id"):
-            self._redirect_studio("/?linear=error#settings")
-            return
-        self.service.linear_install_store.upsert(
-            workspace_id=ws["id"],
-            access_token=access,
-            workspace_name=ws.get("name"),
-            scopes=tok.get("scope"),
-            refresh_token=tok.get("refresh_token"),
-            expires_in=tok.get("expires_in"),
-        )
-        self._redirect_studio("/?linear=connected#settings")
-
     @staticmethod
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/surfaces", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/surfaces", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools",
+                                  "/connect", "/connections"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
@@ -923,9 +841,11 @@ class FabriHTTPServer(ThreadingHTTPServer):
         company: dict | None = None,
         catalog: Mapping[str, dict] | None = None,
         setups_api: object | None = None,
+        connections_api: object | None = None,
     ) -> None:
         super().__init__(address, _Handler)
         self.setups_api = setups_api
+        self.connections_api = connections_api
         self.service = service
         self.serve_studio = serve_studio
         self.company = company
@@ -941,13 +861,22 @@ def serve_http(
     company: dict | None = None,
     catalog: Mapping[str, dict] | None = None,
     setups_api: object | None = None,
+    connections_api: object | None = None,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
     Returns the server so a caller can ``serve_forever()`` (the CLI does) or run
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
+
+    With no ``connections_api``, a service that has a ``connection_store``
+    gets a default ``ConnectionsApi``, so the Slack and Linear install paths
+    keep working for hosts that call this function directly.
     """
+    if connections_api is None and getattr(service, "connection_store", None) is not None:
+        from fabri.service.connections_routes import ConnectionsApi
+
+        connections_api = ConnectionsApi(service)
     return FabriHTTPServer(
         (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog,
-        setups_api=setups_api,
+        setups_api=setups_api, connections_api=connections_api,
     )

@@ -1602,6 +1602,13 @@ def _setups_api(args: argparse.Namespace):
         sys.exit(1)
 
 
+def _connections_api(service):
+    """The /connections and /connect routes for a served FabriService."""
+    from fabri.service.connections_routes import ConnectionsApi
+
+    return ConnectionsApi(service)
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     """B7: start the embeddable HTTP service. A non-Python host POSTs a task and
     streams events (SSE) without importing fabri. Blocks until Ctrl-C."""
@@ -1613,7 +1620,8 @@ def cmd_serve(args: argparse.Namespace) -> None:
         home_root=args.home_root,
         auth_config=getattr(args, "auth_config", None),
     )
-    server = serve_http(service, host=args.host, port=args.port, setups_api=_setups_api(args))
+    server = serve_http(service, host=args.host, port=args.port, setups_api=_setups_api(args),
+                         connections_api=_connections_api(service))
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(
         f"fabri serve listening on http://{bound_host}:{bound_port} "
@@ -1666,6 +1674,7 @@ def cmd_studio(args: argparse.Namespace) -> None:
         server = serve_http(
             service, host=args.host, port=args.port, serve_studio=True, catalog=catalog,
             setups_api=_setups_api(args),
+            connections_api=_connections_api(service),
         )
     else:
         company = None
@@ -1696,6 +1705,7 @@ def cmd_studio(args: argparse.Namespace) -> None:
             serve_studio=True,
             company=company,
             setups_api=_setups_api(args),
+            connections_api=_connections_api(service),
         )
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     print(f"Open Fabri Studio at http://{bound_host}:{bound_port}", flush=True)

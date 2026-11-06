@@ -382,3 +382,59 @@ def test_repr_has_no_token(tmp_path, caplog):
         assert secret not in repr(store)
         assert secret not in caplog.text
         assert secret not in repr(vars(store))
+
+
+def _pending(store, nonce, *, now, scope_kind="org", user_id=None):
+    store.pending_put(nonce=nonce, provider="gmail", handle=None, scope_kind=scope_kind,
+                      user_id=user_id, code_verifier=f"verifier-{nonce}", scopes="a b",
+                      redirect_uri="https://x.test/cb", now=now)
+
+
+def test_pending_pop_is_single_use_and_keeps_fields(tmp_path):
+    store = ConnectionStore(tmp_path / "installs.db")
+    _pending(store, "n1", now=T0, scope_kind="user", user_id="u1")
+    row = store.pending_pop("n1", now=T0 + 10)
+    assert row["provider"] == "gmail" and row["scope_kind"] == "user" and row["user_id"] == "u1"
+    assert row["code_verifier"] == "verifier-n1" and row["redirect_uri"] == "https://x.test/cb"
+    assert row["expires_at"] == T0 + cs_module.PENDING_TTL_S
+    assert store.pending_pop("n1", now=T0 + 11) is None
+    assert store.pending_pop("never", now=T0) is None
+    # Pending handshakes are not connections.
+    assert store.list() == []
+    with pytest.raises(ValueError):
+        _pending(store, "n2", now=T0, scope_kind="team")
+
+
+def test_pending_pop_of_expired_nonce_deletes_it(tmp_path):
+    store = ConnectionStore(tmp_path / "installs.db")
+    _pending(store, "old", now=T0)
+    assert store.pending_pop("old", now=T0 + cs_module.PENDING_TTL_S + 1) is None
+    with sqlite3.connect(store.path) as c:
+        assert c.execute("SELECT COUNT(*) FROM pending_oauth").fetchone() == (0,)
+    c.close()
+    # A later put sweeps rows that are already past their expiry.
+    _pending(store, "stale", now=T0)
+    _pending(store, "fresh", now=T0 + cs_module.PENDING_TTL_S + 1)
+    with sqlite3.connect(store.path) as c:
+        assert [r[0] for r in c.execute("SELECT nonce FROM pending_oauth")] == ["fresh"]
+    c.close()
+
+
+def test_state_secret_is_shared_by_two_stores_on_one_file(tmp_path, monkeypatch):
+    monkeypatch.delenv(cs_module.STATE_SECRET_ENV, raising=False)
+    db = tmp_path / "installs.db"
+    a, b = ConnectionStore(db), ConnectionStore(db)
+    assert a.state_secret() == b.state_secret() == a.state_secret()
+    assert len(a.state_secret()) >= 40
+    assert a.state_secret() not in repr(a)
+    assert _mode(db) == 0o600
+
+
+def test_wave_four_tables_exist_after_migration(tmp_path):
+    db = tmp_path / "installs.db"
+    _legacy_db(db)
+    ConnectionStore(db)
+    with sqlite3.connect(db) as c:
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    c.close()
+    assert {"connections", "service_secrets", "pending_oauth"} <= tables

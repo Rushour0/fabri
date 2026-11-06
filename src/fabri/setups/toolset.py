@@ -29,12 +29,12 @@ import httpx
 from fabri.setups.layers import LayerLike
 from fabri.setups.resolver import ResolvedSetup, resolve_setup
 from fabri.tools.approval import RANK, stricter
-from fabri.tools.credential_store import CredentialStore
+from fabri.tools.credential_store import ACTOR_SENTINEL, ActorCredentialStore, CredentialStore
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.openapi import OpenAPIOperation
 from fabri.tools.policy import ToolPolicy
 from fabri.tools.registry import ToolRegistry
-from fabri.tools.sources import build_source_tools
+from fabri.tools.sources import build_source_tools, secret_refs
 
 logger = logging.getLogger("fabri.setups.tools")
 
@@ -172,14 +172,34 @@ def _matches(names: Iterable[str], patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(n, p) for n in names for p in patterns)
 
 
-def _build(setup: ResolvedSetup, policy: ToolPolicy, transport, store, dry_run) -> ResolvedToolSet:
+def uses_actor(decl: Mapping[str, Any]) -> list[str]:
+    """The secret refs in a source declaration whose handle is ``${actor}``."""
+    return [ref for ref in secret_refs(decl) if ref.endswith(":" + ACTOR_SENTINEL)]
+
+
+def _build(setup: ResolvedSetup, policy: ToolPolicy, transport, store, dry_run,
+           actor: str | None = None) -> ResolvedToolSet:
     allow_entries = [a["entry"] for a in setup.tools["allow"]]
     tools: dict[str, ResolvedTool] = {}
     errors: list[str] = []
+    if store is not None:
+        # Every lookup resolves for this actor: ${actor} becomes its id and a
+        # user-scoped row resolves only for its own user.
+        store = ActorCredentialStore(store, actor)
+    elif actor is not None:
+        from fabri.tools.secret_refs import default_credential_store
+
+        store = default_credential_store(actor=actor)
+    # With no store and no actor, each lookup uses the default store, which
+    # takes its actor from FABRI_RUN_ACTOR.
     for item in setup.tools["sources"]:
         decl = item["decl"]
         label = f"{item['source']}:{decl.get('name')}"
         if decl.get("enabled") is False:
+            continue
+        if actor is None and uses_actor(decl):
+            errors.append(f"{label}: needs an actor (a secret ref uses ${{actor}}); "
+                          "resolve this setup with actor=<user id>")
             continue
         try:
             built = build_source_tools(decl, base_dir=Path(item["base_dir"]), policy=policy,
@@ -226,6 +246,7 @@ def resolve_tools(
     use_cache: bool = True,
     catalog: bool = True,
     state_dir: str | Path | None = None,
+    actor: str | None = None,
 ) -> ResolvedToolSet:
     """Build the tool set for a resolved setup (or a layer list).
 
@@ -236,20 +257,28 @@ def resolve_tools(
     `catalog=True` attaches the tool catalog (titles, descriptions, probe
     options) from `state_dir`, by default the deepest layer's
     ``tools/.fabri-state``.
+
+    `actor` is the user the tools act for: a ``${actor}`` secret ref
+    resolves to that user's own connection, and a user-scoped connection
+    resolves only for its owner. Without an actor, a source whose refs use
+    ``${actor}`` is skipped with an error in ``errors``. The cache key holds
+    the actor, so two users never share a built tool set.
     """
+    actor = actor or None
     resolved = setup if isinstance(setup, ResolvedSetup) else resolve_setup(setup)
     pol = policy or ToolPolicy.permissive()
     if global_allow is not None:
         pol = pol.with_allow(global_allow)
     key = (tuple((l.name, str(l.path)) for l in resolved.layers), resolved.content_hash, repr(pol),
            json.dumps(pol.dry_run_header, sort_keys=True, default=str), dry_run, id(transport), id(store), catalog,
-           str(state_dir or ""), _state_stamp(resolved, state_dir) if catalog else "")
+           str(state_dir or ""), _state_stamp(resolved, state_dir) if catalog else "",
+           ("actor", actor) if actor is not None else ("shared",))
     if use_cache:
         with _cache_lock:
             hit = _cache.get(key)
         if hit is not None:
             return hit
-    result = _build(resolved, pol, transport, store, dry_run)
+    result = _build(resolved, pol, transport, store, dry_run, actor)
     if catalog:
         from fabri.tools.catalog import attach_catalog
 

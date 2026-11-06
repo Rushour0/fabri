@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import stat
 import time
@@ -85,15 +86,28 @@ _LEGACY = (
 
 
 def default_refreshers() -> dict[str, Refresher]:
-    """Token refreshers for the providers that rotate tokens.
+    """Token refreshers for every catalog connector whose OAuth tokens rotate.
 
-    Imported lazily so loading this module does not pull in the OAuth
-    helpers, and so a test that patches ``linear_oauth.refresh_access_token``
-    is seen on the next call.
+    Each entry with ``oauth`` and ``oauth.refresh`` gets its generic
+    ``OAuthCodeProvider.refresh``, keyed by the provider name its rows are
+    stored under. Linear keeps ``linear_oauth.refresh_access_token``, which
+    sends the same request and which existing callers and tests patch.
+
+    Imported lazily so loading this module does not pull in the catalog or
+    the OAuth helpers (the tools package imports this one), and so a patched
+    refresher is seen on the next call.
     """
     from fabri.service import linear_oauth
+    from fabri.tools.connections.oauth import OAuthCodeProvider
+    from fabri.tools.connector_catalog import CONNECTORS
 
-    return {"linear": linear_oauth.refresh_access_token}
+    refreshers: dict[str, Refresher] = {}
+    for name, entry in CONNECTORS.items():
+        if entry.oauth is not None and entry.oauth.refresh:
+            refreshers[entry.secret_provider or name] = OAuthCodeProvider(entry).refresh
+    if "linear" in refreshers:
+        refreshers["linear"] = linear_oauth.refresh_access_token
+    return refreshers
 
 
 class ConnectionStore:
@@ -202,6 +216,26 @@ class ConnectionStore:
                         installed_at REAL,
                         updated_at REAL,
                         PRIMARY KEY(provider, handle)
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS service_secrets("
+                    "name TEXT PRIMARY KEY, value TEXT NOT NULL, created_at REAL)"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_oauth(
+                        nonce TEXT PRIMARY KEY,
+                        provider TEXT NOT NULL,
+                        handle TEXT,
+                        scope_kind TEXT NOT NULL,
+                        user_id TEXT,
+                        code_verifier TEXT NOT NULL,
+                        scopes TEXT,
+                        redirect_uri TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        expires_at REAL NOT NULL
                     )
                     """
                 )
@@ -314,6 +348,92 @@ class ConnectionStore:
                 (status, time.time(), provider, handle),
             )
         return cur.rowcount > 0
+
+    # -- OAuth state secret and pending handshakes --------------------------
+
+    def state_secret(self) -> str:
+        """The secret that signs OAuth ``state`` values.
+
+        ``FABRI_OAUTH_STATE_SECRET`` wins when set, and then nothing is
+        written. Otherwise one random secret is stored in ``service_secrets``
+        on first use and read back from then on. Two processes racing on a
+        fresh file both insert with ``INSERT OR IGNORE`` and both read the
+        one row that won, so they sign with the same secret.
+        """
+        pinned = os.environ.get(STATE_SECRET_ENV, "")
+        if pinned:
+            return pinned
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO service_secrets(name, value, created_at) VALUES(?,?,?)",
+                ("oauth_state", secrets.token_urlsafe(48), time.time()),
+            )
+            row = connection.execute(
+                "SELECT value FROM service_secrets WHERE name='oauth_state'"
+            ).fetchone()
+        self._secure_sidecars()
+        return row["value"]
+
+    def pending_put(
+        self,
+        *,
+        nonce: str,
+        provider: str,
+        handle: str | None,
+        scope_kind: str,
+        user_id: str | None,
+        code_verifier: str,
+        scopes: str,
+        redirect_uri: str,
+        now: float | None = None,
+    ) -> None:
+        """Record one OAuth handshake that is waiting for its callback. It
+        lives PENDING_TTL_S seconds. Rows already past their expiry are
+        removed on the way."""
+        if scope_kind not in SCOPE_KINDS:
+            raise ValueError("scope_kind must be 'org' or 'user'")
+        if not nonce:
+            raise ValueError("nonce must not be empty")
+        now = time.time() if now is None else now
+        with self._connect() as connection:
+            connection.execute("DELETE FROM pending_oauth WHERE expires_at < ?", (now,))
+            connection.execute(
+                """
+                INSERT INTO pending_oauth(
+                    nonce, provider, handle, scope_kind, user_id, code_verifier,
+                    scopes, redirect_uri, created_at, expires_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    nonce, provider, handle, scope_kind, user_id, code_verifier,
+                    scopes, redirect_uri, now, now + PENDING_TTL_S,
+                ),
+            )
+        self._secure_sidecars()
+
+    def pending_pop(self, nonce: str, *, now: float | None = None) -> dict | None:
+        """Take the pending handshake for `nonce`, once. The row is deleted
+        whether or not it is still valid; an expired row returns None."""
+        now = time.time() if now is None else now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT nonce, provider, handle, scope_kind, user_id, code_verifier, "
+                    "scopes, redirect_uri, created_at, expires_at "
+                    "FROM pending_oauth WHERE nonce=?",
+                    (nonce,),
+                ).fetchone()
+                if row is not None:
+                    connection.execute("DELETE FROM pending_oauth WHERE nonce=?", (nonce,))
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        if row is None or row["expires_at"] < now:
+            return None
+        return dict(row)
 
     # -- reads -------------------------------------------------------------
 

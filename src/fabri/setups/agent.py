@@ -32,6 +32,7 @@ def build_agent_config(
     dry_run: bool = False,
     task: str | None = None,
     approver=None,
+    actor: str | None = None,
 ) -> tuple[dict[str, Any], ToolRegistry]:
     """Return ``(config, registry)`` for one agent type.
 
@@ -50,14 +51,16 @@ def build_agent_config(
     on-demand skills than setup.yaml `skill_index_top_k` lists only the best
     matches in full. `approver` goes on the registry and answers calls whose
     class is always_approve, for example ``fabri.tools.approver.default_approver()``;
-    with None those calls are refused.
+    with None those calls are refused. `actor` goes to resolve_tools when no
+    `tool_set` is given: ``${actor}`` secret refs resolve to that user's own
+    connection.
     """
     from fabri.config import DEFAULT_CONFIG, _deep_merge, _normalize_llm_roles
 
     agent = resolved.agent(agent_type)
     if tool_set is None:
         tool_set = resolve_tools(resolved, global_allow=global_allow, policy=policy, transport=transport,
-                                 store=store, dry_run=dry_run)
+                                 store=store, dry_run=dry_run, actor=actor)
     chosen = tool_set.for_type(resolved, agent_type)
     registry = tool_set.registry([t.name for t in chosen], sandbox_root=sandbox_root,
                                  meta_tools=meta_tools and bool(chosen), approver=approver)

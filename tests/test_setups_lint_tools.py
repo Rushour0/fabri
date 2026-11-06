@@ -67,3 +67,25 @@ def test_tool_set_tokens_monotonic(tmp_path):
                            use_cache=False, catalog=False)
     assert 0 < tool_set_tokens(small) < tool_set_tokens(more)
     assert tool_set_tokens(small) < tool_set_tokens(longer)
+
+
+def test_lint_warns_once_per_actor_ref_source(tmp_path):
+    write(tmp_path / "tools/tools.yaml", """
+        sources:
+          - kind: http
+            name: mail_me
+            url: https://api.test/mail
+            headers:
+              Authorization: {secret_ref: "gmail:${actor}", prefix: "Bearer "}
+              X-Other: {secret_ref: "gmail:${actor}"}
+          - kind: http
+            name: org_mail
+            url: https://api.test/org
+            headers: {Authorization: {secret_ref: "gmail:main", prefix: "Bearer "}}
+        allow: [mail_me, org_mail]
+    """)
+    findings = lint_setup(resolve_setup([("project", tmp_path)]))
+    hits = [f for f in findings if "resolves per user" in f.message]
+    assert [(f.level, f.layer, f.item, f.message) for f in hits] == [
+        ("warning", "project", "tools/mail_me",
+         "tools/mail_me: credential gmail:${actor} resolves per user; runs without an actor cannot use it")]

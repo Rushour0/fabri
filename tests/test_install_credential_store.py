@@ -151,8 +151,14 @@ def test_scope_kind_reports_user_rows(tmp_path):
 
 
 def test_default_credential_store_selection(tmp_path, monkeypatch):
+    from fabri.tools.credential_store import ActorCredentialStore
+
+    def inner(store):
+        # The default store is wrapped so ${actor} handles resolve per run.
+        return store._store if isinstance(store, ActorCredentialStore) else store
+
     monkeypatch.setenv("FABRI_INSTALL_DB", str(tmp_path / "installs.db"))
-    assert isinstance(default_credential_store(), SqliteInstallCredentialStore)
+    assert isinstance(inner(default_credential_store()), SqliteInstallCredentialStore)
 
     monkeypatch.delenv("FABRI_INSTALL_DB")
-    assert isinstance(default_credential_store(), EnvCredentialStore)
+    assert isinstance(inner(default_credential_store()), EnvCredentialStore)

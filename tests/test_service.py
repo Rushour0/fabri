@@ -1180,3 +1180,53 @@ def test_snapshot_mode_is_refused_for_same_user_runs_without_the_opt_in(tmp_path
         assert svc.list_sessions() == []
     finally:
         svc.close()
+
+
+_FAKE_AGENT_ACTOR = """
+import json, os
+from pathlib import Path
+
+home = Path(os.environ["FABRI_HOME"])
+sid = os.environ["FABRI_SESSION_ID"]
+trace = home / ".fabri" / "traces" / (sid + ".jsonl")
+trace.parent.mkdir(parents=True, exist_ok=True)
+trace.write_text("")
+print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                  "final_text": json.dumps({"actor": os.environ.get("FABRI_RUN_ACTOR")})}))
+"""
+
+
+def test_submit_sets_FABRI_RUN_ACTOR_for_owned_runs_only(tmp_path: Path, broker_env):
+    # A stray value in the service env must never reach a run as its actor.
+    broker_env.setenv("FABRI_RUN_ACTOR", "service-env-actor")
+    script = tmp_path / "fake_agent_actor.py"
+    script.write_text(textwrap.dedent(_FAKE_AGENT_ACTOR))
+    template = _write_template(tmp_path / "actor.yaml", [{
+        "name": "mail", "kind": "http", "url": "https://api.example.test/mail", "method": "GET",
+        "headers": {"Authorization": {"secret_ref": "gmail:${actor}", "prefix": "Bearer "}},
+    }])
+    svc = FabriService(template_config=str(template), home_root=tmp_path / "runs",
+                       command_builder=_builder_for(script))
+    bound: dict = {}
+    real_bind = svc.credential_broker.bind
+
+    def recording_bind(**kwargs):
+        binding = real_bind(**kwargs)
+        bound[kwargs["session_id"]] = binding
+        return binding
+
+    svc.credential_broker.bind = recording_bind
+    try:
+        owned = svc.submit("t", user_id="u1")
+        assert bound[owned].actor == "u1"
+        assert bound[owned].sources["mail"].refs == (("gmail", "u1"),)
+        assert json.loads(svc.result(owned, timeout=30)["final_text"]) == {"actor": "u1"}
+
+        shared = svc.submit("t")
+        assert bound[shared].actor is None
+        # A run without a user gets no handle for the ${actor} ref, so the
+        # broker refuses it on every call.
+        assert bound[shared].sources["mail"].refs == ()
+        assert json.loads(svc.result(shared, timeout=30)["final_text"]) == {"actor": None}
+    finally:
+        svc.close()

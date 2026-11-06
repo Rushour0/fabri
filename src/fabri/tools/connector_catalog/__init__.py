@@ -45,9 +45,10 @@ catalog lazily through ``fabri.tools.connectors``).
 from __future__ import annotations
 
 import importlib
+import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from types import ModuleType
 from typing import Any
@@ -63,6 +64,31 @@ class ConnectorError(ValueError):
 
 
 @dataclass(frozen=True)
+class OAuthSpec:
+    """How a connector runs the OAuth authorization code flow.
+
+    ``client_id_env`` and ``secret_env`` are names of environment variables,
+    never values. ``scopes_optional`` maps a short name a user can ask for
+    to the full scope string; its help text lives in the connector module.
+    ``callback_alias`` is the redirect path the vendor app was registered
+    with before the generic ``/connect/<provider>/callback`` existed.
+    ``scope_separator`` joins scopes in the authorize URL."""
+    authorize_url: str
+    token_url: str
+    scopes_default: tuple[str, ...]
+    scopes_optional: Mapping[str, str] = field(default_factory=dict)
+    client_id_env: str = ""
+    secret_env: str = ""
+    pkce: bool = True
+    loopback: bool = False
+    extra_authorize: Mapping[str, str] = field(default_factory=dict)
+    identity_url: str | None = None
+    refresh: bool = True
+    callback_alias: str | None = None
+    scope_separator: str = " "
+
+
+@dataclass(frozen=True)
 class Connector:
     name: str
     title: str
@@ -73,7 +99,7 @@ class Connector:
     remote_url: str | None = None
     auth_header: str = "Authorization"
     auth_prefix: str = "Bearer "
-    auth_kind: str = "pat"  # pat | api_key | mcp
+    auth_kind: str = "pat"  # pat | api_key | mcp | oauth
     spec_file: str | None = None  # basename under connector_catalog/specs/
     default_allow: tuple[str, ...] | None = None  # curated tool names, when the connector has a list
     needs_include: bool = False  # the caller must name the exact tools to expose
@@ -81,6 +107,19 @@ class Connector:
     experimental: bool = False  # the expansion is written disabled
     verify_path: str | None = None
     scope_default: str = "org"  # org | user: who a connection belongs to by default
+    oauth: OAuthSpec | None = None  # set when the connector can connect through OAuth
+
+
+def oauth_configured(connector: Connector) -> bool:
+    """True when this server can start the connector's OAuth flow: the client
+    id variable is set, and so is the client secret variable when the flow has
+    no PKCE to stand in for it."""
+    spec = connector.oauth
+    if spec is None or not spec.client_id_env or not os.environ.get(spec.client_id_env):
+        return False
+    if spec.pkce:
+        return True
+    return bool(spec.secret_env and os.environ.get(spec.secret_env))
 
 
 def _credential(connector: Connector, token_env: str | None, workspace: str | None,
@@ -138,6 +177,13 @@ def _validate(mod: ModuleType, module_name: str) -> Connector:
                 or pair[0] != pair[0].upper()):
             raise ConnectorError(f"connector module {module_name}: READS must be a tuple of (METHOD, pattern) pairs")
         re.compile(pair[1])
+    if entry.oauth is not None:
+        if not isinstance(entry.oauth, OAuthSpec):
+            raise ConnectorError(f"connector module {module_name}: ENTRY.oauth must be an OAuthSpec")
+        if not callable(getattr(mod, "identity", None)):
+            raise ConnectorError(f"connector module {module_name}: identity must be callable when ENTRY.oauth is set")
+        if not entry.oauth.client_id_env:
+            raise ConnectorError(f"connector module {module_name}: ENTRY.oauth needs client_id_env")
     return entry
 
 
@@ -180,7 +226,15 @@ def list_connectors() -> list[dict[str, Any]]:
              "auth_kind": c.auth_kind, "curated": c.default_allow is not None,
              "pinned_spec": c.spec_file is not None, "needs_include": c.needs_include,
              "needs_url": c.needs_url, "experimental": c.experimental,
-             "scope_default": c.scope_default} for c in CONNECTORS.values()]
+             "scope_default": c.scope_default, "oauth": c.oauth is not None,
+             "oauth_configured": oauth_configured(c),
+             "oauth_loopback": bool(c.oauth is not None and c.oauth.loopback)}
+            for c in CONNECTORS.values()]
+
+
+def connector_module(kind: str) -> ModuleType:
+    """The loaded catalog module for one connector id (for its ``identity``)."""
+    return _module(kind)
 
 
 def connector_entry(
@@ -297,5 +351,6 @@ def request_floor(url: str | None, method: str | None) -> tuple[str | None, str 
 _MODULES.update(_load_modules())
 CONNECTORS.update({mod_name: mod.ENTRY for mod_name, mod in _MODULES.items()})
 
-__all__ = ["CONNECTORS", "MODULE_ORDER", "Connector", "ConnectorError", "catalog_for_url", "catalog_minimum",
-           "connector_entry", "connector_kinds", "list_connectors", "request_floor", "spec_rel", "spec_text"]
+__all__ = ["CONNECTORS", "MODULE_ORDER", "Connector", "ConnectorError", "OAuthSpec", "catalog_for_url",
+           "catalog_minimum", "connector_entry", "connector_kinds", "connector_module", "list_connectors",
+           "oauth_configured", "request_floor", "spec_rel", "spec_text"]

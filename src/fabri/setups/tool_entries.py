@@ -46,6 +46,7 @@ from fabri.tools.approval import (
     stricter,
 )
 from fabri.tools.connectors import CONNECTORS, ConnectorError, connector_entry
+from fabri.tools.credential_store import ACTOR_SENTINEL
 from fabri.tools.connectors import spec_rel as _catalog_spec_rel
 from fabri.tools.connectors import spec_text as _catalog_spec_text
 from fabri.tools.openapi import (
@@ -420,7 +421,9 @@ def connector_tool_entry(kind: str, *, name: str | None = None, token_env: str |
         raise EntryError("--include and --all-tools cannot be combined")
     if token_env:
         check_env_name(token_env, "--token-env")
-    if workspace and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", workspace):
+    # ${actor} is the one non-handle value: it resolves to the run's user.
+    if (workspace and workspace != ACTOR_SENTINEL
+            and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", workspace)):
         raise EntryError("--workspace must be a handle such as acme or T0123")
     if kind not in CONNECTORS:
         raise EntryError(f"unknown connector {kind!r}; known: {', '.join(sorted(CONNECTORS))}")
