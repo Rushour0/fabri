@@ -514,6 +514,9 @@ def test_snapshot_opt_out_restores_values(
     """FABRI_CRED_SNAPSHOT=1 on the service: the bound run.yaml decides which
     values the run gets, and no broker is bound."""
     monkeypatch.setenv("FABRI_CRED_SNAPSHOT", "1")
+    # These runs share the test's OS user, so stored credentials need the
+    # local development opt-in.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
     template = _run_yaml(tmp_path / "template.yaml", [_http_source("chat", "slack:acme")])
 
     seen, _bindings, _sid = _service_run(tmp_path, template)

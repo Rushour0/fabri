@@ -327,6 +327,9 @@ def test_service_resolves_from_its_own_db_not_the_env_one(
 ) -> None:
     for name in ("FABRI_CRED_AUDIT_LOG", "FABRI_CRED_SLACK_MAIN", "FABRI_RUN_ENV_ALLOW"):
         monkeypatch.delenv(name, raising=False)
+    # These runs share the test's OS user, so stored credentials need the
+    # local development opt-in.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
     # The snapshot is off by default once the broker holds a run's credentials.
     monkeypatch.setenv("FABRI_CRED_SNAPSHOT", "1")
     other = ConnectionStore(tmp_path / "other" / "installs.db")
@@ -348,6 +351,9 @@ def test_submit_user_id_is_the_run_actor_with_audit_on(
 ) -> None:
     for name in ("FABRI_CRED_GMAIL_U1", "FABRI_CRED_GMAIL_U2", "FABRI_RUN_ENV_ALLOW", "FABRI_INSTALL_DB"):
         monkeypatch.delenv(name, raising=False)
+    # These runs share the test's OS user, so stored credentials need the
+    # local development opt-in.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
     monkeypatch.setenv("FABRI_CRED_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("FABRI_CRED_SNAPSHOT", "1")
     own = ConnectionStore(tmp_path / "runs" / "installs.db")

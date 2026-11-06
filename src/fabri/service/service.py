@@ -44,6 +44,7 @@ from fabri.service.credential_broker import SNAPSHOT_ENV, BindError, CredentialB
 from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
 from fabri.service.launcher import (
     ALLOW_SHARED_UID_ENV,
+    granted_secret_refs,
     LAUNCH_ISOLATION,
     RunHandle,
     launch_run,
@@ -363,6 +364,18 @@ class FabriService:
                 )
             if binding is not None:
                 run_env.update(binding.env())
+        elif self._same_uid_refused():
+            # Snapshot mode copies stored tokens straight into the run, so the
+            # same-user refusal applies here too.
+            from fabri.config import load_config
+            refs = granted_secret_refs(load_config(str(config_path)), actor=str(user_id) if user_id else None)
+            if refs:
+                self._abandon_submit(session_id, run_home)
+                raise BindError(
+                    f"{SNAPSHOT_ENV}=1 would copy stored credentials into a run that executes as the same "
+                    "OS user as fabri serve, so it could read installs.db and the service's memory. "
+                    f"For local development only, set {ALLOW_SHARED_UID_ENV}=1 on the service"
+                )
         try:
             handle = launch_run(
                 task,

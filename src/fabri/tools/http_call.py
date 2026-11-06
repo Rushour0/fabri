@@ -141,22 +141,34 @@ def render_path_value(name: str, value: Any) -> str:
     for ch in text:
         if unicodedata.category(ch) in _BLOCKED_CATEGORIES:
             raise PathParamError(f"path parameter {name!r} holds a control, format or line separator character")
-    seen = text
-    for _ in range(5):
-        # Check the value as written and as a proxy would fold it (NFKC),
-        # so full-width slashes or dots cannot turn into a separator later.
-        for form in (seen, unicodedata.normalize("NFKC", seen)):
-            if form in ("", ".", "..") or "/" in form or "\\" in form:
-                raise PathParamError(f"path parameter {name!r} is not allowed (empty, a dot segment or holds a separator)")
-        folded = unicodedata.normalize("NFKC", seen)
-        if folded != seen and "%" in folded and "%" not in seen:
+    # A character that folds into a percent sign (full-width percent and its
+    # kin) would add a new escape after a proxy folds the value.
+    for ch in text:
+        folded_ch = unicodedata.normalize("NFKC", ch)
+        if folded_ch != ch and "%" in folded_ch:
             raise PathParamError(f"path parameter {name!r} is not allowed (folds to a percent sign)")
-        decoded = unquote(seen)
-        if decoded == seen:
+    # Walk every form a client, proxy or server could reach by percent
+    # decoding and NFKC folding in any order, and refuse when any of them is
+    # empty, a dot segment, or holds a separator.
+    forms = {text}
+    frontier = [text]
+    for _ in range(6):
+        nxt = []
+        for form in frontier:
+            for step in (unquote(form), unicodedata.normalize("NFKC", form)):
+                if step not in forms:
+                    forms.add(step)
+                    nxt.append(step)
+        if not nxt:
             break
-        seen = decoded
+        frontier = nxt
     else:
         raise PathParamError(f"path parameter {name!r} is encoded too many times")
+    for form in forms:
+        if form in ("", ".", "..") or "/" in form or "\\" in form:
+            raise PathParamError(f"path parameter {name!r} is not allowed (empty, a dot segment or holds a separator)")
+        if any(seg in (".", "..") for seg in form.split("/")):
+            raise PathParamError(f"path parameter {name!r} is not allowed (empty, a dot segment or holds a separator)")
     # quote() leaves only ASCII letters, digits and -._~ as they are and
     # percent-encodes everything else, including non-ASCII letters.
     return quote(text, safe="")

@@ -132,6 +132,7 @@ _ALLOWED_PREFIXES = ("LC_",)
 # for local development where the operator owns every token anyway.
 
 LAUNCH_ISOLATION_SHARED_UID = "shared_uid"
+LAUNCH_ISOLATION_CONTAINER = "container"
 LAUNCH_ISOLATION = LAUNCH_ISOLATION_SHARED_UID
 ALLOW_SHARED_UID_ENV = "FABRI_ALLOW_SHARED_UID"
 
@@ -139,7 +140,9 @@ ALLOW_SHARED_UID_ENV = "FABRI_ALLOW_SHARED_UID"
 def runs_share_service_uid(isolation: str | None = None) -> bool:
     """True when a run started with ``isolation`` (default
     :data:`LAUNCH_ISOLATION`) executes as the same OS user as the service."""
-    return (isolation or LAUNCH_ISOLATION) == LAUNCH_ISOLATION_SHARED_UID
+    # Only the container launcher may report isolation, and only with this
+    # exact value; anything else counts as a same-user run.
+    return (isolation or LAUNCH_ISOLATION) != LAUNCH_ISOLATION_CONTAINER
 
 
 def shared_uid_allowed(env: Mapping[str, str] | None = None) -> bool:

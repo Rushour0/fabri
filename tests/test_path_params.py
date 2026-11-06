@@ -153,3 +153,12 @@ def test_division_slash_is_percent_encoded_not_folded():
     # NFKC leaves U+2215 alone, so no proxy folds it to "/". It is a symbol,
     # not a letter or digit, so it is percent-encoded like any other symbol.
     assert render_path_value("id", "a\u2215b") == "a%E2%88%95b"
+
+
+def test_percent_and_nfkc_in_any_order_cannot_make_a_separator():
+    import pytest
+    from fabri.tools.http_call import PathParamError, render_path_value
+    for bad in ("%zz％2f..％2fsecret", "％2e％2e", "%25／", "a％" + "2Fb"):
+        with pytest.raises(PathParamError):
+            render_path_value("id", bad)
+    assert render_path_value("id", "100%-sure") == "100%25-sure"

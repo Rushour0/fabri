@@ -1159,3 +1159,24 @@ def test_isolated_launch_mode_passes_the_same_uid_check(tmp_path: Path, broker_e
         assert svc.result(sid, timeout=30)["success"] is True
     finally:
         svc.close()
+
+
+def test_isolation_values_other_than_container_count_as_shared_uid():
+    from fabri.service.launcher import runs_share_service_uid
+    assert runs_share_service_uid("shared_uid")
+    assert runs_share_service_uid("anything-else")
+    assert not runs_share_service_uid("container")
+
+
+def test_snapshot_mode_is_refused_for_same_user_runs_without_the_opt_in(tmp_path: Path, broker_env):
+    from fabri.service.credential_broker import BindError
+    broker_env.setenv("FABRI_CRED_SNAPSHOT", "1")
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    template = _write_template(tmp_path / "stdio.yaml", [_STDIO_SOURCE], _MCP_POLICY)
+    svc = _broker_service(tmp_path, template)
+    try:
+        with pytest.raises(BindError, match="FABRI_ALLOW_SHARED_UID"):
+            svc.submit("t")
+        assert svc.list_sessions() == []
+    finally:
+        svc.close()
