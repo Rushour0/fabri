@@ -203,3 +203,30 @@ def test_inherited_credential_urls_are_redaction_secrets(monkeypatch, name, valu
             assert piece in c._secrets, piece
     finally:
         c.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DB_PASSWORD", "12345678"),
+        ("DB_PASSWORD", "true"),
+        ("GITHUB_TOKEN", "123456"),
+        ("STRIPE_KEY", "999999"),
+        ("APP_SECRET", "42424242"),
+        ("SMTP_PASS", "yes"),
+    ],
+)
+def test_flags_and_numbers_under_strong_secret_names_are_redaction_secrets(name, value):
+    from fabri.tools.mcp_client import _inherited_secrets
+
+    assert value in _inherited_secrets(name, value)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("MAX_TOKENS", "4096"), ("TOKENIZERS_PARALLELISM", "false"), ("PORT", "8080")],
+)
+def test_flags_and_numbers_under_loose_names_stay_visible(name, value):
+    from fabri.tools.mcp_client import _inherited_secrets
+
+    assert _inherited_secrets(name, value) == []

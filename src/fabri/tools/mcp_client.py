@@ -397,11 +397,26 @@ def _excerpt_result(serialized: str, is_error: bool) -> dict:
 # ---------------------------------------------------------------- stdio
 
 
-# Inherited values under a secret-looking name that are still not redacted:
-# a flag or a number (TOKENIZERS_PARALLELISM=false, MAX_TOKENS=4096) is not a
-# credential, and redacting a common word would mangle unrelated output.
-# Every other value under such a name is, however short (DB_PASSWORD=hunter2).
+# Inherited values under a loosely secret-looking name that are still not
+# redacted: a flag or a number (TOKENIZERS_PARALLELISM=false,
+# MAX_TOKENS=4096) is not a credential, and redacting a common word would
+# mangle unrelated output. Every other value under such a name is, however
+# short (DB_PASSWORD=hunter2).
 _TRIVIAL_ENV_VALUE = re.compile(r"(?i)true|false|yes|no|on|off|\d+")
+# Names that say the value is a credential and nothing else. Under these the
+# flag-or-number exemption does not apply: DB_PASSWORD=12345678 is a password.
+# A last part such as TOKEN or KEY counts (GITHUB_TOKEN, STRIPE_KEY); the same
+# word earlier in the name does not (TOKEN_LIMIT, MAX_TOKENS,
+# TOKENIZERS_PARALLELISM). PASSWORD and SECRET count anywhere.
+_STRONG_SECRET_LAST = frozenset({
+    "password", "passwd", "pass", "pwd", "secret", "token", "pat", "apikey", "key", "pin",
+})
+_STRONG_SECRET_ANYWHERE = frozenset({"password", "passwd", "secret"})
+
+
+def _env_name_is_strong_secret(name: str) -> bool:
+    parts = [p for p in name.lower().split("_") if p]
+    return bool(parts) and (parts[-1] in _STRONG_SECRET_LAST or bool(set(parts) & _STRONG_SECRET_ANYWHERE))
 # Names whose value is a connection string that may carry user:password.
 _CONNECTION_NAME_SUFFIXES = ("_url", "_dsn", "_uri")
 
@@ -435,8 +450,8 @@ def _url_credentials(value: str) -> list[str]:
 
 def _inherited_secrets(name: str, value: str) -> list[str]:
     """The values to redact for one variable the child inherits. Under a name
-    that says it holds a credential, the whole value unless it is a flag or a
-    number. Under any name, a URL with a password gives the whole value and
+    that says it holds a credential, the whole value, except a flag or a
+    number under a name that only loosely looks secret (MAX_TOKENS=4096). Under any name, a URL with a password gives the whole value and
     the password. A ``*_URL``, ``*_DSN`` or ``*_URI`` value with a user part
     and no password (``https://token@host``) gives the whole value and that
     user part, which is then usually a token."""
@@ -444,7 +459,8 @@ def _inherited_secrets(name: str, value: str) -> list[str]:
     stripped = value.strip()
     if not stripped:
         return out
-    if _env_name_is_secret(name) and not _TRIVIAL_ENV_VALUE.fullmatch(stripped):
+    if _env_name_is_strong_secret(name) or (
+            _env_name_is_secret(name) and not _TRIVIAL_ENV_VALUE.fullmatch(stripped)):
         out.append(value)
     passwords = _url_credentials(stripped)
     if passwords:
