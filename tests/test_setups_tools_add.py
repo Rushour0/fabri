@@ -114,7 +114,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def loopback():
+def loopback(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
     _Handler.sessions = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -183,6 +184,39 @@ def test_add_openapi_file_writes_yaml_and_spec_copy(monkeypatch, capsys, layer):
     assert sorted(names) == sorted(data["allow"])
     audit = [json.loads(line) for line in (layer / ".fabri-audit.jsonl").read_text().splitlines()]
     assert audit[-1]["action"] == "add-tool-source" and audit[-1]["name"] == "pets"
+
+
+MAIL_SPEC = """
+openapi: 3.0.3
+info: {title: Mail API, version: "1"}
+servers: [{url: "https://mail.test"}]
+paths:
+  /campaigns:
+    get: {operationId: listCampaigns, responses: {"200": {description: ok}}}
+    post: {operationId: createCampaign, responses: {"200": {description: ok}}}
+  /campaigns/{id}/launch:
+    post:
+      operationId: launchCampaign
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok}}
+"""
+
+
+def test_openapi_preview_hints_always_approve_for_mail_apis(monkeypatch, capsys, layer):
+    spec = layer.parent / "mail.yaml"
+    spec.write_text(MAIL_SPEC)
+    code, out, err = run(monkeypatch, capsys, "setups", "tools", "add", "openapi", str(spec),
+                         "--layer", str(layer), "--dry-run")
+    assert code == 0, err
+    assert "pass --approval always_approve if this API sends mail, messages or campaigns" in out
+    code, out, err = run(monkeypatch, capsys, "setups", "tools", "add", "openapi", str(spec),
+                         "--layer", str(layer), "--dry-run", "--approval", "always_approve")
+    assert code == 0, err
+    assert "pass --approval always_approve" not in out
+    code, out, err = run(monkeypatch, capsys, "setups", "tools", "add", "openapi", str(PETSTORE),
+                         "--layer", str(layer), "--dry-run")
+    assert code == 0, err
+    assert "pass --approval always_approve" not in out
 
 
 def test_add_openapi_delete_is_always_approve_and_floor_applies(monkeypatch, capsys, layer):
@@ -294,6 +328,32 @@ def test_http_client_reads_sse_and_keeps_session(loopback):
 # ---------------------------------------------------------------- connectors
 
 
+def test_connector_flags_parse(monkeypatch, capsys, layer):
+    seen = {}
+
+    def fake(kind, **kwargs):
+        seen["kind"], seen["kwargs"] = kind, kwargs
+        raise EntryError("stop here")
+
+    monkeypatch.setattr("fabri.setups.tool_entries.connector_tool_entry", fake)
+    code, _, err = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "composio",
+                       "--url", "https://example.test/mcp", "--include", "GMAIL_SEND_EMAIL", "GITHUB_LIST_ISSUES",
+                       "--layer", str(layer))
+    assert code == 1 and "stop here" in err
+    assert seen["kind"] == "composio"
+    assert seen["kwargs"]["url"] == "https://example.test/mcp"
+    assert seen["kwargs"]["include"] == ["GMAIL_SEND_EMAIL", "GITHUB_LIST_ISSUES"]
+    assert seen["kwargs"]["all_tools"] is False
+    run(monkeypatch, capsys, "setups", "tools", "add", "connector", "cakemail", "--all-tools", "--layer", str(layer))
+    assert seen["kwargs"]["all_tools"] is True and seen["kwargs"]["url"] is None and seen["kwargs"]["include"] is None
+
+
+def test_connectors_table_has_auth_and_note_columns(monkeypatch, capsys):
+    code, out, _ = run(monkeypatch, capsys, "setups", "tools", "connectors")
+    header = out.splitlines()[0]
+    assert code == 0 and "AUTH" in header and "NOTE" in header
+
+
 def test_add_connectors(monkeypatch, capsys, layer):
     code, out, _ = run(monkeypatch, capsys, "setups", "tools", "connectors")
     assert code == 0 and "github" in out and "slack" in out and "linear" in out
@@ -401,7 +461,8 @@ def api(tmp_path, scoped):
     service = FabriService(home_root=tmp_path / "home")
     server = serve_http(service, port=0, setups_api=SetupsApi(root, policy="strict"))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    client = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}")
+    client = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                          headers={"Sec-Fetch-Site": "same-origin"})
     yield client, root
     server.shutdown()
     server.server_close()
@@ -442,5 +503,5 @@ def test_api_tool_sources_refusals(api):
     assert mcp.status_code == 400 and any("not allowed by the policy" in r for r in mcp.json()["reasons"])
     assert client.post("/tools/sources", json={"scope": "org:acme", "source": "ftp"}).status_code == 400
     connectors = client.get("/tools/connectors").json()
-    assert [c["name"] for c in connectors] == ["github", "linear", "slack"]
+    assert {"github", "linear", "slack", "cakemail", "composio"} <= {c["name"] for c in connectors}
     assert connectors[2]["env_var"] == "SLACK_BOT_TOKEN" and connectors[2]["store_provider"] == "slack"

@@ -28,11 +28,24 @@ fabri imports, no websockets dependency. Three endpoints:
 - ``GET  /catalog``         ``{"catalog": {...} | null}`` -- installed roster entries.
 - ``GET  /auth/check``      204 when the caller may read, 401 otherwise (for a
                             reverse proxy's forward-auth).
+- ``/connections``, ``/connect/<provider>`` and the Slack and Linear install
+  paths are served by :class:`fabri.service.connections_routes.ConnectionsApi`.
 
 With ``auth.enabled`` every route except ``/health``, ``/auth/*`` and signed
 webhooks needs a session or a service/admin bearer token, and anything that
 starts or changes work needs the admin role. ``auth.allow_guests`` restores the
 older mode where anonymous visitors may start and follow their own runs.
+
+With auth off, every ``POST``, ``PUT`` and ``DELETE`` except the signed
+webhooks goes through the cross-site checks in
+:mod:`fabri.service.request_guard`: ``Sec-Fetch-Site: cross-site`` and a
+foreign or ``null`` ``Origin`` are refused (403), a route that reads a JSON
+body needs ``Content-Type: application/json`` (415), and the request must be
+shown to be same-origin (a matching ``Origin``, or ``Sec-Fetch-Site:
+same-origin`` with a loopback or public base ``Host``) or carry the service
+or admin token (403 otherwise). Studio's own fetches pass. A script that
+drives the API with auth off sends ``Sec-Fetch-Site: same-origin`` or a
+token. ``PATCH`` has no route and gets 501.
 
 Built on :class:`http.server.ThreadingHTTPServer` so a streaming ``events``
 request doesn't block a concurrent ``POST /runs``.
@@ -52,10 +65,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from fabri.core.logging_setup import get_logger
 from fabri.catalog import catalog_listing
-from fabri.service import github_app, linear_oauth
-from fabri.service import slack_oauth
+from fabri.service import github_app
 from fabri.service.github_events import handle_github_event
 from fabri.service.surfaces import pipeline as surface_pipeline
+from fabri.service.binding import refused_override_keys
 from fabri.service.service import FabriService
 from fabri.service.auth import (
     Principal,
@@ -82,13 +95,23 @@ _SLACK_UNINSTALL_RE = re.compile(r"^/slack/installs/([A-Za-z0-9_.-]+)/delete/?$"
 _GITHUB_UNINSTALL_RE = re.compile(r"^/github/installs/([A-Za-z0-9_.-]+)/delete/?$")
 _LINEAR_UNINSTALL_RE = re.compile(r"^/linear/installs/([A-Za-z0-9_.-]+)/delete/?$")
 _AUTH_BODY_MAX_BYTES = 8 * 1024
+# A query string inside a logged request line, up to the next space or quote.
+_QUERY_RE = re.compile(r"\?[^\s\"']*")
 _AUTH_EMAIL_MAX_LENGTH = 254
 _AUTH_PASSWORD_MAX_LENGTH = 1024
-# GETs that write install state or start an OAuth install.
-_ADMIN_GETS = frozenset({
-    "/slack/install", "/slack/oauth/callback", "/github/setup",
-    "/linear/install", "/linear/oauth/callback", "/surfaces/health",
-})
+# GETs that write install state. The Slack and Linear install paths moved
+# to ConnectionsApi, which gates them itself.
+_ADMIN_GETS = frozenset({"/github/setup", "/surfaces/health"})
+
+
+def _override_refusal(keys: list[str], where: str = "overrides") -> dict:
+    return {
+        "error": (
+            f"{where} may not set {', '.join(keys)}: these keys start processes, "
+            "widen tool access, or choose where keys, data or traffic go, so only "
+            "the agent's own config may set them"
+        )
+    }
 
 
 def studio_assets_available() -> bool:
@@ -111,8 +134,21 @@ class _Handler(BaseHTTPRequestHandler):
     def slack_cfg(self) -> dict:
         return self.service._slack_cfg
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        # Method and path only. OAuth callbacks carry the authorization code
+        # and state in the query string, so no query is ever logged.
+        command = getattr(self, "command", None) or "-"
+        path = urlsplit(getattr(self, "path", "") or "").path or "-"
+        logger.debug("fabri serve: %s %s %s", command, path, code)
+
     def log_message(self, fmt: str, *args) -> None:  # quiet the default stderr spam
-        logger.debug("fabri serve: " + fmt, *args)
+        # Error lines (a bad request line, say) can quote the raw request
+        # line, so any query string in the text is cut before logging.
+        try:
+            text = fmt % args
+        except (TypeError, ValueError):
+            text = fmt
+        logger.debug("fabri serve: %s", _QUERY_RE.sub("?[query removed]", text))
 
     def _send_json(
         self, code: int, payload: dict, *, extra_headers: Mapping[str, str] | None = None
@@ -171,8 +207,12 @@ class _Handler(BaseHTTPRequestHandler):
         cfg = getattr(service, "auth_cfg", None) or {}
         return bool(getattr(service, "auth_enabled", False)) and not cfg.get("allow_guests")
 
-    def _gate(self, method: str) -> bool:
-        """Under strict auth: a caller for every route, admin for any change."""
+    def _gate(self, method: str, owner_may_write: bool = False) -> bool:
+        """Under strict auth: a caller for every route, admin for any change.
+
+        owner_may_write skips the admin check for one route whose handler then
+        checks run ownership itself (answering a question on your own run).
+        """
         self._caller = None
         if not self._strict_auth():
             return True
@@ -181,7 +221,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "auth required"})
             return False
         path = urlsplit(self.path).path.rstrip("/")
-        if (method != "GET" or path in _ADMIN_GETS) and not principal.is_admin:
+        needs_admin = method != "GET" or path in _ADMIN_GETS
+        if needs_admin and not owner_may_write and not principal.is_admin:
             self._send_json(403, {"error": "admin role required"})
             return False
         self._caller = principal
@@ -205,15 +246,27 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _authorize_run(self, session_id: str) -> bool:
-        """Allow capability-style guest runs or the authenticated run owner."""
+    def _authorize_run(self, session_id: str, *, write: bool = False) -> bool:
+        """Allow capability-style guest runs or the authenticated run owner.
+
+        Under strict auth a write (answer, cancel) needs an admin or the exact
+        owner: an unowned run or a caller with no user id never matches. Reads
+        keep the wider rule, so the read-only service token can still stream
+        any run and a signed-in user can read an unowned one by its id."""
         owner_id = self.service.run_owner(session_id)
         if self._strict_auth():
             caller = getattr(self, "_caller", None)
             if caller is None:
                 self._send_json(401, {"error": "auth required"})
                 return False
-            if owner_id is None or caller.user_id is None or owner_id == caller.user_id:
+            if write:
+                if caller.is_admin or (
+                    caller.user_id is not None
+                    and owner_id is not None
+                    and owner_id == caller.user_id
+                ):
+                    return True
+            elif owner_id is None or caller.user_id is None or owner_id == caller.user_id:
                 return True
             self._send_json(404, {"error": f"unknown session_id {session_id!r}"})
             return False
@@ -239,20 +292,72 @@ class _Handler(BaseHTTPRequestHandler):
         api.handle(self, method)
         return True
 
+    def _connections_dispatch(self, method: str) -> bool:
+        """Serve /connections, /connect/* and the Slack and Linear install
+        paths when the server has a ConnectionsApi."""
+        api = getattr(self.server, "connections_api", None)
+        if api is None or not api.matches(self.path):
+            return False
+        api.handle(self, method)
+        return True
+
+    def _webhook_post(self) -> bool:
+        """POSTs from a vendor's servers: surface webhooks, Slack events and
+        the GitHub webhook. They carry signatures, not browser headers, so
+        the cross-site checks do not apply to them."""
+        surfaces = getattr(self.service, "surfaces", None)
+        if surfaces is not None and surfaces.routes().get(self.path) is not None:
+            return True
+        return self.path in ("/slack/events", "/slack/events/", "/github/webhook", "/github/webhook/")
+
+    def _json_route(self) -> bool:
+        """Routes that read a JSON request body."""
+        path = urlsplit(self.path).path
+        if path in ("/runs", "/runs/", "/fleets", "/fleets/") or _ANSWER_RE.match(path):
+            return True
+        api = getattr(self.server, "setups_api", None)
+        return api is not None and api.matches(self.path)
+
+    def _cross_site_refused(self, method: str) -> bool:
+        """With auth off, refuse a cross-site mutation and one that is neither
+        shown to be same-origin nor carries the service or admin token (see
+        ``fabri.service.request_guard``). True when a refusal was sent.
+
+        With auth on, every change already needs a session cookie (sent
+        SameSite=Lax, so not on a cross-site POST) or a bearer token."""
+        if getattr(self.service, "auth_enabled", False):
+            return False
+        from fabri.service.request_guard import Refused, check_request, need_same_origin
+
+        try:
+            same_origin = check_request(self, json_body=method in ("POST", "PUT") and self._json_route())
+            need_same_origin(auth_on=False, principal=self._principal(), same_origin=same_origin)
+        except Refused as exc:
+            self._send_json(exc.status, {"error": exc.message})
+            return True
+        return False
+
     def do_PUT(self) -> None:  # noqa: N802
+        if self._cross_site_refused("PUT"):
+            return
         if self._setups_dispatch("PUT"):
             return
         if self._gate("PUT"):
             self._send_json(404, {"error": f"no route for PUT {self.path}"})
 
     def do_DELETE(self) -> None:  # noqa: N802
+        # ConnectionsApi runs the same checks itself.
+        if self._connections_dispatch("DELETE"):
+            return
+        if self._cross_site_refused("DELETE"):
+            return
         if self._setups_dispatch("DELETE"):
             return
         if self._gate("DELETE"):
             self._send_json(404, {"error": f"no route for DELETE {self.path}"})
 
     def do_GET(self) -> None:  # noqa: N802 (http.server naming)
-        if self._setups_dispatch("GET"):
+        if self._setups_dispatch("GET") or self._connections_dispatch("GET"):
             return
         parsed = urlsplit(self.path)
         path = parsed.path
@@ -363,19 +468,6 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_result(m.group(1))
             return
-        if path in ("/slack/install", "/slack/install/"):
-            url = slack_oauth.build_install_redirect()
-            if url is None:
-                self._send_json(500, {"error": "Slack install is not configured"})
-                return
-            self.send_response(302)
-            self.send_header("Location", url)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if path in ("/slack/oauth/callback", "/slack/oauth/callback/"):
-            self._slack_oauth_callback(parse_qs(parsed.query))
-            return
         if path in ("/slack/installs", "/slack/installs/"):
             ok, user_id = self._owner_scope()
             if not ok:
@@ -389,12 +481,27 @@ class _Handler(BaseHTTPRequestHandler):
             ok, user_id = self._owner_scope()
             if not ok:
                 return
-            self._send_json(200, {"install_url": github_app.install_url()})
+            # The install start. It issues a signed single-use state, so with
+            # auth off it must be provably same-origin (Studio's fetch is).
+            store = getattr(self.service, "connection_store", None)
+            if github_app.install_url() is None or store is None:
+                self._send_json(200, {"install_url": github_app.install_url()})
+                return
+            if self._cross_site_refused("GET"):
+                return
+            self._send_json(200, {"install_url": github_app.install_url(github_app.begin_install(store))})
             return
         if path in ("/github/setup", "/github/setup/"):
             q = parse_qs(parsed.query)
             installation_id = (q.get("installation_id") or [""])[0]
-            if not installation_id:
+            state = (q.get("state") or [""])[0]
+            store = getattr(self.service, "connection_store", None)
+            # GitHub sends the browser here from github.com, so this request is
+            # cross-site by nature and the browser headers prove nothing. The
+            # signed single-use state from /github/app-info is the proof. Without
+            # it nothing is written; the signed installation webhook still
+            # records installs that did not start here.
+            if not installation_id or store is None or not github_app.consume_install_state(store, state):
                 self._redirect_studio("/?github=error#settings")
                 return
             self.service.github_install_store.upsert(installation_id=installation_id)
@@ -409,19 +516,6 @@ class _Handler(BaseHTTPRequestHandler):
                  "account_type": r["account_type"], "installed_at": r["installed_at"]}
                 for r in self.service.github_install_store.list()
             ]})
-            return
-        if path in ("/linear/install", "/linear/install/"):
-            url = linear_oauth.build_install_redirect()
-            if url is None:
-                self._send_json(500, {"error": "Linear install is not configured"})
-                return
-            self.send_response(302)
-            self.send_header("Location", url)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if path in ("/linear/oauth/callback", "/linear/oauth/callback/"):
-            self._linear_oauth_callback(parse_qs(parsed.query))
             return
         if path in ("/linear/installs", "/linear/installs/"):
             ok, user_id = self._owner_scope()
@@ -449,6 +543,12 @@ class _Handler(BaseHTTPRequestHandler):
         return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
+        # ConnectionsApi runs the same checks itself; webhooks are signed
+        # server-to-server calls.
+        if self._connections_dispatch("POST"):
+            return
+        if not self._webhook_post() and self._cross_site_refused("POST"):
+            return
         if self._setups_dispatch("POST"):
             return
         if self.service.auth_enabled and self.path.rstrip("/") in {
@@ -496,17 +596,30 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(encoded)
             return
-        if not self._gate("POST"):
-            return
         m = _ANSWER_RE.match(self.path)
+        if not self._gate("POST", owner_may_write=m is not None):
+            return
         if m:
-            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
-                return
+            # Under strict auth the run owner may answer, not only an admin.
+            # An admin may answer any run.
+            caller = getattr(self, "_caller", None)
+            admin = caller is not None and caller.is_admin
+            if self.service.auth_enabled and not admin:
+                if self._strict_auth():
+                    # Only the owner may answer. An unowned run (token-submitted)
+                    # or a caller with no user id (the service token) never
+                    # matches, so None == None does not count as ownership.
+                    owner_id = self.service.run_owner(m.group(1))
+                    if owner_id is None or caller.user_id is None or owner_id != caller.user_id:
+                        self._send_json(404, {"error": f"unknown session_id {m.group(1)!r}"})
+                        return
+                if not self._authorize_run(m.group(1), write=True):
+                    return
             self._answer(m.group(1))
             return
         m = _CANCEL_RE.match(self.path)
         if m:
-            if self.service.auth_enabled and not self._authorize_run(m.group(1)):
+            if self.service.auth_enabled and not self._authorize_run(m.group(1), write=True):
                 return
             self._cancel(m.group(1))
             return
@@ -560,6 +673,10 @@ class _Handler(BaseHTTPRequestHandler):
         task = req.get("task")
         if not task:
             self._send_json(400, {"error": "request missing required field 'task'"})
+            return
+        refused = refused_override_keys(req.get("overrides"))
+        if refused:
+            self._send_json(400, _override_refusal(refused))
             return
         try:
             session_id = self.service.submit(
@@ -619,6 +736,16 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(items, list) or not items:
             self._send_json(400, {"error": "fleet request requires a non-empty 'items' list"})
             return
+        refused = refused_override_keys(req.get("overrides"))
+        if refused:
+            self._send_json(400, _override_refusal(refused))
+            return
+        for index, item in enumerate(items):
+            item_overrides = item.get("overrides") if isinstance(item, Mapping) else None
+            refused = refused_override_keys(item_overrides)
+            if refused:
+                self._send_json(400, _override_refusal(refused, f"items[{index}].overrides"))
+                return
         try:
             result = self.service.submit_fleet(
                 items, req.get("overrides"), user_id=user_id
@@ -760,76 +887,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _slack_oauth_callback(self, q: dict) -> None:
-        secret = os.environ.get("SLACK_SIGNING_SECRET", "")
-        state = (q.get("state") or [""])[0]
-        if q.get("error") or not slack_oauth.verify_state(state, secret):
-            self._redirect_studio("/?slack=error#settings")
-            return
-        code = (q.get("code") or [""])[0]
-        if not code:
-            self._redirect_studio("/?slack=error#settings")
-            return
-        try:
-            tok = slack_oauth.exchange_code(code)
-        except Exception:
-            logger.warning("Slack OAuth code exchange failed")
-            self._redirect_studio("/?slack=error#settings")
-            return
-        if not tok.get("ok"):
-            logger.warning("Slack OAuth rejected: %s", tok.get("error"))
-            self._redirect_studio("/?slack=error#settings")
-            return
-        team = tok.get("team") or {}
-        if not team.get("id"):
-            self._redirect_studio("/?slack=error#settings")
-            return
-        self.service.install_store.upsert(
-            team_id=team["id"],
-            bot_token=tok["access_token"],
-            team_name=team.get("name"),
-            scopes=tok.get("scope"),
-        )
-        self._redirect_studio("/?slack=connected#settings")
-
-    def _linear_oauth_callback(self, q: dict) -> None:
-        secret = os.environ.get("LINEAR_CLIENT_SECRET", "")
-        state = (q.get("state") or [""])[0]
-        if q.get("error") or not slack_oauth.verify_state(state, secret):
-            self._redirect_studio("/?linear=error#settings")
-            return
-        code = (q.get("code") or [""])[0]
-        if not code:
-            self._redirect_studio("/?linear=error#settings")
-            return
-        try:
-            tok = linear_oauth.exchange_code(code)
-            access = tok.get("access_token")
-            if not access:
-                raise ValueError("no access_token")
-            ws = linear_oauth.fetch_workspace(access)
-        except Exception:
-            logger.warning("Linear OAuth exchange failed")
-            self._redirect_studio("/?linear=error#settings")
-            return
-        if not ws.get("id"):
-            self._redirect_studio("/?linear=error#settings")
-            return
-        self.service.linear_install_store.upsert(
-            workspace_id=ws["id"],
-            access_token=access,
-            workspace_name=ws.get("name"),
-            scopes=tok.get("scope"),
-            refresh_token=tok.get("refresh_token"),
-            expires_in=tok.get("expires_in"),
-        )
-        self._redirect_studio("/?linear=connected#settings")
-
     @staticmethod
     def _is_api_path(raw_path: str) -> bool:
         path = urlsplit(raw_path).path.rstrip("/")
         return any(path == prefix or path.startswith(f"{prefix}/")
-                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/surfaces", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools"))
+                   for prefix in ("/runs", "/fleets", "/agencies", "/health", "/surfaces", "/questions", "/company", "/catalog", "/slack", "/auth", "/github", "/linear", "/setups", "/tools",
+                                  "/connect", "/connections"))
 
     def _send_studio_asset(self) -> None:
         request_path = unquote(urlsplit(self.path).path).lstrip("/")
@@ -853,6 +916,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class StartRefused(SystemExit):
+    """``serve_http`` will not start with this configuration. A SystemExit,
+    so ``fabri serve`` and ``fabri studio`` print the message and exit 1
+    without a traceback."""
+
+
 class FabriHTTPServer(ThreadingHTTPServer):
     """Threading HTTP server carrying a :class:`FabriService`."""
 
@@ -868,9 +937,11 @@ class FabriHTTPServer(ThreadingHTTPServer):
         company: dict | None = None,
         catalog: Mapping[str, dict] | None = None,
         setups_api: object | None = None,
+        connections_api: object | None = None,
     ) -> None:
         super().__init__(address, _Handler)
         self.setups_api = setups_api
+        self.connections_api = connections_api
         self.service = service
         self.serve_studio = serve_studio
         self.company = company
@@ -886,13 +957,31 @@ def serve_http(
     company: dict | None = None,
     catalog: Mapping[str, dict] | None = None,
     setups_api: object | None = None,
+    connections_api: object | None = None,
 ) -> FabriHTTPServer:
     """Build (but do not block on) a :class:`FabriHTTPServer`.
 
     Returns the server so a caller can ``serve_forever()`` (the CLI does) or run
     it in a thread (tests do). Bind a port of ``0`` to get an OS-assigned one.
+
+    With no ``connections_api``, a service that has a ``connection_store``
+    gets a default ``ConnectionsApi``, so the Slack and Linear install paths
+    keep working for hosts that call this function directly.
+
+    Raises StartRefused when FABRI_PUBLIC_BASE_URL is not usable (not http or
+    https, or plain http on a non-loopback host), or names a hosted address
+    while auth is off.
     """
+    from fabri.service.connections_routes import hosted_start_refusal
+
+    refusal = hosted_start_refusal(service)
+    if refusal:
+        raise StartRefused(f"fabri serve refused to start: {refusal}")
+    if connections_api is None and getattr(service, "connection_store", None) is not None:
+        from fabri.service.connections_routes import ConnectionsApi
+
+        connections_api = ConnectionsApi(service)
     return FabriHTTPServer(
         (host, port), service, serve_studio=serve_studio, company=company, catalog=catalog,
-        setups_api=setups_api,
+        setups_api=setups_api, connections_api=connections_api,
     )

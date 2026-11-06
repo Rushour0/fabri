@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -168,3 +169,115 @@ def test_socket_empty_reply_falls_back_to_default(short_socket_dir):
 
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["answer"] == "yes"
+
+
+# -- AskUserListener: questions asked from inside the service process ---------
+
+def _listener(short_socket_dir, events):
+    from fabri.service.ask_user_listener import AskUserListener
+
+    return AskUserListener(str(short_socket_dir / "q.sock"), events.append)
+
+
+def test_ask_local_fires_on_question_and_is_listed(short_socket_dir):
+    events: list[dict] = []
+    lst = _listener(short_socket_dir, events)
+    p = lst.ask_local(
+        question_id="q1", question="send it?", options=["approve", "deny"],
+        default="deny", kind="approval",
+    )
+    assert p.conn is None
+    assert events == [{
+        "question_id": "q1", "kind": "approval", "question": "send it?",
+        "options": ["approve", "deny"], "default": "deny",
+    }]
+    listed = lst.pending_questions()
+    assert [q["question_id"] for q in listed] == ["q1"]
+    assert listed[0]["kind"] == "approval"
+    lst.forget("q1")
+    assert lst.pending_questions() == []
+
+
+def test_ask_local_answered_through_answer(short_socket_dir):
+    lst = _listener(short_socket_dir, [])
+    p = lst.ask_local(question_id="q1", question="ok?", options=None, default=None)
+    assert not p.event.is_set()
+    assert lst.answer("q1", "approve", "approve") is True
+    assert p.event.is_set()
+    assert p.reply == {
+        "question_id": "q1", "answer": "approve", "selected_option": "approve",
+    }
+    lst.forget("q1")
+    lst.forget("q1")  # second forget is a no-op
+    assert lst.answer("q1", "approve") is False
+
+
+def test_ask_local_close_releases_without_reply(short_socket_dir):
+    lst = _listener(short_socket_dir, [])
+    p = lst.ask_local(question_id="q1", question="ok?", options=None, default=None)
+    lst.close()
+    assert p.event.is_set()
+    assert p.reply is None
+    lst.forget("q1")  # after close, still a no-op
+
+
+def test_ask_local_duplicate_id_rejected(short_socket_dir):
+    lst = _listener(short_socket_dir, [])
+    first = lst.ask_local(question_id="q1", question="a", options=None, default=None)
+    with pytest.raises(ValueError):
+        lst.ask_local(question_id="q1", question="b", options=None, default=None)
+    assert lst._pending["q1"] is first
+
+
+def test_ask_local_survives_a_failing_on_question_hook(short_socket_dir):
+    from fabri.service.ask_user_listener import AskUserListener
+
+    def boom(_event):
+        raise RuntimeError("hook down")
+
+    lst = AskUserListener(str(short_socket_dir / "q.sock"), boom)
+    p = lst.ask_local(question_id="q1", question="ok?", options=None, default=None)
+    assert [q["question_id"] for q in lst.pending_questions()] == ["q1"]
+    assert lst.answer("q1", "yes") is True
+    assert p.reply["answer"] == "yes"
+
+
+def test_socket_questions_unchanged_next_to_local_ones(short_socket_dir):
+    events: list[dict] = []
+    lst = _listener(short_socket_dir, events)
+    lst.start()
+    try:
+        local = lst.ask_local(
+            question_id="local1", question="local?", options=None, default=None,
+            kind="approval",
+        )
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(5.0)
+        client.connect(lst.socket_path)
+        client.sendall((json.dumps({
+            "question_id": "sock1", "question": "socket?", "options": ["a"],
+            "default": "a",
+        }) + "\n").encode())
+        deadline = time.time() + 5.0
+        while len(lst.pending_questions()) < 2 and time.time() < deadline:
+            time.sleep(0.02)
+        ids = {q["question_id"] for q in lst.pending_questions()}
+        assert ids == {"local1", "sock1"}
+        assert {e["question_id"] for e in events} == {"local1", "sock1"}
+
+        assert lst.answer("sock1", "a", "a") is True
+        data = b""
+        while b"\n" not in data:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        assert json.loads(data.split(b"\n")[0]) == {
+            "question_id": "sock1", "answer": "a", "selected_option": "a",
+        }
+        # The local one is untouched by the socket answer.
+        assert not local.event.is_set()
+        assert local.reply is None
+        client.close()
+    finally:
+        lst.close()

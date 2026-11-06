@@ -26,6 +26,11 @@ from fabri.repo.base import token_url
 from fabri.repo.github import GitHubProvider
 from fabri.repo.github_auth import build_github_auth
 from fabri.service.repo_run_notify import notify_slack
+from fabri.tools.credential_store import (
+    broker_mode,
+    env_without_credentials,
+    subagent_credential_names,
+)
 from fabri.tools.secret_refs import resolve_secret
 
 
@@ -509,7 +514,9 @@ def _gate_setup(
         )
 
     argv = _split_command(setup_cmd, gate="setup")
-    env = os.environ.copy()
+    # The setup command runs code from the checked-out repo, so it gets no
+    # FABRI_CRED_* value and no credential broker name.
+    env = env_without_credentials()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     completed = _run_captured(
         argv,
@@ -556,7 +563,7 @@ def _gate_agency_run(
         "--session-id",
         session_id,
     ]
-    env = os.environ.copy()
+    env = _agency_run_env(materialized_config)
     env.update(
         {
             "FABRI_SANDBOX_ROOT_OVERRIDE": str(checkout_dir),
@@ -594,6 +601,27 @@ def _gate_agency_run(
     )
 
 
+def _agency_run_env(config: Path) -> dict[str, str]:
+    """The environment for the nested ``fabri run`` of the crew.
+
+    That run is a sub-agent of this process, so it is treated the same way:
+    it keeps the two credential broker names when this process has them, and
+    nothing derived from its config, because the broker answers it from the
+    parent run's binding. Without a broker it keeps only the FABRI_CRED_*
+    values the crew config's own sources declare and its policy grants. Every
+    other FABRI_CRED_* variable is removed.
+    """
+    if broker_mode():
+        return env_without_credentials(keep_broker=True)
+    try:
+        keep = subagent_credential_names(
+            config, actor=os.environ.get("FABRI_RUN_ACTOR") or None
+        )
+    except Exception:  # noqa: BLE001 -- an unreadable config passes no credentials
+        keep = frozenset()
+    return env_without_credentials(keep=keep)
+
+
 def _gate_verified_tests(
     *,
     explicit_cmd: str | None,
@@ -605,7 +633,9 @@ def _gate_verified_tests(
     argv = _split_command(resolved_cmd, gate="verified_tests")
     argv = _without_pytest_cache(argv)
 
-    env = os.environ.copy()
+    # The test command runs code from the checked-out repo, so it gets no
+    # FABRI_CRED_* value and no credential broker name.
+    env = env_without_credentials()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     completed = _run_captured(
         argv,

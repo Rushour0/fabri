@@ -17,6 +17,8 @@ import { CatalogView, type CatalogSelection } from "./components/CatalogView";
 import ConnectSlack from "./components/ConnectSlack";
 import ConnectGitHub from "./components/ConnectGitHub";
 import ConnectLinear from "./components/ConnectLinear";
+import ConnectionsPanel from "./components/ConnectionsPanel";
+import { allScopes, setupsApi } from "./lib/setups";
 import { useHashRoute, type Surface } from "./hooks/useHashRoute";
 import { listQuestions, getCompany, getCatalog, onUnauthorized, type Company, type Catalog } from "./lib/api";
 import { getAuthConfig, getMe, LEGACY_AUTH_CONFIG, logout, mustSignIn, type AuthConfig, type AuthState } from "./lib/auth";
@@ -115,6 +117,26 @@ export default function App() {
   }, []);
 
   useEffect(() => onUnauthorized(() => setAuthState("anon")), []);
+
+  // Setup scopes the Connections card can attach to. Loaded once, on the
+  // Settings surface; a server without setups leaves the list empty and the
+  // card shows the CLI line instead.
+  const [setupScopes, setSetupScopes] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!hasAccountAccess || surface !== "settings" || setupScopes !== null) return;
+    let live = true;
+    setupsApi
+      .scopes()
+      .then((tree) => {
+        if (live) setSetupScopes(allScopes(tree).map((s) => s.id));
+      })
+      .catch(() => {
+        if (live) setSetupScopes([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [hasAccountAccess, surface, setupScopes]);
 
   // A deep link or a stale hash can point at a hidden section.
   useEffect(() => {
@@ -417,6 +439,12 @@ export default function App() {
                   <ConnectSlack locked={!hasAccountAccess} onRequireAuth={requireAuthForIntegrations} />
                   <ConnectGitHub locked={!hasAccountAccess} onRequireAuth={requireAuthForIntegrations} />
                   <ConnectLinear locked={!hasAccountAccess} onRequireAuth={requireAuthForIntegrations} />
+                  <ConnectionsPanel
+                    locked={!hasAccountAccess}
+                    onRequireAuth={requireAuthForIntegrations}
+                    scopes={setupScopes ?? []}
+                    signedIn={authEmail !== null}
+                  />
                 </div>
               </div>
             )}

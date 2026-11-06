@@ -1,47 +1,45 @@
-"""Slack install storage; tokens are plaintext-at-rest v1 and never logged."""
+"""Workspace install stores for Slack, GitHub and Linear.
+
+Slack and Linear tokens live in the ``connections`` table
+(``fabri.service.connection_store``); the two classes here keep their old
+names, signatures and row shapes as thin wrappers over ``ConnectionStore``.
+Secrets at rest are plaintext in a 0600 file in this release, and no token is
+ever logged. ``GitHubInstallStore`` holds no token and keeps its own table.
+"""
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from fabri.service.connection_store import REFRESH_MARGIN_S, ConnectionStore
 
-# Refresh a token this many seconds before it expires.
-REFRESH_MARGIN_S = 300
+__all__ = [
+    "REFRESH_MARGIN_S",
+    "GitHubInstallStore",
+    "LinearInstallStore",
+    "SlackInstallStore",
+]
 
 
 class SlackInstallStore:
-    """Store Slack installs with plaintext-at-rest v1 tokens that are never logged."""
+    """Slack workspace installs, stored as ``slack`` connections keyed by team id."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self._cs = ConnectionStore(path)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS installs(
-                    team_id TEXT PRIMARY KEY,
-                    bot_token TEXT NOT NULL,
-                    team_name TEXT,
-                    scopes TEXT,
-                    installed_at REAL,
-                    updated_at REAL
-                )
-                """
-            )
+    @staticmethod
+    def _legacy(row: dict) -> dict:
+        return {
+            "team_id": row["handle"],
+            "team_name": row["display_name"],
+            "scopes": row["scopes"],
+            "installed_at": row["installed_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def upsert(
         self,
@@ -52,56 +50,27 @@ class SlackInstallStore:
         scopes: str | None = None,
         now: float | None = None,
     ) -> None:
-        now = time.time() if now is None else now
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO installs(
-                    team_id, bot_token, team_name, scopes, installed_at, updated_at
-                ) VALUES(?,?,?,?,?,?)
-                ON CONFLICT(team_id) DO UPDATE SET
-                    bot_token=excluded.bot_token,
-                    team_name=excluded.team_name,
-                    scopes=excluded.scopes,
-                    updated_at=excluded.updated_at
-                """,
-                (team_id, bot_token, team_name, scopes, now, now),
-            )
+        self._cs.upsert(
+            provider="slack",
+            handle=team_id,
+            access_token=bot_token,
+            display_name=team_name,
+            scopes=scopes,
+            now=now,
+        )
 
     def get_token(self, team_id: str) -> str | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT bot_token FROM installs WHERE team_id=?", (team_id,)
-            ).fetchone()
-        return row["bot_token"] if row is not None else None
+        return self._cs.get_token("slack", team_id)
 
     def get(self, team_id: str) -> dict | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT team_id, team_name, scopes, installed_at, updated_at
-                FROM installs WHERE team_id=?
-                """,
-                (team_id,),
-            ).fetchone()
-        return dict(row) if row is not None else None
+        row = self._cs.get("slack", team_id)
+        return self._legacy(row) if row is not None else None
 
     def list(self) -> list[dict]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT team_id, team_name, scopes, installed_at, updated_at
-                FROM installs
-                """
-            ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._legacy(row) for row in self._cs.list("slack")]
 
     def delete(self, team_id: str) -> bool:
-        with self._connect() as connection:
-            cur = connection.execute(
-                "DELETE FROM installs WHERE team_id=?", (team_id,)
-            )
-        return cur.rowcount > 0
+        return self._cs.delete("slack", team_id)
 
 
 class GitHubInstallStore:
@@ -240,7 +209,7 @@ class GitHubInstallStore:
 
 
 class LinearInstallStore:
-    """Linear workspace installs.
+    """Linear workspace installs, stored as ``linear`` connections.
 
     Linear access tokens last 24 hours and come with a rotating refresh
     token. With a `refresher` (a callable taking the refresh token and
@@ -251,33 +220,19 @@ class LinearInstallStore:
     def __init__(self, path: Path, refresher: Callable[[str], dict] | None = None) -> None:
         self.refresher = refresher
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self._cs = ConnectionStore(
+            path, refreshers={"linear": refresher} if refresher else None
+        )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS linear_installs(
-                    workspace_id TEXT PRIMARY KEY,
-                    access_token TEXT NOT NULL,
-                    workspace_name TEXT,
-                    scopes TEXT,
-                    installed_at REAL,
-                    updated_at REAL
-                )
-                """
-            )
-            columns = {r[1] for r in connection.execute("PRAGMA table_info(linear_installs)")}
-            for column, kind in (("refresh_token", "TEXT"), ("expires_at", "REAL")):
-                if column not in columns:
-                    connection.execute(f"ALTER TABLE linear_installs ADD COLUMN {column} {kind}")
+    @staticmethod
+    def _legacy(row: dict) -> dict:
+        return {
+            "workspace_id": row["handle"],
+            "workspace_name": row["display_name"],
+            "scopes": row["scopes"],
+            "installed_at": row["installed_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def upsert(
         self,
@@ -290,115 +245,29 @@ class LinearInstallStore:
         expires_in: float | None = None,
         now: float | None = None,
     ) -> None:
-        now = time.time() if now is None else now
-        expires_at = now + float(expires_in) if expires_in else None
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO linear_installs(
-                    workspace_id, access_token, workspace_name, scopes,
-                    installed_at, updated_at, refresh_token, expires_at
-                ) VALUES(?,?,?,?,?,?,?,?)
-                ON CONFLICT(workspace_id) DO UPDATE SET
-                    access_token=excluded.access_token,
-                    workspace_name=excluded.workspace_name,
-                    scopes=excluded.scopes,
-                    updated_at=excluded.updated_at,
-                    refresh_token=excluded.refresh_token,
-                    expires_at=excluded.expires_at
-                """,
-                (
-                    workspace_id,
-                    access_token,
-                    workspace_name,
-                    scopes,
-                    now,
-                    now,
-                    refresh_token,
-                    expires_at,
-                ),
-            )
+        self._cs.upsert(
+            provider="linear",
+            handle=workspace_id,
+            access_token=access_token,
+            display_name=workspace_name,
+            scopes=scopes,
+            refresh_token=refresh_token,
+            expires_in=expires_in,
+            now=now,
+        )
 
     def get_token(self, workspace_id: str, *, now: float | None = None) -> str | None:
         """The workspace's access token, refreshed first when it is about to
         expire. None when there is no install, or when the token has expired
         and could not be refreshed."""
-        now = time.time() if now is None else now
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT access_token, refresh_token, expires_at FROM linear_installs WHERE workspace_id=?",
-                (workspace_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        if row["expires_at"] is None or row["expires_at"] - now > REFRESH_MARGIN_S:
-            return row["access_token"]
-        if self.refresher is None or not row["refresh_token"]:
-            return row["access_token"] if row["expires_at"] > now else None
-        return self._refresh(workspace_id, now)
-
-    def _refresh(self, workspace_id: str, now: float) -> str | None:
-        # BEGIN IMMEDIATE takes the write lock before reading, so two servers
-        # sharing the database cannot both spend the same refresh token.
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT access_token, refresh_token, expires_at FROM linear_installs WHERE workspace_id=?",
-                (workspace_id,),
-            ).fetchone()
-            if row is None:
-                connection.rollback()
-                return None
-            if row["expires_at"] is not None and row["expires_at"] - now > REFRESH_MARGIN_S:
-                connection.rollback()
-                return row["access_token"]
-            try:
-                fresh = self.refresher(row["refresh_token"])
-                access = fresh["access_token"]
-            except Exception as exc:  # noqa: BLE001 -- logged without the token
-                connection.rollback()
-                logger.warning("Linear token refresh failed for a workspace: %s", type(exc).__name__)
-                return row["access_token"] if (row["expires_at"] or 0) > now else None
-            expires_in = fresh.get("expires_in")
-            connection.execute(
-                "UPDATE linear_installs SET access_token=?, refresh_token=?, expires_at=?, updated_at=? "
-                "WHERE workspace_id=?",
-                (access, fresh.get("refresh_token") or row["refresh_token"],
-                 now + float(expires_in) if expires_in else None, now, workspace_id),
-            )
-            connection.commit()
-            return access
-        finally:
-            connection.close()
+        return self._cs.get_token("linear", workspace_id, now=now)
 
     def get(self, workspace_id: str) -> dict | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT workspace_id, workspace_name, scopes,
-                    installed_at, updated_at
-                FROM linear_installs WHERE workspace_id=?
-                """,
-                (workspace_id,),
-            ).fetchone()
-        return dict(row) if row is not None else None
+        row = self._cs.get("linear", workspace_id)
+        return self._legacy(row) if row is not None else None
 
     def list(self) -> list[dict]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT workspace_id, workspace_name, scopes,
-                    installed_at, updated_at
-                FROM linear_installs
-                """
-            ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._legacy(row) for row in self._cs.list("linear")]
 
     def delete(self, workspace_id: str) -> bool:
-        with self._connect() as connection:
-            cur = connection.execute(
-                "DELETE FROM linear_installs WHERE workspace_id=?",
-                (workspace_id,),
-            )
-        return cur.rowcount > 0
+        return self._cs.delete("linear", workspace_id)

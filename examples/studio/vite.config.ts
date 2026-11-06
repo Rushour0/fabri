@@ -18,22 +18,43 @@ const PBA_HEADERS = {
   "X-Company": process.env.PBA_COMPANY ?? "demo-league",
 };
 
+// fabri serve refuses writes whose Origin is not its own. A request from the
+// dev server's own page gets the fabri serve origin so Studio works. Any other
+// Origin (a hostile page that reached the proxy) passes through unchanged, so
+// fabri serve refuses it.
+const DEV_PORT = Number(process.env.STUDIO_PORT ?? 5173);
+const DEV_ORIGINS = new Set([`http://localhost:${DEV_PORT}`, `http://127.0.0.1:${DEV_PORT}`]);
+const SERVE_ORIGIN = new URL(FABRI_SERVE).origin;
+
+function rewriteOwnOrigin(proxy: { on: (event: "proxyReq", cb: (proxyReq: { getHeader: (n: string) => unknown; setHeader: (n: string, v: string) => void }) => void) => unknown }) {
+  proxy.on("proxyReq", (proxyReq) => {
+    const origin = proxyReq.getHeader("origin");
+    if (typeof origin === "string" && DEV_ORIGINS.has(origin.toLowerCase())) {
+      proxyReq.setHeader("origin", SERVE_ORIGIN);
+    }
+  });
+}
+
+const SERVE = { target: FABRI_SERVE, changeOrigin: true, configure: rewriteOwnOrigin };
+
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
+    port: DEV_PORT,
     proxy: {
       "/runs": {
-        target: FABRI_SERVE,
-        changeOrigin: true,
+        ...SERVE,
         // Never time out an in-flight SSE stream or a blocking /result call.
         timeout: 0,
         proxyTimeout: 0,
       },
-      "/fleets": { target: FABRI_SERVE, changeOrigin: true, timeout: 0, proxyTimeout: 0 },
-      "/setups": { target: FABRI_SERVE, changeOrigin: true },
-      "/tools": { target: FABRI_SERVE, changeOrigin: true },
-      "/health": { target: FABRI_SERVE, changeOrigin: true },
+      "/fleets": { ...SERVE, timeout: 0, proxyTimeout: 0 },
+      "/setups": { ...SERVE },
+      "/tools": { ...SERVE },
+      // Connections list/add/remove and the OAuth start and callback.
+      "/connections": { ...SERVE },
+      "/connect": { ...SERVE },
+      "/health": { ...SERVE },
       // A regex key: exactly the two spend routes, so no other pba path gets the token.
       "^/pba/v1/spend(/summary)?(\\?.*)?$": { target: PBA, changeOrigin: true, headers: PBA_HEADERS, rewrite: (p) => p.replace(/^\/pba/, "") },
     },

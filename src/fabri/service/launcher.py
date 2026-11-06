@@ -16,16 +16,22 @@ a known trace, and prints a result envelope.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import logging
 import os
 import subprocess
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 from fabri.service.tailer import run_trace_path
+
+logger = logging.getLogger(__name__)
 
 # --- child environment allowlist ---------------------------------------------
 #
@@ -72,7 +78,7 @@ _ALLOWED_EXACT = frozenset({
     "AWS_BEARER_TOKEN_BEDROCK",
     # run-shaping FABRI_* knobs (see the deny note below for the rest)
     "FABRI_HOME", "FABRI_SESSION_ID",
-    "FABRI_ASK_USER_SOCKET", "FABRI_ASK_USER_TIMEOUT_S",
+    "FABRI_ASK_USER_SOCKET", "FABRI_ASK_USER_TIMEOUT_S", "FABRI_APPROVAL_TIMEOUT_S",
     "FABRI_SANDBOX_ROOT", "FABRI_SANDBOX_ROOT_OVERRIDE",
     "FABRI_SUBAGENT_DEPTH", "FABRI_SUBAGENT_MAX_DEPTH",
     "FABRI_DISABLE_SUBAGENT_MINING", "FABRI_EPHEMERAL",
@@ -93,9 +99,61 @@ _ALLOWED_PREFIXES = ("LC_",)
 #   LINEAR_CLIENT_*                        -- OAuth client secret
 #   FABRI_CONFIG                           -- would redirect the run's own config
 # An agency that genuinely needs one (a self-hosted crew posting to its own
-# Slack) re-admits it explicitly via FABRI_RUN_ENV_ALLOW.
+# Slack) re-admits it explicitly via FABRI_RUN_ENV_ALLOW. FABRI_INSTALL_DB is
+# the exception: nothing re-admits it, not even FABRI_RUN_ENV_ALLOW, because
+# the file holds every tenant's connections.
+#
+# A run that needs a stored connection gets it another way. Under fabri serve
+# the service binds the run to its credential broker (service/credential_broker)
+# and passes only FABRI_CRED_BROKER_SOCKET and FABRI_CRED_BROKER_KEY. The run
+# sends each credentialed request to the broker, which resolves the token in
+# the service process on that call and injects it there, so a revoked or
+# refreshed connection takes effect on the next call and no token value is in
+# the run process at all.
+#
+# FABRI_CRED_SNAPSHOT=1 on the service turns on the older, weaker path: before
+# the launch the service resolves the secret_ref values the run's tools.sources
+# declare (and its tools.policy credential_grants allow) and hands the run one
+# FABRI_CRED_<PROVIDER>_<HANDLE> variable per ref (see scoped_credential_env).
+# Those values sit in the run process for its whole life and a revoke does not
+# reach it. It exists for crews that cannot move off a stdio MCP server that
+# needs a stored credential.
+#
+# The broker only keeps tokens out of a run when the run cannot read what the
+# service can read. launch_run starts every run as a plain child process under
+# the service's own OS user, so a run (its bash tool, a python source, a
+# sub-agent) can open installs.db and read every stored token, and on most
+# systems it can read the service's memory too. LAUNCH_ISOLATION names how runs
+# are started. Today it is always "shared_uid". A later launch mode that starts
+# each run under a separate OS user, or in a container with only its run
+# directory mounted, sets it to that mode, and runs_share_service_uid() then
+# returns False. Until then the service refuses a run that needs a stored
+# credential unless the operator sets FABRI_ALLOW_SHARED_UID=1, which is meant
+# for local development where the operator owns every token anyway.
+
+LAUNCH_ISOLATION_SHARED_UID = "shared_uid"
+LAUNCH_ISOLATION_CONTAINER = "container"
+LAUNCH_ISOLATION = LAUNCH_ISOLATION_SHARED_UID
+ALLOW_SHARED_UID_ENV = "FABRI_ALLOW_SHARED_UID"
+
+
+def runs_share_service_uid(isolation: str | None = None) -> bool:
+    """True when a run started with ``isolation`` (default
+    :data:`LAUNCH_ISOLATION`) executes as the same OS user as the service."""
+    # Only the container launcher may report isolation, and only with this
+    # exact value; anything else counts as a same-user run.
+    return (isolation or LAUNCH_ISOLATION) != LAUNCH_ISOLATION_CONTAINER
+
+
+def shared_uid_allowed(env: Mapping[str, str] | None = None) -> bool:
+    """True when the operator opted in to stored credentials for same-user
+    runs with ``FABRI_ALLOW_SHARED_UID=1``."""
+    return (env if env is not None else os.environ).get(ALLOW_SHARED_UID_ENV) == "1"
 
 _ALLOW_ENV_VAR = "FABRI_RUN_ENV_ALLOW"
+
+# Names no allowlist, operator setting or caller env can put in a run.
+_NEVER_IN_RUN = frozenset({"FABRI_INSTALL_DB"})
 
 
 def _operator_allowlist(base_env: dict) -> tuple[str, ...]:
@@ -134,8 +192,164 @@ def build_child_env(
     return {
         key: value
         for key, value in base_env.items()
-        if key in exact or key.startswith(prefixes)
+        if (key in exact or key.startswith(prefixes)) and key not in _NEVER_IN_RUN
     }
+
+
+def _load_bound_config(config_path: str | Path) -> dict:
+    """The run's bound config as raw YAML, or ``{}`` when it cannot be read.
+
+    A malformed or missing file means no credentials are passed; the child
+    fails loudly on the same file, so nothing is hidden by returning empty.
+    """
+    try:
+        with open(config_path) as fh:
+            data = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _run_tool_policy(raw):
+    """The run's ``tools.policy`` built the way ``fabri run`` builds it
+    (``runtime._tool_policy``): a file path or inline data on the strict
+    default. Returns None when the policy cannot be read, which passes no
+    credentials at all."""
+    from fabri.tools.policy import PolicyError, ToolPolicy
+
+    try:
+        if raw is None:
+            return ToolPolicy()
+        if isinstance(raw, (str, Path)):
+            return ToolPolicy.from_file(raw, base=ToolPolicy())
+        return ToolPolicy.from_data(raw, base=ToolPolicy())
+    except (PolicyError, OSError, ValueError):
+        return None
+
+
+def granted_secret_refs(config: Mapping, *, actor: str | None = None) -> list[tuple[str, str]]:
+    """The ``(provider, handle)`` pairs one run may receive.
+
+    Only refs the run's own ``tools.sources`` declare in ``headers`` or ``env``
+    count, and when ``tools.policy`` has ``credential_grants`` a ref must match
+    a grant for the source that declares it. A ``${actor}`` handle becomes the
+    run's actor and is dropped when the run has none. Malformed refs are
+    dropped; the child reports them when it builds the source.
+    """
+    tools = config.get("tools") if isinstance(config, Mapping) else None
+    if not isinstance(tools, Mapping):
+        return []
+    decls = tools.get("sources")
+    if not isinstance(decls, (list, tuple)) or not decls:
+        return []
+    policy = _run_tool_policy(tools.get("policy"))
+    if policy is None:
+        return []
+
+    from fabri.tools.sources import secret_refs
+
+    found: list[tuple[str, str]] = []
+    for decl in decls:
+        if not isinstance(decl, Mapping) or not isinstance(decl.get("name"), str):
+            continue
+        grants = policy.grants_for(decl["name"])
+        for ref in secret_refs(decl):
+            if ref.count(":") != 1:
+                continue
+            provider, handle = ref.split(":", 1)
+            if not provider or not handle:
+                continue
+            if grants is not None and not any(fnmatch.fnmatchcase(ref, g) for g in grants):
+                continue
+            if handle == "${actor}":
+                if not actor:
+                    continue
+                handle = actor
+            found.append((provider, handle))
+    return list(dict.fromkeys(found))
+
+
+def _service_credential_store(install_db: str | Path | None = None):
+    """The store the service resolves a run's refs through, with the audit log
+    when FABRI_CRED_AUDIT_LOG is set.
+
+    ``install_db`` is the service's own install database; FabriService always
+    passes it, so a FABRI_INSTALL_DB left in the process env (by an operator or
+    by another service in the same process) never picks the database. Without
+    it (a direct caller outside the service) the old rule applies: the database
+    FABRI_INSTALL_DB names, else env vars."""
+    from fabri.tools.credential_store import (
+        EnvCredentialStore,
+        ScopedCredentialStore,
+        SqliteInstallCredentialStore,
+    )
+
+    db = install_db if install_db is not None else os.environ.get("FABRI_INSTALL_DB")
+    store = SqliteInstallCredentialStore(Path(db)) if db else EnvCredentialStore()
+    if audit := os.environ.get("FABRI_CRED_AUDIT_LOG"):
+        store = ScopedCredentialStore(store, audit_path=audit, actor="fabri serve launcher")
+    return store
+
+
+def scoped_credential_env(
+    config_path: str | Path,
+    *,
+    store=None,
+    actor: str | None = None,
+    install_db: str | Path | None = None,
+) -> dict[str, str]:
+    """``FABRI_CRED_<PROVIDER>_<HANDLE>`` values for one run, and nothing else.
+
+    Reads the run's bound config, keeps the refs :func:`granted_secret_refs`
+    allows, and resolves each through ``store`` (default: the store for
+    ``install_db``, see :func:`_service_credential_store`) here in the service
+    process. A connection stored with user scope is passed only to a run whose
+    actor is that user. A store that cannot report a row's scope passes nothing,
+    since a user row could not be told apart from an org row. A ref that does not resolve
+    is left out, so the run fails on it the usual way. Two refs that map to the
+    same variable name are both left out rather than guessing. No value is
+    logged; a skip logs the provider and the error type only.
+    """
+    from fabri.tools.credential_store import CredentialStoreError, credential_env_var
+
+    refs = granted_secret_refs(_load_bound_config(config_path), actor=actor)
+    if not refs:
+        return {}
+    store = store if store is not None else _service_credential_store(install_db)
+    scope_kind = getattr(store, "scope_kind", None)
+    if not callable(scope_kind):
+        logger.warning("the credential store cannot report scope; no credentials are passed to the run")
+        return {}
+
+    by_var: dict[str, tuple[str, str]] = {}
+    clashed: set[str] = set()
+    for provider, handle in refs:
+        var = credential_env_var(provider, handle)
+        if var in by_var and by_var[var] != (provider, handle):
+            clashed.add(var)
+        by_var.setdefault(var, (provider, handle))
+
+    out: dict[str, str] = {}
+    for var, (provider, handle) in by_var.items():
+        if var in clashed:
+            logger.warning("two %s refs map to one variable name; neither is passed to the run", provider)
+            continue
+        try:
+            kind = scope_kind(provider, handle)
+        except Exception as exc:  # noqa: BLE001 -- an unknown scope must not pass a user row
+            logger.warning("%s credential scope unknown, not passed to the run (%s)", provider, type(exc).__name__)
+            continue
+        if kind == "user" and handle != actor:
+            logger.warning("a user-scoped %s connection was not passed to a run of another actor", provider)
+            continue
+        try:
+            value = store.get(provider, handle)
+        except CredentialStoreError as exc:
+            logger.info("%s credential not resolved for this run (%s)", provider, type(exc).__name__)
+            continue
+        if value:
+            out[var] = value
+    return out
 
 
 def build_run_command(
@@ -257,6 +471,9 @@ def launch_run(
     env: dict | None = None,
     allow_env: Sequence[str] = (),
     scrub_env: bool = True,
+    install_db: str | Path | None = None,
+    credential_store=None,
+    credential_snapshot: bool = False,
 ) -> RunHandle:
     """Spawn one agent run and return a :class:`RunHandle`.
 
@@ -270,6 +487,19 @@ def launch_run(
     :func:`build_child_env`): service secrets never reach a run. ``allow_env``
     adds names this particular run needs, and ``env`` entries are applied last,
     so an explicit value always wins over the allowlist.
+
+    No credential value is resolved here by default. The service resolves
+    stored credentials through its credential broker on each call and passes
+    the broker's socket and key in ``env``. ``credential_snapshot=True`` (the
+    service sets it for ``FABRI_CRED_SNAPSHOT=1``) is the weaker opt-out: when
+    scrubbing, the credentials the run's own sources declare (and its policy
+    grants) are resolved here and passed as ``FABRI_CRED_*`` variables (see
+    :func:`scoped_credential_env`), where they stay for the life of the run and
+    a revoke does not reach them. ``FABRI_RUN_ACTOR`` in ``env`` names the
+    actor for ``${actor}`` refs and user-scoped rows. ``credential_store`` or
+    ``install_db`` picks the store those refs resolve through; the service
+    passes its own install database so process env never chooses it.
+    ``FABRI_INSTALL_DB`` never reaches a scrubbed run.
     """
     session_id = session_id or str(uuid.uuid4())
     home = Path(fabri_home).resolve()
@@ -278,10 +508,19 @@ def launch_run(
     trace.parent.mkdir(parents=True, exist_ok=True)
 
     child_env = build_child_env(dict(os.environ), allow=allow_env, scrub=scrub_env)
+    if scrub_env and credential_snapshot:
+        actor = (env or {}).get("FABRI_RUN_ACTOR") or None
+        child_env.update(scoped_credential_env(
+            config_path, store=credential_store, install_db=install_db,
+            actor=str(actor) if actor else None,
+        ))
     child_env["FABRI_HOME"] = str(home)
     child_env["FABRI_SESSION_ID"] = session_id
     if env:
         child_env.update({k: str(v) for k, v in env.items()})
+    if scrub_env:
+        for name in _NEVER_IN_RUN:
+            child_env.pop(name, None)
 
     argv = list(command) if command is not None else build_run_command(
         task, config_path, session_id

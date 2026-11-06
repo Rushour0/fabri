@@ -113,3 +113,118 @@ def test_build_tools_agents_default_to_empty(tmp_path):
         "decompose": {"enabled": False, "max_subquestions": 5},
     })
     assert reg.tools == {}
+
+
+# --- D0 wiring: approver, MCP approval classes, tools.sources ---------------
+
+import logging
+import sys
+from pathlib import Path
+
+FAKE_MCP = Path(__file__).parent / "fixtures" / "mcp" / "fake_mcp_server.py"
+
+
+def _tools_cfg(tmp_path, **extra):
+    return {
+        "manifest_dir": [],
+        "enabled": None,
+        "sandbox_root": str(tmp_path),
+        "decompose": {"enabled": False, "max_subquestions": 5},
+        **extra,
+    }
+
+
+def test_build_tools_passes_approver(tmp_path):
+    def approver(name, args, manifest):
+        return False
+
+    assert build_tools(_tools_cfg(tmp_path), approver=approver).approver is approver
+    assert build_tools(_tools_cfg(tmp_path)).approver is None
+
+
+def test_build_tools_mcp_tools_get_approval_class(tmp_path):
+    reg = build_tools(_tools_cfg(tmp_path, mcp_servers=[
+        {"name": "tracker", "command": [sys.executable, str(FAKE_MCP)]},
+    ]))
+    try:
+        approvals = {name: m.approval for name, m in reg.tools.items()}
+        assert approvals == {
+            "mcp_tracker_search_issues": "write",
+            "mcp_tracker_create_issue": "write",
+            "mcp_tracker_archive_issue": "always_approve",
+            "mcp_tracker_send_message": "always_approve",
+        }
+        # With no approver the gate refuses the send before it reaches the server.
+        result = reg.invoke("mcp_tracker_send_message", {"text": "hi"})
+        assert result["ok"] is False
+        assert "no approver is configured" in result["error"]
+    finally:
+        # The registry has no close; stop the server child it owns.
+        for client in reg._owned_resources:
+            client.close()
+
+
+def _slack_post(approval):
+    return {"kind": "http", "name": "notify", "url": "https://slack.com/api/chat.postMessage",
+            "method": "POST", "approval": approval,
+            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}}}
+
+
+def test_build_tools_registers_config_sources_with_class_and_floor(tmp_path):
+    lookup = {"kind": "http", "name": "weather", "url": "https://api.example.test/weather/{city}",
+              "method": "GET", "approval": "read",
+              "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
+    reg = build_tools(_tools_cfg(tmp_path, sources=[lookup, _slack_post("read")]))
+    # The declared class stays when no floor applies.
+    assert reg.tools["weather"].approval == "read"
+    # A POST to a catalog-owned host is always_approve whatever the YAML says.
+    assert reg.tools["notify"].approval == "always_approve"
+
+    seen = []
+
+    def decline(name, args, manifest):
+        seen.append(name)
+        return False
+
+    reg.approver = decline
+    result = reg.invoke("notify", {"text": "hi"})
+    assert result["ok"] is False
+    assert "a human declined this call" in result["error"]
+    assert seen == ["notify"]
+
+
+def test_build_tools_sources_use_strict_policy_by_default(tmp_path, caplog):
+    py = {"kind": "python", "name": "py_tool", "callable": "os.getcwd"}
+    with caplog.at_level(logging.WARNING, logger="fabri.runtime"):
+        reg = build_tools(_tools_cfg(tmp_path, sources=[py, _slack_post("always_approve")]))
+    assert "py_tool" not in reg.tools
+    assert "notify" in reg.tools
+    assert any("py_tool" in r.getMessage() for r in caplog.records)
+
+
+def test_build_tools_sources_apply_config_policy(tmp_path):
+    get = {"kind": "http", "name": "lookup", "url": "https://api.example.test/x", "method": "GET",
+           "approval": "read"}
+    other = {"kind": "http", "name": "other", "url": "https://api.example.test/y", "method": "GET"}
+    policy = {"allow": ["lookup"], "approval_floor": {"lookup": "always_approve"}}
+    reg = build_tools(_tools_cfg(tmp_path, sources=[get, other], policy=policy))
+    assert set(reg.tools) == {"lookup"}
+    assert reg.tools["lookup"].approval == "always_approve"
+
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("allowed_kinds: [openapi, http, python]\npython_modules: [os]\n")
+    py = {"kind": "python", "name": "py_tool", "callable": "os.getcwd"}
+    reg = build_tools(_tools_cfg(tmp_path, sources=[py], policy=str(policy_file)))
+    assert reg.tools["py_tool"].approval == "write"
+
+
+def test_build_tools_sources_never_replace_a_registered_tool(tmp_path):
+    agent = {"name": "notify", "description": "a sub-agent", "config": "agent.yaml"}
+    reg = build_tools(_tools_cfg(tmp_path, agents=[agent], sources=[_slack_post("always_approve")]))
+    assert reg.tools["notify"].description == "a sub-agent"
+    assert "notify" not in reg._callables
+
+
+def test_build_tools_rejects_bad_sources_shape(tmp_path):
+    with pytest.raises(ValueError, match="tools.sources must be a list"):
+        build_tools(_tools_cfg(tmp_path, sources={"kind": "http"}))

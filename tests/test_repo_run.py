@@ -429,3 +429,118 @@ def test_resolve_creds_defaults_to_single_tenant_linear_token(monkeypatch):
 
     assert seen["ref"] == "linear:default"
     assert token == "lin-default"
+
+
+# --- credential variables in the gate subprocesses ---------------------------
+
+_BROKER_NAMES = ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+
+
+def _gate_envs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, str]]:
+    """Run the setup, agency and test gates with a recording subprocess.run
+    and return the environment each one was given, keyed by gate."""
+    seen: dict[str, dict[str, str]] = {}
+
+    def record(argv, **kwargs):
+        key = "agency" if argv[0] == "fabri" else ("setup" if argv[0] == "make" else "tests")
+        seen[key] = dict(kwargs["env"])
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    monkeypatch.setattr(repo_run.subprocess, "run", record)
+    config = _write_crew(tmp_path)
+    checkout = tmp_path / "workspace" / "checkout"
+    checkout.mkdir(parents=True)
+    repo_run._gate_setup("make setup", checkout, 10)
+    repo_run._gate_agency_run(
+        source_config=config,
+        workspace=tmp_path / "workspace",
+        checkout_dir=checkout,
+        repo="acme/widgets",
+        identifier="FAB-42",
+        issue_text="t",
+        session_id="sid",
+        timeout=10,
+    )
+    repo_run._gate_verified_tests(
+        explicit_cmd="python -m pytest -q",
+        source_config=config,
+        checkout_dir=checkout,
+        timeout=10,
+    )
+    return seen
+
+
+def _cred_names(env: dict[str, str]) -> list[str]:
+    return sorted(k for k in env if k.startswith("FABRI_CRED_"))
+
+
+def test_gates_strip_tokens_and_only_the_agency_run_keeps_broker_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FABRI_CRED_SLACK_MAIN", "placeholder-slack-value")
+    monkeypatch.setenv("FABRI_CRED_BROKER_SOCKET", str(tmp_path / "brk.sock"))
+    monkeypatch.setenv("FABRI_CRED_BROKER_KEY", "placeholder-broker-key")
+    monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+
+    seen = _gate_envs(tmp_path, monkeypatch)
+
+    assert set(seen) == {"setup", "agency", "tests"}
+    # Setup and test commands run repo code: no token, no broker name.
+    assert _cred_names(seen["setup"]) == []
+    assert _cred_names(seen["tests"]) == []
+    assert seen["setup"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert seen["tests"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    # The nested agency run talks to the same broker and gets nothing else.
+    assert _cred_names(seen["agency"]) == _BROKER_NAMES
+
+
+def test_agency_run_without_broker_keeps_only_declared_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in _BROKER_NAMES + ["FABRI_CRED_AUDIT_LOG", "FABRI_RUN_ACTOR"]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FABRI_CRED_SLACK_MAIN", "placeholder-slack-value")
+    monkeypatch.setenv("FABRI_CRED_LINEAR_DEFAULT", "placeholder-linear-value")
+
+    seen = _gate_envs(tmp_path, monkeypatch)
+    # The crew config declares no sources, so nothing is kept.
+    assert _cred_names(seen["agency"]) == []
+    assert _cred_names(seen["setup"]) == []
+    assert _cred_names(seen["tests"]) == []
+
+    # A crew whose source declares slack:main keeps that one name.
+    crew = tmp_path / "crew" / "agent.openai.yaml"
+    crew.write_text(
+        crew.read_text(encoding="utf-8").replace(
+            "tools:\n",
+            "tools:\n"
+            "  sources:\n"
+            "    - name: chat\n"
+            "      kind: http\n"
+            "      url: https://api.example.test/x\n"
+            "      method: GET\n"
+            "      headers:\n"
+            "        Authorization: {secret_ref: 'slack:main'}\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def record(argv, **kwargs):
+        seen["agency"] = dict(kwargs["env"])
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    monkeypatch.setattr(repo_run.subprocess, "run", record)
+    checkout = tmp_path / "workspace" / "checkout"
+    repo_run._gate_agency_run(
+        source_config=crew,
+        workspace=tmp_path / "workspace",
+        checkout_dir=checkout,
+        repo="acme/widgets",
+        identifier="FAB-43",
+        issue_text="t",
+        session_id="sid2",
+        timeout=10,
+    )
+    assert _cred_names(seen["agency"]) == ["FABRI_CRED_SLACK_MAIN"]

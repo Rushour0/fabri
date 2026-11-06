@@ -1,0 +1,100 @@
+{
+  "source": "git show HEAD (tag v0.27.0):src/fabri/tools/connectors.py",
+  "cases": [
+    {
+      "kind": "github",
+      "kwargs": {},
+      "entry": "{\"allow\": [\"mcp_github_*\"], \"sources\": [{\"command\": [\"docker\", \"run\", \"--rm\", \"-i\", \"-e\", \"GITHUB_PERSONAL_ACCESS_TOKEN\", \"ghcr.io/github/github-mcp-server\"], \"description\": \"GitHub's official MCP server: issues, pull requests, code and actions.\", \"env\": {\"GITHUB_PERSONAL_ACCESS_TOKEN\": {\"env\": \"GITHUB_PERSONAL_ACCESS_TOKEN\"}}, \"kind\": \"mcp\", \"name\": \"github\"}]}"
+    },
+    {
+      "kind": "github",
+      "kwargs": {
+        "remote": true
+      },
+      "entry": "{\"allow\": [\"mcp_github_*\"], \"sources\": [{\"description\": \"GitHub's official MCP server: issues, pull requests, code and actions.\", \"headers\": {\"Authorization\": {\"env\": \"GITHUB_PERSONAL_ACCESS_TOKEN\", \"prefix\": \"Bearer \"}}, \"kind\": \"mcp\", \"name\": \"github\", \"url\": \"https://api.githubcopilot.com/mcp/\"}]}"
+    },
+    {
+      "kind": "github",
+      "kwargs": {
+        "workspace": "acme"
+      },
+      "entry": "{\"allow\": [\"mcp_github_*\"], \"sources\": [{\"command\": [\"docker\", \"run\", \"--rm\", \"-i\", \"-e\", \"GITHUB_PERSONAL_ACCESS_TOKEN\", \"ghcr.io/github/github-mcp-server\"], \"description\": \"GitHub's official MCP server: issues, pull requests, code and actions.\", \"env\": {\"GITHUB_PERSONAL_ACCESS_TOKEN\": {\"secret_ref\": \"github:acme\"}}, \"kind\": \"mcp\", \"name\": \"github\"}]}"
+    },
+    {
+      "kind": "github",
+      "kwargs": {
+        "name": "gh",
+        "token_env": "GH_TOKEN",
+        "remote": true
+      },
+      "entry": "{\"allow\": [\"mcp_gh_*\"], \"sources\": [{\"description\": \"GitHub's official MCP server: issues, pull requests, code and actions.\", \"headers\": {\"Authorization\": {\"env\": \"GH_TOKEN\", \"prefix\": \"Bearer \"}}, \"kind\": \"mcp\", \"name\": \"gh\", \"url\": \"https://api.githubcopilot.com/mcp/\"}]}"
+    },
+    {
+      "kind": "linear",
+      "kwargs": {},
+      "entry": "{\"allow\": [\"mcp_linear_*\"], \"sources\": [{\"description\": \"Linear's hosted MCP server: issues, projects, comments and cycles.\", \"headers\": {\"Authorization\": {\"env\": \"LINEAR_API_KEY\", \"prefix\": \"Bearer \"}}, \"kind\": \"mcp\", \"name\": \"linear\", \"url\": \"https://mcp.linear.app/mcp\"}]}"
+    },
+    {
+      "kind": "linear",
+      "kwargs": {
+        "workspace": "w1"
+      },
+      "entry": "{\"allow\": [\"mcp_linear_*\"], \"sources\": [{\"description\": \"Linear's hosted MCP server: issues, projects, comments and cycles.\", \"headers\": {\"Authorization\": {\"prefix\": \"Bearer \", \"secret_ref\": \"linear:w1\"}}, \"kind\": \"mcp\", \"name\": \"linear\", \"url\": \"https://mcp.linear.app/mcp\"}]}"
+    },
+    {
+      "kind": "slack",
+      "kwargs": {},
+      "entry": "{\"allow\": [\"slack_channels_list\", \"slack_channel_history\", \"slack_post_message\"], \"sources\": [{\"description\": \"List the Slack channels the bot can see. Returns ids and names; page with cursor.\", \"headers\": {\"Authorization\": {\"env\": \"SLACK_BOT_TOKEN\", \"prefix\": \"Bearer \"}}, \"input_schema\": {\"properties\": {\"cursor\": {\"type\": \"string\"}, \"limit\": {\"maximum\": 1000, \"type\": \"integer\"}, \"types\": {\"description\": \"Comma list: public_channel, private_channel\", \"type\": \"string\"}}, \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"GET\", \"name\": \"slack_channels_list\", \"title\": \"List Slack channels\", \"url\": \"https://slack.com/api/conversations.list\"}, {\"description\": \"Recent messages in one channel, newest first.\", \"headers\": {\"Authorization\": {\"env\": \"SLACK_BOT_TOKEN\", \"prefix\": \"Bearer \"}}, \"input_schema\": {\"properties\": {\"channel\": {\"description\": \"Channel id, for example C0123456\", \"type\": \"string\"}, \"cursor\": {\"type\": \"string\"}, \"limit\": {\"maximum\": 1000, \"type\": \"integer\"}}, \"required\": [\"channel\"], \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"GET\", \"name\": \"slack_channel_history\", \"title\": \"Read a Slack channel\", \"url\": \"https://slack.com/api/conversations.history\"}, {\"approval\": \"always_approve\", \"description\": \"Post a message to a channel, or reply in a thread with thread_ts.\", \"headers\": {\"Authorization\": {\"env\": \"SLACK_BOT_TOKEN\", \"prefix\": \"Bearer \"}}, \"input_schema\": {\"properties\": {\"channel\": {\"type\": \"string\"}, \"text\": {\"type\": \"string\"}, \"thread_ts\": {\"type\": \"string\"}}, \"required\": [\"channel\", \"text\"], \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"POST\", \"name\": \"slack_post_message\", \"title\": \"Post to Slack\", \"url\": \"https://slack.com/api/chat.postMessage\"}]}"
+    },
+    {
+      "kind": "slack",
+      "kwargs": {
+        "workspace": "acme",
+        "name": "ops"
+      },
+      "entry": "{\"allow\": [\"ops_channels_list\", \"ops_channel_history\", \"ops_post_message\"], \"sources\": [{\"description\": \"List the Slack channels the bot can see. Returns ids and names; page with cursor.\", \"headers\": {\"Authorization\": {\"prefix\": \"Bearer \", \"secret_ref\": \"slack:acme\"}}, \"input_schema\": {\"properties\": {\"cursor\": {\"type\": \"string\"}, \"limit\": {\"maximum\": 1000, \"type\": \"integer\"}, \"types\": {\"description\": \"Comma list: public_channel, private_channel\", \"type\": \"string\"}}, \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"GET\", \"name\": \"ops_channels_list\", \"title\": \"List Slack channels\", \"url\": \"https://slack.com/api/conversations.list\"}, {\"description\": \"Recent messages in one channel, newest first.\", \"headers\": {\"Authorization\": {\"prefix\": \"Bearer \", \"secret_ref\": \"slack:acme\"}}, \"input_schema\": {\"properties\": {\"channel\": {\"description\": \"Channel id, for example C0123456\", \"type\": \"string\"}, \"cursor\": {\"type\": \"string\"}, \"limit\": {\"maximum\": 1000, \"type\": \"integer\"}}, \"required\": [\"channel\"], \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"GET\", \"name\": \"ops_channel_history\", \"title\": \"Read a Slack channel\", \"url\": \"https://slack.com/api/conversations.history\"}, {\"approval\": \"always_approve\", \"description\": \"Post a message to a channel, or reply in a thread with thread_ts.\", \"headers\": {\"Authorization\": {\"prefix\": \"Bearer \", \"secret_ref\": \"slack:acme\"}}, \"input_schema\": {\"properties\": {\"channel\": {\"type\": \"string\"}, \"text\": {\"type\": \"string\"}, \"thread_ts\": {\"type\": \"string\"}}, \"required\": [\"channel\", \"text\"], \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"POST\", \"name\": \"ops_post_message\", \"title\": \"Post to Slack\", \"url\": \"https://slack.com/api/chat.postMessage\"}]}"
+    },
+    {
+      "kind": "slack",
+      "kwargs": {
+        "token_env": "OPS_SLACK_TOKEN"
+      },
+      "entry": "{\"allow\": [\"slack_channels_list\", \"slack_channel_history\", \"slack_post_message\"], \"sources\": [{\"description\": \"List the Slack channels the bot can see. Returns ids and names; page with cursor.\", \"headers\": {\"Authorization\": {\"env\": \"OPS_SLACK_TOKEN\", \"prefix\": \"Bearer \"}}, \"input_schema\": {\"properties\": {\"cursor\": {\"type\": \"string\"}, \"limit\": {\"maximum\": 1000, \"type\": \"integer\"}, \"types\": {\"description\": \"Comma list: public_channel, private_channel\", \"type\": \"string\"}}, \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"GET\", \"name\": \"slack_channels_list\", \"title\": \"List Slack channels\", \"url\": \"https://slack.com/api/conversations.list\"}, {\"description\": \"Recent messages in one channel, newest first.\", \"headers\": {\"Authorization\": {\"env\": \"OPS_SLACK_TOKEN\", \"prefix\": \"Bearer \"}}, \"input_schema\": {\"properties\": {\"channel\": {\"description\": \"Channel id, for example C0123456\", \"type\": \"string\"}, \"cursor\": {\"type\": \"string\"}, \"limit\": {\"maximum\": 1000, \"type\": \"integer\"}}, \"required\": [\"channel\"], \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"GET\", \"name\": \"slack_channel_history\", \"title\": \"Read a Slack channel\", \"url\": \"https://slack.com/api/conversations.history\"}, {\"approval\": \"always_approve\", \"description\": \"Post a message to a channel, or reply in a thread with thread_ts.\", \"headers\": {\"Authorization\": {\"env\": \"OPS_SLACK_TOKEN\", \"prefix\": \"Bearer \"}}, \"input_schema\": {\"properties\": {\"channel\": {\"type\": \"string\"}, \"text\": {\"type\": \"string\"}, \"thread_ts\": {\"type\": \"string\"}}, \"required\": [\"channel\", \"text\"], \"type\": \"object\"}, \"kind\": \"http\", \"method\": \"POST\", \"name\": \"slack_post_message\", \"title\": \"Post to Slack\", \"url\": \"https://slack.com/api/chat.postMessage\"}]}"
+    }
+  ],
+  "list": [
+    {
+      "name": "github",
+      "title": "GitHub",
+      "summary": "GitHub's official MCP server: issues, pull requests, code and actions.",
+      "kinds": [
+        "mcp"
+      ],
+      "env_var": "GITHUB_PERSONAL_ACCESS_TOKEN",
+      "store_provider": "github",
+      "remote_option": true
+    },
+    {
+      "name": "linear",
+      "title": "Linear",
+      "summary": "Linear's hosted MCP server: issues, projects, comments and cycles.",
+      "kinds": [
+        "mcp"
+      ],
+      "env_var": "LINEAR_API_KEY",
+      "store_provider": "linear",
+      "remote_option": false
+    },
+    {
+      "name": "slack",
+      "title": "Slack",
+      "summary": "Slack Web API: list channels, read channel history, post a message.",
+      "kinds": [
+        "http"
+      ],
+      "env_var": "SLACK_BOT_TOKEN",
+      "store_provider": "slack",
+      "remote_option": false
+    }
+  ]
+}

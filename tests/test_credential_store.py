@@ -102,3 +102,64 @@ def test_secret_never_appears_in_repr_errors_or_logs(
     assert secret not in str(missing.value)
     assert secret not in repr(missing.value)
     assert secret not in caplog.text
+
+
+from fabri.tools.credential_store import (  # noqa: E402
+    BROKER_ENV_NAMES,
+    BROKER_KEY_ENV,
+    BROKER_SOCKET_ENV,
+    env_without_credentials,
+    subagent_credential_names,
+    wildcard_credential_names,
+)
+
+
+def test_broker_names_are_stripped_by_default() -> None:
+    env = {
+        BROKER_SOCKET_ENV: "/tmp/b.sock",
+        BROKER_KEY_ENV: "k",
+        "FABRI_CRED_SLACK_X": "t",
+        "PATH": "/bin",
+    }
+    assert env_without_credentials(env) == {"PATH": "/bin"}
+    # An explicit keep of one broker name is exact and keeps nothing else.
+    assert env_without_credentials(env, keep={BROKER_KEY_ENV}) == {BROKER_KEY_ENV: "k", "PATH": "/bin"}
+
+
+def test_keep_broker_keeps_both_names_and_nothing_else_prefixed() -> None:
+    env = {
+        BROKER_SOCKET_ENV: "/tmp/b.sock",
+        BROKER_KEY_ENV: "k",
+        "FABRI_CRED_SLACK_X": "t",
+        "PATH": "/bin",
+    }
+    kept = env_without_credentials(env, keep_broker=True)
+    assert kept == {BROKER_SOCKET_ENV: "/tmp/b.sock", BROKER_KEY_ENV: "k", "PATH": "/bin"}
+
+
+def test_subagent_names_include_broker_vars_when_both_set(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv(BROKER_SOCKET_ENV, "/tmp/b.sock")
+    monkeypatch.setenv(BROKER_KEY_ENV, "k")
+    # The config path is never read in broker mode.
+    names = subagent_credential_names(tmp_path / "does-not-exist.yaml")
+    assert names == BROKER_ENV_NAMES
+    assert isinstance(names, frozenset)
+
+
+def test_subagent_names_add_neither_broker_var_when_only_one_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv(BROKER_KEY_ENV, "k")
+    monkeypatch.delenv(BROKER_SOCKET_ENV, raising=False)
+    names = subagent_credential_names(tmp_path / "does-not-exist.yaml")
+    assert not (names & BROKER_ENV_NAMES)
+
+
+def test_wildcard_names_come_from_granted_refs_with_exact_provider() -> None:
+    refs = [("slack", "acme"), ("slack_bot", "x"), ("linear", "y"), ("broker", "key")]
+    assert wildcard_credential_names(["slack:*"], refs) == frozenset({"FABRI_CRED_SLACK_ACME"})
+    assert wildcard_credential_names(["slack:acme"], refs) == frozenset()
+    assert wildcard_credential_names(["broker:*"], refs) == frozenset()
+    assert wildcard_credential_names(["slack:*", "linear:*"], refs) == frozenset(
+        {"FABRI_CRED_SLACK_ACME", "FABRI_CRED_LINEAR_Y"}
+    )

@@ -245,7 +245,7 @@ def test_http_answer_round_trip(tmp_path: Path, asking_agent: Path):
         # submit
         conn = http.client.HTTPConnection(host, port, timeout=30)
         conn.request("POST", "/runs", body=json.dumps({"task": "go"}),
-                     headers={"Content-Type": "application/json"})
+                     headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         session_id = json.loads(conn.getresponse().read().decode())["session_id"]
         conn.close()
 
@@ -277,7 +277,7 @@ def test_http_answer_round_trip(tmp_path: Path, asking_agent: Path):
         ans.request("POST", f"/runs/{session_id}/answer",
                     body=json.dumps({"question_id": holder["qid"], "answer": "yes",
                                      "selected_option": "yes"}),
-                    headers={"Content-Type": "application/json"})
+                    headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         ans_resp = ans.getresponse()
         assert ans_resp.status == 200
         assert json.loads(ans_resp.read().decode())["status"] == "answered"
@@ -303,9 +303,39 @@ def test_http_answer_unknown_session_404(tmp_path: Path):
         conn = http.client.HTTPConnection(host, port, timeout=30)
         conn.request("POST", "/runs/nope/answer",
                      body=json.dumps({"question_id": "q", "answer": "a"}),
-                     headers={"Content-Type": "application/json"})
+                     headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         resp = conn.getresponse()
         assert resp.status == 404
     finally:
         server.shutdown()
         svc.close()
+
+
+@pytest.mark.parametrize("sent,expected", [
+    ("approval", "approval"), ("ask_user", "ask_user"), (None, "ask_user"),
+    ("other", "ask_user"), (7, "ask_user"),
+])
+def test_listener_keeps_a_validated_kind(short_socket_dir: Path, sent, expected):
+    """An approval stays an approval through on_question and pending_questions;
+    a missing or unknown kind is an ask_user, as before."""
+    seen: list[dict] = []
+    sock_path = str(short_socket_dir / "ask.sock")
+    listener = AskUserListener(sock_path, on_question=seen.append)
+    listener.start()
+    try:
+        qid = str(uuid.uuid4())
+        req = {"question_id": qid, "question": "Q?", "options": ["approve", "deny"]}
+        if sent is not None:
+            req["kind"] = sent
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(sock_path)
+        s.sendall((json.dumps(req) + "\n").encode())
+        deadline = time.time() + 5
+        while not seen and time.time() < deadline:
+            time.sleep(0.02)
+        assert seen and seen[0]["kind"] == expected
+        assert [q["kind"] for q in listener.pending_questions()] == [expected]
+        assert listener.answer(qid, "deny") is True
+        s.close()
+    finally:
+        listener.close()

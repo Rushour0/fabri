@@ -49,5 +49,6 @@
     },
     "required": ["ok"]
   },
+  "credentials": ["zapier:*", "n8n:*", "webhook:*"],
   "timeout_s": 65
 }

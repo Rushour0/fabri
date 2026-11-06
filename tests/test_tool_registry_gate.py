@@ -165,3 +165,58 @@ def test_otel_root_span_gets_tool_usage_attributes():
     otelmod._emit_trace_spans(events, provider.get_tracer("test"), "sid")
     [root] = [s for s in exporter.get_finished_spans() if s.name == "fabri.agent_run"]
     assert root.attributes["fabri.tool_usage.send_email.refused"] == 2
+
+
+def test_broker_gated_name_skips_the_approver():
+    asked = []
+    sent = []
+    reg = ToolRegistry([], approver=lambda *a: asked.append(a) or False)
+    reg.register_callable(manifest("ck_send", "always_approve", ["to"]),
+                          lambda a: sent.append(a) or tool_ok({"sent": True}))
+    reg.mark_broker_gated("ck_send")
+    # no approver at all: still runs, the broker owns the question
+    bare = ToolRegistry([])
+    bare.register_callable(manifest("ck_send", "always_approve", ["to"]), lambda a: tool_ok({"sent": True}))
+    bare.mark_broker_gated("ck_send")
+    assert reg.invoke("ck_send", {"to": "a@b.c"})["ok"]
+    assert bare.invoke("ck_send", {"to": "a@b.c"})["ok"]
+    assert asked == [] and sent == [{"to": "a@b.c"}]
+    # the required-argument check still runs before the handler
+    out = reg.invoke("ck_send", {})
+    assert not out["ok"] and "missing required argument(s): to" in out["error"]
+
+
+def test_a_callable_cannot_mark_itself_broker_gated():
+    asked = []
+    reg = ToolRegistry([], approver=lambda name, *_: asked.append(name) or False)
+    sneaky = lambda a: tool_ok({})  # noqa: E731
+    sneaky.approval_gate = "broker"
+    reg.register_callable(manifest("sneaky_send", "always_approve"), sneaky)
+    assert not reg.invoke("sneaky_send", {})["ok"]
+    assert asked == ["sneaky_send"]
+
+
+def test_other_callables_still_ask():
+    asked = []
+    reg = ToolRegistry([], approver=lambda name, *_: asked.append(name) or False)
+    plain = lambda a: tool_ok({})  # noqa: E731
+    reg.register_callable(manifest("plain_send", "always_approve"), plain)
+    other_gate = lambda a: tool_ok({})  # noqa: E731
+    other_gate.approval_gate = "something_else"
+    reg.register_callable(manifest("odd_send", "always_approve"), other_gate)
+    # the attribute on the args must not matter either
+    reg.register_callable(manifest("args_send", "always_approve"), lambda a: tool_ok({}))
+    assert not reg.invoke("plain_send", {})["ok"]
+    assert not reg.invoke("odd_send", {})["ok"]
+    assert not reg.invoke("args_send", {"approval_gate": "broker"})["ok"]
+    assert asked == ["plain_send", "odd_send", "args_send"]
+
+
+def test_manifest_tools_unaffected():
+    asked = []
+    reg = ToolRegistry([], approver=lambda name, *_: asked.append(name) or False)
+    # a manifest tool is not a callable, so it can never carry the attribute
+    m = manifest("proc_send", "always_approve")
+    reg.register(m)
+    out = reg.invoke("proc_send", {})
+    assert not out["ok"] and "declined" in out["error"] and asked == ["proc_send"]

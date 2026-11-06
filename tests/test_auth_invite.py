@@ -61,7 +61,9 @@ def make_server(tmp_path):
 
 
 def client(server, headers=None):
-    return httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}", headers=headers or {})
+    # Studio's same-origin fetch sends Sec-Fetch-Site: same-origin.
+    return httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                        headers={"Sec-Fetch-Site": "same-origin", **(headers or {})})
 
 
 def session(service, email):
@@ -238,3 +240,35 @@ def test_cli_reads_the_auth_config_path_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FABRI_AUTH_CONFIG", str(write_auth(tmp_path, INVITE_ONLY + f"  db_path: {db}\n")))
     run_cli(monkeypatch, ["auth", "add-user", BOSS], "password-1\n")
     assert UserStore(db).verify_user(BOSS, "password-1")
+
+
+def test_owner_answers_own_run_under_strict_auth(make_server, monkeypatch):
+    monkeypatch.setenv("FABRI_ADMIN_TOKEN", "adm")
+    server, service, _ = make_server()
+    answered = []
+    service.answer = lambda sid, qid, ans, opt=None: answered.append((sid, qid, ans, opt))
+    cancelled = []
+    service.cancel = lambda sid: cancelled.append(sid) or {"status": "cancelled"}
+    dev_headers = session(service, DEV)
+    dev_id = service.user_store.verify_user(DEV, "password-1")
+    owners = {"mine": dev_id, "theirs": "someone-else", "orphan": None}
+    service.run_owner = lambda sid: owners.get(sid)
+    body = {"question_id": "q1", "answer": "approve"}
+
+    dev = client(server, dev_headers)
+    other = client(server, session(service, BOSS))  # a signed-in admin, not the owner
+    adm = client(server, {"Authorization": "Bearer adm"})
+    anon = client(server)
+
+    assert dev.post("/runs/mine/answer", json=body).status_code == 200
+    assert answered == [("mine", "q1", "approve", None)]
+    assert dev.post("/runs/theirs/answer", json=body).status_code == 404
+    assert dev.post("/runs/orphan/answer", json=body).status_code == 404
+    assert anon.post("/runs/mine/answer", json=body).status_code == 401
+    assert adm.post("/runs/theirs/answer", json=body).status_code == 200
+    assert other.post("/runs/theirs/answer", json=body).status_code == 200
+    assert len(answered) == 3
+    # Cancel and every other write stay admin-only.
+    assert dev.post("/runs/mine/cancel").status_code == 403
+    assert cancelled == []
+    assert adm.post("/runs/mine/cancel").status_code == 200

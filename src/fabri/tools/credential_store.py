@@ -15,13 +15,22 @@ import fnmatch
 import json
 import os
 import re
-import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 ENV_CREDENTIAL_PREFIX = "FABRI_CRED_"
+# Shares the prefix but holds a log file path, not a secret, so it is never
+# stripped from a child's environment.
+CREDENTIAL_AUDIT_LOG_ENV = "FABRI_CRED_AUDIT_LOG"
+# The two variables a run gets when the service holds its credentials in a
+# broker: the ask socket path and the capability key. They share the
+# FABRI_CRED_ prefix on purpose, so the default strip below removes them from
+# every tool subprocess. Only a sub-agent (or a nested run) is meant to keep them.
+BROKER_SOCKET_ENV = "FABRI_CRED_BROKER_SOCKET"
+BROKER_KEY_ENV = "FABRI_CRED_BROKER_KEY"
+BROKER_ENV_NAMES = frozenset({BROKER_SOCKET_ENV, BROKER_KEY_ENV})
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
 
 
@@ -42,6 +51,101 @@ def credential_env_var(provider: str, handle: str) -> str:
     normalized_provider = _NON_ALNUM.sub("_", provider).upper()
     normalized_handle = _NON_ALNUM.sub("_", handle).upper()
     return f"{ENV_CREDENTIAL_PREFIX}{normalized_provider}_{normalized_handle}"
+
+
+def credential_env_names(refs: Iterable[str], *, actor: str | None = None) -> frozenset[str]:
+    """The ``FABRI_CRED_*`` names a list of ``provider:handle`` refs maps to.
+
+    A ``${actor}`` handle becomes ``actor`` and is dropped when there is none.
+    Malformed refs are dropped.
+    """
+    names = set()
+    for ref in refs:
+        if not isinstance(ref, str) or ref.count(":") != 1:
+            continue
+        provider, handle = ref.split(":", 1)
+        if handle == "${actor}":
+            if not actor:
+                continue
+            handle = actor
+        if provider and handle:
+            names.add(credential_env_var(provider, handle))
+    return frozenset(names)
+
+
+def wildcard_credential_names(
+    patterns: Iterable[str], granted_refs: Iterable[tuple[str, str]]
+) -> frozenset[str]:
+    """The ``FABRI_CRED_*`` names a manifest's ``provider:*`` patterns reach.
+
+    The names come from the run's granted ``(provider, handle)`` refs, and a
+    pattern matches a ref only when the provider is exactly equal, so
+    ``slack:*`` does not reach ``slack_bot``. A pattern that is not a
+    ``provider:*`` wildcard is ignored here, and the broker names are never
+    returned, so ``broker:*`` reaches nothing.
+    """
+    providers = set()
+    for pattern in patterns:
+        if isinstance(pattern, str) and pattern.count(":") == 1:
+            provider, handle = pattern.split(":", 1)
+            if provider and handle == "*":
+                providers.add(provider)
+    names = {
+        credential_env_var(provider, handle)
+        for provider, handle in granted_refs
+        if provider in providers
+    }
+    return frozenset(names - BROKER_ENV_NAMES)
+
+
+def env_without_credentials(
+    env: Mapping[str, str] | None = None,
+    *,
+    keep: Iterable[str] = (),
+    keep_broker: bool = False,
+) -> dict[str, str]:
+    """A copy of ``env`` (default: this process's) with every ``FABRI_CRED_*``
+    variable removed, except the exact names in ``keep``.
+
+    ``keep_broker=True`` also keeps the two broker names. Only the sub-agent
+    and nested-run paths set it; a manifest tool, ``bash`` and ``python_exec``
+    never do.
+
+    Every subprocess a run starts gets its environment through this, so a tool
+    the model drives cannot print a token the run holds for a source.
+    """
+    base = os.environ if env is None else env
+    keep = frozenset(keep)
+    if keep_broker:
+        keep = keep | BROKER_ENV_NAMES
+    return {
+        key: value
+        for key, value in base.items()
+        if not key.startswith(ENV_CREDENTIAL_PREFIX) or key in keep or key == CREDENTIAL_AUDIT_LOG_ENV
+    }
+
+
+def broker_mode(env: Mapping[str, str] | None = None) -> bool:
+    """True when both broker variables are set, so this process talks to a broker."""
+    source = os.environ if env is None else env
+    return all(source.get(name) for name in BROKER_ENV_NAMES)
+
+
+def subagent_credential_names(config_path: str | Path, *, actor: str | None = None) -> frozenset[str]:
+    """The ``FABRI_CRED_*`` names a sub-agent may receive.
+
+    Under a broker (both broker variables set) that is exactly the two broker
+    names, always. The broker answers from the parent run's own binding, so
+    nothing is derived from the child config, which a model may have chosen.
+    Without a broker it is the refs the child's ``tools.sources`` declare that
+    its ``tools.policy`` grants, read the same way the service reads a run's
+    bound config. An unreadable config or policy gives an empty set."""
+    if broker_mode():
+        return BROKER_ENV_NAMES
+    from fabri.service.launcher import _load_bound_config, granted_secret_refs
+
+    refs = granted_secret_refs(_load_bound_config(config_path), actor=actor)
+    return frozenset(credential_env_var(provider, handle) for provider, handle in refs)
 
 
 @runtime_checkable
@@ -65,56 +169,131 @@ class EnvCredentialStore:
             )
         return value
 
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """Environment variables are set by the operator and carry no user scope."""
+        return None
+
     def __repr__(self) -> str:
         return "EnvCredentialStore()"
 
 
 class SqliteInstallCredentialStore:
-    """Read per-workspace Slack/Linear credentials from the install database."""
+    """Read stored connections (any provider) from the install database.
+
+    A handle other than ``default`` is looked up in the ``connections`` table,
+    so Slack, Linear, Cakemail and every later provider resolve the same way.
+    A token near expiry is refreshed on the way out. No row, or a token that
+    is dead, falls back to the environment store. If that has nothing either,
+    the error names the fix and the environment variable, never the token.
+    """
 
     def __init__(self, db_path=None, fallback=None) -> None:
         self._db_path = db_path or os.environ.get("FABRI_INSTALL_DB")
         self._fallback = fallback or EnvCredentialStore()
 
-    def get(self, provider: str, handle: str) -> str:
-        if (
-            provider == "slack"
-            and handle != "default"
-            and self._db_path
-            and Path(self._db_path).exists()
-        ):
-            connection = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro", uri=True, timeout=30
-            )
-            try:
-                row = connection.execute(
-                    "SELECT bot_token FROM installs WHERE team_id=?", (handle,)
-                ).fetchone()
-            finally:
-                connection.close()
-            if row is not None and row[0]:
-                return row[0]
-            raise CredentialNotFoundError(
-                "no Slack install for this workspace"
-            )
-        if provider == "linear" and handle != "default" and self._db_path and Path(self._db_path).exists():
-            # Through the install store so a token near expiry is refreshed
-            # (needs LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET in this process).
-            from fabri.service import linear_oauth
-            from fabri.service.install_store import LinearInstallStore
+    def _has_db(self, handle: str) -> bool:
+        return bool(handle != "default" and self._db_path and Path(self._db_path).exists())
 
-            token = LinearInstallStore(
-                Path(self._db_path), refresher=linear_oauth.refresh_access_token
-            ).get_token(handle)
-            if token:
-                return token
+    def _connections(self):
+        # Lazy imports: the service package imports this module's siblings.
+        from fabri.service.connection_store import ConnectionStore, default_refreshers
+
+        return ConnectionStore(Path(self._db_path), refreshers=default_refreshers())
+
+    def get(self, provider: str, handle: str) -> str:
+        if not self._has_db(handle):
+            return self._fallback.get(provider, handle)
+        token = self._connections().get_token(provider, handle)
+        if token:
+            return token
+        try:
+            return self._fallback.get(provider, handle)
+        except CredentialNotFoundError:
             raise CredentialNotFoundError(
-                "no Linear install for this workspace"
-            )
-        return self._fallback.get(provider, handle)
+                f"no {provider} connection for this handle; run `fabri connect {provider}` "
+                f"or set {credential_env_var(provider, handle)}"
+            ) from None
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """Return ``org`` or ``user`` for a stored connection, None when there is no row or no db."""
+        if not self._has_db(handle):
+            return None
+        return self._connections().scope_kind(provider, handle)
 
     def __repr__(self) -> str:
         return "SqliteInstallCredentialStore()"
+
+
+ACTOR_SENTINEL = "${actor}"
+
+
+class ActorCredentialStore:
+    """Wrap a store so it resolves for one run actor.
+
+    A ``${actor}`` handle becomes the actor's id, so ``gmail:${actor}`` reads
+    the signed-in user's own row. A run with no actor gets a
+    CredentialScopeError for such a handle. Any other handle is checked
+    against the wrapped store's ``scope_kind``: a row stored with user scope
+    resolves only when the handle is this actor's own id, so a run without
+    an actor never receives a user-scoped row. A store with no
+    ``scope_kind`` (environment variables, a host's own store) has no user
+    rows and passes literal handles through. A store whose ``scope_kind``
+    fails is treated as unknown and refused, since a user row could not be
+    told apart from an org row.
+
+    Wrapping an ActorCredentialStore again replaces its actor rather than
+    stacking a second check. Messages name the provider only, never a handle
+    or a value.
+    """
+
+    def __init__(self, store: CredentialStore, actor: str | None) -> None:
+        if isinstance(store, ActorCredentialStore):
+            store = store._store
+        self._store = store
+        self._actor = actor or None
+
+    @property
+    def actor(self) -> str | None:
+        return self._actor
+
+    @property
+    def inner(self) -> CredentialStore:
+        """The wrapped store."""
+        return self._store
+
+    def _handle(self, provider: str, handle: str) -> str:
+        if handle == ACTOR_SENTINEL:
+            if not self._actor:
+                raise CredentialScopeError(
+                    f"credential {provider}:{ACTOR_SENTINEL} needs an actor; this run has none"
+                )
+            return self._actor
+        return handle
+
+    def get(self, provider: str, handle: str) -> str:
+        handle = self._handle(provider, handle)
+        scope_kind = getattr(self._store, "scope_kind", None)
+        if callable(scope_kind):
+            try:
+                kind = scope_kind(provider, handle)
+            except Exception:  # noqa: BLE001 -- an unknown scope must not pass a user row
+                raise CredentialScopeError(
+                    f"credential {provider} has an unknown scope; it is not used for this run"
+                ) from None
+            if kind == "user" and handle != self._actor:
+                raise CredentialScopeError(f"credential {provider} belongs to another user")
+        return self._store.get(provider, handle)
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """The wrapped store's scope for the handle after substitution. Raises
+        AttributeError when the wrapped store cannot say."""
+        inner = getattr(self._store, "scope_kind", None)
+        if not callable(inner):
+            raise AttributeError("the wrapped credential store does not report scope_kind")
+        return inner(provider, self._handle(provider, handle))
+
+    def __repr__(self) -> str:
+        return f"ActorCredentialStore({self._store!r}, actor={'set' if self._actor else 'none'})"
 
 
 class ScopedCredentialStore:
@@ -163,6 +342,15 @@ class ScopedCredentialStore:
             raise
         self._audit(provider, handle, "ok")
         return value
+
+    def scope_kind(self, provider: str, handle: str) -> str | None:
+        """The wrapped store's scope for a row. Raises AttributeError when the
+        wrapped store cannot say, so a caller that checks user rows fails closed
+        instead of treating an unknown scope as org."""
+        inner = getattr(self._store, "scope_kind", None)
+        if not callable(inner):
+            raise AttributeError("the wrapped credential store does not report scope_kind")
+        return inner(provider, handle)
 
     def _audit(self, provider: str, handle: str, result: str) -> None:
         if self._audit_path is None:

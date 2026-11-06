@@ -20,8 +20,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -35,10 +37,20 @@ from fabri.events import EventType
 from fabri.memory.output import split_agent_output
 from fabri.service.ask_user_listener import AskUserListener, append_trace_event
 from fabri.service.auth import UserStore
-from fabri.service.binding import bind_run_config, merge_overrides
+from fabri.service.binding import bind_run_config, merge_overrides, refused_override_keys
 from fabri.service import linear_oauth
+from fabri.service.connection_store import ConnectionStore, default_refreshers
+from fabri.service.credential_broker import SNAPSHOT_ENV, BindError, CredentialBroker
 from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
-from fabri.service.launcher import RunHandle, launch_run
+from fabri.service.launcher import (
+    ALLOW_SHARED_UID_ENV,
+    granted_secret_refs,
+    LAUNCH_ISOLATION,
+    RunHandle,
+    launch_run,
+    runs_share_service_uid,
+    shared_uid_allowed,
+)
 from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
 from fabri.service.surfaces.github import GitHubAdapter
@@ -151,6 +163,7 @@ class FabriService:
         command_builder: CommandBuilder | None = None,
         catalog: Mapping[str, dict] | None = None,
         auth_config: str | Path | None = None,
+        credential_broker: CredentialBroker | None = None,
     ) -> None:
         self.template_config = template_config
         self.catalog = catalog
@@ -221,12 +234,30 @@ class FabriService:
             index_path=self._index_path,
             default_agency=self._default_agency,
         )
+        # One installs.db holds every connection; the three legacy stores open
+        # the same file (Slack and Linear are wrappers over connection_store).
+        self.connection_store = ConnectionStore(
+            self.home_root / "installs.db", refreshers=default_refreshers()
+        )
         self.install_store = SlackInstallStore(self.home_root / "installs.db")
         self.github_install_store = GitHubInstallStore(self.home_root / "installs.db")
         self.linear_install_store = LinearInstallStore(
             self.home_root / "installs.db", refresher=linear_oauth.refresh_access_token
         )
         os.environ.setdefault("FABRI_INSTALL_DB", str(self.home_root / "installs.db"))
+        # Resolves stored credentials for runs, one call at a time, from this
+        # service's own database (never the FABRI_INSTALL_DB a process env
+        # names). A host or a test may pass its own broker, for example one
+        # with a fake transport.
+        self.credential_broker = credential_broker or CredentialBroker(
+            install_db=self.home_root / "installs.db",
+            audit_path=os.environ.get("FABRI_CRED_AUDIT_LOG") or None,
+        )
+        # How runs are started relative to the service's OS user. Today every
+        # run is a child process under the service's own user ("shared_uid").
+        # A container or separate-user launch mode sets this to its own value,
+        # and then runs that need stored credentials are no longer refused.
+        self.launch_isolation: str = LAUNCH_ISOLATION
 
     @property
     def _index_path(self) -> Path:
@@ -292,18 +323,84 @@ class FabriService:
         trace_path = run_trace_path(run_home, session_id)
         listener = self._start_ask_listener(session_id, trace_path)
 
-        handle = launch_run(
-            task,
-            config_path=config_path,
-            fabri_home=run_home,
-            session_id=session_id,
-            command=command,
-            env={"FABRI_ASK_USER_SOCKET": listener.socket_path},
-            # The child env is an allowlist (launcher.build_child_env), so a crew
-            # naming a provider key the launcher has never heard of would lose
-            # it. Re-admit exactly the keys this run's own config asks for.
-            allow_env=_bound_api_key_envs(config_path),
-        )
+        run_env = {"FABRI_ASK_USER_SOCKET": listener.socket_path}
+        if user_id:
+            # The run's actor: ${actor} refs resolve to this user, and a
+            # user-scoped connection reaches only this user's runs.
+            run_env["FABRI_RUN_ACTOR"] = str(user_id)
+
+        # Stored credentials reach a run through the broker: the run gets a
+        # socket and a key, never a token. FABRI_CRED_SNAPSHOT=1 is the weaker
+        # opt-out that copies the run's granted values into its env instead
+        # (no revocation, values in the run process), and it skips the broker
+        # so a stdio MCP server with a stored credential still works there.
+        snapshot = os.environ.get(SNAPSHOT_ENV) == "1"
+        binding = None
+        if not snapshot:
+            try:
+                binding = self.credential_broker.bind(
+                    session_id=session_id,
+                    config_path=config_path,
+                    run_home=run_home,
+                    actor=str(user_id) if user_id else None,
+                    listener=listener,
+                )
+            except Exception:
+                # A BindError (a ValueError naming the source, never a value)
+                # becomes a 400 on POST /runs; nothing of this run is kept.
+                self._abandon_submit(session_id, run_home)
+                raise
+            if binding is not None and self._same_uid_refused():
+                # The run would start as the service's own OS user, so it could
+                # open installs.db or read the service's memory and take every
+                # stored token. The broker cannot protect against that.
+                names = ", ".join(sorted(binding.sources))
+                self._abandon_submit(session_id, run_home)
+                raise BindError(
+                    f"sources {names} use stored credentials, and this run would execute as the same "
+                    "OS user as fabri serve, so it could read installs.db and the service's memory. "
+                    "Stored credentials need runs isolated under a separate OS user (the coming container "
+                    f"launch mode). For local development only, set {ALLOW_SHARED_UID_ENV}=1 on the service"
+                )
+            if binding is not None:
+                run_env.update(binding.env())
+        elif self._same_uid_refused():
+            # Snapshot mode copies stored tokens straight into the run, so the
+            # same-user refusal applies here too.
+            from fabri.config import load_config
+            refs = granted_secret_refs(load_config(str(config_path)), actor=str(user_id) if user_id else None)
+            if refs:
+                self._abandon_submit(session_id, run_home)
+                raise BindError(
+                    f"{SNAPSHOT_ENV}=1 would copy stored credentials into a run that executes as the same "
+                    "OS user as fabri serve, so it could read installs.db and the service's memory. "
+                    f"For local development only, set {ALLOW_SHARED_UID_ENV}=1 on the service"
+                )
+        try:
+            handle = launch_run(
+                task,
+                config_path=config_path,
+                fabri_home=run_home,
+                session_id=session_id,
+                command=command,
+                env=run_env,
+                # Resolve the run's refs from this service's own database, never
+                # from whatever FABRI_INSTALL_DB the process env happens to hold.
+                install_db=self.home_root / "installs.db",
+                # The child env is an allowlist (launcher.build_child_env), so a crew
+                # naming a provider key the launcher has never heard of would lose
+                # it. Re-admit exactly the keys this run's own config asks for.
+                allow_env=_bound_api_key_envs(config_path),
+                credential_snapshot=snapshot,
+            )
+        except Exception:
+            self._abandon_submit(session_id, run_home)
+            raise
+        if binding is not None:
+            # The broker accepts connections only from this process tree, and
+            # refuses every call until it knows the run's pid.
+            self.credential_broker.attach_run_pid(session_id, handle.proc.pid)
+            self._watch_run_end(session_id, handle)
         self._runs[session_id] = handle
         meta = {
             "session_id": session_id,
@@ -506,6 +603,34 @@ class FabriService:
         listener = self._asks.pop(session_id, None)
         if listener is not None:
             listener.close()
+        self.credential_broker.release(session_id)
+
+    def _same_uid_refused(self) -> bool:
+        """True when a run that needs stored credentials must be refused: it
+        would execute as the service's own OS user and the operator has not
+        set FABRI_ALLOW_SHARED_UID=1."""
+        return runs_share_service_uid(self.launch_isolation) and not shared_uid_allowed()
+
+    def _abandon_submit(self, session_id: str, run_home: Path) -> None:
+        """Undo a submit that failed before its run started: no listener, no
+        broker binding and no run home are left behind."""
+        self._close_ask(session_id)
+        shutil.rmtree(run_home, ignore_errors=True)
+
+    def _watch_run_end(self, session_id: str, handle: RunHandle) -> None:
+        """Release the run's broker binding as soon as its process exits, even
+        when nobody calls ``result`` or ``cancel``."""
+
+        def wait_then_release() -> None:
+            try:
+                handle.proc.wait()
+            except Exception:  # noqa: BLE001 -- release below either way
+                pass
+            self.credential_broker.release(session_id)
+
+        threading.Thread(
+            target=wait_then_release, name=f"cred-release-{session_id[:8]}", daemon=True
+        ).start()
 
     def _handle(self, session_id: str) -> RunHandle:
         handle = self._runs.get(session_id)
@@ -814,6 +939,7 @@ class FabriService:
         for listener in list(self._asks.values()):
             listener.close()
         self._asks.clear()
+        self.credential_broker.close()
 
 
 _SUCCESS_OUTCOMES = frozenset({"success", "success_with_recovery"})
@@ -902,6 +1028,9 @@ def serve_stdio(
     (``{"session_id", "event": {...}}``) followed by a final result line
     (``{"session_id", "result": {...}}``). A non-Python host drives the whole
     run -- submit, stream, cost -- over stdin/stdout with no fabri imports.
+
+    Overrides are checked the same way HTTP checks them: a job that sets a
+    refused key gets an error line and is skipped.
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
@@ -919,9 +1048,24 @@ def serve_stdio(
         except json.JSONDecodeError as e:
             _write({"error": f"invalid request JSON: {e}"})
             continue
+        if not isinstance(req, dict):
+            _write({"error": "request must be a JSON object"})
+            continue
+        overrides = req.get("overrides")
+        if overrides is not None and not isinstance(overrides, dict):
+            _write({"error": "overrides must be a JSON object"})
+            continue
         task = req.get("task")
         if not task:
             _write({"error": "request missing required field 'task'"})
+            continue
+        refused = refused_override_keys(req.get("overrides"))
+        if refused:
+            _write({"error": (
+                f"overrides may not set {', '.join(refused)}: these keys start processes, "
+                "widen tool access, or choose where keys, data or traffic go, so only "
+                "the agent's own config may set them"
+            )})
             continue
         session_id = service.submit(task, req.get("overrides"))
         _write({"session_id": session_id, "status": "submitted"})

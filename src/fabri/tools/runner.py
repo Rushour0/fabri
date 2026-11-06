@@ -3,8 +3,17 @@ import os
 import signal
 import subprocess
 import time
+from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
+from fabri.tools.credential_store import (
+    BROKER_ENV_NAMES,
+    ENV_CREDENTIAL_PREFIX,
+    broker_mode,
+    credential_env_var,
+    env_without_credentials,
+    subagent_credential_names,
+)
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.result import tool_error, tool_ok
 
@@ -28,6 +37,70 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 RUNNER_OUTPUT_CAP_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 
+def _subagent_config(manifest: ToolManifest, args: dict) -> str | None:
+    """The config path of the sub-agent this tool call starts, or None when the
+    tool is not a sub-agent. Two shapes start one: a static ``tools.agents``
+    entry runs ``agent_runner_tool.py <config>``, and ``spawn_subagent`` takes
+    the config as its ``config_path`` argument."""
+    command = [str(part) for part in manifest.command]
+    for i, part in enumerate(command[:-1]):
+        if Path(part).name == "agent_runner_tool.py":
+            return command[i + 1]
+    if any(Path(part).name == "spawn_subagent.py" for part in command):
+        config = (args or {}).get("config_path")
+        return config if isinstance(config, str) and config else None
+    return None
+
+
+def declared_credential_names(manifest: ToolManifest, env: dict | None = None) -> frozenset[str]:
+    """The FABRI_CRED_* names in ``env`` (default: this process's) that the
+    manifest's ``credentials`` patterns match. An exact handle maps through
+    ``credential_env_var``; a "*" handle matches every name that starts with
+    the provider's FABRI_CRED_<PROVIDER>_ prefix. No patterns, no names.
+
+    The two credential broker names are never returned, so a manifest that
+    declares ``broker:*`` or ``broker:key`` cannot get the broker key. Only a
+    sub-agent keeps those (see ``tool_env``)."""
+    source = os.environ if env is None else env
+    names: set[str] = set()
+    for pattern in manifest.credentials:
+        provider, handle = pattern.split(":", 1)
+        if handle == "*":
+            prefix = credential_env_var(provider, "")
+            names.update(key for key in source if key.startswith(prefix))
+        else:
+            names.add(credential_env_var(provider, handle))
+    return frozenset(n for n in names if n.startswith(ENV_CREDENTIAL_PREFIX) and n not in BROKER_ENV_NAMES)
+
+
+def tool_env(manifest: ToolManifest, args: dict, extra_env: dict | None = None) -> dict:
+    """The environment one tool subprocess gets: this process's env with every
+    FABRI_CRED_* variable removed, except the ones the manifest's ``credentials``
+    patterns declare, then ``extra_env``.
+
+    A sub-agent always keeps the two credential broker names when the run has
+    them, whatever its config says, because the broker answers it from the
+    parent run's own binding. Without a broker (the snapshot path) it keeps the
+    credentials its own config declares and its policy grants, so its sources
+    still work. Every other tool, bash and python_exec included, sees no token
+    and no broker name at all."""
+    keep: frozenset[str] = frozenset()
+    keep_broker = False
+    config = _subagent_config(manifest, args)
+    if config is not None:
+        # Both broker names or neither: a lone one is not a broker run.
+        keep_broker = broker_mode()
+        if not keep_broker:
+            try:
+                keep = subagent_credential_names(config, actor=os.environ.get("FABRI_RUN_ACTOR") or None)
+            except Exception as e:  # noqa: BLE001 -- an unreadable config passes no credentials
+                logger.warning("tool %s: sub-agent credentials not passed (%s)", manifest.name, type(e).__name__)
+    env = env_without_credentials(keep=keep | declared_credential_names(manifest), keep_broker=keep_broker)
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
 def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) -> dict:
     """Invoke a tool's command as a subprocess: write `args` as JSON to stdin,
     read a JSON object from stdout. Always returns the normalized shape
@@ -36,14 +109,12 @@ def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) 
 
     `extra_env` is layered on top of os.environ for this one call -- the
     ToolRegistry threads FABRI_SANDBOX_ROOT this way so two concurrent
-    registries don't clobber each other's root via the global env."""
+    registries don't clobber each other's root via the global env. Connector
+    credentials (FABRI_CRED_*) are removed first, see `tool_env`."""
     logger.debug("tool %s: invoking (args_size=%d bytes)", manifest.name, len(json.dumps(args)))
     t0 = time.monotonic()
 
-    env = None
-    if extra_env is not None:
-        env = os.environ.copy()
-        env.update(extra_env)
+    env = tool_env(manifest, args, extra_env)
 
     try:
         # start_new_session=True puts the child in its own process group so a

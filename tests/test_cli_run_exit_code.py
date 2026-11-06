@@ -25,7 +25,7 @@ def _invoke_cmd_run(monkeypatch, result, *, entries=()):
     monkeypatch.setattr(cli, "_require_api_key", lambda _e: None)
     monkeypatch.setattr(cli, "configure_logging", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_open_store", lambda _c: object())
-    monkeypatch.setattr(cli, "build_tools", lambda _c: [])
+    monkeypatch.setattr(cli, "build_tools", lambda _c, **_kw: [])
     monkeypatch.setattr(cli, "build_tool_defs", lambda *a, **k: [])
     monkeypatch.setattr(cli, "build_llm", lambda *a, **k: object())
     monkeypatch.setattr(cli, "build_run_llms", lambda *a, **k: {

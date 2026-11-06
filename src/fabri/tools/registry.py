@@ -15,6 +15,12 @@ ToolHandler = Callable[[dict], dict]
 # call to a tool whose approval class is `always_approve`.
 Approver = Callable[[str, dict, ToolManifest], bool]
 
+
+class ApprovalRefused(Exception):
+    """An approver raises this to deny a call without asking anyone, with a
+    reason the registry returns to the model as the tool error."""
+
+
 BATCH_TOOL_NAME = "batch"
 # Nested batches multiply fan-out unpredictably; spawn_subagent + ask_user
 # have side effects that don't belong inside an opaque batch result.
@@ -53,6 +59,7 @@ class ToolRegistry:
         # Tools marked `always_approve` run only when the approver says yes.
         # With no approver they are refused: a human has to be in the loop.
         self.approver = approver
+        self._broker_gated_names: set[str] = set()
         # Per tool: calls, failures, refused (approval or bad args), seconds.
         self.usage: dict[str, dict[str, float]] = {}
         for manifest_dir in dirs:
@@ -111,11 +118,18 @@ class ToolRegistry:
 
     def invoke(self, name: str, args: dict) -> dict:
         if name == BATCH_TOOL_NAME and BATCH_TOOL_NAME in self.tools:
-            return self.invoke_batch(args.get("calls") or [])
-        canonical = self.canonical_name(name)
-        if canonical is None:
-            return tool_error(f"unknown tool: {name}")
-        name = canonical
+            # The batch call is checked like any other call (its own approval
+            # class, its required arguments) before any inner call runs. Each
+            # inner call is then checked on its own when invoke_batch hands it
+            # back to invoke(). The batch row's seconds include its inner calls.
+            name = BATCH_TOOL_NAME
+            run = lambda: self.invoke_batch(args.get("calls") or [])  # noqa: E731
+        else:
+            canonical = self.canonical_name(name)
+            if canonical is None:
+                return tool_error(f"unknown tool: {name}")
+            name = canonical
+            run = None
         manifest = self.tools[name]
         stats = self.usage.setdefault(name, {"calls": 0, "failures": 0, "refused": 0, "seconds": 0.0})
         stats["calls"] += 1
@@ -125,7 +139,7 @@ class ToolRegistry:
             return refusal
         t0 = time.monotonic()
         try:
-            result = self._run(name, args, manifest)
+            result = run() if run is not None else self._run(name, args, manifest)
         finally:
             stats["seconds"] += time.monotonic() - t0
         if not result.get("ok"):
@@ -148,19 +162,45 @@ class ToolRegistry:
                 out[name] = delta
         return out
 
+    def mark_broker_gated(self, name: str) -> None:
+        """Record that `name` sends through the credential broker, which asks a
+        human itself before any always_approve request. Only the source
+        builder calls this, and only when it wired the tool to a live broker
+        client, so a callable cannot opt itself out of the approver."""
+        self._broker_gated_names.add(name)
+
+    def _broker_gated(self, name: str) -> bool:
+        """True only for names the source builder marked with
+        `mark_broker_gated`. Manifest (subprocess) tools and every other
+        callable are gated here as before."""
+        return name in self._broker_gated_names
+
     def _check_call(self, name: str, args: object, manifest: ToolManifest) -> dict | None:
-        """An error result when the call must not run, else None."""
+        """An error result when the call must not run, else None. The approver
+        step is skipped for a broker-gated handler (see `_broker_gated`); the
+        manifest still shows the class for lint and Studio. Arguments too long
+        to show in full on an approval card are refused before any approver
+        is called."""
         if not isinstance(args, dict):
             return tool_error(f"{name}: arguments must be a JSON object")
         missing = [k for k in (manifest.input_schema or {}).get("required") or [] if k not in args]
         if missing:
             return tool_error(f"{name}: missing required argument(s): {', '.join(missing)}")
-        if manifest.approval == "always_approve":
+        if manifest.approval == "always_approve" and not self._broker_gated(name):
             if self.approver is None:
                 return tool_error(f"{name} needs human approval and no approver is configured; "
                                   "the call was not made")
+            # Checked here, not only in describe_call: a custom approver that
+            # never builds a card must not approve arguments no card could show.
+            from fabri.tools.approver import check_fits_card
+            try:
+                check_fits_card(args)
+            except ApprovalRefused as e:
+                return tool_error(f"{name}: {e}")
             try:
                 approved = bool(self.approver(name, args, manifest))
+            except ApprovalRefused as e:
+                return tool_error(f"{name}: {e}")
             except Exception as e:  # noqa: BLE001 -- a broken approver means no
                 return tool_error(f"{name}: approval check failed ({type(e).__name__}); the call was not made")
             if not approved:

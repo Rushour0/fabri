@@ -37,13 +37,25 @@ def check_approval(value: object) -> str:
 
 RANK = {"read": 0, "write": 1, "always_approve": 2}
 # Words that mark an action a human should approve on every call: it sends
-# something to people or moves money. Matched against name tokens and paths.
+# something to people (a message, comment, review, share) or moves money.
+# Matched against name tokens and paths.
 _SENSITIVE = frozenset({
     "send", "sends", "message", "messages", "msg", "email", "emails", "mail", "sms", "notify", "notification",
     "notifications", "broadcast", "publish", "post_message", "postmessage", "reply", "dm", "invite",
     "pay", "pays", "payment", "payments", "charge", "charges", "refund", "refunds", "payout", "payouts",
     "transfer", "transfers", "checkout", "purchase", "purchases", "withdraw", "withdrawal",
+    "schedule", "reschedule", "resume", "activate", "launch", "trigger", "import", "subscribe", "unsubscribe",
+    "sender", "export", "action",
 })
+# Words for posts other people read: a comment, a review, a reply, a share, a
+# forward. They gate like _SENSITIVE. A read verb in front ("list_comments")
+# does not lift the gate: the name is a claim, and the HTTP read methods are
+# already read before these words are looked at.
+_OUTBOUND = frozenset({
+    "comment", "comments", "review", "reviews", "post", "posts", "replies", "share", "shares",
+    "forward", "forwards",
+})
+_GATED = _SENSITIVE | _OUTBOUND
 _DESTRUCTIVE = frozenset({"delete", "deletes", "remove", "destroy", "drop", "purge", "erase", "wipe", "truncate"})
 
 
@@ -65,25 +77,35 @@ def _tokens(*texts: object) -> set[str]:
     return out
 
 
+def _gated(words: set[str]) -> bool:
+    """True when `words` hold a word that sends to people, posts something
+    others read, moves money or deletes."""
+    return bool(words & (_GATED | _DESTRUCTIVE))
+
+
 def safe_approval(method: str | None, *names: object) -> str:
     """The default class for an HTTP operation: ``read`` for GET, HEAD and
     OPTIONS; ``always_approve`` for DELETE and for anything whose name or path
-    sends messages or moves money; ``write`` otherwise."""
+    sends messages, posts a comment, review or share, or moves money;
+    ``write`` otherwise. A read verb in the name does not lift the gate for
+    a method that is not a read. Names are not reshaped first: a generated
+    operation id such as "create_key_keys_post" gates on its "post" like any
+    other name, since telling a generated method suffix from a real word
+    ("create_blog_post") is a guess."""
     verb = (method or "").upper()
     if verb in READ_METHODS:
         return "read"
     if verb == "DELETE":
         return "always_approve"
-    words = _tokens(*names)
-    return "always_approve" if words & (_SENSITIVE | _DESTRUCTIVE) else "write"
+    return "always_approve" if _gated(_tokens(*names)) else "write"
 
 
 def mcp_approval(name: str, description: str = "", annotations: object = None) -> str:
     """The default class for an MCP tool. Never ``read``: a server's own
     readOnlyHint is a claim, so read access has to be granted in the YAML.
     ``always_approve`` when the server marks it destructive or its name sends
-    messages, moves money or deletes."""
+    messages, posts a comment, review or share, moves money or deletes."""
     hints = annotations if isinstance(annotations, dict) else {}
     if hints.get("destructiveHint") is True:
         return "always_approve"
-    return "always_approve" if _tokens(name) & (_SENSITIVE | _DESTRUCTIVE) else "write"
+    return "always_approve" if _gated(_tokens(name)) else "write"

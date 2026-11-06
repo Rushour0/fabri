@@ -217,3 +217,48 @@ def test_transport_error_maps_to_error():
     pairs = dict((m.name, h) for m, h in openapi_tools(PETSTORE, transport=httpx.MockTransport(boom)))
     out = pairs["pet_list"]({})
     assert out["ok"] is False and out["result"] == {"status": "error", "code": None}
+
+
+def test_operation_handler_accepts_sender():
+    from fabri.tools.openapi import operation_handler
+
+    ops = {op.name: op for op in openapi_tool_defs(load_openapi(PETSTORE))}
+    seen: list[tuple] = []
+
+    def sender(method, url, **kwargs):
+        seen.append((method, url, kwargs))
+        return {"ok": True, "result": {"status": "ok", "code": 201, "data": {"id": 7}}}
+
+    def no_network(request):
+        raise AssertionError("a sender-backed handler must not use the client")
+
+    handler = operation_handler(ops["pet_adopt"], base_url="https://petstore.test/", sender=sender,
+                                client=httpx.Client(transport=httpx.MockTransport(no_network)),
+                                headers={"Authorization": {"secret_ref": "pets:prod"}},
+                                extra_headers={"X-Dry-Run": "1"}, timeout_s=12.0)
+    out = handler({"petId": 3, "owner_id": 9})
+    assert out == {"ok": True, "result": {"status": "ok", "code": 201, "data": {"id": 7}}}
+    method, url, kwargs = seen[-1]
+    assert method == "POST" and url == "https://petstore.test/pets/3/adopt"
+    # The raw value goes to the sender so the broker renders the URL itself.
+    assert kwargs["path_params"] == {"petId": 3}
+    assert kwargs["json_body"] == {"owner_id": 9} and kwargs["form_body"] is None
+    assert kwargs["params"] == {}
+    assert kwargs["extra_headers"] == {"X-Dry-Run": "1"}
+    assert kwargs["timeout_s"] == 12.0 and kwargs["tool_name"] == "pet_adopt"
+    assert kwargs["floor_url"] == "https://petstore.test/pets/{petId}/adopt"
+    assert "headers" not in kwargs and "store" not in kwargs
+
+    list_handler = operation_handler(ops["pet_list"], base_url="https://petstore.test", sender=sender)
+    list_handler({"limit": 5})
+    assert seen[-1][2]["params"] == {"limit": 5} and seen[-1][2]["path_params"] == {}
+
+    # The local path checks still run before anything is sent.
+    get_handler = operation_handler(ops["pet_get"], base_url="https://petstore.test", sender=sender)
+    count = len(seen)
+    assert get_handler({"petId": "a/b"})["ok"] is False
+    assert get_handler({})["error"].endswith("missing path parameter 'petId'")
+    assert len(seen) == count
+
+    with pytest.raises(ValueError, match="client or a sender"):
+        operation_handler(ops["pet_list"], base_url="https://petstore.test")

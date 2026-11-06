@@ -484,10 +484,10 @@ class SetupsApi:
             if entry is None:
                 raise ApiError(405, f"{method} is not allowed on {path}")
             fn, write = entry
-            actor = self._authorize(handler, write=write)
+            actor, user_id = self._authorize(handler, write=write)
             query = {k: v[0] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
             body = self._read_body(handler) if method in ("POST", "PUT") else {}
-            status, payload = fn(Request(actor=actor, query=query, body=body, params=params))
+            status, payload = fn(Request(actor=actor, query=query, body=body, params=params, user_id=user_id))
         except ApiError as exc:
             out: dict[str, Any] = {"error": exc.message}
             if exc.reasons:
@@ -527,7 +527,9 @@ class SetupsApi:
 
     # ---- auth
 
-    def _authorize(self, handler: Any, *, write: bool) -> str:
+    def _authorize(self, handler: Any, *, write: bool) -> tuple[str, str | None]:
+        """(actor name for the audit log, signed-in user id or None). Only a
+        session user has a user id; token callers and open access have none."""
         service = handler.service
         principal = handler._principal()
         if principal is None:
@@ -535,11 +537,11 @@ class SetupsApi:
             read_open = not session_auth and not os.environ.get("FABRI_SERVICE_TOKEN")
             write_open = read_open and not os.environ.get("FABRI_ADMIN_TOKEN")
             if (write and write_open) or (not write and read_open):
-                return "anonymous"
+                return "anonymous", None
             raise ApiError(401, "auth required")
         if write and not principal.is_admin:
             raise ApiError(403, "admin role required")
-        return principal.actor
+        return principal.actor, getattr(principal, "user_id", None) or None
 
     # ---- helpers
 
@@ -885,6 +887,7 @@ class SetupsApi:
         from fabri.orchestrator.retrieval import _tool_text, retrieve_tools
         from fabri.ranking import rank
         from fabri.setups.agent import build_agent_config
+        from fabri.setups.toolset import resolve_tools
 
         org, project = req.query.get("org") or None, req.query.get("project") or None
         agent_type = req.query.get("type") or None
@@ -929,8 +932,11 @@ class SetupsApi:
         on_demand_rows = [{"name": n, "score": scores.get(n, 0.0), "full": n in full,
                            "source": resolved.skills[n].get("source")} for n in [*full, *rest]]
 
-        # Tools: the registry a run gets, then the run's own selection.
-        tools = setups.tools()
+        # Tools: the registry a run gets, then the run's own selection. A
+        # signed-in user previews with their own connections (${actor} refs
+        # resolve to them); a token caller or open access has no actor.
+        tools = resolve_tools(resolved, policy=self.policy, transport=self.transport, store=self.store,
+                              actor=req.user_id)
         try:
             config, registry = build_agent_config(resolved, agent_type, tool_set=tools, task=task)
         except SetupError as exc:
@@ -1418,7 +1424,9 @@ class SetupsApi:
             return connector_tool_entry(
                 connector, name=self._opt_str(body, "name"), token_env=self._opt_str(body, "token_env"),
                 workspace=self._opt_str(body, "workspace"), remote=self._opt_bool(body, "remote", False),
-                approval=approval, connect=self._opt_bool(body, "connect", False))
+                approval=approval, connect=self._opt_bool(body, "connect", False),
+                url=self._opt_str(body, "url"), include=self._opt_list(body, "include"),
+                all_tools=self._opt_bool(body, "all_tools", False))
         raise ApiError(400, "source must be openapi, mcp or connector")
 
     def post_tool_source(self, req: "Request"):
@@ -1471,3 +1479,5 @@ class Request:
     query: dict[str, str]
     body: dict[str, Any]
     params: dict[str, str] = field(default_factory=dict)
+    # The signed-in user's id, None for a token caller or open access.
+    user_id: str | None = None
