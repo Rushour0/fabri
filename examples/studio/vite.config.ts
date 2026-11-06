@@ -18,22 +18,28 @@ const PBA_HEADERS = {
   "X-Company": process.env.PBA_COMPANY ?? "demo-league",
 };
 
+// fabri serve refuses writes whose Origin is not its own. The browser page is
+// on the dev server's origin, so the proxy presents the fabri serve origin.
+const SERVE = { target: FABRI_SERVE, changeOrigin: true, headers: { origin: new URL(FABRI_SERVE).origin } };
+
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
       "/runs": {
-        target: FABRI_SERVE,
-        changeOrigin: true,
+        ...SERVE,
         // Never time out an in-flight SSE stream or a blocking /result call.
         timeout: 0,
         proxyTimeout: 0,
       },
-      "/fleets": { target: FABRI_SERVE, changeOrigin: true, timeout: 0, proxyTimeout: 0 },
-      "/setups": { target: FABRI_SERVE, changeOrigin: true },
-      "/tools": { target: FABRI_SERVE, changeOrigin: true },
-      "/health": { target: FABRI_SERVE, changeOrigin: true },
+      "/fleets": { ...SERVE, timeout: 0, proxyTimeout: 0 },
+      "/setups": { ...SERVE },
+      "/tools": { ...SERVE },
+      // Connections list/add/remove and the OAuth start and callback.
+      "/connections": { ...SERVE },
+      "/connect": { ...SERVE },
+      "/health": { ...SERVE },
       // A regex key: exactly the two spend routes, so no other pba path gets the token.
       "^/pba/v1/spend(/summary)?(\\?.*)?$": { target: PBA, changeOrigin: true, headers: PBA_HEADERS, rewrite: (p) => p.replace(/^\/pba/, "") },
     },
