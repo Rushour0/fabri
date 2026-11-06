@@ -162,9 +162,13 @@ Three flags apply to some connectors only:
 `--workspace` uses the credential store ref `<provider>:<workspace>`. fabri resolves it from a stored connection
 (`fabri connect <provider> --handle <workspace>`, see [connections.md](connections.md)), or from
 `FABRI_CRED_<PROVIDER>_<WORKSPACE>` when there is no stored row. Stored tokens are plain text in a 0600 file. Under
-`fabri serve`, a run receives only the tokens its own sources declare and its grants allow, as `FABRI_CRED_*` variables
-in its environment. Tool subprocesses (`bash`, MCP servers, sub-agents) get them removed, and `kind: python`
-sources can read them (see [connections.md](connections.md#what-a-run-can-see)). To keep tenants apart, wrap the store a run gets in
+`fabri serve`, a run never receives a stored token. A credentialed `http`, `openapi` or `http` MCP source sends each
+request to a credential broker in the service process, which adds the token, sends the call and returns the result with
+the token removed. Only `always_approve` calls need a person's yes. A stdio MCP source or a `kind: python` source that
+needs a stored credential is refused under `fabri serve`; use an http or openapi source, or set
+`FABRI_CRED_SNAPSHOT=1` on the service (weaker, see [connections.md](connections.md#fabri_cred_snapshot1-the-weaker-opt-out)).
+`fabri run` and Python hosts resolve the token in the same process. Details and limits are in
+[connections.md](connections.md#what-a-run-can-see). To keep tenants apart, wrap the store a run gets in
 `ScopedCredentialStore(store, ["slack:acme", "linear:*"])`: any other ref
 fails with `CredentialScopeError`. Pass `audit_path=` (or set
 `FABRI_CRED_AUDIT_LOG` for the default store) to append one JSON line per
@@ -196,7 +200,7 @@ and lint warns when it does. Adding a connector's hosts is a change to its modul
 needs editing. The functions live in `fabri.tools.connector_catalog`
 (`catalog_for_url`, `request_floor`). The `fabri.tools.connectors` facade re-exports both.
 
-A manifest tool sees no `FABRI_CRED_*` variable unless it lists `provider:handle` patterns (handle may be `*`) in an optional `credentials` field, and then only the matching variables are passed to its process.
+A manifest tool sees no `FABRI_CRED_*` variable unless it lists `provider:handle` patterns (handle may be `*`) in an optional `credentials` field, and then only the matching variables are passed to its process. Under `fabri serve` a run holds no stored token (the broker keeps them), so there is nothing to match; use an `http` source for credentialed calls. The broker's own variables are never handed out this way.
 
 ## Approval classes
 
@@ -258,7 +262,7 @@ token. Without the key there is no cap. `env:` header specs are not covered.
 - `fabri run` on a terminal prints the call on stderr and reads `[y/N]`. Only `y` or `yes` approves. Without a
   terminal (a pipe, CI) there is no approver and the call is refused.
 - `fabri serve` and Studio send the call to the run's questions inbox as a question with approve and deny
-  buttons. A run bound to Slack gets the same question there. Under strict auth an admin can answer any run, and the run's owner can answer their own run only when signed in as that owner. A run with no owner (submitted by token) is admin only. `POST /runs/<id>/answer` must carry the `question_id` of the question and an `answer`, or it gets a 400.
+  buttons. A run bound to Slack gets the same question there. Under strict auth an admin can answer any run, and the run's owner can answer their own run only when signed in as that owner. A run with no owner (submitted by token) is admin only. `POST /runs/<id>/answer` must carry the `question_id` of the question and an `answer`, or it gets a 400. For a credentialed `http`, `openapi` or `http` MCP source, the question comes from the credential broker and shows the rendered request. Only `always_approve` calls ask.
 - A child agent asks the parent's human. Its own stdin is a pipe, so it can never approve its own call.
 - A Python host passes `approver=` to `build_tools`, `registry(...)` or `build_agent_config`, or sets
   `registry.approver`, as in the example above.

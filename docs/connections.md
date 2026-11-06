@@ -10,11 +10,9 @@ Every connection has a scope kind. `org` connections belong to the whole install
 
 A setup refers to a connection by name only. `fabri setups tools add connector cakemail --workspace acct1` writes the
 secret ref `cakemail:acct1`, and fabri looks the token up when a call is made. The token is not written to the setup
-file, the agent's prompt or a log line, and the model's tools cannot read it: the run process holds the tokens its own
-sources declare, but every tool subprocess it starts (`bash`, `python_exec`, MCP servers, sub-agents) gets an
-environment with those tokens removed, except the ones an MCP server or sub-agent declares for itself. `kind: python` sources are the exception. They run inside the run process and
-can read every token it holds, so only declare python callables you trust. See
-[What a run can see](#what-a-run-can-see) below.
+file, the agent's prompt or a log line. Under `fabri serve` a run never holds a stored token at all: a credential
+broker in the service process makes the credentialed calls for it. See
+[Approving calls under fabri serve](#approving-calls-under-fabri-serve) and [What a run can see](#what-a-run-can-see).
 
 ## Connect a service
 
@@ -92,36 +90,135 @@ fabri that opens the file can still read it. Nothing is migrated twice.
 - **`fabri run` and Python hosts** read the token from the connection store directly, or from the environment variable
   `FABRI_CRED_<PROVIDER>_<HANDLE>` when there is no stored row. This applies to every provider. With neither, the call
   fails with `no <provider> connection for this handle; run fabri connect <provider> or set FABRI_CRED_...`. The
-  message names no handle and no token.
-- **`fabri serve` and `fabri studio`** do not give a run the database. `FABRI_INSTALL_DB` stays on the launcher's deny
-  list, so a run cannot open the file. Instead, when the service binds a run, it looks at the secret refs that the
-  run's own `tools.sources` declare, keeps the ones its `credential_grants` allow, resolves just those, and puts each in
-  that run's child environment as `FABRI_CRED_<PROVIDER>_<HANDLE>`. A run that uses `cakemail:acct1` receives that one
-  variable. It gets no other Cakemail handle, no Slack bot token, no Linear token. Every other token stays inside the
-  service process.
+  message names no handle and no token. Nothing sits between the code and the token here, because the process that
+  makes the call already holds it. On a terminal, `fabri run` asks `[y/N]` before an `always_approve` call.
+- **`fabri serve` and `fabri studio`** run each agent as a child process that does not get the database
+  (`FABRI_INSTALL_DB` stays on the launcher's deny list) and does not get a token either. The service holds one
+  credential broker. When it binds a run, it reads the run's own `tools.sources`, and if any source declares a
+  `secret_ref` it opens a Unix socket for that run (mode 0600, in a 0700 directory) and gives the run two variables:
+  `FABRI_CRED_BROKER_SOCKET` (the socket path) and `FABRI_CRED_BROKER_KEY` (a random 256-bit key). A run whose sources
+  declare no `secret_ref` gets neither. Every credentialed `http` or `openapi` source tool, and every `http` MCP
+  source with a `secret_ref` header, sends its request to the broker instead of calling the provider itself. The
+  broker checks the request, resolves the token from the connection store on that call, adds it to the outbound
+  request, and sends it. The reply passes through with the token value scrubbed out. Because the token is looked up on
+  each call, a revoked connection stops working on the next call and a refreshed one is used at once.
+- A source whose only credentials are `env:` variables or literal headers is not brokered. Its values are in the run's
+  environment because the operator put them there.
 - `FABRI_RUN_ENV_ALLOW` still exists. It is the operator's blunt way to pass a whole variable family to every run
-  (`FABRI_RUN_ENV_ALLOW=FABRI_CRED_*`). Prefer the scoped passing above.
+  (`FABRI_RUN_ENV_ALLOW=FABRI_CRED_*`). It puts those values in the run process, outside the broker.
 - Overrides sent with `POST /runs` or `/fleets` cannot name a credential or a connection. Keys such as `secret_ref`,
   `credential_grants`, `header_source` and anything ending in `_ref` are refused.
 
+### Approving calls under fabri serve
+
+Only calls whose approval class is `always_approve` need a person. The broker works out the class itself from the
+run's bound `run.yaml` (the tool's own class, raised by the policy floors and by the catalog floor for the request
+host). Nothing in a request can lower it.
+
+- `read` and `write` calls pass the broker with no question. They are still limited to the declared sources and tools.
+- An `always_approve` call is held. The broker asks the run's questions inbox (Studio, or Slack for a run bound to
+  Slack) and shows the rendered request: tool, provider, method, URL, the body with secrets removed, and the names and
+  values of any extra headers. A person answers `approve` or `deny` through `POST /runs/<id>/answer`, and the reply
+  must carry the matching `question_id` (see [setups-api.md](setups-api.md)).
+- An approval covers that one request only. The broker hashes the exact request it prepared, sends that same object
+  after the yes, and drops the approval after one use or `120` seconds, whichever is first. The same call asked again
+  gets a new question.
+- With no one to ask (a host that did not wire an approver), an `always_approve` call is refused with
+  `approval_required`. With no answer inside `FABRI_APPROVAL_TIMEOUT_S` (default 300 seconds) it is refused with
+  `approval_timeout`. A denial gives `approval_declined`. In every case the call is not made.
+- For an `http` MCP source, the methods `initialize`, `ping`, `tools/list`, `resources/list`, `resources/read`,
+  `prompts/list`, `prompts/get` and a few others count as `read`. `tools/call` gets the class of the remote tool
+  (annotations, the source's `approval:` block, policy floors, the catalog minimum). A `tools/call` for a tool the
+  broker has not seen in a `tools/list` reply, any other method, and a batch body are `always_approve`.
+
+The broker writes one audit line per decision (source, tool, method, host, path, class, decision, status code, never a
+value) to the service log, and to the file named by `FABRI_CRED_AUDIT_LOG` when that is set.
+
 ### What a run can see
 
-The tokens a run receives sit in the run process's environment. The `http` and `openapi` source tools read them there
-and send them in the request, inside the run process. A subprocess the run starts gets only what it declared:
+Under `fabri serve` a run sees the socket path and the key, and nothing else about the token.
 
-- Every manifest tool (`bash`, `python_exec`, `slack_post` and any tool in a `manifest_dir`) starts with every
-  `FABRI_CRED_*` variable removed. A manifest tool that used to read a credential from the environment, such as the
-  `slack_post`, `webhook_post` and `send_email` recipes, finds nothing there; use an `http` source for those calls.
-- A stdio MCP server with `env_mode: inherit` (the default) keeps only the `FABRI_CRED_*` names its own declaration
-  references through `env` or a `secret_ref`; with `env_mode: allowlist` it inherits none. Either way the values its
-  `env` names are resolved by the run and passed under the names you chose.
-- A sub-agent keeps only the refs its own config declares and its `credential_grants` allow.
-- A `verify` command gets no `FABRI_CRED_*` variable.
+- The run process holds no stored token. Code in the run that reads its own environment finds no `FABRI_CRED_<PROVIDER>_`
+  variable for a stored connection.
+- Every tool subprocess (`bash`, `python_exec`, manifest tools, MCP servers, the `verify` command) starts with every
+  `FABRI_CRED_*` variable removed, which includes the two broker variables. A manifest tool that used to read a credential from
+  the environment, such as the `slack_post`, `webhook_post` and `send_email` recipes, finds nothing. Use an `http`
+  source for those calls. A manifest `credentials:` list cannot hand out the broker variables.
+- A sub-agent keeps the two broker variables and sends its credentialed calls to the same broker, which answers from
+  the parent run's binding. It can use only the sources that were bound when the run started, which includes sources
+  in the static `tools.agents[*].config` files the template names. A sub-agent config chosen later by the model cannot
+  use a credentialed source: the call fails with `source <name> is not bound to this run`.
+- The broker applies the header specs of the declared source. A request cannot choose its own auth header, add an
+  `Authorization`, `Cookie` or `X-API-Key` header, or name a different host. The URL comes from the template the run
+  declared, with path values filled in by the broker. It does not follow redirects.
+- A run cannot reach another run's broker. The broker checks that the connecting process has the service's user id and,
+  where the platform reports the peer's process id (Linux and macOS), that it is a descendant of this run's process.
+  It also checks the key.
 
-`kind: python` sources run in the run process, so they can read every token the run holds. Only declare python
-callables you trust. This is a mitigation, not isolation: revoking or rotating a connection does not reach a run that
-has already started. A token broker, where the service makes the call on the run's behalf and the token never enters
-the run, is planned for a later release.
+#### Sources that cannot be brokered
+
+- A stdio MCP server (`command:`) that needs a stored credential is refused under `fabri serve`, because the
+  token would have to be placed in the server's environment, which puts it in the run again. The run fails at bind
+  with `a stdio MCP server cannot use a stored credential under fabri serve; use the http transport, or set
+  FABRI_CRED_SNAPSHOT=1 on the service`.
+- A `kind: python` source that declares a stored credential is refused the same way. The python callable would run
+  inside the run process with the token. Use an `http` or `openapi` source, or the snapshot opt-out below.
+- A `secret_ref` inside an MCP source's `env:` cannot be brokered. Put it in `headers` on an http MCP source.
+- A source with no stored credential (`env:` variables or no auth) is unaffected, and python and stdio sources work
+  as before.
+
+#### `FABRI_CRED_SNAPSHOT=1`, the weaker opt-out
+
+Set `FABRI_CRED_SNAPSHOT=1` in the service environment to turn the old behavior back on for every run. At launch the
+service resolves each secret ref the run's sources declare (limited by its `credential_grants`) and puts it in the
+run's environment as `FABRI_CRED_<PROVIDER>_<HANDLE>`. No broker is started. This is weaker in three ways:
+
+- The token sits in the run process for the life of the run. Any code in that process can read it, including
+  `kind: python` sources and anything the model gets the process to run.
+- Revoking or rotating a connection does not reach a run that has already started.
+- No broker means no rendered approval card, and the run-side approval gate is the only one.
+
+Subprocesses still lose the variables as described above. Use the opt-out only for a crew that cannot move off a
+stdio MCP server or python source that needs a stored credential, and prefer moving the crew.
+
+#### What a library host gets
+
+- A host that uses `FabriService`, in-process or over HTTP, gets the broker with nothing to set up. Runs are
+  subprocesses, the service owns the tokens, and approval goes through the answer route or Slack.
+- A host that calls `build_tools` or `run_agent` in its own process already holds the tokens in that process, so there
+  is no boundary and nothing changes. Credentials resolve in-process and a Python `approver=` handles `always_approve`.
+- A host that launches runs itself with `launch_run` can own a `CredentialBroker(install_db=...)`, call `bind(...)`,
+  and pass `binding.env()` to the run. With no listener wired, every `always_approve` call is refused. That is the
+  safe default.
+
+#### Limits that remain
+
+- Code in the run's own process tree can use the broker for the calls the run declared. The key is in the run
+  process's environment, so a `kind: python` source with no credential, or anything the model makes the run process
+  execute, can send a declared read or write. It cannot read the token, and it cannot send an `always_approve`
+  call without a person saying yes. A subprocess the run starts loses the variables, but a process the run starts
+  can still find the key if it can read the parent's environment, as same-user processes usually can on Linux and
+  macOS.
+- DNS rebinding. The broker checks that the host resolves to a public address right before it sends. The check and
+  the send are two lookups. A declared host whose DNS an attacker controls could change its answer between them.
+  Pinning the resolved address is a later item. Use hosts you trust.
+- Tokens are stored in plain text in `installs.db` (see [Where it is stored](#where-it-is-stored)). The broker reads
+  that file as the service user; anything else that can read the file reads the tokens.
+- Env fallback. When a ref has no stored row, the broker reads `FABRI_CRED_<PROVIDER>_<HANDLE>` from the service's
+  own environment. A stored row that exists but is revoked, expired or another user's refuses the call and does not
+  fall back to the environment.
+- `fabri run`, a Python host and the snapshot opt-out have no broker. Their code sees the token.
+
+#### Environment reference
+
+| Variable | Where | Meaning |
+|---|---|---|
+| `FABRI_CRED_BROKER_SOCKET` | run | Path of this run's broker socket. Set by the service, removed from every tool subprocess. |
+| `FABRI_CRED_BROKER_KEY` | run | The run's 256-bit key. Set by the service, removed from every tool subprocess. Never logged. |
+| `FABRI_CRED_SNAPSHOT` | service | `1` puts granted token values in each run's environment and starts no broker. The weaker opt-out. |
+| `FABRI_APPROVAL_TIMEOUT_S` | service and run | Seconds to wait for a person to answer an approval question. Default 300. |
+| `FABRI_CRED_AUDIT_LOG` | service | Path of a JSON-lines file for broker decisions and credential lookups. No values. |
+| `FABRI_FETCH_ALLOW_PRIVATE` | service and run | Lets http and MCP sources call loopback and private addresses, for a local MCP server. Off by default. |
 
 ## When a token stops working
 

@@ -413,3 +413,75 @@ def test_upstream_body_echoing_the_auth_header_is_redacted(monkeypatch):
                headers={"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}},
                store=EnvCredentialStore())
     assert secret not in repr(out)
+
+
+# --- credential broker, end to end -------------------------------------------
+# A real FabriService run whose tool calls go through the broker socket (see
+# tests/test_credential_broker_e2e.py for the stub agent and the harness).
+
+
+def test_broker_question_text_and_trace_event_carry_no_value(tmp_path, monkeypatch):
+    from tests.test_credential_broker_e2e import TOKEN as BROKER_TOKEN, Harness
+
+    h = Harness(tmp_path, monkeypatch)
+    try:
+        sid, _sync = h.submit([{"call": "ck_send", "args": {
+            "campaign_id": "c9", "subject": "Hello", "password": "pw-broker-card-unique"}}])
+        q = h.pending_approval(sid)
+        h.svc.answer(sid, q["question_id"], "approve", selected_option="approve")
+        (result,) = h.results(sid)
+        trace = (h.home_root / sid / ".fabri" / "traces" / f"{sid}.jsonl").read_text()
+    finally:
+        h.close()
+
+    assert result["out"]["ok"] is True, result["out"].get("error")
+    assert h.upstream.count() == 1
+    events = [json.loads(line) for line in trace.splitlines() if line.strip()]
+    asks = [e for e in events if e.get("type") == "ask_user"]
+    assert len(asks) == 1 and asks[0]["question_id"] == q["question_id"]
+    assert asks[0]["question"] == q["question"]
+    for label, text in (("card", q["question"]), ("trace", trace)):
+        leaked = BROKER_TOKEN in text or "Bearer" in text or "authorization" in text.lower()
+        assert not leaked, f"the {label} shows the credential"
+        password_shown = "pw-broker-card-unique" in text
+        assert not password_shown, f"the {label} shows a password argument"
+
+
+def test_broker_audit_log_carries_no_value(tmp_path, monkeypatch, caplog):
+    from tests.test_credential_broker_e2e import TOKEN as BROKER_TOKEN, Harness
+
+    audit = tmp_path / "audit" / "broker.jsonl"
+    h = Harness(tmp_path, monkeypatch, audit_path=audit)
+    caplog.set_level(logging.INFO, logger="fabri.service.credential_broker")
+    try:
+        sid, _sync = h.submit([
+            {"call": "ck_get", "args": {"list_id": "1", "q": "query-value-unique"}},
+            {"call": "ck_send", "args": {"campaign_id": "c9", "subject": "Hello"}},
+        ])
+        q = h.pending_approval(sid)
+        h.svc.answer(sid, q["question_id"], "deny", selected_option="deny")
+        read, send = h.results(sid)
+    finally:
+        h.close()
+
+    assert read["out"]["ok"] is True, read["out"].get("error")
+    assert send["out"]["result"]["status"] == "approval_declined"
+    # The read did carry the query upstream; the audit must not repeat it.
+    assert h.upstream.requests[0].url.params.get("q") == "query-value-unique"
+    text = audit.read_text()
+    records = [json.loads(line) for line in text.splitlines()]
+    # Two kinds of line share the file: one broker decision per call, and one
+    # credential lookup line per resolved ref (only the sent call resolved one).
+    decisions = [r for r in records if "decision" in r]
+    lookups = [r for r in records if "decision" not in r]
+    assert [(r["tool"], r["decision"]) for r in decisions] == [("ck_get", "sent"), ("ck_send", "declined")]
+    assert all(r["session"] == sid for r in decisions)
+    assert decisions[0]["path"] == "/lists/1/contacts" and decisions[0]["code"] == 200
+    assert [(r["provider"], r["handle"]) for r in lookups] == [("ck", "acme")]
+    assert lookups[0]["actor"] == f"broker {sid[:8]}"
+    for label, blob in (("audit log", text), ("log records", caplog.text)):
+        leaked = BROKER_TOKEN in blob or "Bearer" in blob
+        assert not leaked, f"the {label} carries the credential"
+        query_shown = "query-value-unique" in blob
+        assert not query_shown, f"the {label} carries the query string"
+        assert "authorization" not in blob.lower()
