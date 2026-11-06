@@ -4,7 +4,7 @@ Three kinds of tool source can be added to any scope with one command:
 
 - an OpenAPI 3 spec (a file or a URL)
 - an MCP server (a stdio command or an HTTP URL)
-- a connector (GitHub, Linear, Slack, Cakemail; Composio is experimental)
+- a connector (GitHub, Linear, Slack, Cakemail, Gmail; Composio is experimental)
 
 Each command writes one plain YAML file, `<layer>/tools/sources/<name>.yaml`,
 checks that it builds under the host's policy, lints the layer stack and
@@ -157,6 +157,7 @@ Three flags apply to some connectors only:
 | `linear` | mcp (hosted) | `LINEAR_API_KEY` | Linear's MCP server: issues, projects, comments |
 | `slack` | http | `SLACK_BOT_TOKEN` | `slack_channels_list`, `slack_channel_history` (read), `slack_post_message` (always_approve) |
 | `cakemail` | openapi (pinned spec) | `CAKEMAIL_TOKEN` | 28 curated tools: lists, contacts, segments, tags, senders, templates, campaigns. 21 read, 7 always_approve. See [connectors/cakemail.md](connectors/cakemail.md) |
+| `gmail` | http | `GMAIL_TOKEN` (usually `--workspace '${actor}'`, one connection per user) | `gmail_labels_list` (read), `gmail_messages_send` (always_approve). `--all-tools` adds `gmail_drafts_create` (always_approve, needs the `compose` scope) and two reads that need the `readonly` scope. See [connectors/gmail.md](connectors/gmail.md) |
 | `composio` | mcp (experimental, written disabled) | `COMPOSIO_API_KEY` | Tools of the apps connected in your Composio account, every one always_approve. See [connectors/composio.md](connectors/composio.md) |
 
 `--workspace` uses the credential store ref `<provider>:<workspace>`. fabri resolves it from a stored connection
@@ -325,6 +326,16 @@ tools:
 - A source cannot replace a tool that is already registered, or the reserved `decompose` name. The tool is skipped
   with a warning.
 - `tools.enabled` filters the result as it does for other tools, so list the source tool names there if you use it.
+
+Two `http` source keys shape the request:
+
+- `query: {uploadType: media}` sends these literal pairs on every call. They win over an argument of the same name.
+- `body_format: rfc822` (POST or PUT, no path parameters) turns the arguments `to`, `cc`, `bcc`, `subject` and
+  `body` into one plain text mail message sent as `Content-Type: message/rfc822`. `to`, `subject` and `body` are
+  required, any other argument is refused, and a line break or control character in `to`, `cc`, `bcc` or `subject`
+  is refused before anything is sent, so an argument cannot add a header. Under `fabri serve` the broker builds the
+  message itself from those arguments, and the approval card shows the recipients, the subject and the body as text.
+  The Gmail connector's send and draft tools use it.
 
 Loosening is possible only by editing the YAML by hand (`approval: {pet_delete:
 read}`), and then `fabri setup lint`, the add commands and `GET /setups/lint`

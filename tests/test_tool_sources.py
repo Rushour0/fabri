@@ -520,3 +520,70 @@ def test_manifest_classes_identical_with_and_without_broker():
         assert all(t.broker_gated for t in brokered) and not any(t.broker_gated for t in plain)
     slack = build_source_tools(decls[1], broker=FakeBroker())[0]
     assert slack.manifest.approval == "always_approve"
+
+
+# ---------------------------------------------------------------- query and body_format: rfc822
+
+
+MAIL_DECL = {"kind": "http", "name": "mail_send", "url": "https://mail.example.test/upload/send",
+             "method": "POST", "query": {"uploadType": "media"}, "body_format": "rfc822",
+             "headers": {"Authorization": {"env": "MAIL_TOKEN", "prefix": "Bearer "}}}
+
+
+def test_http_query_and_body_format_are_checked():
+    assert validate_source_decl(MAIL_DECL) == []
+    bad = [
+        ({**MAIL_DECL, "body_format": "xml"}, "body_format"),
+        ({**MAIL_DECL, "method": "GET"}, "POST or PUT"),
+        ({**MAIL_DECL, "url": "https://mail.example.test/upload/{box}/send"}, "path parameters"),
+        ({**MAIL_DECL, "query": {"uploadType": 1}}, "query"),
+        ({**MAIL_DECL, "query": ["uploadType=media"]}, "query"),
+    ]
+    for decl, words in bad:
+        with pytest.raises(ToolSourceError, match=words):
+            validate_source_decl(decl)
+
+
+def test_http_query_pairs_win_over_arguments():
+    calls = []
+    decl = {"kind": "http", "name": "search", "url": "https://api.example.test/find", "method": "GET",
+            "query": {"format": "metadata"}}
+    tool = build_source_tools(decl, transport=_transport(calls))[0]
+    assert tool.handler({"q": "x", "format": "raw"})["ok"] is True
+    assert calls[-1].url.params["format"] == "metadata" and calls[-1].url.params["q"] == "x"
+    post = build_source_tools({**decl, "name": "add", "method": "POST"}, transport=_transport(calls))[0]
+    assert post.handler({"name": "n"})["ok"] is True
+    assert str(calls[-1].url) == "https://api.example.test/find?format=metadata"
+    assert json.loads(calls[-1].content) == {"name": "n"}
+
+
+def test_rfc822_source_sends_a_plain_text_message(monkeypatch):
+    monkeypatch.setenv("MAIL_TOKEN", "mail-token-value-123")
+    calls = []
+    tool = build_source_tools(MAIL_DECL, transport=_transport(calls))[0]
+    assert tool.extra == {"query": {"uploadType": "media"}, "body_format": "rfc822"}
+    out = tool.handler({"to": "a@example.test", "subject": "Hi", "body": "line one\nline two"})
+    assert out["ok"] is True
+    (sent,) = calls
+    assert str(sent.url) == "https://mail.example.test/upload/send?uploadType=media"
+    assert sent.headers["content-type"] == "message/rfc822"
+    assert sent.headers["authorization"] == "Bearer mail-token-value-123"
+    text = sent.content.decode()
+    assert "To: a@example.test\r\n" in text and "Subject: Hi\r\n" in text and "line one\r\nline two" in text
+    refused = tool.handler({"to": "a@example.test", "subject": "Hi\nBcc: x@example.test", "body": "b"})
+    assert refused["ok"] is False and len(calls) == 1
+
+
+def test_rfc822_source_under_broker_sends_named_arguments():
+    broker = FakeBroker()
+    decl = {**MAIL_DECL, "headers": CK_HEADERS}
+    tool = build_source_tools(decl, broker=broker, transport=httpx.MockTransport(_no_network))[0]
+    assert tool.broker_gated is True
+    args = {"to": "a@example.test", "subject": "Hi", "body": "b"}
+    assert tool.handler(args)["ok"] is True
+    sent = broker.sent[-1]
+    assert sent["json_body"] == args and sent["params"] == {"uploadType": "media"}
+    assert sent["path_params"] == {}
+    # A bad message never reaches the broker.
+    assert tool.handler({"to": "nobody", "subject": "Hi", "body": "b"})["ok"] is False
+    assert len(broker.sent) == 1

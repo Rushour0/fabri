@@ -54,7 +54,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import urlsplit
 
-MODULE_ORDER: tuple[str, ...] = ("github", "linear", "slack", "cakemail", "composio")
+MODULE_ORDER: tuple[str, ...] = ("github", "linear", "slack", "cakemail", "gmail", "composio")
 
 _CHECK_URL = "https://example.test/mcp"
 

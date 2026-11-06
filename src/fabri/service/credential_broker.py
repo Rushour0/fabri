@@ -124,6 +124,11 @@ class ToolBinding:
     # The {placeholder} names in template_url, in order. The broker renders
     # the URL itself from these, so no client URL is ever matched.
     placeholders: tuple[str, ...] = ()
+    # The declaration's literal query pairs; they win over the run's params.
+    query: tuple[tuple[str, str], ...] = ()
+    # "json", or "rfc822": the broker builds a message/rfc822 body from the
+    # run's to, cc, bcc, subject and body arguments.
+    body_format: str = "json"
 
 
 @dataclass(frozen=True)
@@ -148,7 +153,8 @@ class SourceBinding:
     def _signature(self) -> tuple:
         """What must be the same for two configs to share one binding: where
         the request goes and which credential it carries."""
-        tools = tuple(sorted((t.name, t.method, t.template_url, t.placeholders) for t in self.tools.values()))
+        tools = tuple(sorted((t.name, t.method, t.template_url, t.placeholders, t.query, t.body_format)
+                             for t in self.tools.values()))
         return (self.kind, json.dumps(self.header_specs, sort_keys=True, default=str), self.refs, tools, self.url)
 
     def _authorization(self) -> tuple:
@@ -182,7 +188,7 @@ def _merge_strictest(prior: SourceBinding, bound: SourceBinding) -> SourceBindin
                 "using the strictest of each", _label(bound.name, 64))
     tools = {name: ToolBinding(name=tb.name, method=tb.method, template_url=tb.template_url,
                                approval=stricter(tb.approval, bound.tools[name].approval),
-                               placeholders=tb.placeholders)
+                               placeholders=tb.placeholders, query=tb.query, body_format=tb.body_format)
              for name, tb in prior.tools.items()}
     if prior.grants is None:
         grants = bound.grants
@@ -329,7 +335,9 @@ def _bind_one(decl: Mapping[str, Any], policy, enabled, *, actor, base_dir, tran
             approval = stricter(approval, floor)
         tools[tool.manifest.name] = ToolBinding(
             name=tool.manifest.name, method=str(tool.method or "GET").upper(), template_url=template,
-            approval=approval, placeholders=tuple(dict.fromkeys(_PLACEHOLDER.findall(template))))
+            approval=approval, placeholders=tuple(dict.fromkeys(_PLACEHOLDER.findall(template))),
+            query=tuple(sorted((tool.extra.get("query") or {}).items())),
+            body_format=str(tool.extra.get("body_format") or "json"))
     return SourceBinding(name=name, kind=kind, header_specs=specs, refs=refs, grants=grants, tools=tools,
                          floors=tuple(policy.approval_floor))
 
@@ -565,6 +573,7 @@ def _redacted(value: Any) -> Any:
 
 
 APPROVAL_CARD_BODY_CAP = 2000
+MAIL_CONTENT_TYPE = "message/rfc822"
 
 
 class RequestNotShowable(ValueError):
@@ -595,6 +604,18 @@ def _shown_pairs(pairs: list[tuple[str, str]]) -> list[list[str]]:
     return out
 
 
+def _shown_message(content: bytes) -> str:
+    """The message as a person reads it, each line passed through the
+    approval redaction like any other body value."""
+    from fabri.tools.mail_message import MessageNotShowable, describe_message
+
+    try:
+        text = describe_message(content)
+    except MessageNotShowable as exc:
+        raise RequestNotShowable(str(exc)) from None
+    return "\n".join(str(_redacted(line)) for line in text.split("\n"))
+
+
 def describe_request(
     tool: str,
     source: str,
@@ -611,6 +632,10 @@ def describe_request(
     extra headers with their values, and the body with secrets redacted.
     Credential headers are not in the request yet, so no token can appear
     here.
+
+    A ``message/rfc822`` body is shown as the mail it is: To, Cc, Bcc and
+    Subject decoded, then the body text. A message that is not one plain
+    text part with only those headers is never shown as text.
 
     With `exact`, a request the card cannot show in full raises
     RequestNotShowable instead of being cut or summarised: a body over `cap`
@@ -637,7 +662,14 @@ def describe_request(
     else:
         ctype = request.headers.get("content-type", "")
         try:
-            if "x-www-form-urlencoded" in ctype:
+            if ctype.split(";", 1)[0].strip().lower() == MAIL_CONTENT_TYPE:
+                try:
+                    body_text = "mail message (" + MAIL_CONTENT_TYPE + "):\n" + _shown_message(content)
+                except RequestNotShowable:
+                    if exact:
+                        raise
+                    body_text = f"({len(content)} bytes, a mail message the card cannot show)"
+            elif "x-www-form-urlencoded" in ctype:
                 form = parse_qsl(content.decode("utf-8"), keep_blank_values=True)
                 body_text = "form: " + json.dumps(_shown_pairs(form), ensure_ascii=False)
             else:
@@ -1139,8 +1171,15 @@ class CredentialBroker:
             raise _Refuse("refused", f"{tool}: {exc}") from None
         except (TypeError, ValueError, AttributeError):
             raise _Refuse("refused", f"{tool}: extra_headers must be an object of strings") from None
+        if tb.query:
+            params = {**dict(params or {}), **dict(tb.query)}
         try:
-            prepared = prepare(tb.method, url, params=params, json_body=json_body, form_body=form_body)
+            if tb.body_format == "rfc822":
+                prepared = self._mail_request(tool, tb, url, params, json_body, form_body, extra)
+            else:
+                prepared = prepare(tb.method, url, params=params, json_body=json_body, form_body=form_body)
+        except _Refuse:
+            raise
         except (httpx.HTTPError, TypeError, ValueError) as exc:
             raise _Refuse("refused", f"{tool}: request refused: cannot encode it ({type(exc).__name__})") from None
         if _floor_drift(tb.template_url, tb.method, url):
@@ -1150,6 +1189,27 @@ class CredentialBroker:
         _owner, floor = request_floor(url, tb.method)
         cls = stricter(cls, floor or cls)
         return source, tb, prepared, extra, cls
+
+    @staticmethod
+    def _mail_request(tool: str, tb: ToolBinding, url: str, params: Mapping[str, Any] | None, json_body: Any,
+                      form_body: Any, extra: Mapping[str, str]) -> httpx.Request:
+        """The request for a ``body_format: rfc822`` tool. The broker builds
+        the message bytes itself from the run's named arguments, so the card
+        and the hash cover exactly what Gmail (or any such endpoint) gets."""
+        from fabri.tools.mail_message import MessageError, build_message
+
+        if form_body is not None or not isinstance(json_body, Mapping):
+            raise _Refuse("refused", f"{tool}: a mail message tool takes its arguments as a JSON object")
+        if set(params or {}) - {name for name, _ in tb.query}:
+            raise _Refuse("refused", f"{tool}: a mail message tool takes no query parameters of its own")
+        if any(str(k).lower() == "content-type" for k in extra):
+            raise _Refuse("refused", f"{tool}: extra header Content-Type cannot be set on a mail message tool")
+        try:
+            content = build_message(json_body)
+        except MessageError as exc:
+            raise _Refuse("refused", f"{tool}: {exc}") from None
+        return httpx.Request(tb.method, url, params=dict(params) if params else None, content=content,
+                             headers={"Content-Type": MAIL_CONTENT_TYPE})
 
     @staticmethod
     def _check_url_shape(tool: str, template: str, url: str) -> None:

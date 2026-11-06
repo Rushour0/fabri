@@ -14,6 +14,12 @@
         method: GET
         description: Current weather for a city.
         input_schema: {type: object, properties: {city: {type: string}}, required: [city]}
+      - kind: http                 # one mail message as the body
+        name: mail_send
+        url: https://mail.test/upload/send
+        method: POST
+        query: {uploadType: media}  # literal query pairs sent on every call
+        body_format: rfc822        # to, cc, bcc, subject, body -> a message/rfc822 body
       - kind: mcp                  # an MCP server (stdio `command` or http `url`)
         name: files
         command: [mcp-files, /srv/data]
@@ -28,6 +34,12 @@
 `build_tool_source(decl)` returns ``[(manifest, handler), ...]`` ready for
 ``ToolRegistry.register_callable``. `register_tool_sources` does that for a
 list. A ToolPolicy, when given, is enforced while building.
+
+An http source with ``body_format: rfc822`` takes the arguments ``to``,
+``cc``, ``bcc``, ``subject`` and ``body`` and sends one plain text mail
+message as a ``message/rfc822`` body (``fabri.tools.mail_message``). Under
+the broker the run sends those arguments and the broker builds the message
+itself, so the approval card shows the recipients, subject and body as text.
 
 An http or openapi tool whose request URL is on a catalog connector's host
 (slack.com, for example) gets that connector's approval floor whatever the
@@ -62,6 +74,7 @@ from fabri.tools.approval import APPROVAL_CLASSES, check_approval, mcp_approval,
 from fabri.tools.credential_store import CredentialStore, credential_env_names
 from fabri.tools.http_call import (
     PathParamError,
+    _has_dot_segment,
     check_header_specs,
     credential_refused_hint,
     dry_run_headers,
@@ -69,7 +82,10 @@ from fabri.tools.http_call import (
     resolve_headers,
     secret_ref_provider,
     send,
+    send_prepared,
 )
+from fabri.tools.mail_message import CONTENT_TYPE as MAIL_CONTENT_TYPE
+from fabri.tools.mail_message import MessageError, build_message
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.openapi import (
     OpenAPIOperation,
@@ -96,7 +112,7 @@ COMMON_KEYS = frozenset({"kind", "name", "description", "approval", "enabled", "
 KIND_KEYS: dict[str, frozenset[str]] = {
     "openapi": frozenset({"spec", "base_url", "allow", "deny", "methods", "tags", "headers",
                           "dry_run_header", "description_cap", "naming", "names", "strip_prefixes"}),
-    "http": frozenset({"url", "method", "input_schema", "headers", "dry_run_header"}),
+    "http": frozenset({"url", "method", "input_schema", "headers", "dry_run_header", "query", "body_format"}),
     "mcp": frozenset({"command", "url", "env", "headers", "env_mode"}),
     "python": frozenset({"callable", "input_schema"}),
 }
@@ -159,6 +175,7 @@ def validate_source_decl(decl: Any, policy: ToolPolicy | None = None) -> list[st
         if not decl.get("url"):
             raise ToolSourceError(f"http source {name}: `url` is required")
         _check_schema(decl.get("input_schema"), name)
+        _check_http_body(decl, name)
     if kind == "python":
         target = decl.get("callable")
         if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?", target):
@@ -192,6 +209,27 @@ def validate_source_decl(decl: Any, policy: ToolPolicy | None = None) -> list[st
         raise ToolSourceError(f"mcp source {name}: env_mode must be 'inherit' or 'allowlist' (got {decl['env_mode']!r})")
     unknown = set(decl) - COMMON_KEYS - KIND_KEYS[kind]
     return [f"source {name}: unknown keys {sorted(unknown)}"] if unknown else []
+
+
+HTTP_BODY_FORMATS = ("json", "rfc822")
+
+
+def _check_http_body(decl: Mapping[str, Any], name: str) -> None:
+    """``query`` is a mapping of literal text pairs; ``body_format`` is json
+    (the default) or rfc822, which needs a method that sends a body."""
+    query = decl.get("query")
+    if query is not None:
+        if not isinstance(query, Mapping) or not all(
+                isinstance(k, str) and k and isinstance(v, str) for k, v in query.items()):
+            raise ToolSourceError(f"http source {name}: `query` must map names to text values")
+    body_format = decl.get("body_format")
+    if body_format is not None and body_format not in HTTP_BODY_FORMATS:
+        raise ToolSourceError(f"http source {name}: `body_format` must be one of {', '.join(HTTP_BODY_FORMATS)}")
+    if body_format == "rfc822":
+        if str(decl.get("method") or "GET").upper() not in ("POST", "PUT"):
+            raise ToolSourceError(f"http source {name}: body_format rfc822 needs method POST or PUT")
+        if _PARAM.search(str(decl.get("url") or "")):
+            raise ToolSourceError(f"http source {name}: body_format rfc822 takes no path parameters")
 
 
 def _check_schema(schema: Any, name: str) -> None:
@@ -415,13 +453,36 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry, broker=None) -
     schema = dict(decl.get("input_schema") or {"type": "object", "properties": {}})
     placeholders = _PARAM.findall(url)
     headers = decl.get("headers")
+    query = {str(k): str(v) for k, v in (decl.get("query") or {}).items()}
+    body_format = str(decl.get("body_format") or "json")
     # With the broker the run holds no token and opens no connection: the
     # broker renders the URL from its bound template with the raw values.
     sender = broker.sender(name, name) if broker is not None else None
     client = None if sender is not None else httpx.Client(transport=transport, timeout=timeout)
 
+    def mail_handler(args: dict) -> dict:
+        # body_format rfc822: the arguments become one message/rfc822 body.
+        # The broker builds the same bytes itself from these arguments, so a
+        # bad message is refused here first and never leaves the run.
+        try:
+            content = build_message(args)
+        except MessageError as e:
+            return tool_error(f"{name}: {e}", result={"status": "error", "code": None})
+        if sender is not None:
+            return sender(method, url, path_params={}, params=query or None, json_body=dict(args),
+                          extra_headers=dry, timeout_s=timeout, tool_name=name, floor_url=url)
+        if _has_dot_segment(url):
+            return tool_error("request refused: the URL path holds a dot segment",
+                              result={"status": "error", "code": None})
+        request = client.build_request(method, url, params=query or None, content=content,
+                                       headers={"Content-Type": MAIL_CONTENT_TYPE})
+        return send_prepared(client, request, headers=headers, store=store, extra_headers=dry,
+                             timeout_s=timeout, tool_name=name, floor_url=url)
+
     def handler(args: dict) -> dict:
         args = dict(args or {})
+        if body_format == "rfc822":
+            return mail_handler(args)
         target = url
         path_params: dict[str, Any] = {}
         for key in placeholders:
@@ -434,15 +495,18 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry, broker=None) -
                 return tool_error(f"{name}: {e}", result={"status": "error", "code": None})
             path_params[key] = value
             target = target.replace("{" + key + "}", rendered)
+        reads = method in ("GET", "HEAD", "OPTIONS", "DELETE")
+        # The declared query pairs win over an argument of the same name.
+        params = {**args, **query} if reads else (query or None)
         if sender is not None:
-            body = {"params": args} if method in ("GET", "HEAD", "OPTIONS", "DELETE") else {"json_body": args}
+            body = {"params": params} if reads else {"params": params, "json_body": args}
             return sender(method, target, path_params=path_params, extra_headers=dry, timeout_s=timeout,
                           tool_name=name, floor_url=url, **body)
-        if method in ("GET", "HEAD", "OPTIONS", "DELETE"):
+        if reads:
             return send(client, method, target, headers=headers, store=store, extra_headers=dry,
-                        params=args, timeout_s=timeout, tool_name=name, floor_url=url)
+                        params=params, timeout_s=timeout, tool_name=name, floor_url=url)
         return send(client, method, target, headers=headers, store=store, extra_headers=dry,
-                    json_body=args, timeout_s=timeout, tool_name=name, floor_url=url)
+                    params=params, json_body=args, timeout_s=timeout, tool_name=name, floor_url=url)
 
     safe = safe_approval(method, name, url)
     manifest = ToolManifest(
@@ -450,7 +514,8 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry, broker=None) -
         input_schema=schema, output_schema={"type": "object"}, timeout_s=timeout,
         approval=_approval_for(decl, name, safe), title=decl.get("title"),
     )
-    return [SourceTool(manifest, handler, "http", name, method, url, safe_approval=safe)]
+    return [SourceTool(manifest, handler, "http", name, method, url, safe_approval=safe,
+                       extra={"query": query, "body_format": body_format})]
 
 
 def _build_python(decl, *, base_dir, policy, transport, store, dry, broker=None) -> list[SourceTool]:

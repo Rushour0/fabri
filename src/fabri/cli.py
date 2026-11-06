@@ -1883,6 +1883,99 @@ def _cakemail_login_pat(args: argparse.Namespace) -> str:
                       transport=connections._transport)
 
 
+def _wants_oauth(entry, args: argparse.Namespace) -> bool:
+    """The OAuth path: an OAuth-only connector, or an OAuth flag on a
+    connector that also takes a pasted token (Slack, Linear)."""
+    if entry.oauth is None:
+        return False
+    if entry.auth_kind == "oauth":
+        return True
+    return bool(args.scopes or args.no_browser or args.timeout_s is not None)
+
+
+def _connect_oauth(args: argparse.Namespace, entry) -> None:
+    """`fabri connect <provider>` for a connector with loopback OAuth: open the
+    browser, take the one callback on 127.0.0.1 and store the connection."""
+    import webbrowser
+
+    from fabri.tools import connections
+    from fabri.tools.connections import ConnectError, handle_ok, next_step
+    from fabri.tools.connections.loopback import run_loopback_flow
+    from fabri.tools.connector_catalog import ConnectorError, oauth_configured
+
+    spec = entry.oauth
+    if not spec.loopback:
+        print(f"{entry.name} OAuth runs through the server: open GET /connect/{entry.name} on fabri serve "
+              f"(the vendor needs a registered HTTPS redirect)", file=sys.stderr)
+        sys.exit(2)
+    for flag, given in (("--token-stdin", args.token_stdin), ("--login", args.login),
+                        ("--no-verify", args.no_verify), ("--expires-days", args.expires_days is not None),
+                        ("--account-id", bool(args.account_ids))):
+        if given:
+            print(f"{flag} is for pasted tokens; {entry.name} connects through OAuth in the browser",
+                  file=sys.stderr)
+            sys.exit(2)
+    if not handle_ok(args.handle):
+        print(f"bad --handle: {connections.HANDLE_RULE}", file=sys.stderr)
+        sys.exit(2)
+    if args.handle in connections.RESERVED_HANDLES:
+        print(f"bad --handle: {args.handle!r} is reserved; pick another, such as {connections.DEFAULT_HANDLE}",
+              file=sys.stderr)
+        sys.exit(2)
+    scopes: list[str] = []
+    for name in args.scopes or ():
+        for short in (part.strip() for part in name.split(",")):
+            if not short:
+                continue
+            if short not in spec.scopes_optional:
+                known = ", ".join(sorted(spec.scopes_optional)) or "none"
+                print(f"unknown scope name {short[:60]!r} for {entry.name}; known: {known}", file=sys.stderr)
+                sys.exit(2)
+            if short not in scopes:
+                scopes.append(short)
+    timeout_s = 300.0 if args.timeout_s is None else args.timeout_s
+    if timeout_s <= 0:
+        print("--timeout-s must be more than 0", file=sys.stderr)
+        sys.exit(2)
+    if not oauth_configured(entry):
+        print(f"{entry.name} OAuth is not configured: set {spec.client_id_env} to the client id of a "
+              f"Desktop OAuth client" + (f" ({spec.secret_env} is optional)" if spec.pkce and spec.secret_env
+                                         else ""), file=sys.stderr)
+        sys.exit(2)
+
+    def open_url(url: str) -> None:
+        if args.no_browser:
+            print("open this URL in a browser on this machine to connect:", file=sys.stderr)
+            print(url, file=sys.stderr)
+            return
+        print(f"opening the browser to sign in to {entry.title}; if it does not open, visit:", file=sys.stderr)
+        print(url, file=sys.stderr)
+        try:
+            webbrowser.open(url)
+        except webbrowser.Error:
+            pass
+
+    store = _connection_store(args, create=True)
+    try:
+        row = run_loopback_flow(store, entry, handle=args.handle, scope_kind=args.scope, scopes=scopes,
+                                open_url=open_url, transport=connections._transport, timeout_s=timeout_s)
+    except KeyboardInterrupt:
+        print("", file=sys.stderr)
+        sys.exit(130)
+    except (ConnectError, ConnectorError) as exc:
+        print(f"connect failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    handle = row["handle"]
+    who = f" ({row['display_name']})" if row.get("display_name") else ""
+    print(f"connected {entry.name}:{handle}{who}")
+    print("next, add it to a setup:")
+    if row.get("scope_kind") == "user":
+        print(f"  fabri setups tools add connector {entry.name} --workspace '${{actor}}' --scope org:<org>")
+        print(f"  runs whose user id is {handle} read this connection")
+    else:
+        print(f"  {next_step(entry, handle)}")
+
+
 def cmd_connect(args: argparse.Namespace) -> None:
     from fabri.tools import connections
     from fabri.tools.connections import ConnectError, connect_static, handle_ok, next_step, store_provider
@@ -1892,9 +1985,12 @@ def cmd_connect(args: argparse.Namespace) -> None:
     if entry is None:
         print(f"unknown connector {args.provider!r}; known: {', '.join(sorted(CONNECTORS))}", file=sys.stderr)
         sys.exit(2)
+    if _wants_oauth(entry, args):
+        _connect_oauth(args, entry)
+        return
     if args.scope == "user":
-        print(f"user-scoped connections are made through the server (GET /connect/{entry.name}) "
-              f"and land in wave 4", file=sys.stderr)
+        print(f"user-scoped connections for {entry.name} are made through the server "
+              f"(GET /connect/{entry.name} on fabri serve)", file=sys.stderr)
         sys.exit(2)
     if not handle_ok(args.handle):
         print(f"bad --handle: {connections.HANDLE_RULE}", file=sys.stderr)
@@ -2485,7 +2581,9 @@ def main() -> None:
     p_connect.add_argument("--handle", default="main",
                            help="Name for this connection, used as --workspace in setups (default: main)")
     p_connect.add_argument("--scope", choices=("org", "user"), default="org",
-                           help="org (default); user-scoped connections are made through the server")
+                           help="org (default). user: only for browser OAuth connectors such as gmail, "
+                                "where --handle is the user id the connection belongs to; other "
+                                "user-scoped connections are made through the server")
     p_connect.add_argument("--token-stdin", dest="token_stdin", action="store_true",
                            help="Read the token from the first line of stdin instead of a prompt")
     p_connect.add_argument("--login", action="store_true",
@@ -2496,6 +2594,14 @@ def main() -> None:
                            help="With --login: days until the PAT expires (default: 365)")
     p_connect.add_argument("--account-id", dest="account_ids", type=int, action="append", default=None,
                            metavar="ID", help="With --login: limit the PAT to this account id (repeatable)")
+    p_connect.add_argument("--scopes", nargs="+", default=None, metavar="NAME",
+                           help="OAuth: extra scopes by short name, such as gmail's readonly, compose or "
+                                "modify. Gmail readonly and modify are restricted scopes: a published app "
+                                "needs Google's CASA security assessment before it may ask for them")
+    p_connect.add_argument("--no-browser", dest="no_browser", action="store_true",
+                           help="OAuth: print the sign-in URL instead of opening a browser")
+    p_connect.add_argument("--timeout-s", dest="timeout_s", type=float, default=None,
+                           help="OAuth: seconds to wait for the browser to come back (default: 300)")
     p_connect.set_defaults(func=cmd_connect)
 
     p_conns = sub.add_parser("connections", help="List or remove stored connections offline (no tokens are printed)")
