@@ -228,14 +228,19 @@ def test_registry_integration_declined(tmp_path):
     assert calls == [{"id": 2}]
 
 
-def test_describe_call_caps_args():
+def test_describe_call_refuses_args_over_cap():
+    # Over the cap the card is never cut short: it raises, so the call that
+    # would run the unseen tail is not made.
+    from fabri.tools.approver import ArgsTooLong
+
     args = {"body": "x" * 5000}
-    text = describe_call("send_campaign", args, _manifest(title=None), cap=100)
+    with pytest.raises(ArgsTooLong, match="arguments too long to show in full"):
+        describe_call("send_campaign", args, _manifest(title=None), cap=100)
+    text = describe_call("send_campaign", args, _manifest(title=None))
     full = json.dumps(args, indent=2, sort_keys=True)
     assert text.startswith("send_campaign needs your approval (class always_approve)\nargs:\n")
     assert "title:" not in text
-    assert text.endswith(f"... ({len(full) - 100} more chars)")
-    assert full[:100] in text
+    assert text.endswith(full)
 
     short = describe_call("t", {"b": 2, "a": 1}, _manifest(approval="write"))
     assert short.splitlines()[0] == "t needs your approval (class write)"

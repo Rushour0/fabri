@@ -96,7 +96,12 @@ import httpx
 
 from fabri.core.logging_setup import get_logger
 from fabri.tools.credential_broker_client import BrokerUnavailable
-from fabri.tools.credential_store import BROKER_ENV_NAMES, env_without_credentials
+from fabri.tools.credential_store import (
+    BROKER_ENV_NAMES,
+    CREDENTIAL_AUDIT_LOG_ENV,
+    ENV_CREDENTIAL_PREFIX,
+    env_without_credentials,
+)
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.result import tool_error, tool_ok
 from fabri.tools.security.ssrf import validate_url
@@ -435,10 +440,15 @@ class MCPStdioClient:
     proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
     _next_id: int = field(default=0, init=False, repr=False)
     _buf: bytes = field(default=b"", init=False, repr=False)
+    # Every credential value start() handed the child: its own env values and
+    # the FABRI_CRED_* values it inherited through credential_env.
+    _child_secrets: tuple[str, ...] = field(default=(), init=False, repr=False)
 
     @property
     def _secrets(self) -> tuple[str, ...]:
-        return tuple(v for v in (self.env or {}).values() if v)
+        values = [v for v in (self.env or {}).values() if v]
+        values.extend(v for v in self._child_secrets if v and v not in values)
+        return tuple(values)
 
     def start(self) -> None:
         # Popen's `env=` replaces the whole environment. With inherit_env the
@@ -457,6 +467,14 @@ class MCPStdioClient:
             child_env = {**env_without_credentials(_allowlisted_env()), **(self.env or {})}
         for broker_name in BROKER_ENV_NAMES:
             child_env.pop(broker_name, None)
+        # The child can echo any credential it was given (in a result, an
+        # error or its stderr), so every one of them is redacted, not only
+        # the values in `env`.
+        self._child_secrets = tuple(
+            value for key, value in child_env.items()
+            if value and key != CREDENTIAL_AUDIT_LOG_ENV
+            and (key.startswith(ENV_CREDENTIAL_PREFIX) or key in (self.env or {}))
+        )
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,

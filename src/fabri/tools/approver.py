@@ -30,7 +30,7 @@ import uuid
 from typing import IO, Mapping
 
 from fabri.tools.manifest_schema import ToolManifest
-from fabri.tools.registry import Approver
+from fabri.tools.registry import ApprovalRefused, Approver
 
 SOCKET_ENV = "FABRI_ASK_USER_SOCKET"
 TIMEOUT_ENV = "FABRI_APPROVAL_TIMEOUT_S"
@@ -148,21 +148,45 @@ def redact_args(value: object) -> object:
     return value
 
 
-def describe_call(name: str, args: object, manifest: ToolManifest | None, cap: int = 2000) -> str:
+# The card shows the arguments in full or not at all. The registry runs the
+# exact arguments the person saw, so a cut card could hide a tail the person
+# never read. 20000 characters fits a long email body.
+CARD_CAP = 20000
+
+
+class ArgsTooLong(ApprovalRefused):
+    """The arguments do not fit on an approval card, so the call is denied
+    without asking."""
+
+
+def _args_text(args: object) -> str:
+    return json.dumps(redact_args(args), indent=2, sort_keys=True, default=str)
+
+
+def fits_card(args: object, cap: int = CARD_CAP) -> bool:
+    """True when the redacted arguments fit on an approval card in full."""
+    return len(_args_text(args)) <= cap
+
+
+def describe_call(name: str, args: object, manifest: ToolManifest | None, cap: int = CARD_CAP) -> str:
     """The text a person reads before deciding: tool name, approval class,
-    title when the manifest has one, and the arguments as sorted JSON. Long
-    arguments are cut at `cap` characters with a note of how much was left
-    out. Secret-looking argument values are redacted first, so the question
-    that goes to a trace or a chat surface never holds them."""
+    title when the manifest has one, and the arguments as sorted JSON.
+    Secret-looking argument values are redacted first, so the question that
+    goes to a trace or a chat surface never holds them. Arguments longer than
+    `cap` characters raise ArgsTooLong: the card is never cut short, since
+    the call would still run with the part nobody saw."""
+    text = _args_text(args)
+    if len(text) > cap:
+        raise ArgsTooLong(
+            f"arguments too long to show in full ({len(text)} chars, limit {cap}); "
+            "the call was not made"
+        )
     approval = getattr(manifest, "approval", None) or "unknown"
     lines = [f"{name} needs your approval (class {approval})"]
     title = getattr(manifest, "title", None)
     if title:
         lines.append(f"title: {title}")
     lines.append("args:")
-    text = json.dumps(redact_args(args), indent=2, sort_keys=True, default=str)
-    if len(text) > cap:
-        text = f"{text[:cap]}... ({len(text) - cap} more chars)"
     lines.append(text)
     return "\n".join(lines)
 
@@ -190,7 +214,9 @@ class TtyApprover:
         with self._lock:
             if not (_isatty(stdin) and _isatty(stderr)):
                 return False
-            stderr.write(describe_call(name, args, manifest) + "\n")
+            # Raises ArgsTooLong before anything is shown or read.
+            card = describe_call(name, args, manifest)
+            stderr.write(card + "\n")
             stderr.write("approve? [y/N] ")
             stderr.flush()
             line = stdin.readline()
@@ -213,6 +239,7 @@ class SocketApprover:
         self.timeout_s = float(timeout_s) if timeout_s is not None else _timeout_from_env()
 
     def __call__(self, name: str, args: dict, manifest: ToolManifest) -> bool:
+        # describe_call raises ArgsTooLong before the socket is opened.
         payload = {
             "kind": "approval",
             "question_id": uuid.uuid4().hex,

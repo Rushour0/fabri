@@ -15,6 +15,12 @@ ToolHandler = Callable[[dict], dict]
 # call to a tool whose approval class is `always_approve`.
 Approver = Callable[[str, dict, ToolManifest], bool]
 
+
+class ApprovalRefused(Exception):
+    """An approver raises this to deny a call without asking anyone, with a
+    reason the registry returns to the model as the tool error."""
+
+
 BATCH_TOOL_NAME = "batch"
 # Nested batches multiply fan-out unpredictably; spawn_subagent + ask_user
 # have side effects that don't belong inside an opaque batch result.
@@ -177,6 +183,8 @@ class ToolRegistry:
                                   "the call was not made")
             try:
                 approved = bool(self.approver(name, args, manifest))
+            except ApprovalRefused as e:
+                return tool_error(f"{name}: {e}")
             except Exception as e:  # noqa: BLE001 -- a broken approver means no
                 return tool_error(f"{name}: approval check failed ({type(e).__name__}); the call was not made")
             if not approved:

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { getGitHubAppInfo, listGitHubInstalls, disconnectGitHub, type GitHubInstall } from "../lib/api";
+import { connectGitHub } from "../lib/githubConnect";
 import IntegrationSection from "./IntegrationSection";
 
 export default function ConnectGitHub({
@@ -13,7 +14,8 @@ export default function ConnectGitHub({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [banner, setBanner] = useState<"connected" | "error" | null>(null);
-  const [installUrl, setInstallUrl] = useState<string | null>(null);
+  const [configured, setConfigured] = useState(false);
+  const [connecting, setConnecting] = useState(false);
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -34,15 +36,15 @@ export default function ConnectGitHub({
   }, [locked, refetch]);
 
   useEffect(() => {
-    // The install URL comes from an authenticated endpoint, so signed-out
-    // visitors never have one — the section shows the sign-in prompt instead.
+    // Display only: is the App configured. The signed URL expires in 10
+    // minutes, so the click handler fetches its own fresh one.
     if (locked) return;
     const loadAppInfo = async () => {
       try {
         const info = await getGitHubAppInfo();
-        setInstallUrl(info.install_url);
+        setConfigured(Boolean(info.install_url));
       } catch {
-        setInstallUrl(null);
+        setConfigured(false);
       }
     };
     void loadAppInfo();
@@ -60,6 +62,17 @@ export default function ConnectGitHub({
       window.history.replaceState({}, "", url);
     }
   }, []);
+
+  const handleConnect = async () => {
+    setError(null);
+    setConnecting(true);
+    try {
+      await connectGitHub(getGitHubAppInfo, (url) => window.location.assign(url));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start GitHub connection");
+      setConnecting(false);
+    }
+  };
 
   const handleDisconnect = async (installationId: string) => {
     setError(null);
@@ -81,8 +94,10 @@ export default function ConnectGitHub({
       locked={locked}
       onRequireAuth={onRequireAuth}
       connect={
-        installUrl ? (
-          <a href={installUrl}>Connect GitHub</a>
+        configured ? (
+          <button className="btn" onClick={() => void handleConnect()} disabled={connecting} aria-busy={connecting}>
+            {connecting ? "Connecting…" : "Connect GitHub"}
+          </button>
         ) : (
           <span className="integration__unavailable">
             GitHub App not configured on this server.
