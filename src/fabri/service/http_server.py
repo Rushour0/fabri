@@ -481,12 +481,27 @@ class _Handler(BaseHTTPRequestHandler):
             ok, user_id = self._owner_scope()
             if not ok:
                 return
-            self._send_json(200, {"install_url": github_app.install_url()})
+            # The install start. It issues a signed single-use state, so with
+            # auth off it must be provably same-origin (Studio's fetch is).
+            store = getattr(self.service, "connection_store", None)
+            if github_app.install_url() is None or store is None:
+                self._send_json(200, {"install_url": github_app.install_url()})
+                return
+            if self._cross_site_refused("GET"):
+                return
+            self._send_json(200, {"install_url": github_app.install_url(github_app.begin_install(store))})
             return
         if path in ("/github/setup", "/github/setup/"):
             q = parse_qs(parsed.query)
             installation_id = (q.get("installation_id") or [""])[0]
-            if not installation_id:
+            state = (q.get("state") or [""])[0]
+            store = getattr(self.service, "connection_store", None)
+            # GitHub sends the browser here from github.com, so this request is
+            # cross-site by nature and the browser headers prove nothing. The
+            # signed single-use state from /github/app-info is the proof. Without
+            # it nothing is written; the signed installation webhook still
+            # records installs that did not start here.
+            if not installation_id or store is None or not github_app.consume_install_state(store, state):
                 self._redirect_studio("/?github=error#settings")
                 return
             self.service.github_install_store.upsert(installation_id=installation_id)

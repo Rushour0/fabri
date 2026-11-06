@@ -13,6 +13,11 @@ from fabri.service.service import FabriService
 from fabri.service.setups_routes import SetupsApi
 
 SAME = {"Sec-Fetch-Site": "same-origin"}
+_SERVICES: dict[int, FabriService] = {}
+
+
+def _service_of(http):
+    return _SERVICES[id(http)]
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +51,9 @@ def make_server(tmp_path):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         started.append((server, service))
         port = server.server_address[1]
-        return httpx.Client(base_url=f"http://127.0.0.1:{port}"), port, calls
+        client = httpx.Client(base_url=f"http://127.0.0.1:{port}")
+        _SERVICES[id(client)] = service
+        return client, port, calls
 
     yield make
     for server, service in started:
@@ -180,3 +187,66 @@ def test_auth_on_keeps_its_own_rules(make_server, monkeypatch):
     assert http.post("/runs", json={"task": "t"}, headers={"Authorization": "Bearer adm"}).status_code == 200
     assert http.post("/runs", json={"task": "t"}).status_code == 401
     assert calls == [("submit", "t")]
+
+
+def _installs(http):
+    return http.get("/github/installs", headers=SAME).json()["installs"]
+
+
+def _issued_state(http, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    monkeypatch.setenv("GITHUB_APP_SLUG", "my-app")
+    resp = http.get("/github/app-info", headers=SAME)
+    assert resp.status_code == 200, resp.text
+    url = resp.json()["install_url"]
+    assert url.startswith("https://github.com/apps/my-app/installations/new?state=")
+    return parse_qs(urlsplit(url).query)["state"][0]
+
+
+CROSS = {"Sec-Fetch-Site": "cross-site"}
+
+
+def test_github_setup_without_valid_state_writes_nothing(make_server):
+    http, _port, _calls = make_server()
+    for query in ("installation_id=42", "installation_id=42&state=", "installation_id=42&state=forged",
+                  "installation_id=42&state=a.9999999999.deadbeef"):
+        for headers in (CROSS, SAME, {}):
+            resp = http.get(f"/github/setup?{query}", headers=headers, follow_redirects=False)
+            assert resp.status_code == 302
+            assert resp.headers["location"] == "/?github=error#settings"
+    assert _installs(http) == []
+
+
+def test_github_setup_state_is_single_use_and_from_a_same_origin_start(make_server, monkeypatch):
+    http, _port, _calls = make_server()
+    state = _issued_state(http, monkeypatch)
+    # GitHub's redirect arrives cross-site by nature. The state is the proof.
+    resp = http.get(f"/github/setup?installation_id=42&state={state}", headers=CROSS, follow_redirects=False)
+    assert resp.headers["location"] == "/?github=connected#settings"
+    assert [r["installation_id"] for r in _installs(http)] == ["42"]
+    # Replaying the same state, or pairing it with another id, writes nothing.
+    again = http.get(f"/github/setup?installation_id=43&state={state}", headers=CROSS, follow_redirects=False)
+    assert again.headers["location"] == "/?github=error#settings"
+    assert [r["installation_id"] for r in _installs(http)] == ["42"]
+
+
+def test_github_setup_refuses_a_state_for_another_provider(make_server):
+    from fabri.service.oauth_state import sign_state
+
+    http, _port, _calls = make_server()
+    service = _service_of(http)
+    store = service.connection_store
+    store.pending_put(nonce="n1", provider="google", handle=None, scope_kind="org", user_id=None,
+                      code_verifier="", scopes="", redirect_uri="x")
+    state = sign_state(store.state_secret(), {"n": "n1", "p": "google"})
+    resp = http.get(f"/github/setup?installation_id=42&state={state}", headers=CROSS, follow_redirects=False)
+    assert resp.headers["location"] == "/?github=error#settings"
+    assert _installs(http) == []
+
+
+def test_github_install_start_refuses_a_cross_site_request(make_server, monkeypatch):
+    http, _port, _calls = make_server()
+    monkeypatch.setenv("GITHUB_APP_SLUG", "my-app")
+    for headers in (CROSS, {"Origin": "http://evil.example"}, {}):
+        assert http.get("/github/app-info", headers=headers).status_code == 403
