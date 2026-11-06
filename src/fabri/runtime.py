@@ -258,7 +258,16 @@ def build_tools(tools_cfg: dict, *, approver=None) -> ToolRegistry:
     (see fabri.tools.approver); with None those calls are refused.
     Config-declared MCP servers get an approval class per tool, and
     ``tools.sources`` entries are built the same way setups build theirs,
-    approval floors included (see _register_config_sources)."""
+    approval floors included (see _register_config_sources).
+
+    Under ``fabri serve`` the run env names a credential broker. Sources
+    with a ``secret_ref`` then send through it, and the broker asks a human
+    for ``always_approve`` requests itself, so those tools skip the
+    registry's approver. With no broker env (``fabri run``, library hosts)
+    every tool keeps the normal approver."""
+    from fabri.tools.credential_broker_client import BrokerClient
+
+    broker = BrokerClient.from_env()
     # sandbox_root is threaded to each tool spawn via env= (see
     # registry.invoke) rather than os.environ, so a parent registry and a
     # sub-agent registry with a tighter sandbox can coexist.
@@ -281,6 +290,12 @@ def build_tools(tools_cfg: dict, *, approver=None) -> ToolRegistry:
     # Connection failures are logged but don't kill the build — one bad
     # MCP server shouldn't take down an otherwise-working agent.
     for server_cfg in tools_cfg.get("mcp_servers", []) or []:
+        refused = _snapshot_credential_env_refusal(server_cfg, tools_cfg, broker=broker)
+        if refused:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MCP server %r refused (skipping): %s", server_cfg.get("name") or "?", refused)
+            continue
         try:
             from fabri.tools.approval import mcp_approval
             from fabri.tools.mcp_client import build_mcp_tools
@@ -298,7 +313,7 @@ def build_tools(tools_cfg: dict, *, approver=None) -> ToolRegistry:
                 server_cfg.get("name") or "?", e,
             )
     if tools_cfg.get("sources"):
-        _register_config_sources(registry, tools_cfg["sources"], tools_cfg.get("policy"))
+        _register_config_sources(registry, tools_cfg["sources"], tools_cfg.get("policy"), broker=broker)
     if tools_cfg["enabled"] is not None:
         registry.tools = {name: m for name, m in registry.tools.items() if name in tools_cfg["enabled"]}
     return registry
@@ -326,7 +341,43 @@ def _tool_policy(raw):
     return ToolPolicy.from_data(raw, base=ToolPolicy())
 
 
-def _register_config_sources(registry: ToolRegistry, decls, raw_policy) -> None:
+def _snapshot_credential_env_refusal(server_cfg, tools_cfg: dict, *, broker) -> str | None:
+    """Why a ``tools.mcp_servers`` entry may not start in a snapshot run, or
+    None when it may.
+
+    A snapshot run is one the service launched (``FABRI_SESSION_ID`` is set)
+    with no credential broker, so the service put ``FABRI_CRED_*`` values in
+    the run env. There every ``credential_env`` name the server asks for must
+    be one the run's own ``tools.sources`` declare and its ``tools.policy``
+    grants (the refs the service passed); the broker names never count.
+    ``fabri run`` holds only the operator's own env, and under a broker the
+    run holds no credential values, so neither is checked here. The reason
+    names variable names only, never a value."""
+    if broker is not None or not os.environ.get("FABRI_SESSION_ID"):
+        return None
+    from collections.abc import Mapping
+
+    if not isinstance(server_cfg, Mapping):
+        return None
+    wanted = server_cfg.get("credential_env")
+    if not wanted:
+        return None
+    if isinstance(wanted, str) or not isinstance(wanted, (list, tuple, set, frozenset)):
+        return "credential_env must be a list of variable names"
+    from fabri.service.launcher import granted_secret_refs
+    from fabri.tools.credential_broker_client import BROKER_ENV_NAMES
+    from fabri.tools.credential_store import credential_env_var
+
+    refs = granted_secret_refs({"tools": tools_cfg}, actor=os.environ.get("FABRI_RUN_ACTOR") or None)
+    allowed = {credential_env_var(provider, handle) for provider, handle in refs} - BROKER_ENV_NAMES
+    bad = sorted(str(name) for name in wanted if not isinstance(name, str) or name not in allowed)
+    if bad:
+        return ("credential_env names a credential this run's tools.sources do not declare or "
+                f"tools.policy does not grant: {', '.join(bad)}")
+    return None
+
+
+def _register_config_sources(registry: ToolRegistry, decls, raw_policy, *, broker=None) -> None:
     """Register ``tools.sources`` declarations (the format setups use in
     tools.yaml) into `registry`.
 
@@ -337,20 +388,37 @@ def _register_config_sources(registry: ToolRegistry, decls, raw_policy) -> None:
     ``tools.manifest_dir``. A source that fails to build is logged and
     skipped; a bad ``tools.policy`` raises, since ignoring it would hide
     what the operator asked for. A source may not replace a tool that is
-    already registered or the reserved decompose name."""
+    already registered or the reserved decompose name.
+
+    With `broker` (a live BrokerClient) the builder routes sources that
+    declare a ``secret_ref`` through it, and each tool it wired that way is
+    marked with ``registry.mark_broker_gated``. A tool is marked only when
+    this function knows its declaration sends through the broker (an http,
+    openapi or url MCP source with a ref) and the builder tagged its handler,
+    so a python callable cannot opt itself out of the approver. Without a
+    broker nothing is marked and the builder is called exactly as before."""
     import logging
 
     from fabri.tools.approval import stricter
-    from fabri.tools.sources import register_tool_sources
+    from fabri.tools.sources import register_tool_sources, secret_refs
 
     log = logging.getLogger(__name__)
     policy = _tool_policy(raw_policy)
     if not isinstance(decls, (list, tuple)):
         raise ValueError("tools.sources must be a list of tool source declarations")
-    collected = _CollectedTools()
-    for error in register_tool_sources(collected, decls, policy=policy):
-        log.warning("tool source failed to build (skipping): %s", error)
-    for manifest, handler in collected:
+    build_kwargs = {"policy": policy}
+    if broker is not None:
+        build_kwargs["broker"] = broker
+    # One builder call per declaration, so each built tool is paired with the
+    # declaration it came from.
+    collected: list[tuple] = []
+    for decl in decls:
+        built = _CollectedTools()
+        for error in register_tool_sources(built, [decl], **build_kwargs):
+            log.warning("tool source failed to build (skipping): %s", error)
+        routed = broker is not None and _routes_through_broker(decl, secret_refs)
+        collected.extend((manifest, handler, routed) for manifest, handler in built)
+    for manifest, handler, routed in collected:
         aliases = manifest.aliases or ()
         if not policy.name_allowed(manifest.name, aliases):
             continue
@@ -361,3 +429,22 @@ def _register_config_sources(registry: ToolRegistry, decls, raw_policy) -> None:
         if floor is not None:
             manifest.approval = stricter(manifest.approval or "write", floor)
         registry.register_callable(manifest, handler)
+        if routed and getattr(handler, "approval_gate", None) == "broker":
+            registry.mark_broker_gated(manifest.name)
+
+
+def _routes_through_broker(decl, secret_refs) -> bool:
+    """True when the source builder sends this declaration through a broker:
+    an http or openapi source, or an MCP source with a url, that names at
+    least one ``secret_ref``. Python and stdio MCP sources never do."""
+    from collections.abc import Mapping
+
+    if not isinstance(decl, Mapping):
+        return False
+    kind = decl.get("kind")
+    if kind not in ("http", "openapi") and not (kind == "mcp" and decl.get("url")):
+        return False
+    try:
+        return bool(secret_refs(decl))
+    except Exception:  # noqa: BLE001 -- a malformed declaration is never marked
+        return False

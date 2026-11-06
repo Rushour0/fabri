@@ -640,12 +640,26 @@ def operation_handler(
     op: OpenAPIOperation,
     *,
     base_url: str,
-    client: httpx.Client,
+    client: httpx.Client | None = None,
     headers: Mapping[str, Any] | None = None,
     store: CredentialStore | None = None,
     extra_headers: Mapping[str, str] | None = None,
     timeout_s: float = 30.0,
+    sender: Callable[..., dict] | None = None,
 ) -> Callable[[dict], dict]:
+    """A handler that sends one call of `op`.
+
+    With `client`, the handler renders the URL and calls ``http_call.send``
+    in this process with `headers` resolved through `store`. With `sender`
+    (the credential broker's, for example), the handler calls
+    ``sender(method, url, path_params=..., params=..., json_body=...,
+    form_body=..., extra_headers=..., timeout_s=..., tool_name=...,
+    floor_url=...)`` instead, where `path_params` holds the raw values the
+    model gave so the broker can render the URL from its own template.
+    `headers` and `store` are not used then. `sender` wins when both are
+    given; one of the two is required."""
+    if sender is None and client is None:
+        raise ValueError(f"{op.name}: operation_handler needs a client or a sender")
     known = {p.name for p in op.params} | set(op.body_keys) | ({"body"} if op.body_mode == "wrap" else set())
 
     def handler(args: dict) -> dict:
@@ -655,6 +669,7 @@ def operation_handler(
             return tool_error(f"{op.name}: unknown arguments {unknown}",
                               result={"status": "error", "code": None})
         path = op.path
+        path_params: dict[str, Any] = {}
         query: dict[str, Any] = {}
         for param in op.params:
             if param.location == "path":
@@ -665,6 +680,7 @@ def operation_handler(
                     rendered = render_path_value(param.name, args[param.name])
                 except PathParamError as exc:
                     return tool_error(f"{op.name}: {exc}", result={"status": "error", "code": None})
+                path_params[param.name] = args[param.name]
                 path = path.replace("{" + param.name + "}", rendered)
             elif param.name in args:
                 value = args[param.name]
@@ -679,10 +695,18 @@ def operation_handler(
                     json_body = body
         elif op.body_mode == "wrap" and "body" in args:
             json_body = args["body"]
-        return send(client, op.method, base_url.rstrip("/") + path, headers=headers, store=store,
+        url = base_url.rstrip("/") + path
+        floor_url = base_url.rstrip("/") + op.path
+        if sender is not None:
+            # The rendered URL is passed for the sender shape; the broker
+            # ignores it and renders from its own template with path_params.
+            return sender(op.method, url, path_params=path_params, params=query, json_body=json_body,
+                          form_body=form_body, extra_headers=extra_headers, timeout_s=timeout_s,
+                          tool_name=op.name, floor_url=floor_url)
+        return send(client, op.method, url, headers=headers, store=store,
                     extra_headers=extra_headers, params=query, json_body=json_body,
                     form_body=form_body, timeout_s=timeout_s, tool_name=op.name,
-                    floor_url=base_url.rstrip("/") + op.path)
+                    floor_url=floor_url)
 
     return handler
 

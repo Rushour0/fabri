@@ -310,3 +310,213 @@ def test_http_401_with_env_header_keeps_plain_message(monkeypatch):
     out = tool.handler({})
     assert seen == ["env_token_value_123"]
     assert out["ok"] is False and out["error"] == "HTTP 401"
+
+
+# ---------------------------------------------------- credential broker routing
+
+
+from fabri.tools.credential_broker_client import BrokerClient  # noqa: E402
+
+CK_HEADERS = {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}}
+
+
+class FakeBroker(BrokerClient):
+    """A broker client that records what it would send and never opens a
+    socket. `sender` is the real one, so the keyword shape is the real one."""
+
+    def __init__(self):
+        super().__init__("/nonexistent/brk.sock", "test-capability", approval_timeout_s=1.0)
+        self.sent: list[dict] = []
+        self.posted: list[dict] = []
+
+    def send(self, **kwargs):
+        self.sent.append(kwargs)
+        return {"v": 1, "ok": True, "result": {"status": "ok", "code": 200, "data": {"via": "broker"}}}
+
+    def post_mcp(self, **kwargs):
+        self.posted.append(kwargs)
+        return 200, {"content-type": "application/json"}, b"{}"
+
+
+def _no_network(request):
+    raise AssertionError(f"a brokered tool sent in process: {request.method} {request.url}")
+
+
+def test_http_source_with_secret_ref_uses_broker_sender_and_marks_gate():
+    broker = FakeBroker()
+    decl = {"kind": "http", "name": "ck_contacts_create", "url": "https://api.cakemail.test/lists/{list_id}/contacts",
+            "method": "POST", "headers": CK_HEADERS, "approval": "always_approve",
+            "dry_run_header": {"name": "X-Dry-Run", "value": "true"}}
+    tool = build_source_tools(decl, broker=broker, dry_run=True,
+                              transport=httpx.MockTransport(_no_network))[0]
+    assert tool.broker_gated is True and tool.handler.approval_gate == "broker"
+    out = tool.handler({"list_id": 42, "email": "a@b.test"})
+    assert out["ok"] is True and out["result"]["data"] == {"via": "broker"}
+    sent = broker.sent[-1]
+    assert sent["source"] == "ck_contacts_create" and sent["tool"] == "ck_contacts_create"
+    assert sent["method"] == "POST"
+    # Raw values; the broker renders the URL from its own template.
+    assert sent["path_params"] == {"list_id": 42}
+    assert sent["url"] == "https://api.cakemail.test/lists/42/contacts"
+    assert sent["floor_url"] == decl["url"]
+    assert sent["json_body"] == {"email": "a@b.test"} and sent["params"] is None
+    assert sent["extra_headers"] == {"X-Dry-Run": "true"}
+    # A bad path value is refused before anything reaches the broker.
+    count = len(broker.sent)
+    assert tool.handler({"list_id": "../x", "email": "a@b.test"})["ok"] is False
+    assert len(broker.sent) == count
+
+    get_tool = build_source_tools({"kind": "http", "name": "ck_lists", "url": "https://api.cakemail.test/lists",
+                                   "method": "GET", "headers": CK_HEADERS}, broker=broker)[0]
+    get_tool.handler({"page": 2})
+    assert broker.sent[-1]["params"] == {"page": 2} and broker.sent[-1]["json_body"] is None
+
+    # Registered with a live broker: marked, so the registry does not ask a
+    # second time and the always_approve call reaches the broker.
+    registry = ToolRegistry([])
+    assert register_tool_sources(registry, [decl], broker=broker) == []
+    assert registry._broker_gated("ck_contacts_create") is True
+    out = registry.invoke("ck_contacts_create", {"list_id": 7, "email": "c@d.test"})
+    assert out["ok"] is True and broker.sent[-1]["path_params"] == {"list_id": 7}
+
+    # No broker client: nothing is marked and the normal approver gate holds.
+    plain = ToolRegistry([])
+    assert register_tool_sources(plain, [decl], transport=httpx.MockTransport(_no_network)) == []
+    assert plain._broker_gated("ck_contacts_create") is False
+    refused = plain.invoke("ck_contacts_create", {"list_id": 7, "email": "c@d.test"})
+    assert refused["ok"] is False and "needs human approval" in refused["error"]
+
+
+def test_http_source_with_env_header_stays_in_process(monkeypatch):
+    monkeypatch.setenv("ACME_TOKEN", "env_token_value_123")
+    broker = FakeBroker()
+    calls: list[httpx.Request] = []
+    decl = {"kind": "http", "name": "acme_get", "url": "https://api.example.test/things/{id}", "method": "GET",
+            "headers": {"Authorization": {"env": "ACME_TOKEN"}, "X-Client": "fabri"}}
+    tool = build_source_tools(decl, broker=broker, transport=_transport(calls))[0]
+    assert tool.broker_gated is False and getattr(tool.handler, "approval_gate", None) is None
+    assert tool.handler({"id": 5})["ok"] is True
+    assert broker.sent == [] and calls[-1].url.path == "/things/5"
+    assert calls[-1].headers["Authorization"] == "env_token_value_123"
+    registry = ToolRegistry([])
+    assert register_tool_sources(registry, [decl], broker=broker, transport=_transport(calls)) == []
+    assert "acme_get" in registry.tools and registry._broker_gated("acme_get") is False
+
+
+def test_openapi_source_routes_every_op_through_broker():
+    broker = FakeBroker()
+    decl = {"kind": "openapi", "name": "pets", "spec": str(FIXTURES / "petstore.yaml"),
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"], "headers": CK_HEADERS,
+            "dry_run_header": {"name": "X-Dry-Run", "value": "1"}}
+    tools = build_source_tools(decl, broker=broker, dry_run=True, transport=httpx.MockTransport(_no_network))
+    assert len(tools) > 4
+    assert all(t.broker_gated and t.handler.approval_gate == "broker" for t in tools)
+    by_name = {t.manifest.name: t for t in tools}
+    by_name["pet_get"].handler({"petId": 3})
+    sent = broker.sent[-1]
+    assert sent["source"] == "pets" and sent["tool"] == "pet_get" and sent["method"] == "GET"
+    assert sent["path_params"] == {"petId": 3} and sent["extra_headers"] == {"X-Dry-Run": "1"}
+    by_name["pet_adopt"].handler({"petId": 4, "owner_id": 9})
+    sent = broker.sent[-1]
+    assert sent["tool"] == "pet_adopt" and sent["method"] == "POST"
+    assert sent["path_params"] == {"petId": 4} and sent["json_body"] == {"owner_id": 9}
+    # Each op has its own sender bound to its own tool name.
+    for tool in tools:
+        if not any(p.location == "path" for p in tool.operation.params):
+            tool.handler({})
+            assert broker.sent[-1]["tool"] == tool.manifest.name
+    registry = ToolRegistry([])
+    assert register_tool_sources(registry, [decl], broker=broker) == []
+    assert all(registry._broker_gated(name) for name in by_name)
+
+
+def test_mcp_url_source_gets_poster_and_no_headers(monkeypatch):
+    from fabri.tools import mcp_client
+    from fabri.tools.manifest_schema import ToolManifest
+
+    seen: list[dict] = []
+
+    def fake_build(cfg, approval_for=None):
+        seen.append(dict(cfg))
+        m = ToolManifest(name="mcp_gh_list", description="d", command=[], input_schema={"type": "object"},
+                         output_schema={"type": "object"}, approval="write")
+        return object(), [(m, lambda args: {"ok": True})]
+
+    monkeypatch.setattr(mcp_client, "build_mcp_tools", fake_build)
+    broker = FakeBroker()
+    decl = {"kind": "mcp", "name": "gh", "url": "https://mcp.example.test/mcp", "headers": CK_HEADERS,
+            "dry_run_header": {"name": "X-Dry-Run", "value": "1"}}
+    tools = build_source_tools(decl, broker=broker, dry_run=True)
+    cfg = seen[-1]
+    assert "headers" not in cfg and "header_source" not in cfg
+    assert cfg["url"] == decl["url"] and callable(cfg["poster"])
+    assert "cakemail" in cfg["credential_hint"]
+    status, headers, body = cfg["poster"](body=b'{"jsonrpc":"2.0"}', headers={"Mcp-Session-Id": "abc"},
+                                          timeout_s=5.0)
+    assert (status, body) == (200, b"{}")
+    posted = broker.posted[-1]
+    assert posted["source"] == "gh" and posted["url"] == decl["url"] and posted["timeout_s"] == 5.0
+    assert posted["body"] == b'{"jsonrpc":"2.0"}'
+    assert posted["headers"] == {"Mcp-Session-Id": "abc", "X-Dry-Run": "1"}
+    assert all(t.broker_gated and t.handler.approval_gate == "broker" for t in tools)
+    registry = ToolRegistry([])
+    assert register_tool_sources(registry, [decl], broker=broker) == []
+    assert registry._broker_gated("mcp_gh_list") is True
+
+    # Without a broker the same declaration resolves headers in process.
+    class Store:
+        def get(self, provider, handle):
+            return "store-value"
+
+    build_source_tools(decl, store=Store())
+    assert "poster" not in seen[-1] and "header_source" in seen[-1]
+
+
+def test_stdio_mcp_with_ref_refused_under_broker(monkeypatch):
+    from fabri.tools import mcp_client
+
+    def fake_build(cfg, approval_for=None):
+        raise AssertionError("a refused source must not start its server")
+
+    monkeypatch.setattr(mcp_client, "build_mcp_tools", fake_build)
+    decl = {"kind": "mcp", "name": "files", "command": ["mcp-files"],
+            "env": {"FILES_TOKEN": {"secret_ref": "files:main"}}}
+    with pytest.raises(ToolSourceError) as err:
+        build_source_tools(decl, broker=FakeBroker())
+    assert str(err.value) == ("source files: a stdio MCP server cannot use a stored credential under fabri serve; "
+                              "use the http transport, or set FABRI_CRED_SNAPSHOT=1 on the service")
+    registry = ToolRegistry([])
+    errors = register_tool_sources(registry, [decl], broker=FakeBroker())
+    assert errors == ["files: source files: a stdio MCP server cannot use a stored credential under fabri "
+                      "serve; use the http transport, or set FABRI_CRED_SNAPSHOT=1 on the service"]
+    assert registry.tools == {}
+
+
+def test_python_source_with_headers_refused_under_broker():
+    decl = {"kind": "python", "name": "echo", "callable": "tests.test_tool_sources:echo_tool",
+            "headers": CK_HEADERS}
+    with pytest.raises(ToolSourceError, match="python source cannot use a stored credential"):
+        build_source_tools(decl, broker=FakeBroker())
+    # A python source with no ref still builds with a broker present.
+    plain = build_source_tools({"kind": "python", "name": "echo", "callable": "tests.test_tool_sources:echo_tool"},
+                               broker=FakeBroker())[0]
+    assert plain.broker_gated is False
+
+
+def test_manifest_classes_identical_with_and_without_broker():
+    decls = [
+        {"kind": "openapi", "name": "pets", "spec": str(FIXTURES / "petstore.yaml"),
+         "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"], "headers": CK_HEADERS},
+        {"kind": "http", "name": "slack_post", "url": "https://slack.com/api/chat.postMessage", "method": "POST",
+         "headers": CK_HEADERS, "approval": "read"},
+        {"kind": "http", "name": "ck_lists", "url": "https://api.cakemail.test/lists", "method": "GET",
+         "headers": CK_HEADERS},
+    ]
+    for decl in decls:
+        plain = build_source_tools(decl, transport=httpx.MockTransport(_no_network))
+        brokered = build_source_tools(decl, broker=FakeBroker())
+        assert [(t.manifest.name, t.manifest.approval, t.safe_approval) for t in plain] == \
+            [(t.manifest.name, t.manifest.approval, t.safe_approval) for t in brokered]
+        assert all(t.broker_gated for t in brokered) and not any(t.broker_gated for t in plain)
+    slack = build_source_tools(decls[1], broker=FakeBroker())[0]
+    assert slack.manifest.approval == "always_approve"

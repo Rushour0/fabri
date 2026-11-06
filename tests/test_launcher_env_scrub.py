@@ -293,6 +293,7 @@ def two_tenants(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("FABRI_INSTALL_DB", str(tmp_path / "absent-installs.db"))
     monkeypatch.delenv("FABRI_RUN_ENV_ALLOW", raising=False)
     monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+    monkeypatch.delenv("FABRI_CRED_SNAPSHOT", raising=False)
 
 
 def _launch(tmp_path: Path, config: Path, script: Path, sid: str, **kw) -> dict:
@@ -307,14 +308,38 @@ def _launch(tmp_path: Path, config: Path, script: Path, sid: str, **kw) -> dict:
     return handle.result(timeout=30)
 
 
+def test_no_cred_values_in_child_without_snapshot(
+    tmp_path: Path, cred_dumping_agent: Path, two_tenants
+):
+    """By default the launcher resolves nothing: a run that declares a stored
+    credential gets no FABRI_CRED_* value, even though the service holds it."""
+    config = _run_yaml(tmp_path / "run.yaml", [_http_source("chat", "slack:acme")])
+
+    seen = _launch(tmp_path, config, cred_dumping_agent, "sess-default")
+
+    assert seen["creds"] == {}
+    assert "FABRI_INSTALL_DB" not in seen["names"]
+
+
+def test_approval_timeout_reaches_the_run():
+    """The run's broker client waits as long as the service will wait for a
+    human, so the timeout has to cross the allowlist."""
+    child = build_child_env({"FABRI_APPROVAL_TIMEOUT_S": "900"})
+    assert child["FABRI_APPROVAL_TIMEOUT_S"] == "900"
+
+
+# The snapshot path below is the FABRI_CRED_SNAPSHOT=1 opt-out: the service
+# passes credential_snapshot=True and the run gets its granted values.
+
+
 def test_run_gets_only_its_own_refs_never_another_tenants(
     tmp_path: Path, cred_dumping_agent: Path, two_tenants
 ):
     acme_yaml = _run_yaml(tmp_path / "acme.yaml", [_http_source("chat", "slack:acme")])
     globex_yaml = _run_yaml(tmp_path / "globex.yaml", [_http_source("chat", "slack:globex")])
 
-    acme = _launch(tmp_path, acme_yaml, cred_dumping_agent, "sess-acme")
-    globex = _launch(tmp_path, globex_yaml, cred_dumping_agent, "sess-globex")
+    acme = _launch(tmp_path, acme_yaml, cred_dumping_agent, "sess-acme", credential_snapshot=True)
+    globex = _launch(tmp_path, globex_yaml, cred_dumping_agent, "sess-globex", credential_snapshot=True)
 
     assert sorted(acme["creds"]) == ["FABRI_CRED_SLACK_ACME"]
     acme_ok = acme["creds"]["FABRI_CRED_SLACK_ACME"] == _digest(ACME)
@@ -336,7 +361,7 @@ def test_credential_grants_filter_the_declared_refs(
         policy={"credential_grants": {"acme_*": ["slack:acme"], "other_*": ["linear:*"]}},
     )
 
-    seen = _launch(tmp_path, config, cred_dumping_agent, "sess-grants")
+    seen = _launch(tmp_path, config, cred_dumping_agent, "sess-grants", credential_snapshot=True)
 
     assert sorted(seen["creds"]) == ["FABRI_CRED_SLACK_ACME"]
     assert "FABRI_INSTALL_DB" not in seen["names"]
@@ -352,7 +377,7 @@ def test_run_with_no_secret_refs_gets_no_credentials(
 
     for sid, config in (("sess-plain", with_sources), ("sess-bare", no_tools),
                         ("sess-missing", tmp_path / "missing.yaml")):
-        seen = _launch(tmp_path, config, cred_dumping_agent, sid)
+        seen = _launch(tmp_path, config, cred_dumping_agent, sid, credential_snapshot=True)
         assert seen["creds"] == {}, sid
         assert "FABRI_INSTALL_DB" not in seen["names"], sid
 
@@ -365,7 +390,7 @@ def test_install_db_never_reaches_a_run_even_when_named(
     config = _run_yaml(tmp_path / "run.yaml", [_http_source("chat", "slack:acme")])
 
     seen = _launch(
-        tmp_path, config, cred_dumping_agent, "sess-db",
+        tmp_path, config, cred_dumping_agent, "sess-db", credential_snapshot=True,
         allow_env=("FABRI_INSTALL_DB",),
         env={"FABRI_INSTALL_DB": "/elsewhere/installs.db"},
     )
@@ -428,38 +453,70 @@ def test_scoped_credentials_skip_malformed_refs_and_bad_policy(tmp_path: Path):
     assert granted_secret_refs({"tools": "x"}) == []
 
 
-def test_real_service_run_gets_only_its_declared_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, two_tenants
-):
-    """FabriService.submit -> launch_run: the bound run.yaml decides what the run gets."""
+_SERVICE_DUMP = """
+import hashlib, json, os, pathlib
+home = pathlib.Path(os.environ["FABRI_HOME"])
+sid = os.environ["FABRI_SESSION_ID"]
+trace = home / ".fabri" / "traces" / f"{sid}.jsonl"
+trace.parent.mkdir(parents=True, exist_ok=True)
+trace.write_text("")
+creds = {k: hashlib.sha256(v.encode()).hexdigest()
+         for k, v in os.environ.items() if k.startswith("FABRI_CRED_")}
+sock = os.environ.get("FABRI_CRED_BROKER_SOCKET")
+print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                  "final_text": json.dumps({"names": sorted(os.environ), "creds": creds,
+                                            "socket_seen": bool(sock and os.path.exists(sock)),
+                                            "socket": sock})}))
+"""
+
+
+def _service_run(tmp_path: Path, template: Path) -> tuple[dict, object, str]:
     from fabri.service.service import FabriService
 
     script = tmp_path / "dump.py"
-    script.write_text(textwrap.dedent("""
-        import hashlib, json, os, pathlib
-        home = pathlib.Path(os.environ["FABRI_HOME"])
-        sid = os.environ["FABRI_SESSION_ID"]
-        trace = home / ".fabri" / "traces" / f"{sid}.jsonl"
-        trace.parent.mkdir(parents=True, exist_ok=True)
-        trace.write_text("")
-        creds = {k: hashlib.sha256(v.encode()).hexdigest()
-                 for k, v in os.environ.items() if k.startswith("FABRI_CRED_")}
-        print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
-                          "final_text": json.dumps({"names": sorted(os.environ), "creds": creds})}))
-    """))
-    template = _run_yaml(tmp_path / "template.yaml", [_http_source("chat", "slack:acme")])
-
+    script.write_text(_SERVICE_DUMP)
     svc = FabriService(
         template_config=str(template),
         home_root=tmp_path / "runs",
         command_builder=lambda task, cfg, sid, home: [sys.executable, str(script)],
     )
     try:
-        seen = json.loads(svc.result(svc.submit("t"), timeout=30)["final_text"])
+        sid = svc.submit("t")
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+        return seen, svc.credential_broker.bindings(), sid
     finally:
         svc.close()
+
+
+def test_real_service_run_gets_broker_env_and_no_values(tmp_path: Path, two_tenants):
+    """FabriService.submit -> launch_run: the run gets the broker's socket and
+    key, never the token the service holds for its declared ref."""
+    template = _run_yaml(tmp_path / "template.yaml", [_http_source("chat", "slack:acme")])
+
+    seen, live_bindings, sid = _service_run(tmp_path, template)
+
+    assert sorted(seen["creds"]) == ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+    assert _digest(ACME) not in seen["creds"].values()
+    assert _digest(GLOBEX) not in seen["creds"].values()
+    assert seen["socket_seen"] is True
+    assert "FABRI_INSTALL_DB" not in seen["names"]
+    # result() ended the run, so its binding and socket are gone.
+    assert sid not in live_bindings
+    assert not Path(seen["socket"]).exists()
+
+
+def test_snapshot_opt_out_restores_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, two_tenants
+):
+    """FABRI_CRED_SNAPSHOT=1 on the service: the bound run.yaml decides which
+    values the run gets, and no broker is bound."""
+    monkeypatch.setenv("FABRI_CRED_SNAPSHOT", "1")
+    template = _run_yaml(tmp_path / "template.yaml", [_http_source("chat", "slack:acme")])
+
+    seen, _bindings, _sid = _service_run(tmp_path, template)
 
     assert sorted(seen["creds"]) == ["FABRI_CRED_SLACK_ACME"]
     acme_ok = seen["creds"]["FABRI_CRED_SLACK_ACME"] == _digest(ACME)
     assert acme_ok, "the run did not get its declared value"
+    assert seen["socket"] is None
     assert "FABRI_INSTALL_DB" not in seen["names"]

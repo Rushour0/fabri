@@ -32,6 +32,16 @@ list. A ToolPolicy, when given, is enforced while building.
 An http or openapi tool whose request URL is on a catalog connector's host
 (slack.com, for example) gets that connector's approval floor whatever the
 declaration says; see ``_apply_floors``.
+
+Under ``fabri serve`` a run holds no stored tokens. When a credential broker
+client is passed (``broker=``), a source that names a ``secret_ref`` sends
+its requests through the broker in the service process instead: http and
+openapi tools hand the broker the tool name, the method and the raw path
+parameters, and an http MCP source posts its JSON-RPC bodies through it.
+Those handlers carry ``approval_gate = "broker"`` and
+``register_tool_sources`` marks them on the registry, since the broker asks
+a human itself before any ``always_approve`` request. Sources with only
+``env:`` or literal headers keep sending in this process.
 """
 from __future__ import annotations
 
@@ -44,7 +54,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -71,6 +81,9 @@ from fabri.tools.openapi import (
 )
 from fabri.tools.policy import SOURCE_KINDS, PolicyError, ToolPolicy
 from fabri.tools.result import tool_error, tool_ok
+
+if TYPE_CHECKING:
+    from fabri.tools.credential_broker_client import BrokerClient
 
 logger = logging.getLogger("fabri.tools.sources")
 
@@ -107,6 +120,8 @@ class SourceTool:
     extra: dict = field(default_factory=dict)
     # The class fabri would pick with no override in the declaration.
     safe_approval: str = "write"
+    # True when the handler sends through a live credential broker client.
+    broker_gated: bool = False
 
 
 def _approval_for(decl: Mapping[str, Any], tool_name: str, default: str) -> str:
@@ -208,10 +223,25 @@ def build_source_tools(
     transport: httpx.BaseTransport | None = None,
     store: CredentialStore | None = None,
     dry_run: bool = False,
+    broker: BrokerClient | None = None,
 ) -> list[SourceTool]:
-    """Build one declaration into SourceTools (manifest, handler, origin)."""
+    """Build one declaration into SourceTools (manifest, handler, origin).
+
+    With `broker` set and a ``secret_ref`` in the declaration, http and
+    openapi tools and an http MCP source send through the broker, and each
+    built tool is flagged ``broker_gated``. A stdio MCP or python source
+    with a ``secret_ref`` cannot be brokered and raises ToolSourceError.
+    The approval classes in the manifests are the same either way."""
     validate_source_decl(decl, policy)
     kind = decl["kind"]
+    uses_broker = broker is not None and bool(secret_refs(decl))
+    if uses_broker and kind == "mcp" and decl.get("command"):
+        raise ToolSourceError(f"source {decl['name']}: a stdio MCP server cannot use a stored credential under "
+                              "fabri serve; use the http transport, or set FABRI_CRED_SNAPSHOT=1 on the service")
+    if uses_broker and kind == "python":
+        raise ToolSourceError(f"source {decl['name']}: a python source cannot use a stored credential under "
+                              "fabri serve; use an http or openapi source, or set FABRI_CRED_SNAPSHOT=1 on the "
+                              "service")
     builder = {"openapi": _build_openapi, "http": _build_http, "mcp": _build_mcp, "python": _build_python}[kind]
     dry: dict[str, str] = {}
     if dry_run:
@@ -220,14 +250,20 @@ def build_source_tools(
         dry.update(dry_run_headers(decl.get("dry_run_header")))
         dry.update(dry_run_headers(policy.dry_run_header if policy else None))
     grants = policy.grants_for(decl["name"]) if policy is not None else None
-    if grants is not None:
+    if grants is not None and not uses_broker:
         # The build-time check covers the declaration; this covers the store
-        # at call time, so the source can never resolve anything else.
+        # at call time, so the source can never resolve anything else. With
+        # the broker the run resolves nothing; the broker holds the grants.
         from fabri.tools.credential_store import ScopedCredentialStore
         from fabri.tools.secret_refs import default_credential_store
 
         store = ScopedCredentialStore(store or default_credential_store(), grants, actor=decl["name"])
-    built = builder(decl, base_dir=base_dir, policy=policy, transport=transport, store=store, dry=dry)
+    built = builder(decl, base_dir=base_dir, policy=policy, transport=transport, store=store, dry=dry,
+                    broker=broker if uses_broker else None)
+    if uses_broker:
+        for tool in built:
+            tool.broker_gated = True
+            tool.handler.approval_gate = "broker"  # type: ignore[attr-defined]
     _apply_floors(decl, built)
     return built
 
@@ -313,12 +349,22 @@ def build_tool_source(decl: Mapping[str, Any], **kwargs: Any) -> list[tuple[Tool
 def register_tool_sources(registry: Any, decls: Iterable[Mapping[str, Any]], **kwargs: Any) -> list[str]:
     """Build and register every declaration. A source that fails to build is
     skipped and its error returned, so one bad source never takes down the
-    rest."""
+    rest.
+
+    A tool built to send through a live broker client (``broker=``) is
+    marked with ``registry.mark_broker_gated`` right after it is
+    registered, so the registry skips its own approval prompt for it (the
+    broker asks instead). No tool is marked when no broker is passed. A
+    registry stand-in without ``mark_broker_gated`` marks nothing, which
+    keeps the normal approver in front of the tool."""
     errors: list[str] = []
     for decl in decls:
         try:
             for tool in build_source_tools(decl, **kwargs):
                 registry.register_callable(tool.manifest, tool.handler)
+                mark = getattr(registry, "mark_broker_gated", None)
+                if tool.broker_gated and callable(mark):
+                    mark(tool.manifest.name)
         except Exception as exc:  # noqa: BLE001 -- reported, not fatal
             errors.append(f"{(decl or {}).get('name', '?')}: {exc}")
     return errors
@@ -327,7 +373,7 @@ def register_tool_sources(registry: Any, decls: Iterable[Mapping[str, Any]], **k
 # ---------------------------------------------------------------- builders
 
 
-def _build_openapi(decl, *, base_dir, policy, transport, store, dry) -> list[SourceTool]:
+def _build_openapi(decl, *, base_dir, policy, transport, store, dry, broker=None) -> list[SourceTool]:
     timeout = float(decl.get("timeout_s") or 30.0)
     doc = load_openapi(decl["spec"], base_dir=base_dir, transport=transport, timeout_s=timeout)
     base_url = decl.get("base_url") or default_base_url(doc)
@@ -351,36 +397,47 @@ def _build_openapi(decl, *, base_dir, policy, transport, store, dry) -> list[Sou
     if isinstance(decl.get("approval"), str):
         for op in ops:
             op.approval = check_approval(decl["approval"])
-    client = httpx.Client(transport=transport, timeout=timeout)
+    client = None if broker is not None else httpx.Client(transport=transport, timeout=timeout)
     out = []
     for op in ops:
+        sender = broker.sender(decl["name"], op.name) if broker is not None else None
         handler = operation_handler(op, base_url=base_url, client=client, headers=decl.get("headers"),
-                                    store=store, extra_headers=dry, timeout_s=timeout)
+                                    store=store, extra_headers=dry, timeout_s=timeout, sender=sender)
         out.append(SourceTool(op.manifest(timeout), handler, "openapi", decl["name"], op.method, op.path, op,
                               {"base_url": base_url}, safe_approval=op.safe_approval))
     return out
 
 
-def _build_http(decl, *, base_dir, policy, transport, store, dry) -> list[SourceTool]:
+def _build_http(decl, *, base_dir, policy, transport, store, dry, broker=None) -> list[SourceTool]:
     name, url = decl["name"], str(decl["url"])
     method = str(decl.get("method") or "GET").upper()
     timeout = float(decl.get("timeout_s") or 30.0)
     schema = dict(decl.get("input_schema") or {"type": "object", "properties": {}})
     placeholders = _PARAM.findall(url)
-    client = httpx.Client(transport=transport, timeout=timeout)
     headers = decl.get("headers")
+    # With the broker the run holds no token and opens no connection: the
+    # broker renders the URL from its bound template with the raw values.
+    sender = broker.sender(name, name) if broker is not None else None
+    client = None if sender is not None else httpx.Client(transport=transport, timeout=timeout)
 
     def handler(args: dict) -> dict:
         args = dict(args or {})
         target = url
+        path_params: dict[str, Any] = {}
         for key in placeholders:
             if key not in args:
                 return tool_error(f"{name}: missing path parameter {key!r}", result={"status": "error", "code": None})
+            value = args.pop(key)
             try:
-                rendered = render_path_value(key, args.pop(key))
+                rendered = render_path_value(key, value)
             except PathParamError as e:
                 return tool_error(f"{name}: {e}", result={"status": "error", "code": None})
+            path_params[key] = value
             target = target.replace("{" + key + "}", rendered)
+        if sender is not None:
+            body = {"params": args} if method in ("GET", "HEAD", "OPTIONS", "DELETE") else {"json_body": args}
+            return sender(method, target, path_params=path_params, extra_headers=dry, timeout_s=timeout,
+                          tool_name=name, floor_url=url, **body)
         if method in ("GET", "HEAD", "OPTIONS", "DELETE"):
             return send(client, method, target, headers=headers, store=store, extra_headers=dry,
                         params=args, timeout_s=timeout, tool_name=name, floor_url=url)
@@ -396,7 +453,7 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry) -> list[Source
     return [SourceTool(manifest, handler, "http", name, method, url, safe_approval=safe)]
 
 
-def _build_python(decl, *, base_dir, policy, transport, store, dry) -> list[SourceTool]:
+def _build_python(decl, *, base_dir, policy, transport, store, dry, broker=None) -> list[SourceTool]:
     name, target = decl["name"], str(decl["callable"])
     module_name, _, attr = target.partition(":")
     if not attr:
@@ -433,11 +490,26 @@ def _build_python(decl, *, base_dir, policy, transport, store, dry) -> list[Sour
     return [SourceTool(manifest, handler, "python", name)]
 
 
-def _build_mcp(decl, *, base_dir, policy, transport, store, dry) -> list[SourceTool]:
+def _build_mcp(decl, *, base_dir, policy, transport, store, dry, broker=None) -> list[SourceTool]:
     from fabri.tools.mcp_client import build_mcp_tools
 
     cfg: dict[str, Any] = {"name": decl["name"], "timeout_s": float(decl.get("timeout_s") or 30.0)}
-    if decl.get("url"):
+    if decl.get("url") and broker is not None:
+        # The broker applies the declared header specs; the run sends only
+        # the literal dry-run headers, which the broker checks like any
+        # other extra header.
+        source, url, extra = decl["name"], str(decl["url"]), dict(dry)
+
+        def poster(*, body: bytes, headers: Mapping[str, str], timeout_s: float = 30.0):
+            return broker.post_mcp(source=source, url=url, body=body, headers={**dict(headers or {}), **extra},
+                                   timeout_s=timeout_s)
+
+        cfg["url"] = url
+        cfg["poster"] = poster
+        provider = secret_ref_provider(decl.get("headers"))
+        if provider:
+            cfg["credential_hint"] = credential_refused_hint(provider)
+    elif decl.get("url"):
         cfg["url"] = decl["url"]
         specs = decl.get("headers")
         # Resolved once here so a missing credential fails the build, then

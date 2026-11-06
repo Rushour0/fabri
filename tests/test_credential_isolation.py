@@ -27,6 +27,9 @@ import yaml
 from fabri.service.connection_store import ConnectionStore
 from fabri.service.launcher import scoped_credential_env
 from fabri.tools.credential_store import (
+    BROKER_ENV_NAMES,
+    BROKER_KEY_ENV,
+    BROKER_SOCKET_ENV,
     CredentialNotFoundError,
     EnvCredentialStore,
     ScopedCredentialStore,
@@ -52,6 +55,17 @@ def run_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FABRI_CRED_SLACK_GLOBEX", GLOBEX)
     monkeypatch.delenv("FABRI_RUN_ACTOR", raising=False)
     monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+    for name in BROKER_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def broker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run_tokens) -> None:
+    """The run talks to a credential broker, as it does under ``fabri serve``.
+    The run also still holds the two snapshot tokens, so a test can show that
+    a sub-agent under a broker gets the broker names and nothing else."""
+    monkeypatch.setenv(BROKER_SOCKET_ENV, str(tmp_path / "brk.sock"))
+    monkeypatch.setenv(BROKER_KEY_ENV, "placeholder-broker-key")
 
 
 def _cred_names(text: str) -> list[str]:
@@ -301,11 +315,20 @@ def _service_run(tmp_path: Path, template: Path, command, **submit_kw) -> dict:
         svc.close()
 
 
+def _snapshot_creds(seen: dict) -> dict:
+    """The FABRI_CRED_* digests a run reported, minus the two broker names.
+    These tests check the snapshot path, which a service may run beside a
+    broker binding."""
+    return {k: v for k, v in seen["creds"].items() if k not in BROKER_ENV_NAMES}
+
+
 def test_service_resolves_from_its_own_db_not_the_env_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dumping_command
 ) -> None:
     for name in ("FABRI_CRED_AUDIT_LOG", "FABRI_CRED_SLACK_MAIN", "FABRI_RUN_ENV_ALLOW"):
         monkeypatch.delenv(name, raising=False)
+    # The snapshot is off by default once the broker holds a run's credentials.
+    monkeypatch.setenv("FABRI_CRED_SNAPSHOT", "1")
     other = ConnectionStore(tmp_path / "other" / "installs.db")
     other.upsert(provider="slack", handle="main", access_token="other-db-token")
     monkeypatch.setenv("FABRI_INSTALL_DB", str(tmp_path / "other" / "installs.db"))
@@ -314,9 +337,10 @@ def test_service_resolves_from_its_own_db_not_the_env_one(
     template = _refs_config(tmp_path / "template.yaml", ["slack:main"])
 
     seen = _service_run(tmp_path, template, dumping_command)
+    creds = _snapshot_creds(seen)
 
-    assert sorted(seen["creds"]) == ["FABRI_CRED_SLACK_MAIN"]
-    assert seen["creds"]["FABRI_CRED_SLACK_MAIN"] == _digest("own-db-token"), "run resolved from the wrong database"
+    assert sorted(creds) == ["FABRI_CRED_SLACK_MAIN"]
+    assert creds["FABRI_CRED_SLACK_MAIN"] == _digest("own-db-token"), "run resolved from the wrong database"
 
 
 def test_submit_user_id_is_the_run_actor_with_audit_on(
@@ -325,6 +349,7 @@ def test_submit_user_id_is_the_run_actor_with_audit_on(
     for name in ("FABRI_CRED_GMAIL_U1", "FABRI_CRED_GMAIL_U2", "FABRI_RUN_ENV_ALLOW", "FABRI_INSTALL_DB"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FABRI_CRED_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("FABRI_CRED_SNAPSHOT", "1")
     own = ConnectionStore(tmp_path / "runs" / "installs.db")
     own.upsert(provider="gmail", handle="u1", access_token="u1-db-token", scope_kind="user")
     own.upsert(provider="gmail", handle="u2", access_token="u2-db-token", scope_kind="user")
@@ -333,13 +358,14 @@ def test_submit_user_id_is_the_run_actor_with_audit_on(
     seen = _service_run(tmp_path, template, dumping_command, user_id="u1")
 
     assert seen["actor"] == "u1"
-    assert sorted(seen["creds"]) == ["FABRI_CRED_GMAIL_U1"]
-    assert seen["creds"]["FABRI_CRED_GMAIL_U1"] == _digest("u1-db-token"), "actor's own row was not passed"
+    creds = _snapshot_creds(seen)
+    assert sorted(creds) == ["FABRI_CRED_GMAIL_U1"]
+    assert creds["FABRI_CRED_GMAIL_U1"] == _digest("u1-db-token"), "actor's own row was not passed"
 
     # Without a user, neither user row reaches the run.
     seen = _service_run(tmp_path, template, dumping_command)
     assert seen["actor"] is None
-    assert seen["creds"] == {}
+    assert _snapshot_creds(seen) == {}
 
 
 # --- manifest `credentials` field ---------------------------------------------
@@ -402,3 +428,134 @@ def test_slack_post_resolves_its_token_through_the_runner(run_tokens, monkeypatc
     out = run_tool(manifest, {})
     assert out["ok"], out.get("error")
     assert out["result"]["digest"] == _digest(ACME)
+
+
+# --- credential broker names ------------------------------------------------------
+# Under ``fabri serve`` the run holds FABRI_CRED_BROKER_SOCKET and
+# FABRI_CRED_BROKER_KEY. Only a sub-agent may keep them.
+
+
+def test_bash_sees_no_broker_key(tmp_path: Path, broker_env) -> None:
+    manifest = ToolManifest.from_file(EXAMPLES / "bash.json")
+    out = run_tool(manifest, {"command": "env | cut -d= -f1"},
+                   extra_env={"FABRI_SANDBOX_ROOT": str(tmp_path)})
+    assert out["ok"], "bash tool failed to run"
+    names = out["result"]["stdout"].split()
+    assert "PATH" in names
+    assert _cred_names(" ".join(names)) == []
+
+
+def test_python_exec_sees_no_broker_vars(tmp_path: Path, broker_env) -> None:
+    manifest = ToolManifest.from_file(EXAMPLES / "python_exec.json")
+    code = "import os\nprint(' '.join(sorted(os.environ)))\n"
+    out = run_tool(manifest, {"code": code}, extra_env={"FABRI_SANDBOX_ROOT": str(tmp_path)})
+    assert out["ok"], "python_exec tool failed to run"
+    names = out["result"]["stdout"].split()
+    assert "PATH" in names
+    assert _cred_names(" ".join(names)) == []
+
+
+def test_subagent_keeps_broker_vars(tmp_path: Path, broker_env) -> None:
+    # The child config declares slack:acme, but under a broker nothing is
+    # derived from the config: the child gets the two broker names only.
+    config = _source_config(tmp_path / "child.yaml", "slack:acme")
+    runner_script = _names_script(tmp_path / "agent_runner_tool.py")
+    manifest = ToolManifest(name="child", description="d",
+                            command=[sys.executable, str(runner_script), str(config)],
+                            input_schema={"type": "object"}, output_schema={"type": "object"})
+    out = run_tool(manifest, {"task": "t"})
+    assert out["ok"]
+    assert out["result"]["names"] == sorted(BROKER_ENV_NAMES)
+
+    # A config that cannot be read still gets the broker names.
+    missing = ToolManifest(name="child2", description="d",
+                           command=[sys.executable, str(runner_script), str(tmp_path / "nope.yaml")],
+                           input_schema={"type": "object"}, output_schema={"type": "object"})
+    out = run_tool(missing, {"task": "t"})
+    assert out["ok"]
+    assert out["result"]["names"] == sorted(BROKER_ENV_NAMES)
+
+
+def test_spawned_subagent_keeps_broker_vars(tmp_path: Path, broker_env) -> None:
+    # Through the runner, for a config the model chose.
+    config = _source_config(tmp_path / "child.yaml", "slack:globex")
+    spawn_script = _names_script(tmp_path / "spawn_subagent.py")
+    manifest = ToolManifest(name="spawn_subagent", description="d",
+                            command=[sys.executable, str(spawn_script)],
+                            input_schema={"type": "object"}, output_schema={"type": "object"})
+    out = run_tool(manifest, {"config_path": str(config), "task": "t"})
+    assert out["ok"]
+    assert out["result"]["names"] == sorted(BROKER_ENV_NAMES)
+
+    bare = tmp_path / "bare.yaml"
+    bare.write_text("llm:\n  model: m\n")
+    out = run_tool(manifest, {"config_path": str(bare), "task": "t"})
+    assert out["result"]["names"] == sorted(BROKER_ENV_NAMES)
+
+
+def test_spawn_subagent_script_passes_broker_vars_to_its_child(
+    tmp_path: Path, broker_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """spawn_subagent.py applies the same rule itself, for when it is started
+    some other way than through the runner."""
+    import io
+
+    from fabri.tools.examples import spawn_subagent
+
+    config = _source_config(tmp_path / "child.yaml", "slack:acme")
+    monkeypatch.setattr(spawn_subagent, "RUNNER_SCRIPT", _names_script(tmp_path / "agent_runner_tool.py"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"config_path": str(config), "task": "t"})))
+    assert spawn_subagent.main() == 0
+    assert json.loads(capsys.readouterr().out)["names"] == sorted(BROKER_ENV_NAMES)
+
+
+def test_spawn_subagent_script_without_broker_keeps_declared_ref(
+    tmp_path: Path, run_tokens, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import io
+
+    from fabri.tools.examples import spawn_subagent
+
+    config = _source_config(tmp_path / "child.yaml", "slack:acme")
+    monkeypatch.setattr(spawn_subagent, "RUNNER_SCRIPT", _names_script(tmp_path / "agent_runner_tool.py"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"config_path": str(config), "task": "t"})))
+    assert spawn_subagent.main() == 0
+    assert json.loads(capsys.readouterr().out)["names"] == ["FABRI_CRED_SLACK_ACME"]
+
+
+def test_subagent_with_one_broker_var_gets_neither(tmp_path: Path, run_tokens, monkeypatch) -> None:
+    # Only the socket is set: not a broker run, so the snapshot rule applies
+    # and the stray name is not passed.
+    monkeypatch.setenv(BROKER_SOCKET_ENV, str(tmp_path / "brk.sock"))
+    config = _source_config(tmp_path / "child.yaml", "slack:acme")
+    runner_script = _names_script(tmp_path / "agent_runner_tool.py")
+    manifest = ToolManifest(name="child", description="d",
+                            command=[sys.executable, str(runner_script), str(config)],
+                            input_schema={"type": "object"}, output_schema={"type": "object"})
+    out = run_tool(manifest, {"task": "t"})
+    assert out["ok"]
+    assert out["result"]["names"] == ["FABRI_CRED_SLACK_ACME"]
+
+
+@pytest.mark.parametrize("pattern", [["broker:*"], ["broker:key"], ["broker:socket"]])
+def test_manifest_cannot_declare_broker_vars(tmp_path: Path, broker_env, pattern) -> None:
+    out = run_tool(_names_manifest(tmp_path, pattern), {})
+    assert out["ok"]
+    assert _cred_names(" ".join(out["result"]["names"])) == []
+
+
+def test_stdio_mcp_child_sees_no_broker_vars(env_names_mcp_server: Path, broker_env) -> None:
+    seen = _mcp_names(env_names_mcp_server, "inherit")
+    assert not set(seen["creds"]) & BROKER_ENV_NAMES
+    seen = _mcp_names(env_names_mcp_server, "allowlist")
+    assert seen["creds"] == []
+
+
+def test_verifier_sees_no_broker_vars(tmp_path: Path, broker_env) -> None:
+    from fabri.core.agent import _run_verifier
+
+    script = tmp_path / "verify.py"
+    script.write_text("import os\nprint(' '.join(sorted(os.environ)))\n")
+    verdict = _run_verifier([sys.executable, str(script)], str(tmp_path))
+    assert verdict["ok"]
+    assert _cred_names(verdict["output"]) == []

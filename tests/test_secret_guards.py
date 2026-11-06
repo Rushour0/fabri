@@ -305,10 +305,34 @@ def test_installs_db_mode_is_0600_after_every_cli_command(tmp_path, monkeypatch,
 # ------------------------------------------------------ run environments
 
 
-def test_serve_run_gets_only_its_declared_refs_not_install_db(tmp_path, monkeypatch):
-    """A run under fabri serve receives FABRI_CRED_* for the refs its own
-    sources declare and no FABRI_INSTALL_DB, even when the service holds many."""
-    db = tmp_path / "installs.db"
+_GUARD_DUMP = """
+import hashlib, json, os, pathlib
+home = pathlib.Path(os.environ["FABRI_HOME"])
+sid = os.environ.get("FABRI_SESSION_ID", "sess")
+trace = home / ".fabri" / "traces" / f"{sid}.jsonl"
+trace.parent.mkdir(parents=True, exist_ok=True)
+trace.write_text("")
+body = {
+    "names": sorted(os.environ),
+    "values": sorted(os.environ.values()),
+    "creds": {k: hashlib.sha256(v.encode()).hexdigest()
+              for k, v in os.environ.items() if k.startswith("FABRI_CRED_")},
+}
+print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                  "final_text": json.dumps(body), **body}))
+"""
+
+
+def _guard_config(tmp_path):
+    config = tmp_path / "run.yaml"
+    config.write_text(yaml.safe_dump({"tools": {"sources": [{
+        "name": "ck", "kind": "http", "url": "https://api.example.test/x", "method": "GET",
+        "headers": {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}},
+    }]}}))
+    return config
+
+
+def _guard_env(monkeypatch, db):
     store = ConnectionStore(db)
     store.upsert(provider="cakemail", handle="main", access_token=TOKEN)
     store.upsert(provider="cakemail", handle="other", access_token=PAT)
@@ -317,35 +341,65 @@ def test_serve_run_gets_only_its_declared_refs_not_install_db(tmp_path, monkeypa
     monkeypatch.setenv("FABRI_CRED_SLACK_ACME", "slack-service-env-value")
     monkeypatch.delenv("FABRI_RUN_ENV_ALLOW", raising=False)
     monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+    monkeypatch.delenv("FABRI_CRED_SNAPSHOT", raising=False)
 
-    config = tmp_path / "run.yaml"
-    config.write_text(yaml.safe_dump({"tools": {"sources": [{
-        "name": "ck", "kind": "http", "url": "https://api.example.test/x", "method": "GET",
-        "headers": {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}},
-    }]}}))
+
+def test_serve_run_gets_broker_env_and_no_values(tmp_path, monkeypatch):
+    """A run under fabri serve receives the broker's socket and key for its
+    credentialed source, and no token value and no install db path, even when
+    the service holds many tokens."""
+    from fabri.service.service import FabriService
+
+    home_root = tmp_path / "serve"
+    home_root.mkdir()
+    db = home_root / "installs.db"
+    _guard_env(monkeypatch, db)
+    config = _guard_config(tmp_path)
     script = tmp_path / "dump.py"
-    script.write_text(textwrap.dedent("""
-        import hashlib, json, os
-        print(json.dumps({
-            "names": sorted(os.environ),
-            "values": sorted(v for v in os.environ.values()),
-            "creds": {k: hashlib.sha256(v.encode()).hexdigest()
-                      for k, v in os.environ.items() if k.startswith("FABRI_CRED_")},
-        }))
-    """))
+    script.write_text(_GUARD_DUMP)
 
-    handle = launch_run("t", config_path=config, fabri_home=tmp_path / "home", session_id="sess-guard",
-                        command=[sys.executable, str(script)])
-    seen = handle.result(timeout=30)
+    svc = FabriService(template_config=str(config), home_root=home_root,
+                       command_builder=lambda task, cfg, sid, home: [sys.executable, str(script)])
+    try:
+        seen = json.loads(svc.result(svc.submit("t"), timeout=30)["final_text"])
+    finally:
+        svc.close()
 
+    assert sorted(seen["creds"]) == ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+    assert "FABRI_INSTALL_DB" not in seen["names"]
+    db_path_seen = any(str(db) in v for v in seen["values"])
+    assert not db_path_seen, "the install db path reached the run"
+    for label, secret in (("TOKEN", TOKEN), ("PAT", PAT), ("ACCESS", ACCESS),
+                          ("service env", "slack-service-env-value")):
+        leaked = any(secret in v for v in seen["values"])
+        assert not leaked, f"{label} value reached the run"
+
+
+def test_serve_run_snapshot_gets_only_its_declared_refs(tmp_path, monkeypatch):
+    """The FABRI_CRED_SNAPSHOT=1 path (credential_snapshot=True): the run
+    receives FABRI_CRED_* for the refs its own sources declare and no
+    FABRI_INSTALL_DB, even when the service holds many."""
     import hashlib
 
+    db = tmp_path / "installs.db"
+    _guard_env(monkeypatch, db)
+    config = _guard_config(tmp_path)
+    script = tmp_path / "dump.py"
+    script.write_text(_GUARD_DUMP)
+
+    handle = launch_run("t", config_path=config, fabri_home=tmp_path / "home", session_id="sess-guard",
+                        command=[sys.executable, str(script)], credential_snapshot=True)
+    seen = handle.result(timeout=30)
+
     assert sorted(seen["creds"]) == ["FABRI_CRED_CAKEMAIL_MAIN"]
-    assert seen["creds"]["FABRI_CRED_CAKEMAIL_MAIN"] == hashlib.sha256(TOKEN.encode()).hexdigest()
+    right_value = seen["creds"]["FABRI_CRED_CAKEMAIL_MAIN"] == hashlib.sha256(TOKEN.encode()).hexdigest()
+    assert right_value, "the run did not get its declared value"
     assert "FABRI_INSTALL_DB" not in seen["names"]
-    assert str(db) not in seen["values"]
-    for other in (PAT, ACCESS, "slack-service-env-value"):
-        assert other not in seen["values"]
+    db_path_seen = any(str(db) in v for v in seen["values"])
+    assert not db_path_seen, "the install db path reached the run"
+    for label, secret in (("PAT", PAT), ("ACCESS", ACCESS), ("service env", "slack-service-env-value")):
+        leaked = any(secret in v for v in seen["values"])
+        assert not leaked, f"{label} value reached the run"
 
 
 def test_upstream_body_echoing_the_auth_header_is_redacted(monkeypatch):

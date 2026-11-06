@@ -785,3 +785,204 @@ def test_build_mcp_sets_header_source_and_hint(monkeypatch):
     assert out["ok"] is False
     assert out["error"].endswith("HTTP 401 (the stored cakemail credential was refused, run fabri connect cakemail)")
     assert "store_token_value" not in out["error"]
+
+
+# ---------------------------------------------------- broker poster (K2-b)
+
+from fabri.tools.credential_broker_client import BROKER_ENV_NAMES, BrokerUnavailable  # noqa: E402
+
+
+class _Poster:
+    """Stands in for BrokerClient.post_mcp bound to one source. Records every
+    call and answers from a script of (status, headers, body) or exceptions."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def __call__(self, *, body, headers, timeout_s):
+        self.calls.append({"body": body, "headers": dict(headers), "timeout_s": timeout_s})
+        answer = self.answers.pop(0)
+        if callable(answer):
+            answer = answer(json.loads(body))
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def _json_answer(result, **headers):
+    def build(msg):
+        body = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}).encode()
+        return 200, {"content-type": "application/json", **headers}, body
+    return build
+
+
+def test_poster_replaces_http_post_and_carries_headers(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+
+    def no_network(request):
+        raise AssertionError("the httpx transport must not be used in poster mode")
+
+    poster = _Poster([
+        _json_answer({}, **{"mcp-session-id": "sess-9"}),
+        (202, {}, b""),
+        _json_answer({"tools": [{"name": "echo", "description": "e", "inputSchema": {"type": "object"}}]}),
+        _json_answer({"content": [{"type": "text", "text": "hi"}], "isError": False}),
+    ])
+    client, pairs = build_mcp_tools({"name": "gh", "url": "http://127.0.0.1:9/mcp", "timeout_s": 12,
+                                     "poster": poster, "transport": _mock(no_network),
+                                     "credential_hint": "run fabri connect github"})
+    try:
+        assert isinstance(client, MCPHttpClient) and client._client is None
+        out = pairs[0][1]({"x": 1})
+    finally:
+        client.close()
+    assert out["ok"] is True and out["result"]["content"][0]["text"] == "hi"
+    methods = [json.loads(c["body"])["method"] for c in poster.calls]
+    assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"]
+    assert json.loads(poster.calls[3]["body"])["params"] == {"name": "echo", "arguments": {"x": 1}}
+    first = poster.calls[0]["headers"]
+    assert first == {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    # The session id the broker relayed (lower-cased name) is sent back on every later call.
+    for call in poster.calls[1:]:
+        assert call["headers"]["Mcp-Session-Id"] == "sess-9"
+        assert "Authorization" not in call["headers"]
+    assert {c["timeout_s"] for c in poster.calls} == {12.0}
+    assert client._secrets == ()
+    assert client._auth_headers() == {}
+
+
+def test_poster_start_still_runs_ssrf_guard(monkeypatch):
+    monkeypatch.delenv("FABRI_FETCH_ALLOW_PRIVATE", raising=False)
+    poster = _Poster([])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster)
+    with pytest.raises(MCPProtocolError, match="private"):
+        client.list_tools()
+    assert poster.calls == []
+
+
+def test_poster_401_retry_drops_session(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    poster = _Poster([
+        _json_answer({}, **{"mcp-session-id": "sess-1"}),
+        (401, {}, b""),
+        _json_answer({"tools": []}),
+    ])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster)
+    client._request("initialize", {})
+    assert client._session_id == "sess-1"
+    assert client.list_tools() == []
+    client.close()
+    assert len(poster.calls) == 3
+    assert poster.calls[1]["headers"].get("Mcp-Session-Id") == "sess-1"
+    assert "Mcp-Session-Id" not in poster.calls[2]["headers"]
+    assert poster.calls[1]["body"] == poster.calls[2]["body"]
+
+    # A second 401 raises with the hint and stops.
+    poster = _Poster([(401, {}, b""), (401, {}, b"")])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster, credential_hint="run fabri connect gh")
+    with pytest.raises(MCPProtocolError) as exc:
+        client.list_tools()
+    assert str(exc.value) == "MCP HTTP http://127.0.0.1:9/mcp -> HTTP 401 (run fabri connect gh)"
+    assert len(poster.calls) == 2
+
+
+def test_poster_unavailable_maps_to_protocol_error_without_values(monkeypatch, caplog):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    poster = _Poster([BrokerUnavailable("gh: the stored github credential is revoked; run fabri connect github")])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster)
+    with pytest.raises(MCPProtocolError) as exc:
+        client.list_tools()
+    # Raised at once: no second attempt.
+    assert len(poster.calls) == 1
+    assert str(exc.value) == ("MCP HTTP http://127.0.0.1:9/mcp -> credential broker: "
+                              "gh: the stored github credential is revoked; run fabri connect github")
+
+    # Any other failure in the poster names its type only.
+    poster = _Poster([RuntimeError(f"leak {TOKEN}")])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster)
+    with pytest.raises(MCPProtocolError) as exc:
+        client.list_tools()
+    assert str(exc.value) == "MCP HTTP http://127.0.0.1:9/mcp -> credential broker (RuntimeError)"
+    assert TOKEN not in str(exc.value) and TOKEN not in caplog.text
+
+    # A reply of the wrong shape is refused with no detail from it.
+    poster = _Poster([(200, {}, f"text {TOKEN}")])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster)
+    with pytest.raises(MCPProtocolError) as exc:
+        client.list_tools()
+    assert str(exc.value) == "MCP HTTP http://127.0.0.1:9/mcp -> credential broker gave an unusable reply"
+
+    # Through build_mcp_tools a tool call gets the standard tool error shape.
+    poster = _Poster([
+        _json_answer({}),
+        (202, {}, b""),
+        _json_answer({"tools": [{"name": "echo", "description": "e", "inputSchema": {"type": "object"}}]}),
+        BrokerUnavailable("credential broker unreachable (ConnectionRefusedError)"),
+    ])
+    client, pairs = build_mcp_tools({"name": "gh", "url": "http://127.0.0.1:9/mcp", "poster": poster})
+    out = pairs[0][1]({})
+    client.close()
+    assert out["ok"] is False
+    assert out["error"] == ("mcp gh.echo: MCP HTTP http://127.0.0.1:9/mcp -> credential broker: "
+                            "credential broker unreachable (ConnectionRefusedError)")
+
+
+def test_poster_sse_body_parsed(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+
+    def sse(msg):
+        note = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}})
+        answer = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [
+            {"name": "search", "description": "s", "inputSchema": {"type": "object"}}]}})
+        body = f"event: message\ndata: {note}\n\nevent: message\ndata: {answer}\n\n".encode()
+        return 200, {"content-type": "text/event-stream"}, body
+
+    poster = _Poster([sse])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster)
+    tools = client.list_tools()
+    client.close()
+    assert [t["name"] for t in tools] == ["search"]
+
+
+def test_poster_and_header_source_together_rejected(monkeypatch):
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
+    poster = _Poster([])
+    client = MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster,
+                           header_source=lambda: {"Authorization": f"Bearer {TOKEN}"})
+    with pytest.raises(ValueError, match="poster and header_source"):
+        client.start()
+    with pytest.raises(ValueError, match="poster and headers"):
+        MCPHttpClient(url="http://127.0.0.1:9/mcp", poster=poster,
+                      headers={"Authorization": f"Bearer {TOKEN}"}).start()
+    assert poster.calls == []
+
+
+def test_stdio_start_always_strips_broker_vars(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(mc.subprocess, "Popen",
+                        lambda command, **kw: captured.update(env=kw.get("env")) or _FakeProc([]))
+    monkeypatch.setenv("FABRI_CRED_BROKER_SOCKET", "/tmp/fabri-test/brk.sock")
+    monkeypatch.setenv("FABRI_CRED_BROKER_KEY", "broker_key_value_for_test")
+    monkeypatch.setenv("FABRI_CRED_GH_MAIN", "gh_token_value_for_test")
+    monkeypatch.setenv("SOME_PARENT_VAR", "kept")
+    names = sorted(BROKER_ENV_NAMES)
+    cases = [
+        # The config asks for the broker names by credential_env.
+        {"credential_env": frozenset(names) | {"FABRI_CRED_GH_MAIN"}},
+        # The config copies them into its own env.
+        {"env": {n: "copied" for n in names}},
+        # The allowlist mode.
+        {"inherit_env": False, "credential_env": frozenset(names), "env": {n: "copied" for n in names}},
+    ]
+    for kwargs in cases:
+        captured.clear()
+        MCPStdioClient(command=["s"], name="t", **kwargs).start()
+        env = captured["env"]
+        for n in names:
+            assert n not in env
+        assert "broker_key_value_for_test" not in env.values()
+    # credential_env still passes the ordinary names it lists.
+    MCPStdioClient(command=["s"], name="t", credential_env=frozenset({"FABRI_CRED_GH_MAIN"})).start()
+    assert captured["env"]["FABRI_CRED_GH_MAIN"] == "gh_token_value_for_test"
+    assert captured["env"]["SOME_PARENT_VAR"] == "kept"

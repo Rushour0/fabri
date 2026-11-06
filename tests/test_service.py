@@ -861,3 +861,204 @@ def test_http_unknown_run_events_and_result_are_json_404(tmp_path: Path):
     finally:
         server.shutdown()
         svc.close()
+
+
+# --- credential broker wiring ------------------------------------------------
+
+# Writes a start event, records which broker names it sees and whether the
+# broker socket exists. A copy named *_sleepy.py then sleeps.
+_FAKE_AGENT_BROKER = """
+import json, os, time
+from pathlib import Path
+
+home = Path(os.environ["FABRI_HOME"])
+sid = os.environ["FABRI_SESSION_ID"]
+trace = home / ".fabri" / "traces" / (sid + ".jsonl")
+trace.parent.mkdir(parents=True, exist_ok=True)
+with trace.open("a") as f:
+    f.write(json.dumps({"type": "start", "task": "t"}) + "\\n")
+    f.flush()
+sock = os.environ.get("FABRI_CRED_BROKER_SOCKET")
+seen = {
+    "broker_names": sorted(k for k in os.environ if k.startswith("FABRI_CRED_BROKER_")),
+    "other_cred_names": sorted(k for k in os.environ
+                               if k.startswith("FABRI_CRED_") and not k.startswith("FABRI_CRED_BROKER_")),
+    "socket_exists": bool(sock and os.path.exists(sock)),
+}
+if Path(__file__).name.endswith("_sleepy.py"):
+    time.sleep(60)
+print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                  "final_text": json.dumps(seen)}))
+"""
+
+_CK_SOURCE = {
+    "name": "ck", "kind": "http", "url": "https://api.example.test/contacts", "method": "GET",
+    "headers": {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}},
+}
+_MCP_POLICY = {"allowed_kinds": ["http", "openapi", "mcp"]}
+_STDIO_SOURCE = {
+    "name": "gh", "kind": "mcp", "command": ["gh-mcp"],
+    "env": {"GH_TOKEN": {"secret_ref": "github:main"}},
+}
+
+
+def _write_template(path: Path, sources: list | None, policy: dict | None = None) -> Path:
+    import yaml
+
+    body: dict = {"llm": {"model": "m"}}
+    if sources is not None:
+        body["tools"] = {"sources": sources}
+        if policy is not None:
+            body["tools"]["policy"] = policy
+    path.write_text(yaml.safe_dump(body))
+    return path
+
+
+@pytest.fixture
+def broker_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("FABRI_CRED_SNAPSHOT", raising=False)
+    monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+    return monkeypatch
+
+
+def _broker_service(tmp_path: Path, template: Path, name: str = "runs", *, sleepy: bool = False) -> FabriService:
+    # The run env is an allowlist, so the sleep switch is the script's name.
+    script = tmp_path / ("fake_agent_broker_sleepy.py" if sleepy else "fake_agent_broker.py")
+    script.write_text(textwrap.dedent(_FAKE_AGENT_BROKER))
+    return FabriService(template_config=str(template), home_root=tmp_path / name,
+                        command_builder=_builder_for(script))
+
+
+def _wait_until(predicate, timeout: float = 15.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+def test_submit_binds_broker_and_passes_env_only_for_credentialed_templates(tmp_path: Path, broker_env):
+    credentialed = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    plain = _write_template(tmp_path / "plain.yaml", [
+        {"name": "pub", "kind": "http", "url": "https://api.example.test/x", "method": "GET"}])
+
+    svc = _broker_service(tmp_path, credentialed, "runs-ck")
+    attached: list[tuple[str, int]] = []
+    real_attach = svc.credential_broker.attach_run_pid
+
+    def record_attach(session_id, pid):
+        attached.append((session_id, pid))
+        real_attach(session_id, pid)
+
+    svc.credential_broker.attach_run_pid = record_attach
+    try:
+        sid = svc.submit("t")
+        bound = svc.credential_broker.bindings()
+        assert sid in bound
+        assert set(bound[sid].sources) == {"ck"}
+        # The service's own database, never whatever FABRI_INSTALL_DB names.
+        assert svc.credential_broker.install_db == svc.home_root / "installs.db"
+        assert attached == [(sid, svc._handle(sid).proc.pid)]
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+    assert seen["other_cred_names"] == []
+    assert seen["socket_exists"] is True
+
+    svc = _broker_service(tmp_path, plain, "runs-plain")
+    try:
+        sid = svc.submit("t")
+        assert svc.credential_broker.bindings() == {}
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == []
+    assert seen["socket_exists"] is False
+
+
+def test_submit_bind_error_is_400_and_leaves_no_run(tmp_path: Path, broker_env):
+    from fabri.service.http_server import serve_http
+
+    template = _write_template(tmp_path / "stdio.yaml", [_STDIO_SOURCE], _MCP_POLICY)
+    svc = _broker_service(tmp_path, template)
+    def _entries():
+        # SQLite may add -wal/-shm side files whenever installs.db is read.
+        return {p.name for p in svc.home_root.iterdir() if not p.name.endswith(("-wal", "-shm"))}
+
+    before = _entries()
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    host, port = server.server_address[0], server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _http_post(host, port, "/runs", {"task": "go"})
+        assert status == 400
+        error = json.loads(body)["error"]
+        assert "source gh" in error
+        assert "stdio" in error
+        assert "FABRI_CRED_SNAPSHOT" in error
+        # Nothing of the refused run is left: no run home, no listener, no
+        # binding, no history.
+        assert _entries() == before
+        assert svc._asks == {}
+        assert svc._runs == {}
+        assert svc.credential_broker.bindings() == {}
+        assert svc.list_sessions() == []
+    finally:
+        server.shutdown()
+        svc.close()
+
+
+def test_stdio_mcp_with_a_stored_credential_runs_under_the_snapshot_opt_out(tmp_path: Path, broker_env):
+    broker_env.setenv("FABRI_CRED_SNAPSHOT", "1")
+    template = _write_template(tmp_path / "stdio.yaml", [_STDIO_SOURCE], _MCP_POLICY)
+    svc = _broker_service(tmp_path, template)
+    try:
+        sid = svc.submit("t")
+        assert svc.credential_broker.bindings() == {}
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == []
+
+
+def test_release_on_cancel_and_on_finish(tmp_path: Path, broker_env):
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+
+    # Cancel: the binding and its socket go with the run.
+    svc = _broker_service(tmp_path, template, "runs-cancel", sleepy=True)
+    try:
+        sid = svc.submit("long task")
+        socket_path = Path(svc.credential_broker.bindings()[sid].socket_path)
+        for ev in svc.stream(sid, timeout=30):
+            if ev.get("type") == "start":
+                break
+        assert socket_path.exists()
+        assert svc.cancel(sid)["status"] == "cancelled"
+        assert sid not in svc.credential_broker.bindings()
+        assert not socket_path.exists()
+    finally:
+        svc.close()
+
+    # Natural completion, with nobody calling result() or cancel().
+    svc = _broker_service(tmp_path, template, "runs-finish")
+    paths: dict[str, Path] = {}
+    real_attach = svc.credential_broker.attach_run_pid
+
+    def note_socket(session_id, pid):
+        # Runs before the end-of-run watcher starts, so the binding is still there.
+        paths[session_id] = Path(svc.credential_broker.bindings()[session_id].socket_path)
+        real_attach(session_id, pid)
+
+    svc.credential_broker.attach_run_pid = note_socket
+    try:
+        sid = svc.submit("t")
+        socket_path = paths[sid]
+        assert _wait_until(lambda: sid not in svc.credential_broker.bindings())
+        assert not socket_path.exists()
+    finally:
+        svc.close()

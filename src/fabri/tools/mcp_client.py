@@ -42,7 +42,9 @@ Hardening:
   and proxy variables without a user:password part) plus its own ``env``. The default ``True`` merges
   ``env`` onto the parent environment. In both modes every ``FABRI_CRED_*``
   variable is removed from the parent part except the names in
-  ``credential_env``.
+  ``credential_env``. The two credential broker variables
+  (``BROKER_ENV_NAMES``) never reach a stdio server, whatever ``env`` or
+  ``credential_env`` say.
 - Remote text. Tool descriptions and titles, top level and inside an
   ``inputSchema``, are cleaned (control characters removed, whitespace
   collapsed, length capped). Other schema strings and keys (enum, const,
@@ -60,6 +62,11 @@ Hardening:
   so credentials are never forwarded to another host, and errors carry the
   status code or the error type only. The guard is a DNS check before the
   connection; it does not stop DNS rebinding at connect time.
+- Broker. Under ``fabri serve`` an http server whose declaration names a
+  stored credential gets a ``poster`` instead of headers. Each POST then goes
+  through the credential broker in the service process, which adds the
+  credential, sends the request and redacts the reply. The run never holds
+  the value.
 - Timeouts. A stdio request waits at most ``timeout_s`` for its answer.
 
 Caveats:
@@ -88,7 +95,8 @@ from typing import Any
 import httpx
 
 from fabri.core.logging_setup import get_logger
-from fabri.tools.credential_store import env_without_credentials
+from fabri.tools.credential_broker_client import BrokerUnavailable
+from fabri.tools.credential_store import BROKER_ENV_NAMES, env_without_credentials
 from fabri.tools.manifest_schema import ToolManifest
 from fabri.tools.result import tool_error, tool_ok
 from fabri.tools.security.ssrf import validate_url
@@ -439,10 +447,16 @@ class MCPStdioClient:
         # only the allowlisted parent variables plus its own env. Either way
         # the run's FABRI_CRED_* tokens are removed, except the exact names in
         # `credential_env`, so a server cannot read another source's token.
+        # The broker socket path and key are removed last and always: a
+        # config that lists them in `credential_env` or sets them in `env`
+        # would otherwise hand the run's broker capability to the server.
+        keep = frozenset(self.credential_env) - BROKER_ENV_NAMES
         if self.inherit_env:
-            child_env = {**env_without_credentials(keep=self.credential_env), **(self.env or {})}
+            child_env = {**env_without_credentials(keep=keep), **(self.env or {})}
         else:
             child_env = {**env_without_credentials(_allowlisted_env()), **(self.env or {})}
+        for broker_name in BROKER_ENV_NAMES:
+            child_env.pop(broker_name, None)
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
@@ -618,6 +632,16 @@ class MCPHttpClient:
     drops its session id, asks ``header_source`` again and resends once; a
     second 401 raises with ``credential_hint`` (plain text, never a value)
     appended.
+
+    ``poster``, when set, replaces the HTTP client: each POST is
+    ``poster(body=bytes, headers=dict, timeout_s=float)`` and returns
+    ``(status, response headers, body)``. Under ``fabri serve`` it is the
+    credential broker client, which adds the stored credential in the service
+    process, so this client sends no auth headers of its own and has no
+    secret values to redact. ``start()`` still runs the SSRF guard. A
+    ``poster`` cannot be combined with ``header_source`` or ``headers``. A
+    ``BrokerUnavailable`` from it raises ``MCPProtocolError`` at once,
+    without the 401 retry.
     """
 
     url: str
@@ -627,9 +651,11 @@ class MCPHttpClient:
     transport: httpx.BaseTransport | None = None
     header_source: Callable[[], Mapping[str, str]] | None = None
     credential_hint: str = ""
+    poster: Callable[..., tuple[int, Mapping[str, str], bytes]] | None = None
     _next_id: int = field(default=0, init=False, repr=False)
     _session_id: str | None = field(default=None, init=False, repr=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
+    _started: bool = field(default=False, init=False, repr=False)
     _seen_values: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -641,18 +667,23 @@ class MCPHttpClient:
         return redact(self.url, self._secrets)
 
     def start(self) -> None:
-        if self._client is not None:
+        if self._started:
             return
+        if self.poster is not None and self.header_source is not None:
+            raise ValueError(f"mcp server {self.name!r}: poster and header_source cannot be used together")
+        if self.poster is not None and self.headers:
+            raise ValueError(f"mcp server {self.name!r}: poster and headers cannot be used together")
         try:
             validate_url(self.url)
         except ValueError as e:
             raise MCPProtocolError(f"MCP HTTP {self._where()} -> {redact(str(e), self._secrets)}") from None
-        self._client = httpx.Client(timeout=self.timeout_s, follow_redirects=False, transport=self.transport)
+        if self.poster is None:
+            self._client = httpx.Client(timeout=self.timeout_s, follow_redirects=False, transport=self.transport)
+        self._started = True
 
     def _post(self, msg: dict) -> tuple[str, bytes]:
-        if self._client is None:
+        if not self._started:
             self.start()
-        assert self._client is not None
         body = json.dumps(msg).encode("utf-8")
         for attempt in (1, 2):
             # Streamable HTTP servers answer with JSON or an SSE stream; they
@@ -661,14 +692,11 @@ class MCPHttpClient:
             if self._session_id:
                 headers["Mcp-Session-Id"] = self._session_id
             headers.update(self._auth_headers())
-            try:
-                resp = self._client.post(self.url, content=body, headers=headers)
-            except httpx.HTTPError as e:
-                raise MCPProtocolError(f"MCP HTTP {self._where()} -> {type(e).__name__}") from None
-            status = resp.status_code
+            status, resp_headers, content = self._send_once(body, headers)
             if status == 401 and attempt == 1:
                 # The token may have been refreshed or replaced since the last
                 # call. The session was opened under the old one, so drop it.
+                # Through a poster the broker resolves the credential again.
                 self._session_id = None
                 continue
             break
@@ -678,15 +706,47 @@ class MCPHttpClient:
             raise MCPProtocolError(f"MCP HTTP {self._where()} -> HTTP 401 ({self.credential_hint})")
         if status >= 400:
             raise MCPProtocolError(f"MCP HTTP {self._where()} -> HTTP {status}")
-        session = resp.headers.get("Mcp-Session-Id")
+        session = resp_headers.get("Mcp-Session-Id")
         if session:
             self._session_id = session
-        return resp.headers.get("Content-Type") or "", resp.content
+        return resp_headers.get("Content-Type") or "", content
+
+    def _send_once(self, body: bytes, headers: dict[str, str]) -> tuple[int, httpx.Headers, bytes]:
+        """One POST, through ``poster`` when set, else the httpx client.
+        Response header names are matched without regard to case. A failure
+        raises MCPProtocolError naming the error type, or the broker's own
+        text for a broker refusal, never a value."""
+        if self.poster is None:
+            assert self._client is not None
+            try:
+                resp = self._client.post(self.url, content=body, headers=headers)
+            except httpx.HTTPError as e:
+                raise MCPProtocolError(f"MCP HTTP {self._where()} -> {type(e).__name__}") from None
+            return resp.status_code, resp.headers, resp.content
+        try:
+            answer = self.poster(body=body, headers=dict(headers), timeout_s=self.timeout_s)
+        except BrokerUnavailable as e:
+            detail = clean_text(redact(str(e), self._secrets), TEXT_CAP)
+            raise MCPProtocolError(f"MCP HTTP {self._where()} -> credential broker: {detail}") from None
+        except Exception as e:
+            raise MCPProtocolError(f"MCP HTTP {self._where()} -> credential broker ({type(e).__name__})") from None
+        try:
+            status, resp_headers, content = answer
+            if not isinstance(status, int) or isinstance(status, bool):
+                raise TypeError("status")
+            if not isinstance(content, (bytes, bytearray)):
+                raise TypeError("body")
+            return status, httpx.Headers({str(k): str(v) for k, v in dict(resp_headers).items()}), bytes(content)
+        except (TypeError, ValueError):
+            raise MCPProtocolError(f"MCP HTTP {self._where()} -> credential broker gave an unusable reply") from None
 
     def _auth_headers(self) -> dict[str, str]:
         """The configured headers for one request: ``header_source()`` when
-        set, else the static ``headers``. A failure names the error, never a
-        value."""
+        set, else the static ``headers``. With a ``poster`` there are none,
+        since the broker adds the credential. A failure names the error,
+        never a value."""
+        if self.poster is not None:
+            return {}
         if self.header_source is None:
             return dict(self.headers or {})
         try:
@@ -752,6 +812,7 @@ class MCPHttpClient:
         ) or {}
 
     def close(self) -> None:
+        self._started = False
         client, self._client = self._client, None
         if client is not None:
             try:
@@ -798,7 +859,7 @@ def build_mcp_tools(
     ``inherit_env`` (stdio, default True), ``credential_env`` (stdio, the
     FABRI_CRED_* names the server may inherit; default none), ``transport`` (http, an
     ``httpx.BaseTransport`` for tests), ``header_source`` and
-    ``credential_hint`` (http, see ``MCPHttpClient``). Picks the transport by which of
+    ``credential_hint`` and ``poster`` (http, see ``MCPHttpClient``). Picks the transport by which of
     `command` / `url` is set. Tools with oversized or nameless specs, and
     tools whose fabri name collides with one already built, are skipped with
     a warning in the log. The caller is responsible for `close()`-ing the
@@ -821,6 +882,7 @@ def build_mcp_tools(
             timeout_s=timeout_s, transport=server_cfg.get("transport"),
             header_source=server_cfg.get("header_source"),
             credential_hint=str(server_cfg.get("credential_hint") or ""),
+            poster=server_cfg.get("poster"),
         )
     elif command:
         inherit = server_cfg.get("inherit_env")

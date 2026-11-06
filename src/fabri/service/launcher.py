@@ -78,7 +78,7 @@ _ALLOWED_EXACT = frozenset({
     "AWS_BEARER_TOKEN_BEDROCK",
     # run-shaping FABRI_* knobs (see the deny note below for the rest)
     "FABRI_HOME", "FABRI_SESSION_ID",
-    "FABRI_ASK_USER_SOCKET", "FABRI_ASK_USER_TIMEOUT_S",
+    "FABRI_ASK_USER_SOCKET", "FABRI_ASK_USER_TIMEOUT_S", "FABRI_APPROVAL_TIMEOUT_S",
     "FABRI_SANDBOX_ROOT", "FABRI_SANDBOX_ROOT_OVERRIDE",
     "FABRI_SUBAGENT_DEPTH", "FABRI_SUBAGENT_MAX_DEPTH",
     "FABRI_DISABLE_SUBAGENT_MINING", "FABRI_EPHEMERAL",
@@ -103,13 +103,21 @@ _ALLOWED_PREFIXES = ("LC_",)
 # the exception: nothing re-admits it, not even FABRI_RUN_ENV_ALLOW, because
 # the file holds every tenant's connections.
 #
-# A run that needs a stored connection gets it another way: before the launch,
-# the service reads the run's own bound config, takes the secret_ref values its
-# tools.sources declare, keeps the ones its tools.policy credential_grants
-# allow, resolves each one in the service process and hands the run only those
-# values, one FABRI_CRED_<PROVIDER>_<HANDLE> variable per ref (see
-# scoped_credential_env). Inside the run the default credential store reads
-# exactly those variables. Every other token stays in the service process.
+# A run that needs a stored connection gets it another way. Under fabri serve
+# the service binds the run to its credential broker (service/credential_broker)
+# and passes only FABRI_CRED_BROKER_SOCKET and FABRI_CRED_BROKER_KEY. The run
+# sends each credentialed request to the broker, which resolves the token in
+# the service process on that call and injects it there, so a revoked or
+# refreshed connection takes effect on the next call and no token value is in
+# the run process at all.
+#
+# FABRI_CRED_SNAPSHOT=1 on the service turns on the older, weaker path: before
+# the launch the service resolves the secret_ref values the run's tools.sources
+# declare (and its tools.policy credential_grants allow) and hands the run one
+# FABRI_CRED_<PROVIDER>_<HANDLE> variable per ref (see scoped_credential_env).
+# Those values sit in the run process for its whole life and a revoke does not
+# reach it. It exists for crews that cannot move off a stdio MCP server that
+# needs a stored credential.
 
 _ALLOW_ENV_VAR = "FABRI_RUN_ENV_ALLOW"
 
@@ -434,6 +442,7 @@ def launch_run(
     scrub_env: bool = True,
     install_db: str | Path | None = None,
     credential_store=None,
+    credential_snapshot: bool = False,
 ) -> RunHandle:
     """Spawn one agent run and return a :class:`RunHandle`.
 
@@ -446,10 +455,16 @@ def launch_run(
     The child's env is an allowlist copy of the service's (see
     :func:`build_child_env`): service secrets never reach a run. ``allow_env``
     adds names this particular run needs, and ``env`` entries are applied last,
-    so an explicit value always wins over the allowlist. When scrubbing, the
-    credentials the run's own sources declare (and its policy grants) are
-    resolved here and passed as ``FABRI_CRED_*`` variables (see
-    :func:`scoped_credential_env`); ``FABRI_RUN_ACTOR`` in ``env`` names the
+    so an explicit value always wins over the allowlist.
+
+    No credential value is resolved here by default. The service resolves
+    stored credentials through its credential broker on each call and passes
+    the broker's socket and key in ``env``. ``credential_snapshot=True`` (the
+    service sets it for ``FABRI_CRED_SNAPSHOT=1``) is the weaker opt-out: when
+    scrubbing, the credentials the run's own sources declare (and its policy
+    grants) are resolved here and passed as ``FABRI_CRED_*`` variables (see
+    :func:`scoped_credential_env`), where they stay for the life of the run and
+    a revoke does not reach them. ``FABRI_RUN_ACTOR`` in ``env`` names the
     actor for ``${actor}`` refs and user-scoped rows. ``credential_store`` or
     ``install_db`` picks the store those refs resolve through; the service
     passes its own install database so process env never chooses it.
@@ -462,7 +477,7 @@ def launch_run(
     trace.parent.mkdir(parents=True, exist_ok=True)
 
     child_env = build_child_env(dict(os.environ), allow=allow_env, scrub=scrub_env)
-    if scrub_env:
+    if scrub_env and credential_snapshot:
         actor = (env or {}).get("FABRI_RUN_ACTOR") or None
         child_env.update(scoped_credential_env(
             config_path, store=credential_store, install_db=install_db,

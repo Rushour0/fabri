@@ -7,7 +7,9 @@ from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
 from fabri.tools.credential_store import (
+    BROKER_ENV_NAMES,
     ENV_CREDENTIAL_PREFIX,
+    broker_mode,
     credential_env_var,
     env_without_credentials,
     subagent_credential_names,
@@ -54,7 +56,11 @@ def declared_credential_names(manifest: ToolManifest, env: dict | None = None) -
     """The FABRI_CRED_* names in ``env`` (default: this process's) that the
     manifest's ``credentials`` patterns match. An exact handle maps through
     ``credential_env_var``; a "*" handle matches every name that starts with
-    the provider's FABRI_CRED_<PROVIDER>_ prefix. No patterns, no names."""
+    the provider's FABRI_CRED_<PROVIDER>_ prefix. No patterns, no names.
+
+    The two credential broker names are never returned, so a manifest that
+    declares ``broker:*`` or ``broker:key`` cannot get the broker key. Only a
+    sub-agent keeps those (see ``tool_env``)."""
     source = os.environ if env is None else env
     names: set[str] = set()
     for pattern in manifest.credentials:
@@ -64,24 +70,32 @@ def declared_credential_names(manifest: ToolManifest, env: dict | None = None) -
             names.update(key for key in source if key.startswith(prefix))
         else:
             names.add(credential_env_var(provider, handle))
-    return frozenset(n for n in names if n.startswith(ENV_CREDENTIAL_PREFIX))
+    return frozenset(n for n in names if n.startswith(ENV_CREDENTIAL_PREFIX) and n not in BROKER_ENV_NAMES)
 
 
 def tool_env(manifest: ToolManifest, args: dict, extra_env: dict | None = None) -> dict:
     """The environment one tool subprocess gets: this process's env with every
     FABRI_CRED_* variable removed, except the ones the manifest's ``credentials``
-    patterns declare, then ``extra_env``. A sub-agent keeps only
-    the credentials its own config declares and its policy grants, so its
-    sources still work; every other tool, bash and python_exec included, sees
-    no token at all."""
+    patterns declare, then ``extra_env``.
+
+    A sub-agent always keeps the two credential broker names when the run has
+    them, whatever its config says, because the broker answers it from the
+    parent run's own binding. Without a broker (the snapshot path) it keeps the
+    credentials its own config declares and its policy grants, so its sources
+    still work. Every other tool, bash and python_exec included, sees no token
+    and no broker name at all."""
     keep: frozenset[str] = frozenset()
+    keep_broker = False
     config = _subagent_config(manifest, args)
     if config is not None:
-        try:
-            keep = subagent_credential_names(config, actor=os.environ.get("FABRI_RUN_ACTOR") or None)
-        except Exception as e:  # noqa: BLE001 -- an unreadable config passes no credentials
-            logger.warning("tool %s: sub-agent credentials not passed (%s)", manifest.name, type(e).__name__)
-    env = env_without_credentials(keep=keep | declared_credential_names(manifest))
+        # Both broker names or neither: a lone one is not a broker run.
+        keep_broker = broker_mode()
+        if not keep_broker:
+            try:
+                keep = subagent_credential_names(config, actor=os.environ.get("FABRI_RUN_ACTOR") or None)
+            except Exception as e:  # noqa: BLE001 -- an unreadable config passes no credentials
+                logger.warning("tool %s: sub-agent credentials not passed (%s)", manifest.name, type(e).__name__)
+    env = env_without_credentials(keep=keep | declared_credential_names(manifest), keep_broker=keep_broker)
     if extra_env:
         env.update(extra_env)
     return env
