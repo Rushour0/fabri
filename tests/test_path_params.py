@@ -123,3 +123,33 @@ def test_http_kind_path_params_are_checked_and_floored(tmp_path):
     assert sent == []
     assert tool.handler({"list_id": "123"}).get("ok") is True
     assert sent == ["https://api.cakemail.dev/lists/123"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a／b",  # full-width slash
+        "．．",  # two full-width dots
+        "．.",  # mixed full-width and ASCII dot
+        "․․",  # one-dot leader pair
+        "a％b",  # full-width percent sign
+        "a\x00b",  # control character
+        "a​b",  # zero-width space (format character)
+        "a b",  # line separator
+        "a b",  # paragraph separator
+    ],
+)
+def test_render_path_value_rejects_unicode_tricks(value):
+    with pytest.raises(PathParamError):
+        render_path_value("id", value)
+
+
+def test_render_path_value_keeps_normal_unicode_names():
+    assert render_path_value("id", "Zoë-München_1.0~x") == "Zo%C3%AB-M%C3%BCnchen_1.0~x"
+    assert render_path_value("id", "abc-1._~") == "abc-1._~"
+
+
+def test_division_slash_is_percent_encoded_not_folded():
+    # NFKC leaves U+2215 alone, so no proxy folds it to "/". It is a symbol,
+    # not a letter or digit, so it is percent-encoded like any other symbol.
+    assert render_path_value("id", "a\u2215b") == "a%E2%88%95b"

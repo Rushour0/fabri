@@ -40,9 +40,16 @@ from fabri.service.auth import UserStore
 from fabri.service.binding import bind_run_config, merge_overrides, refused_override_keys
 from fabri.service import linear_oauth
 from fabri.service.connection_store import ConnectionStore, default_refreshers
-from fabri.service.credential_broker import SNAPSHOT_ENV, CredentialBroker
+from fabri.service.credential_broker import SNAPSHOT_ENV, BindError, CredentialBroker
 from fabri.service.install_store import GitHubInstallStore, LinearInstallStore, SlackInstallStore
-from fabri.service.launcher import RunHandle, launch_run
+from fabri.service.launcher import (
+    ALLOW_SHARED_UID_ENV,
+    LAUNCH_ISOLATION,
+    RunHandle,
+    launch_run,
+    runs_share_service_uid,
+    shared_uid_allowed,
+)
 from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
 from fabri.service.surfaces.github import GitHubAdapter
@@ -245,6 +252,11 @@ class FabriService:
             install_db=self.home_root / "installs.db",
             audit_path=os.environ.get("FABRI_CRED_AUDIT_LOG") or None,
         )
+        # How runs are started relative to the service's OS user. Today every
+        # run is a child process under the service's own user ("shared_uid").
+        # A container or separate-user launch mode sets this to its own value,
+        # and then runs that need stored credentials are no longer refused.
+        self.launch_isolation: str = LAUNCH_ISOLATION
 
     @property
     def _index_path(self) -> Path:
@@ -337,6 +349,18 @@ class FabriService:
                 # becomes a 400 on POST /runs; nothing of this run is kept.
                 self._abandon_submit(session_id, run_home)
                 raise
+            if binding is not None and self._same_uid_refused():
+                # The run would start as the service's own OS user, so it could
+                # open installs.db or read the service's memory and take every
+                # stored token. The broker cannot protect against that.
+                names = ", ".join(sorted(binding.sources))
+                self._abandon_submit(session_id, run_home)
+                raise BindError(
+                    f"sources {names} use stored credentials, and this run would execute as the same "
+                    "OS user as fabri serve, so it could read installs.db and the service's memory. "
+                    "Stored credentials need runs isolated under a separate OS user (the coming container "
+                    f"launch mode). For local development only, set {ALLOW_SHARED_UID_ENV}=1 on the service"
+                )
             if binding is not None:
                 run_env.update(binding.env())
         try:
@@ -567,6 +591,12 @@ class FabriService:
         if listener is not None:
             listener.close()
         self.credential_broker.release(session_id)
+
+    def _same_uid_refused(self) -> bool:
+        """True when a run that needs stored credentials must be refused: it
+        would execute as the service's own OS user and the operator has not
+        set FABRI_ALLOW_SHARED_UID=1."""
+        return runs_share_service_uid(self.launch_isolation) and not shared_uid_allowed()
 
     def _abandon_submit(self, session_id: str, run_home: Path) -> None:
         """Undo a submit that failed before its run started: no listener, no

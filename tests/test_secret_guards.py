@@ -345,6 +345,9 @@ def _guard_env(monkeypatch, db):
 
 
 def test_serve_run_gets_broker_env_and_no_values(tmp_path, monkeypatch):
+    # Same-user runs need the local-development opt-in since stored
+    # credentials are refused otherwise.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
     """A run under fabri serve receives the broker's socket and key for its
     credentialed source, and no token value and no install db path, even when
     the service holds many tokens."""

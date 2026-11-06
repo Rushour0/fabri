@@ -155,6 +155,31 @@ Under `fabri serve` a run sees the socket path and the key, and nothing else abo
   where the platform reports the peer's process id (Linux and macOS), that it is a descendant of this run's process.
   It also checks the key.
 
+#### Runs that share the service's OS user (`FABRI_ALLOW_SHARED_UID`)
+
+The broker keeps tokens out of the run process. It cannot keep them away from code that runs as the same OS user as
+the service. Today `fabri serve` starts every run as a child process under its own user, so the run's `bash` tool, a
+python source or anything the model gets the run to execute can open `installs.db` next to the run directory and
+read every stored token, other tenants' included. On most Linux and macOS systems a same-user process can also read
+the service's memory. File mode 0600 does not help, because the run is the owner.
+
+So `fabri serve` refuses a run that needs a stored credential when that run would execute as the service's user.
+`POST /runs` answers 400 and nothing of the run is kept. The error names the sources, the reason and the flag:
+`sources ck use stored credentials, and this run would execute as the same OS user as fabri serve, so it could read
+installs.db and the service's memory. ... For local development only, set FABRI_ALLOW_SHARED_UID=1 on the service`.
+
+Set `FABRI_ALLOW_SHARED_UID=1` in the service environment to allow these runs. Do this only on a machine where you
+own every stored token, such as your laptop. Any other value, including `true`, leaves the refusal on. Runs whose
+sources use no stored credential (no auth, or `env:` variables) are not affected.
+
+Real isolation needs runs to start under a separate OS user, or in a container that mounts only the run directory
+and cannot see `installs.db` or the service's processes. That is the coming container launch mode. A launch mode
+that isolates runs sets `FabriService.launch_isolation` to something other than `shared_uid` (the default comes
+from `fabri.service.launcher.LAUNCH_ISOLATION`), and the refusal then stops applying without the flag.
+
+The check covers brokered runs. The `FABRI_CRED_SNAPSHOT=1` opt-out below is not checked, and it puts the tokens in
+the run's environment besides.
+
 #### Sources that cannot be brokered
 
 - A stdio MCP server (`command:`) that needs a stored credential is refused under `fabri serve`, because the
@@ -203,7 +228,9 @@ stdio MCP server or python source that needs a stored credential, and prefer mov
   the send are two lookups. A declared host whose DNS an attacker controls could change its answer between them.
   Pinning the resolved address is a later item. Use hosts you trust.
 - Tokens are stored in plain text in `installs.db` (see [Where it is stored](#where-it-is-stored)). The broker reads
-  that file as the service user; anything else that can read the file reads the tokens.
+  that file as the service user; anything else that can read the file reads the tokens. That includes every run
+  started with `FABRI_ALLOW_SHARED_UID=1`, since those runs execute as the service user. See
+  [Runs that share the service's OS user](#runs-that-share-the-services-os-user-fabri_allow_shared_uid).
 - Env fallback. When a ref has no stored row, the broker reads `FABRI_CRED_<PROVIDER>_<HANDLE>` from the service's
   own environment. A stored row that exists but is revoked, expired or another user's refuses the call and does not
   fall back to the environment.
@@ -215,6 +242,7 @@ stdio MCP server or python source that needs a stored credential, and prefer mov
 |---|---|---|
 | `FABRI_CRED_BROKER_SOCKET` | run | Path of this run's broker socket. Set by the service, removed from every tool subprocess. |
 | `FABRI_CRED_BROKER_KEY` | run | The run's 256-bit key. Set by the service, removed from every tool subprocess. Never logged. |
+| `FABRI_ALLOW_SHARED_UID` | service | `1` allows runs that need a stored credential to execute as the service's own OS user. Local development only. Without it such runs are refused with 400. |
 | `FABRI_CRED_SNAPSHOT` | service | `1` puts granted token values in each run's environment and starts no broker. The weaker opt-out. |
 | `FABRI_APPROVAL_TIMEOUT_S` | service and run | Seconds to wait for a person to answer an approval question. Default 300. |
 | `FABRI_CRED_AUDIT_LOG` | service | Path of a JSON-lines file for broker decisions and credential lookups. No values. |

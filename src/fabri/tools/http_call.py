@@ -24,6 +24,7 @@ import hashlib
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -125,6 +126,9 @@ class PathParamError(ValueError):
     """A path parameter value could leave the path segment it fills."""
 
 
+_BLOCKED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
 def render_path_value(name: str, value: Any) -> str:
     """Encode one path parameter value for its URL segment.
 
@@ -134,16 +138,27 @@ def render_path_value(name: str, value: Any) -> str:
     after the client or the server normalizes the URL, which would dodge the
     approval floor that was checked against the template."""
     text = str(value)
+    for ch in text:
+        if unicodedata.category(ch) in _BLOCKED_CATEGORIES:
+            raise PathParamError(f"path parameter {name!r} holds a control, format or line separator character")
     seen = text
     for _ in range(5):
-        if seen in ("", ".", "..") or "/" in seen or "\\" in seen:
-            raise PathParamError(f"path parameter {name!r} is not allowed (empty, a dot segment or holds a separator)")
+        # Check the value as written and as a proxy would fold it (NFKC),
+        # so full-width slashes or dots cannot turn into a separator later.
+        for form in (seen, unicodedata.normalize("NFKC", seen)):
+            if form in ("", ".", "..") or "/" in form or "\\" in form:
+                raise PathParamError(f"path parameter {name!r} is not allowed (empty, a dot segment or holds a separator)")
+        folded = unicodedata.normalize("NFKC", seen)
+        if folded != seen and "%" in folded and "%" not in seen:
+            raise PathParamError(f"path parameter {name!r} is not allowed (folds to a percent sign)")
         decoded = unquote(seen)
         if decoded == seen:
             break
         seen = decoded
     else:
         raise PathParamError(f"path parameter {name!r} is encoded too many times")
+    # quote() leaves only ASCII letters, digits and -._~ as they are and
+    # percent-encodes everything else, including non-ASCII letters.
     return quote(text, safe="")
 
 

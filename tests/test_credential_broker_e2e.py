@@ -175,6 +175,9 @@ def clean_broker_env(monkeypatch: pytest.MonkeyPatch, home_root: Path) -> None:
     monkeypatch.delenv("FABRI_FETCH_ALLOW_PRIVATE", raising=False)
     monkeypatch.delenv("FABRI_APPROVAL_TIMEOUT_S", raising=False)
     monkeypatch.setenv("FABRI_INSTALL_DB", str(home_root / "installs.db"))
+    # The stub runs share the test's OS user, so the broker needs the local
+    # development opt-in. test_same_uid_run_is_refused_without_opt_in drops it.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -558,3 +561,19 @@ def test_right_key_from_outside_the_run_tree_is_refused(harness):
     # The test process is the run's parent, not a descendant: closed, no reply.
     assert reply == b""
     assert h.upstream.count() == 0
+
+
+def test_same_uid_run_is_refused_without_opt_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    h = Harness(tmp_path, monkeypatch)
+    try:
+        monkeypatch.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+        with pytest.raises(ValueError) as excinfo:
+            h.submit([{"call": "ck_get", "args": {}}])
+        message = str(excinfo.value)
+        assert "FABRI_ALLOW_SHARED_UID=1" in message
+        assert "installs.db" in message
+        assert TOKEN not in message
+        assert h.broker.bindings() == {}
+        assert h.upstream.count() == 0
+    finally:
+        h.close()

@@ -60,6 +60,7 @@ from fabri.tools.credential_store import (
     EnvCredentialStore,
     ScopedCredentialStore,
 )
+from fabri.tools.security.ssrf import PinnedTransport
 
 if TYPE_CHECKING:  # pragma: no cover
     from fabri.service.ask_user_listener import AskUserListener
@@ -138,10 +139,68 @@ class SourceBinding:
     catalog_owner: str | None = None            # mcp only: catalog_for_url(url)
     floors: tuple[tuple[str, str], ...] = ()    # policy.approval_floor
     catalog_marker: str | None = None           # mcp only: decl.get("catalog")
+    # mcp only: the approval and catalog declarations of the same source in
+    # other configs of this run. The broker applies all of them, so the
+    # strictest declaration decides.
+    approval_decls: tuple[Any, ...] = ()
+    catalog_markers: tuple[str, ...] = ()
 
     def _signature(self) -> tuple:
-        tools = tuple(sorted((t.name, t.method, t.template_url) for t in self.tools.values()))
+        """What must be the same for two configs to share one binding: where
+        the request goes and which credential it carries."""
+        tools = tuple(sorted((t.name, t.method, t.template_url, t.placeholders) for t in self.tools.values()))
         return (self.kind, json.dumps(self.header_specs, sort_keys=True, default=str), self.refs, tools, self.url)
+
+    def _authorization(self) -> tuple:
+        """Every field that decides how much approval a call needs."""
+        tools = tuple(sorted((t.name, t.approval) for t in self.tools.values()))
+        return (tools, self.grants, self.floors, json.dumps(self.all_approval_decls(), sort_keys=True, default=str),
+                self.all_catalog_markers(), self.catalog_owner)
+
+    def all_approval_decls(self) -> tuple[Any, ...]:
+        return (self.approval_decl, *self.approval_decls)
+
+    def all_catalog_markers(self) -> tuple[str, ...]:
+        first = (self.catalog_marker,) if self.catalog_marker else ()
+        return tuple(dict.fromkeys((*first, *self.catalog_markers)))
+
+
+def _merge_strictest(prior: SourceBinding, bound: SourceBinding) -> SourceBinding:
+    """One binding for a source two configs of the run declare. The request
+    shape and credential must match (else BindError). Where the approval
+    settings differ, the result keeps the strictest of each: the stricter
+    class per tool, every policy floor, every MCP approval declaration and
+    catalog marker, and only the credential grant patterns both configs
+    list. Every ref was already checked against each config's own grants."""
+    from fabri.tools.approval import stricter
+
+    if prior._signature() != bound._signature():
+        raise BindError(f"source {bound.name}: declared twice with different templates or refs")
+    if prior._authorization() == bound._authorization():
+        return prior
+    logger.info("credential broker: source %s is declared twice with different approval settings; "
+                "using the strictest of each", _label(bound.name, 64))
+    tools = {name: ToolBinding(name=tb.name, method=tb.method, template_url=tb.template_url,
+                               approval=stricter(tb.approval, bound.tools[name].approval),
+                               placeholders=tb.placeholders)
+             for name, tb in prior.tools.items()}
+    if prior.grants is None:
+        grants = bound.grants
+    elif bound.grants is None:
+        grants = prior.grants
+    else:
+        grants = tuple(g for g in prior.grants if g in bound.grants)
+    decls: list[Any] = []
+    for decl in (*prior.all_approval_decls(), *bound.all_approval_decls()):
+        if decl is not None and decl not in decls:
+            decls.append(decl)
+    markers = tuple(dict.fromkeys((*prior.all_catalog_markers(), *bound.all_catalog_markers())))
+    return SourceBinding(
+        name=prior.name, kind=prior.kind, header_specs=prior.header_specs, refs=prior.refs, grants=grants,
+        tools=tools, url=prior.url, approval_decl=decls[0] if decls else None,
+        catalog_owner=prior.catalog_owner, floors=tuple(dict.fromkeys((*prior.floors, *bound.floors))),
+        catalog_marker=markers[0] if markers else None, approval_decls=tuple(decls[1:]),
+        catalog_markers=markers[1:])
 
 
 @dataclass
@@ -290,8 +349,10 @@ def bind_sources(
     is validated against its own config's ``tools.policy`` and built with a
     store that refuses every lookup, so binding never reads a token. Raises
     BindError on a ref the policy does not grant, a templated host, a stdio
-    MCP server with a ref, or two configs declaring one source name
-    differently."""
+    MCP server with a ref, or two configs declaring one source name with a
+    different request shape or credential. Two configs that declare one
+    source with different approval settings share one binding that keeps the
+    strictest of each (see _merge_strictest)."""
     from fabri.tools.sources import secret_refs
 
     out: dict[str, SourceBinding] = {}
@@ -311,9 +372,7 @@ def bind_sources(
             for decl in credentialed:
                 bound = _bind_one(decl, policy, enabled, actor=actor, base_dir=base_dir, transport=transport)
                 prior = out.get(bound.name)
-                if prior is not None and prior._signature() != bound._signature():
-                    raise BindError(f"source {bound.name}: declared twice with different templates or refs")
-                out.setdefault(bound.name, bound)
+                out[bound.name] = bound if prior is None else _merge_strictest(prior, bound)
         if depth >= max_depth:
             return
         for entry in tools.get("agents") or ():
@@ -505,6 +564,37 @@ def _redacted(value: Any) -> Any:
     return redact_args(value)
 
 
+APPROVAL_CARD_BODY_CAP = 2000
+
+
+class RequestNotShowable(ValueError):
+    """The approval card cannot show this request exactly (a body over the
+    card cap, a body that is not JSON or form data, or JSON with a repeated
+    key). The message names the reason, never a value."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise RequestNotShowable("the JSON body repeats a key")
+        out[key] = value
+    return out
+
+
+def _shown_pairs(pairs: list[tuple[str, str]]) -> list[list[str]]:
+    """Query or form pairs in the order they are sent, repeats kept, each
+    value redacted when its name (or the object as a whole) names a secret."""
+    whole = _redacted(dict(pairs))
+    out = []
+    for key, value in pairs:
+        shown = _redacted({key: value})[key]
+        if whole.get(key) == "[redacted]":
+            shown = "[redacted]"
+        out.append([key, shown])
+    return out
+
+
 def describe_request(
     tool: str,
     source: str,
@@ -512,12 +602,20 @@ def describe_request(
     provider: str | None,
     request: httpx.Request,
     extra_headers: Mapping[str, str],
-    cap: int = 2000,
+    cap: int = APPROVAL_CARD_BODY_CAP,
+    *,
+    exact: bool = False,
 ) -> str:
-    """The approval card text for one prepared request: method, URL, query,
-    the literal extra headers with their values, and the body with secrets
-    redacted. Credential headers are not in the request yet, so no token can
-    appear here."""
+    """The approval card text for one prepared request: method, URL, the
+    query as the ordered list of name/value pairs (repeats kept), the literal
+    extra headers with their values, and the body with secrets redacted.
+    Credential headers are not in the request yet, so no token can appear
+    here.
+
+    With `exact`, a request the card cannot show in full raises
+    RequestNotShowable instead of being cut or summarised: a body over `cap`
+    characters, a body that is neither JSON nor form data, or a JSON body
+    with a repeated key (a server may read the copy the card does not show)."""
     url = request.url
     lines = [
         f"{tool} needs your approval (class {cls})",
@@ -526,7 +624,7 @@ def describe_request(
     ]
     if url.query:
         query = parse_qsl(url.query.decode("ascii", "replace"), keep_blank_values=True)
-        lines.append("query: " + json.dumps(_redacted(dict(query)), sort_keys=True, ensure_ascii=False))
+        lines.append("query: " + json.dumps(_shown_pairs(query), ensure_ascii=False))
     if extra_headers:
         shown = _redacted({str(k): str(v) for k, v in extra_headers.items()})
         lines.append("headers: " + ", ".join(f"{k}: {v}" for k, v in sorted(shown.items())))
@@ -540,13 +638,22 @@ def describe_request(
         ctype = request.headers.get("content-type", "")
         try:
             if "x-www-form-urlencoded" in ctype:
-                parsed: Any = dict(parse_qsl(content.decode("utf-8"), keep_blank_values=True))
+                form = parse_qsl(content.decode("utf-8"), keep_blank_values=True)
+                body_text = "form: " + json.dumps(_shown_pairs(form), ensure_ascii=False)
             else:
-                parsed = json.loads(content)
-            body_text = json.dumps(_redacted(parsed), sort_keys=True, indent=2, ensure_ascii=False)
+                hook = _reject_duplicate_keys if exact else None
+                parsed = json.loads(content, object_pairs_hook=hook)
+                body_text = json.dumps(_redacted(parsed), sort_keys=True, indent=2, ensure_ascii=False)
+        except RequestNotShowable:
+            raise
         except (ValueError, UnicodeDecodeError):
+            if exact:
+                raise RequestNotShowable("the body is not JSON or form data") from None
             body_text = f"({len(content)} bytes, not JSON)"
     if len(body_text) > cap:
+        if exact:
+            raise RequestNotShowable(f"the body is {len(body_text)} characters and the approval card "
+                                     f"shows at most {cap}")
         body_text = body_text[:cap] + f"... [cut {len(body_text) - cap} chars]"
     lines.append("body:")
     lines.append(body_text)
@@ -797,7 +904,12 @@ class CredentialBroker:
             raise
         binding = BrokerBinding(session_id=session_id, socket_path=str(path), key=secrets.token_hex(32),
                                 actor=actor, sources=sources)
-        client = httpx.Client(transport=self._transport, follow_redirects=False)
+        # Without an injected transport the client connects only to addresses
+        # checked in the same step that connects (no DNS rebinding between
+        # the check and the send). trust_env=False keeps httpx from mounting
+        # proxy transports from the environment, which would bypass that.
+        client = httpx.Client(transport=self._transport or PinnedTransport(), follow_redirects=False,
+                              trust_env=False)
         run = _Run(binding, listener, client, run_pid)
         run.server = server
         with self._lock:
@@ -1090,8 +1202,8 @@ class CredentialBroker:
             digest = request_hash(prepared, extra)
             grant_id = None
             if cls == "always_approve":
-                text = describe_request(tb.name, source.name, cls, secret_ref_provider(source.header_specs),
-                                        prepared, extra)
+                text = self._card(tb.name, source.name, cls, secret_ref_provider(source.header_specs),
+                                  prepared, extra)
                 grant_id = self._approve_with_slot(run, slot, tb.name, text, digest)
             store = self._store_for(binding, source, tool=tb.name)
             self._final_checks(run, conn, grant_id, prepared, extra, tb.name, digest)
@@ -1107,6 +1219,17 @@ class CredentialBroker:
         code = result.get("code") if isinstance(result, Mapping) else None
         self._audit(binding, source.name, tb.name, tb.method, prepared.url, cls, "sent", code)
         return {**out, "v": PROTOCOL_VERSION}
+
+    @staticmethod
+    def _card(tool: str, source: str, cls: str, provider: str | None, request: httpx.Request,
+              extra: Mapping[str, str]) -> str:
+        """The approval card, or a refusal when the card cannot show the
+        exact request a person would be approving."""
+        try:
+            return describe_request(tool, source, cls, provider, request, extra, exact=True)
+        except RequestNotShowable as exc:
+            raise _Refuse("refused", f"{tool}: this call needs approval and the approval card cannot show it "
+                                     f"exactly ({exc}); the call was not made. Send a smaller request.") from None
 
     def _approve_with_slot(self, run: _Run, slot: _Slot, tool: str, text: str, digest: str) -> str:
         """Ask a human with the send slot released, then take a slot back."""
@@ -1226,18 +1349,18 @@ class CredentialBroker:
         description, annotations = known
         fabri_name = f"mcp_{_sanitize_name(source.name)}_{_sanitize_name(remote)}"
         cls = mcp_approval(remote, description, annotations)
-        decl = source.approval_decl
-        if isinstance(decl, Mapping):
-            decl = decl.get(fabri_name)
-        if decl is not None:
-            try:
-                cls = stricter(cls, check_approval(decl))
-            except ValueError:
-                return "always_approve"
+        for decl in source.all_approval_decls():
+            if isinstance(decl, Mapping):
+                decl = decl.get(fabri_name)
+            if decl is not None:
+                try:
+                    cls = stricter(cls, check_approval(decl))
+                except ValueError:
+                    return "always_approve"
         for pattern, floor in source.floors:
             if fnmatch.fnmatchcase(fabri_name, pattern):
                 cls = stricter(cls, floor)
-        for owner in dict.fromkeys(o for o in (source.catalog_marker, source.catalog_owner) if o):
+        for owner in dict.fromkeys(o for o in (*source.all_catalog_markers(), source.catalog_owner) if o):
             try:
                 minimum = catalog_minimum(owner, fabri_name, None)
             except Exception:  # noqa: BLE001 -- an unknown catalog id fails closed
@@ -1262,7 +1385,10 @@ class CredentialBroker:
         except (binascii.Error, ValueError, UnicodeEncodeError):
             raise _Refuse("refused", f"mcp {name}: body_b64 is not base64") from None
         try:
-            parsed = json.loads(body.decode("utf-8"))
+            parsed = json.loads(body.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        except RequestNotShowable:
+            # The broker classifies the last copy of a key; a server may read the first.
+            raise _Refuse("refused", f"mcp {name}: the body repeats a JSON key") from None
         except (UnicodeDecodeError, ValueError):
             raise _Refuse("refused", f"mcp {name}: the body is not JSON") from None
         if not isinstance(parsed, dict) or parsed.get("jsonrpc") != "2.0":
@@ -1298,8 +1424,8 @@ class CredentialBroker:
             digest = request_hash(request, extra)
             grant_id = None
             if cls == "always_approve":
-                text = describe_request(label, source.name, cls, secret_ref_provider(source.header_specs),
-                                        request, extra)
+                text = self._card(label, source.name, cls, secret_ref_provider(source.header_specs),
+                                  request, extra)
                 grant_id = self._approve_with_slot(run, slot, label, text, digest)
             store = self._store_for(binding, source, tool=label)
             self._final_checks(run, conn, grant_id, request, extra, label, digest)
@@ -1428,6 +1554,7 @@ def _jsonrpc_messages(body: bytes) -> list[Any]:
 
 __all__ = [
     "BAD_KEY_DELAY_S",
+    "APPROVAL_CARD_BODY_CAP",
     "GRANT_TTL_S",
     "KEY_ENV",
     "MAX_INFLIGHT_PER_RUN",
@@ -1440,6 +1567,7 @@ __all__ = [
     "BrokerBinding",
     "CredentialBroker",
     "GrantTable",
+    "RequestNotShowable",
     "SourceBinding",
     "ToolBinding",
     "bind_sources",

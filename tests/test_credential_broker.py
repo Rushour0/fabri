@@ -984,3 +984,214 @@ def test_approval_round_trip_through_real_listener(home):
     finally:
         broker.close()
         listener.close()
+
+
+# ---------------------------------------------------------------- duplicate bindings (finding 2)
+
+
+def _parent_child(home, parent_sources, child_sources, parent_policy=None, child_policy=None):
+    child = _write_config(home, child_sources, child_policy, name="child.yaml")
+    return _write_config(home, parent_sources, parent_policy, agents=[{"name": "helper", "config": str(child)}],
+                         name="parent.yaml")
+
+
+def _bind_config(home, config, upstream, listener, sid="sess-dup1"):
+    broker = CredentialBroker(install_db=home / "installs.db", transport=upstream.transport)
+    binding = broker.bind(session_id=sid, config_path=config, run_home=home / "runs" / sid[:8], actor=None,
+                          listener=listener, run_pid=os.getpid())
+    return broker, binding
+
+
+CK_CREATE = "https://api.ck.test/lists/{list_id}/contacts"
+
+
+@pytest.mark.parametrize("child_first", [False, True])
+def test_duplicate_http_source_uses_the_strictest_class(home, child_first):
+    loose = [_http_decl("ck_create", CK_CREATE, "POST")]
+    strict = [_http_decl("ck_create", CK_CREATE, "POST", approval="always_approve")]
+    parent, child = (strict, loose) if child_first else (loose, strict)
+    config = _parent_child(home, parent, child)
+    bound = bind_sources(yaml.safe_load(config.read_text()), actor=None)
+    assert bound["ck_create"].tools["ck_create"].approval == "always_approve"
+
+    _store(home)
+    listener = FakeListener(["deny"])
+    upstream = Upstream()
+    broker, binding = _bind_config(home, config, upstream, listener)
+    try:
+        reply = _http(broker, binding, "ck_create", path_params={"list_id": "L1"}, json={"email": "a@b.test"})
+        assert reply["result"]["status"] == "approval_declined"
+        assert len(listener.asked) == 1 and upstream.requests == []
+    finally:
+        broker.close()
+
+
+def test_duplicate_http_source_keeps_a_child_policy_floor(home):
+    decl = [_http_decl("ck_create", CK_CREATE, "POST")]
+    floored = {**POLICY, "approval_floor": {"ck_*": "always_approve"}}
+    config = _parent_child(home, decl, decl, child_policy=floored)
+    bound = bind_sources(yaml.safe_load(config.read_text()), actor=None)
+    src = bound["ck_create"]
+    assert src.tools["ck_create"].approval == "always_approve"
+    assert ("ck_*", "always_approve") in src.floors
+
+
+def test_duplicate_source_with_different_shape_is_still_refused(home):
+    config = _parent_child(home, [_http_decl("ck_create", CK_CREATE, "POST")],
+                           [_http_decl("ck_create", CK_CREATE, "PUT")])
+    with pytest.raises(BindError, match="ck_create"):
+        bind_sources(yaml.safe_load(config.read_text()), actor=None)
+
+
+@pytest.mark.parametrize("how", ["approval", "floor"])
+def test_duplicate_mcp_source_applies_every_declaration(home, how):
+    child_source, child_policy = dict(GH_SOURCE), None
+    if how == "approval":
+        child_source["approval"] = {"mcp_gh_get_issue": "always_approve"}
+    else:
+        child_policy = {**POLICY, "approval_floor": {"mcp_gh_*": "always_approve"}}
+    config = _parent_child(home, [GH_SOURCE], [child_source], child_policy=child_policy)
+    bound = bind_sources(yaml.safe_load(config.read_text()), actor=None)["gh"]
+    if how == "approval":
+        assert {"mcp_gh_get_issue": "always_approve"} in bound.all_approval_decls()
+    else:
+        assert ("mcp_gh_*", "always_approve") in bound.floors
+
+    _gh_store(home)
+    listener = FakeListener(["deny"])
+    upstream = _mcp_upstream()
+    broker, binding = _bind_config(home, config, upstream, listener)
+    try:
+        assert _mcp(broker, binding, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["ok"] is True
+        sent = len(upstream.requests)
+        reply = _mcp(broker, binding, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                       "params": {"name": "get_issue", "arguments": {"n": 1}}})
+        # Alone the parent would send this as write without a question.
+        assert reply["result"]["status"] == "approval_declined"
+        assert len(listener.asked) == 1 and len(upstream.requests) == sent
+    finally:
+        broker.close()
+
+
+# ---------------------------------------------------------------- exact approval cards (finding 3)
+
+
+def test_card_lists_query_pairs_in_order_with_repeats(home):
+    request = httpx.Request("GET", "https://api.ck.test/x",
+                            params=[("role", "admin"), ("role", "viewer"), ("api_key", "s3cr3t-value")])
+    text = cb.describe_request("t", "s", "always_approve", None, request, {}, exact=True)
+    assert 'query: [["role", "admin"], ["role", "viewer"], ["api_key", "[redacted]"]]' in text
+    assert "s3cr3t-value" not in text
+
+
+def test_always_approve_card_shows_both_list_params(home):
+    _store(home)
+    listener = FakeListener(["approve"])
+    broker, binding, upstream = _broker(home, listener=listener)
+    try:
+        reply = _http(broker, binding, "ck_send", path_params={"campaign_id": "c9"},
+                      params={"role": ["admin", "viewer"]}, json={"subject": "Hi"})
+        assert reply["ok"] is True
+        assert '[["role", "admin"], ["role", "viewer"]]' in listener.asked[0]["question"]
+        (sent,) = upstream.requests
+        assert sent.url.query == b"role=admin&role=viewer"
+    finally:
+        broker.close()
+
+
+def test_always_approve_body_over_the_card_cap_is_refused_unasked(home):
+    _store(home)
+    listener = FakeListener(["approve"])
+    broker, binding, upstream = _broker(home, listener=listener)
+    try:
+        big = {"text": "x" * (cb.APPROVAL_CARD_BODY_CAP + 10)}
+        reply = _http(broker, binding, "ck_send", path_params={"campaign_id": "c9"}, json=big)
+        assert reply["ok"] is False and reply["result"]["status"] == "refused"
+        assert "cannot show it exactly" in reply["error"] and "the call was not made" in reply["error"]
+        assert listener.asked == [] and upstream.requests == []
+        # A write call needs no card, so the same body still goes.
+        assert _http(broker, binding, "ck_create", path_params={"list_id": "L1"}, json=big)["ok"] is True
+    finally:
+        broker.close()
+
+
+def test_card_refuses_bodies_it_cannot_show_exactly():
+    raw = httpx.Request("POST", "https://api.ck.test/x", content=b"\x00\x01 raw bytes")
+    with pytest.raises(cb.RequestNotShowable, match="not JSON or form"):
+        cb.describe_request("t", "s", "always_approve", None, raw, {}, exact=True)
+    dup = httpx.Request("POST", "https://api.ck.test/x", content=b'{"a": 1, "a": 2}')
+    with pytest.raises(cb.RequestNotShowable, match="repeats a key"):
+        cb.describe_request("t", "s", "always_approve", None, dup, {}, exact=True)
+    form = httpx.Request("POST", "https://api.ck.test/x", data={"to": ["a", "b"]})
+    text = cb.describe_request("t", "s", "always_approve", None, form, {}, exact=True)
+    assert '["to", "a"]' in text and '["to", "b"]' in text
+    # Without exact the card still summarises, for callers that only display.
+    assert "not JSON" in cb.describe_request("t", "s", "always_approve", None, raw, {})
+
+
+def test_mcp_body_with_a_repeated_key_is_refused(home):
+    _gh_store(home)
+    listener = FakeListener(["approve"])
+    broker, binding, upstream = _broker(home, _mcp_upstream(), listener=listener, sources=[GH_SOURCE])
+    try:
+        raw = b'{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "method": "ping"}'
+        reply = _mcp(broker, binding, raw)
+        assert reply["result"]["status"] == "refused" and "repeats a JSON key" in reply["error"]
+        assert listener.asked == [] and upstream.requests == []
+    finally:
+        broker.close()
+
+
+# ---------------------------------------------------------------- pinned outbound client (finding 5)
+
+
+def test_default_client_is_pinned_and_ignores_proxy_env(home, monkeypatch):
+    from fabri.tools.security.ssrf import PinnedTransport
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:3128")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.test:3128")
+    broker = CredentialBroker(install_db=home / "installs.db")
+    config = _write_config(home)
+    broker.bind(session_id="sess-pin1", config_path=config, run_home=home / "runs" / "pin1", actor=None,
+                listener=None, run_pid=os.getpid())
+    try:
+        client = broker._runs["sess-pin1"].client
+        assert isinstance(client._transport, PinnedTransport)
+        assert not client._mounts
+    finally:
+        broker.close()
+
+
+def test_dns_rebinding_after_the_prechecks_is_refused_at_connect(home, monkeypatch):
+    """The broker's two prechecks see a public answer; the connect's own
+    lookup sees a private one. Nothing reaches the network."""
+    from fabri.tools.security.ssrf import PinnedTransport
+
+    answers = iter(["93.184.216.34", "93.184.216.34", "10.0.0.9"])
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (next(answers), port or 0))]
+
+    monkeypatch.setattr("fabri.tools.security.ssrf.socket.getaddrinfo", getaddrinfo)
+    connects: list[str] = []
+
+    class NoNetwork:
+        def connect_tcp(self, host, *args, **kwargs):  # pragma: no cover -- must not be reached
+            connects.append(host)
+            raise AssertionError("connected")
+
+        def sleep(self, seconds):  # pragma: no cover
+            pass
+
+    _store(home)
+    upstream = SimpleNamespace(transport=PinnedTransport(inner_backend=NoNetwork()))
+    broker, binding, _ = _broker(home, upstream=upstream)
+    try:
+        reply = _http(broker, binding, "ck_get", path_params={"list_id": "L1"})
+        assert reply["ok"] is False and "ConnectError" in reply["error"]
+        assert connects == []
+        # All three lookups happened: both prechecks and the connect's own.
+        assert next(answers, None) is None
+        assert TOKEN not in json.dumps(reply)
+    finally:
+        broker.close()

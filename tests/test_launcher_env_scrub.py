@@ -488,7 +488,10 @@ def _service_run(tmp_path: Path, template: Path) -> tuple[dict, object, str]:
         svc.close()
 
 
-def test_real_service_run_gets_broker_env_and_no_values(tmp_path: Path, two_tenants):
+def test_real_service_run_gets_broker_env_and_no_values(tmp_path: Path, two_tenants, monkeypatch):
+    # Same-user runs need the local-development opt-in since stored
+    # credentials are refused otherwise.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
     """FabriService.submit -> launch_run: the run gets the broker's socket and
     key, never the token the service holds for its declared ref."""
     template = _run_yaml(tmp_path / "template.yaml", [_http_source("chat", "slack:acme")])

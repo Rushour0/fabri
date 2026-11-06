@@ -15,6 +15,7 @@ Coverage:
 """
 import http.client
 import json
+import os
 import sys
 import textwrap
 import threading
@@ -918,6 +919,9 @@ def _write_template(path: Path, sources: list | None, policy: dict | None = None
 def broker_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("FABRI_CRED_SNAPSHOT", raising=False)
     monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+    # Runs here share the test's OS user, so stored credentials need the
+    # local development opt-in. The refusal tests below remove it.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
     return monkeypatch
 
 
@@ -1060,5 +1064,98 @@ def test_release_on_cancel_and_on_finish(tmp_path: Path, broker_env):
         socket_path = paths[sid]
         assert _wait_until(lambda: sid not in svc.credential_broker.bindings())
         assert not socket_path.exists()
+    finally:
+        svc.close()
+
+
+def _serve_in_thread(svc: FabriService):
+    from fabri.service.http_server import serve_http
+
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[0], server.server_address[1]
+
+
+def test_same_uid_run_with_stored_credentials_is_refused_with_400(tmp_path: Path, broker_env):
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    assert svc.launch_isolation == "shared_uid"
+
+    def _entries():
+        return {p.name for p in svc.home_root.iterdir() if not p.name.endswith(("-wal", "-shm"))}
+
+    before = _entries()
+    server, host, port = _serve_in_thread(svc)
+    try:
+        status, body = _http_post(host, port, "/runs", {"task": "go"})
+        assert status == 400
+        error = json.loads(body)["error"]
+        assert "FABRI_ALLOW_SHARED_UID=1" in error
+        assert "same OS user" in error
+        assert "installs.db" in error
+        assert "sources ck" in error
+        # Nothing of the refused run is left behind.
+        assert _entries() == before
+        assert svc._asks == {}
+        assert svc._runs == {}
+        assert svc.credential_broker.bindings() == {}
+        assert svc.list_sessions() == []
+    finally:
+        server.shutdown()
+        svc.close()
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes", ""])
+def test_same_uid_opt_in_must_be_exactly_1(tmp_path: Path, broker_env, value: str):
+    broker_env.setenv("FABRI_ALLOW_SHARED_UID", value)
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    try:
+        with pytest.raises(ValueError, match="FABRI_ALLOW_SHARED_UID=1"):
+            svc.submit("t")
+        assert svc.credential_broker.bindings() == {}
+    finally:
+        svc.close()
+
+
+def test_same_uid_opt_in_lets_a_brokered_run_start(tmp_path: Path, broker_env):
+    assert os.environ.get("FABRI_ALLOW_SHARED_UID") == "1"
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    try:
+        sid = svc.submit("t")
+        assert sid in svc.credential_broker.bindings()
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+    assert seen["socket_exists"] is True
+
+
+def test_same_uid_check_ignores_runs_without_stored_credentials(tmp_path: Path, broker_env):
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    plain = _write_template(tmp_path / "plain.yaml", [
+        {"name": "pub", "kind": "http", "url": "https://api.example.test/x", "method": "GET"}])
+    svc = _broker_service(tmp_path, plain)
+    try:
+        sid = svc.submit("t")
+        assert svc.result(sid, timeout=30)["success"] is True
+    finally:
+        svc.close()
+
+
+def test_isolated_launch_mode_passes_the_same_uid_check(tmp_path: Path, broker_env):
+    # The hook a container or separate-user launch mode sets. With it, no
+    # opt-in is needed.
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    svc.launch_isolation = "container"
+    try:
+        sid = svc.submit("t")
+        assert sid in svc.credential_broker.bindings()
+        assert svc.result(sid, timeout=30)["success"] is True
     finally:
         svc.close()

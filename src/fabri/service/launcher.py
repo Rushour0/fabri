@@ -118,6 +118,34 @@ _ALLOWED_PREFIXES = ("LC_",)
 # Those values sit in the run process for its whole life and a revoke does not
 # reach it. It exists for crews that cannot move off a stdio MCP server that
 # needs a stored credential.
+#
+# The broker only keeps tokens out of a run when the run cannot read what the
+# service can read. launch_run starts every run as a plain child process under
+# the service's own OS user, so a run (its bash tool, a python source, a
+# sub-agent) can open installs.db and read every stored token, and on most
+# systems it can read the service's memory too. LAUNCH_ISOLATION names how runs
+# are started. Today it is always "shared_uid". A later launch mode that starts
+# each run under a separate OS user, or in a container with only its run
+# directory mounted, sets it to that mode, and runs_share_service_uid() then
+# returns False. Until then the service refuses a run that needs a stored
+# credential unless the operator sets FABRI_ALLOW_SHARED_UID=1, which is meant
+# for local development where the operator owns every token anyway.
+
+LAUNCH_ISOLATION_SHARED_UID = "shared_uid"
+LAUNCH_ISOLATION = LAUNCH_ISOLATION_SHARED_UID
+ALLOW_SHARED_UID_ENV = "FABRI_ALLOW_SHARED_UID"
+
+
+def runs_share_service_uid(isolation: str | None = None) -> bool:
+    """True when a run started with ``isolation`` (default
+    :data:`LAUNCH_ISOLATION`) executes as the same OS user as the service."""
+    return (isolation or LAUNCH_ISOLATION) == LAUNCH_ISOLATION_SHARED_UID
+
+
+def shared_uid_allowed(env: Mapping[str, str] | None = None) -> bool:
+    """True when the operator opted in to stored credentials for same-user
+    runs with ``FABRI_ALLOW_SHARED_UID=1``."""
+    return (env if env is not None else os.environ).get(ALLOW_SHARED_UID_ENV) == "1"
 
 _ALLOW_ENV_VAR = "FABRI_RUN_ENV_ALLOW"
 
