@@ -85,16 +85,16 @@ Default: `openid`, `email`, `https://www.googleapis.com/auth/gmail.send`, `https
 
 Opt-in at connect time with `--scopes`:
 
-- `compose` (`gmail.compose`): drafts. A sensitive scope.
+- `compose` (`gmail.compose`): drafts. A restricted scope.
 - `readonly` (`gmail.readonly`): the two read tools. A restricted scope.
 - `modify` (`gmail.modify`): no tool here uses it. A restricted scope.
 
-Why `readonly` is opt-in: Google treats it as a restricted scope. An app that asks outside users for a restricted
-scope has to pass Google's OAuth verification and a yearly third-party security assessment (CASA) before it can be
-published. Sensitive scopes such as `gmail.send` and `gmail.compose` need verification but no assessment. An app in
-Testing status, used only by the test users you list, skips both. So does an Internal app in a Google Workspace org,
-for its own users. Keeping reads off by default means a published app with the default scopes never needs the
-assessment. Whether `gmail.labels` counts as non-sensitive is UNVERIFIED.
+Why `compose`, `readonly` and `modify` are opt-in: Google treats all three as restricted scopes. An app that asks
+outside users for a restricted scope has to pass Google's OAuth verification and a yearly third-party security
+assessment (CASA) before it can be published. Sensitive scopes such as `gmail.send` need verification but no
+assessment. An app in Testing status, used only by the test users you list, skips both. So does an Internal app in a
+Google Workspace org, for its own users. Keeping drafts and reads off by default means a published app with the
+default scopes never needs the assessment. Whether `gmail.labels` counts as non-sensitive is UNVERIFIED.
 
 ## Google Cloud setup
 

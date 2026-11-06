@@ -737,7 +737,7 @@ def test_http_transport_submit_stream_cost(tmp_path: Path, fake_agent: Path):
         # submit
         conn = http.client.HTTPConnection(host, port, timeout=30)
         conn.request("POST", "/runs", body=json.dumps({"task": "go"}),
-                     headers={"Content-Type": "application/json"})
+                     headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         resp = conn.getresponse()
         submit = json.loads(resp.read().decode())
         conn.close()
@@ -770,7 +770,7 @@ def _http_post(conn_host, port, path, payload):
     conn = http.client.HTTPConnection(conn_host, port, timeout=30)
     conn.request(
         "POST", path, body=json.dumps(payload),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"},
     )
     resp = conn.getresponse()
     body = resp.read().decode()

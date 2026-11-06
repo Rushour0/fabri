@@ -44,6 +44,9 @@ def _handler(path: str, store: _InstallStore | None = None) -> _Handler:
         serve_studio=False,
     )
     handler.path = path
+    # A same-origin Studio request; auth is off, so mutations need one.
+    handler.headers = {"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080",
+                       "Sec-Fetch-Site": "same-origin"}
     return handler
 
 

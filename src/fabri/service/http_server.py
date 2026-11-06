@@ -36,6 +36,17 @@ webhooks needs a session or a service/admin bearer token, and anything that
 starts or changes work needs the admin role. ``auth.allow_guests`` restores the
 older mode where anonymous visitors may start and follow their own runs.
 
+With auth off, every ``POST``, ``PUT`` and ``DELETE`` except the signed
+webhooks goes through the cross-site checks in
+:mod:`fabri.service.request_guard`: ``Sec-Fetch-Site: cross-site`` and a
+foreign or ``null`` ``Origin`` are refused (403), a route that reads a JSON
+body needs ``Content-Type: application/json`` (415), and the request must be
+shown to be same-origin (a matching ``Origin``, or ``Sec-Fetch-Site:
+same-origin`` with a loopback or public base ``Host``) or carry the service
+or admin token (403 otherwise). Studio's own fetches pass. A script that
+drives the API with auth off sends ``Sec-Fetch-Site: same-origin`` or a
+token. ``PATCH`` has no route and gets 501.
+
 Built on :class:`http.server.ThreadingHTTPServer` so a streaming ``events``
 request doesn't block a concurrent ``POST /runs``.
 """
@@ -290,14 +301,57 @@ class _Handler(BaseHTTPRequestHandler):
         api.handle(self, method)
         return True
 
+    def _webhook_post(self) -> bool:
+        """POSTs from a vendor's servers: surface webhooks, Slack events and
+        the GitHub webhook. They carry signatures, not browser headers, so
+        the cross-site checks do not apply to them."""
+        surfaces = getattr(self.service, "surfaces", None)
+        if surfaces is not None and surfaces.routes().get(self.path) is not None:
+            return True
+        return self.path in ("/slack/events", "/slack/events/", "/github/webhook", "/github/webhook/")
+
+    def _json_route(self) -> bool:
+        """Routes that read a JSON request body."""
+        path = urlsplit(self.path).path
+        if path in ("/runs", "/runs/", "/fleets", "/fleets/") or _ANSWER_RE.match(path):
+            return True
+        api = getattr(self.server, "setups_api", None)
+        return api is not None and api.matches(self.path)
+
+    def _cross_site_refused(self, method: str) -> bool:
+        """With auth off, refuse a cross-site mutation and one that is neither
+        shown to be same-origin nor carries the service or admin token (see
+        ``fabri.service.request_guard``). True when a refusal was sent.
+
+        With auth on, every change already needs a session cookie (sent
+        SameSite=Lax, so not on a cross-site POST) or a bearer token."""
+        if getattr(self.service, "auth_enabled", False):
+            return False
+        from fabri.service.request_guard import Refused, check_request, need_same_origin
+
+        try:
+            same_origin = check_request(self, json_body=method in ("POST", "PUT") and self._json_route())
+            need_same_origin(auth_on=False, principal=self._principal(), same_origin=same_origin)
+        except Refused as exc:
+            self._send_json(exc.status, {"error": exc.message})
+            return True
+        return False
+
     def do_PUT(self) -> None:  # noqa: N802
+        if self._cross_site_refused("PUT"):
+            return
         if self._setups_dispatch("PUT"):
             return
         if self._gate("PUT"):
             self._send_json(404, {"error": f"no route for PUT {self.path}"})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if self._setups_dispatch("DELETE") or self._connections_dispatch("DELETE"):
+        # ConnectionsApi runs the same checks itself.
+        if self._connections_dispatch("DELETE"):
+            return
+        if self._cross_site_refused("DELETE"):
+            return
+        if self._setups_dispatch("DELETE"):
             return
         if self._gate("DELETE"):
             self._send_json(404, {"error": f"no route for DELETE {self.path}"})
@@ -474,7 +528,13 @@ class _Handler(BaseHTTPRequestHandler):
         return {"agency": agency, "limit": limit, "offset": offset}
 
     def do_POST(self) -> None:  # noqa: N802
-        if self._setups_dispatch("POST") or self._connections_dispatch("POST"):
+        # ConnectionsApi runs the same checks itself; webhooks are signed
+        # server-to-server calls.
+        if self._connections_dispatch("POST"):
+            return
+        if not self._webhook_post() and self._cross_site_refused("POST"):
+            return
+        if self._setups_dispatch("POST"):
             return
         if self.service.auth_enabled and self.path.rstrip("/") in {
             "/auth/signup",

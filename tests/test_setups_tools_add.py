@@ -461,7 +461,8 @@ def api(tmp_path, scoped):
     service = FabriService(home_root=tmp_path / "home")
     server = serve_http(service, port=0, setups_api=SetupsApi(root, policy="strict"))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    client = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}")
+    client = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                          headers={"Sec-Fetch-Site": "same-origin"})
     yield client, root
     server.shutdown()
     server.server_close()

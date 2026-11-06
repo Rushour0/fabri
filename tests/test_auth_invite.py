@@ -61,7 +61,9 @@ def make_server(tmp_path):
 
 
 def client(server, headers=None):
-    return httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}", headers=headers or {})
+    # Studio's same-origin fetch sends Sec-Fetch-Site: same-origin.
+    return httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                        headers={"Sec-Fetch-Site": "same-origin", **(headers or {})})
 
 
 def session(service, email):

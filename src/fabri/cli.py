@@ -1948,12 +1948,18 @@ def _connect_oauth(args: argparse.Namespace, entry) -> None:
             print("open this URL in a browser on this machine to connect:", file=sys.stderr)
             print(url, file=sys.stderr)
             return
-        print(f"opening the browser to sign in to {entry.title}; if it does not open, visit:", file=sys.stderr)
-        print(url, file=sys.stderr)
+        # The URL carries the signed state, so it is printed only when the
+        # browser cannot be opened. Treat that output as sensitive until the
+        # flow ends.
+        print(f"opening the browser to sign in to {entry.title}", file=sys.stderr)
         try:
-            webbrowser.open(url)
+            opened = webbrowser.open(url)
         except webbrowser.Error:
-            pass
+            opened = False
+        if not opened:
+            print("the browser did not open; open this URL in a browser on this machine to connect "
+                  "(do not share it):", file=sys.stderr)
+            print(url, file=sys.stderr)
 
     store = _connection_store(args, create=True)
     try:
@@ -2596,7 +2602,7 @@ def main() -> None:
                            metavar="ID", help="With --login: limit the PAT to this account id (repeatable)")
     p_connect.add_argument("--scopes", nargs="+", default=None, metavar="NAME",
                            help="OAuth: extra scopes by short name, such as gmail's readonly, compose or "
-                                "modify. Gmail readonly and modify are restricted scopes: a published app "
+                                "modify. Gmail readonly, compose and modify are restricted scopes: a published app "
                                 "needs Google's CASA security assessment before it may ask for them")
     p_connect.add_argument("--no-browser", dest="no_browser", action="store_true",
                            help="OAuth: print the sign-in URL instead of opening a browser")

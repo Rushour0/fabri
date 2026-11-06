@@ -19,10 +19,11 @@ from fabri.tools.connector_catalog import Connector, ConnectorError, OAuthSpec, 
 _SCOPE = "https://www.googleapis.com/auth/"
 
 # Short names a user can ask for at connect time (fabri connect gmail
-# --scopes readonly). readonly is a restricted scope: an app published to
+# --scopes readonly). All three are restricted scopes: an app published to
 # outside users needs Google's verification and a CASA security assessment
-# before it may ask for it. compose is what drafts need; gmail.send does not
-# cover drafts.
+# before it may ask for any of them. compose is what drafts need; gmail.send
+# does not cover drafts. The default set (send, labels, openid, email) holds
+# no restricted scope.
 SCOPES_OPTIONAL = {
     "readonly": _SCOPE + "gmail.readonly",
     "compose": _SCOPE + "gmail.compose",
@@ -94,7 +95,7 @@ def _sources(name: str, auth: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "drafts_create": {
             "kind": "http", "name": f"{name}_drafts_create", "title": "Create a Gmail draft",
             "description": "Save a plain text draft in the connected account without sending it. Needs the "
-                           "compose scope.",
+                           "compose scope, which Google treats as restricted.",
             "url": f"{_UPLOAD}/drafts", "method": "POST", "query": {"uploadType": "media"},
             "body_format": "rfc822", "headers": auth, "approval": "always_approve",
             "input_schema": _MESSAGE_SCHEMA},

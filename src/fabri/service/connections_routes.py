@@ -46,6 +46,9 @@ localhost, so every mutation (``POST`` and ``DELETE /connections``, starting
   base ``Host``; ``none``, a typed URL, counts for starting a flow) or carry
   the service or admin token. Otherwise it is refused (403).
 
+The checks live in :mod:`fabri.service.request_guard`, which the rest of
+the HTTP API uses for its own mutations when auth is off.
+
 The callbacks are not checked this way: they are top-level navigations from
 the vendor's site, and the pending row already ties them to their owner.
 Callback responses carry ``Referrer-Policy: no-referrer``.
@@ -56,7 +59,6 @@ provider name and the exception type only.
 """
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 from collections.abc import Mapping
@@ -64,6 +66,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fabri.core.logging_setup import get_logger
+from fabri.service.request_guard import Refused as _Refused
+from fabri.service.request_guard import (
+    check_request,
+    is_loopback_host,
+    need_same_origin,
+    public_base_problem,
+)
 
 logger = get_logger()
 
@@ -78,64 +87,6 @@ LEGACY_PATHS: dict[str, tuple[str, bool]] = {
 }
 
 _PROVIDER_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
-
-
-class _Refused(Exception):
-    """A request the route refuses, with the HTTP status and a message."""
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
-def is_loopback_host(host: str | None) -> bool:
-    """True for localhost names and loopback IP literals."""
-    if not host:
-        return False
-    host = host.strip("[]").lower()
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _origin(url: str) -> str | None:
-    """``scheme://host[:port]`` for a URL, lowercased, default port dropped."""
-    try:
-        parts = urlsplit(url.strip())
-        port = parts.port
-    except ValueError:
-        return None
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return None
-    host = parts.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    if port is None or (parts.scheme, port) in (("http", 80), ("https", 443)):
-        return f"{parts.scheme}://{host}"
-    return f"{parts.scheme}://{host}:{port}"
-
-
-def public_base_problem(value: str) -> str | None:
-    """Why a FABRI_PUBLIC_BASE_URL value cannot be used, or None. Empty is
-    fine: OAuth is then simply not configured."""
-    if not value:
-        return None
-    try:
-        parts = urlsplit(value)
-        _ = parts.port
-    except ValueError:
-        return "FABRI_PUBLIC_BASE_URL is not a valid URL"
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return "FABRI_PUBLIC_BASE_URL must be an http or https URL, such as https://fabri.example.com"
-    if parts.username or parts.password or parts.query or parts.fragment:
-        return "FABRI_PUBLIC_BASE_URL must be a plain origin and path, with no user, query or fragment"
-    if parts.scheme != "https" and not is_loopback_host(parts.hostname):
-        return "FABRI_PUBLIC_BASE_URL must use https unless it names a loopback address"
-    return None
 
 
 def hosted_start_refusal(service: Any) -> str | None:
@@ -281,75 +232,19 @@ class ConnectionsApi:
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
-    # ---- cross-site checks
+    # ---- cross-site checks (shared with the rest of the API, see request_guard)
 
     @staticmethod
-    def _header(handler: Any, name: str) -> str:
-        headers = getattr(handler, "headers", None) or {}
-        return (headers.get(name) or "").strip()
-
-    def _host_trusted(self, handler: Any) -> bool:
-        """The Host header names a loopback address or the public base URL's
-        host. A DNS-rebound page reaches localhost under its own host name,
-        so its same-origin requests fail this."""
-        from fabri.service.slack_oauth import public_base_url
-
-        try:
-            hostname = urlsplit("//" + self._header(handler, "Host")).hostname
-        except ValueError:
-            return False
-        if is_loopback_host(hostname):
-            return True
-        base = public_base_url()
-        if not hostname or not base or public_base_problem(base):
-            return False
-        return hostname == (urlsplit(base).hostname or "").lower()
-
-    def _own_origins(self, handler: Any) -> set[str]:
-        from fabri.service.slack_oauth import public_base_url
-
-        origins: set[str] = set()
-        base = public_base_url()
-        if base and not public_base_problem(base):
-            origins.add(_origin(base) or "")
-        host = self._header(handler, "Host")
-        try:
-            loopback = is_loopback_host(urlsplit("//" + host).hostname)
-        except ValueError:
-            loopback = False
-        if host and loopback:
-            for scheme in ("http", "https"):
-                origins.add(_origin(f"{scheme}://{host}") or "")
-        origins.discard("")
-        return origins
-
-    def _guard(self, handler: Any, *, json_body: bool = False, navigation: bool = False) -> bool:
+    def _guard(handler: Any, *, json_body: bool = False, navigation: bool = False) -> bool:
         """Refuse a cross-site mutation. Returns True when the request is
         shown to be same-origin, which auth-off mutations need (see
         ``_need_same_origin``)."""
-        site = self._header(handler, "Sec-Fetch-Site").lower()
-        if site == "cross-site":
-            raise _Refused(403, "cross-site request refused")
-        origin = self._header(handler, "Origin")
-        if origin and _origin(origin) not in self._own_origins(handler):
-            # Also covers "null", which sandboxed frames and redirects send.
-            raise _Refused(403, "request from another origin refused")
-        if json_body:
-            ctype = self._header(handler, "Content-Type").split(";")[0].strip().lower()
-            if ctype != "application/json":
-                raise _Refused(415, "Content-Type must be application/json")
-        if origin:
-            return True
-        if not self._host_trusted(handler):
-            return False
-        return site == "same-origin" or (navigation and site == "none")
+        return check_request(handler, json_body=json_body, navigation=navigation)
 
     def _need_same_origin(self, principal: Any, same_origin: bool) -> None:
         """With auth off, a mutation needs a same-origin request or a token."""
-        if self._auth_on() or principal is not None or same_origin:
-            return
-        raise _Refused(403, "with auth off, connection changes need a same-origin request "
-                            "(Studio) or the service or admin token")
+        need_same_origin(auth_on=self._auth_on(), principal=principal, same_origin=same_origin,
+                         what="connection changes")
 
     def _auth_on(self) -> bool:
         return bool(getattr(self.service, "auth_enabled", False))

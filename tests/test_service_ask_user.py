@@ -245,7 +245,7 @@ def test_http_answer_round_trip(tmp_path: Path, asking_agent: Path):
         # submit
         conn = http.client.HTTPConnection(host, port, timeout=30)
         conn.request("POST", "/runs", body=json.dumps({"task": "go"}),
-                     headers={"Content-Type": "application/json"})
+                     headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         session_id = json.loads(conn.getresponse().read().decode())["session_id"]
         conn.close()
 
@@ -277,7 +277,7 @@ def test_http_answer_round_trip(tmp_path: Path, asking_agent: Path):
         ans.request("POST", f"/runs/{session_id}/answer",
                     body=json.dumps({"question_id": holder["qid"], "answer": "yes",
                                      "selected_option": "yes"}),
-                    headers={"Content-Type": "application/json"})
+                    headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         ans_resp = ans.getresponse()
         assert ans_resp.status == 200
         assert json.loads(ans_resp.read().decode())["status"] == "answered"
@@ -303,7 +303,7 @@ def test_http_answer_unknown_session_404(tmp_path: Path):
         conn = http.client.HTTPConnection(host, port, timeout=30)
         conn.request("POST", "/runs/nope/answer",
                      body=json.dumps({"question_id": "q", "answer": "a"}),
-                     headers={"Content-Type": "application/json"})
+                     headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         resp = conn.getresponse()
         assert resp.status == 404
     finally:

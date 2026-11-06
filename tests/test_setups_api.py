@@ -71,7 +71,9 @@ def clean_env(monkeypatch):
 class Client:
     def __init__(self, server, headers=None):
         port = server.server_address[1]
-        self.http = httpx.Client(base_url=f"http://127.0.0.1:{port}", headers=headers or {})
+        # Studio's same-origin fetch sends Sec-Fetch-Site: same-origin.
+        self.http = httpx.Client(base_url=f"http://127.0.0.1:{port}",
+                                 headers={"Sec-Fetch-Site": "same-origin", **(headers or {})})
 
     def call(self, method, path, body=None, **kw):
         if body is not None:

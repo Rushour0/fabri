@@ -8,12 +8,17 @@ instead of a JSON body. Gmail's media upload endpoints take exactly that.
 The message is plain text only (one ``text/plain`` part). Header injection
 is refused: ``to``, ``cc``, ``bcc`` and ``subject`` may not hold a line
 break or any other control character, and every address is parsed and
-written back out, so a value can never add a header of its own.
+written back out, so a value can never add a header of its own. They may
+not hold an RFC 2047 encoded word (``=?charset?q?...?=``) either: the card
+shows header values decoded, so an encoded word could hide a line break or
+a control character that only appears after decoding. The message itself
+still encodes non-ASCII text; only pre-encoded input is refused.
 
 ``describe_message`` turns the bytes back into the text a person reads on
 an approval card: the recipients, the subject and the body, decoded. It
-refuses a message it cannot show in full. Error messages name the field,
-never its value.
+refuses a message it cannot show in full, and checks the decoded header
+values again with the same rules as the input. Error messages name the
+field, never its value.
 """
 from __future__ import annotations
 
@@ -40,6 +45,8 @@ _ALLOWED_HEADERS = frozenset({"to", "cc", "bcc", "subject", "mime-version", "con
                               "content-transfer-encoding"})
 _ADDRESS = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
 _BLOCKED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+# Any "=?" ... "?=" span, so no encoded word reaches the message pre-encoded.
+_ENCODED_WORD = re.compile(r"=\?.*?\?=", re.DOTALL)
 
 
 class MessageError(ValueError):
@@ -50,12 +57,22 @@ class MessageNotShowable(ValueError):
     """The bytes are not a message the approval card can show in full."""
 
 
+def _header_problem(field: str, value: str) -> str | None:
+    """Why a header value cannot be used or shown, or None. Names the field only."""
+    for ch in value:
+        if ch != "\t" and unicodedata.category(ch) in _BLOCKED_CATEGORIES:
+            return f"{field} may not hold a line break or a control character"
+    if _ENCODED_WORD.search(value):
+        return f"{field} may not hold an RFC 2047 encoded word (=?...?=); send the text itself"
+    return None
+
+
 def _header_text(field: str, value: Any, *, cap: int) -> str:
     if not isinstance(value, str):
         raise MessageError(f"{field} must be text")
-    for ch in value:
-        if ch != "\t" and unicodedata.category(ch) in _BLOCKED_CATEGORIES:
-            raise MessageError(f"{field} may not hold a line break or a control character")
+    problem = _header_problem(field, value)
+    if problem:
+        raise MessageError(problem)
     if len(value) > cap:
         raise MessageError(f"{field} is longer than {cap} characters")
     return value
@@ -72,10 +89,21 @@ def _addresses(field: str, value: Any, *, required: bool) -> list[str]:
         value = ", ".join(value)
     text = _header_text(field, value, cap=20_000)
     out = []
-    for name, addr in getaddresses([text]):
+    try:
+        pairs = getaddresses([text])
+    except Exception:  # noqa: BLE001 -- any parse failure is a bad address list
+        raise MessageError(f"{field} holds an address that is not valid") from None
+    for name, addr in pairs:
         if not addr or not _ADDRESS.fullmatch(addr):
             raise MessageError(f"{field} holds an address that is not valid")
-        out.append(formataddr((name, addr)) if name else addr)
+        if name:
+            problem = _header_problem(field, name)
+            if problem:
+                raise MessageError(problem)
+        try:
+            out.append(formataddr((name, addr)) if name else addr)
+        except Exception:  # noqa: BLE001 -- formataddr raises ValueError and others on odd names
+            raise MessageError(f"{field} holds an address that is not valid") from None
     if not out:
         raise MessageError(f"{field} needs at least one address")
     return out
@@ -104,13 +132,16 @@ def build_message(args: Mapping[str, Any]) -> bytes:
         raise MessageError("body may not hold a NUL character")
     if len(body) > MAX_BODY_CHARS:
         raise MessageError(f"body is longer than {MAX_BODY_CHARS} characters")
-    msg = EmailMessage(policy=policy.SMTP)
-    for field, header in (("to", "To"), ("cc", "Cc"), ("bcc", "Bcc")):
-        if recipients[field]:
-            msg[header] = ", ".join(recipients[field])
-    msg["Subject"] = subject
-    msg.set_content(body.replace("\r\n", "\n").replace("\r", "\n"))
-    return msg.as_bytes()
+    try:
+        msg = EmailMessage(policy=policy.SMTP)
+        for field, header in (("to", "To"), ("cc", "Cc"), ("bcc", "Bcc")):
+            if recipients[field]:
+                msg[header] = ", ".join(recipients[field])
+        msg["Subject"] = subject
+        msg.set_content(body.replace("\r\n", "\n").replace("\r", "\n"))
+        return msg.as_bytes()
+    except Exception:  # noqa: BLE001 -- the email package raises ValueError, TypeError and its own errors
+        raise MessageError("the arguments do not make a valid mail message") from None
 
 
 def describe_message(content: bytes) -> str:
@@ -135,8 +166,16 @@ def describe_message(content: bytes) -> str:
         for header in _SHOWN_HEADERS:
             value = msg[header]
             if value is not None:
-                lines.append(f"{header}: {value}")
+                shown = str(value)
+                # The decoded value goes through the input rules again: an
+                # encoded word could decode to a line break, a control or
+                # bidi character, or another encoded word.
+                if _header_problem(header, shown):
+                    raise MessageNotShowable(f"the mail message {header} header cannot be shown as is")
+                lines.append(f"{header}: {shown}")
         text = msg.get_content()
+    except MessageNotShowable:
+        raise
     except Exception:  # noqa: BLE001 -- a header or body that does not decode is not shown
         raise MessageNotShowable("the mail message does not decode") from None
     if any(getattr(msg[h], "defects", None) for h in _SHOWN_HEADERS if msg[h] is not None):

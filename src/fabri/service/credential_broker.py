@@ -578,8 +578,13 @@ MAIL_CONTENT_TYPE = "message/rfc822"
 
 class RequestNotShowable(ValueError):
     """The approval card cannot show this request exactly (a body over the
-    card cap, a body that is not JSON or form data, or JSON with a repeated
-    key). The message names the reason, never a value."""
+    card cap, a body that is not JSON or form data, JSON with a repeated
+    key, or a mail message that redaction would change). The message names
+    the reason, never a value. ``hint`` says what the caller can do."""
+
+    def __init__(self, message: str, hint: str = "Send a smaller request.") -> None:
+        super().__init__(message)
+        self.hint = hint
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -604,16 +609,27 @@ def _shown_pairs(pairs: list[tuple[str, str]]) -> list[list[str]]:
     return out
 
 
-def _shown_message(content: bytes) -> str:
+def _shown_message(content: bytes, *, exact: bool = False) -> str:
     """The message as a person reads it, each line passed through the
-    approval redaction like any other body value."""
+    approval redaction like any other body value.
+
+    With `exact` (an approval card), a message that redaction would change
+    is refused instead: Gmail gets the original text, so a card showing
+    ``[redacted]`` would ask the person to approve words they cannot see."""
     from fabri.tools.mail_message import MessageNotShowable, describe_message
 
     try:
         text = describe_message(content)
     except MessageNotShowable as exc:
         raise RequestNotShowable(str(exc)) from None
-    return "\n".join(str(_redacted(line)) for line in text.split("\n"))
+    lines = text.split("\n")
+    shown = [str(_redacted(line)) for line in lines]
+    if exact and shown != lines:
+        raise RequestNotShowable(
+            "the mail message holds text that looks like a secret, and the card would have to redact "
+            "it, so the person approving would not see exactly what Gmail receives",
+            hint="Remove the secret-looking text from the message and send it again.")
+    return "\n".join(shown)
 
 
 def describe_request(
@@ -640,7 +656,9 @@ def describe_request(
     With `exact`, a request the card cannot show in full raises
     RequestNotShowable instead of being cut or summarised: a body over `cap`
     characters, a body that is neither JSON nor form data, or a JSON body
-    with a repeated key (a server may read the copy the card does not show)."""
+    with a repeated key (a server may read the copy the card does not show),
+    or a mail message the redaction would change (Gmail gets the original
+    text, so the card must show it unredacted)."""
     url = request.url
     lines = [
         f"{tool} needs your approval (class {cls})",
@@ -664,7 +682,7 @@ def describe_request(
         try:
             if ctype.split(";", 1)[0].strip().lower() == MAIL_CONTENT_TYPE:
                 try:
-                    body_text = "mail message (" + MAIL_CONTENT_TYPE + "):\n" + _shown_message(content)
+                    body_text = "mail message (" + MAIL_CONTENT_TYPE + "):\n" + _shown_message(content, exact=exact)
                 except RequestNotShowable:
                     if exact:
                         raise
@@ -1289,7 +1307,7 @@ class CredentialBroker:
             return describe_request(tool, source, cls, provider, request, extra, exact=True)
         except RequestNotShowable as exc:
             raise _Refuse("refused", f"{tool}: this call needs approval and the approval card cannot show it "
-                                     f"exactly ({exc}); the call was not made. Send a smaller request.") from None
+                                     f"exactly ({exc}); the call was not made. {exc.hint}") from None
 
     def _approve_with_slot(self, run: _Run, slot: _Slot, tool: str, text: str, digest: str) -> str:
         """Ask a human with the send slot released, then take a slot back."""

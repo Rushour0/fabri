@@ -274,7 +274,9 @@ def test_cli_connect_opens_browser_and_prints_next_step(zmail, browser, tmp_path
     out, err = capsys.readouterr()
     assert "connected zmail:main (Ada.Lovelace@example.test)" in out
     assert "fabri setups tools add connector zmail --workspace main --scope org:<org>" in out
-    assert len(browser.urls) == 1 and browser.urls[0] in err
+    # The browser opened, so the URL (it carries the signed state) is not printed.
+    assert len(browser.urls) == 1 and browser.urls[0] not in err
+    assert AUTHORIZE_URL not in err
     _assert_clean(out + err + caplog.text)
     assert _store(tmp_path).get_token("zmail", "main") == ACCESS
     token_request = [r for r in zmail.seen if str(r.url) == TOKEN_URL][0]
@@ -335,6 +337,27 @@ def test_no_browser_prints_url_only(zmail, tmp_path, monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert len(printed) == 1 and printed[0] in err
     assert "opening the browser" not in err
+    assert "connected zmail:main" in out
+    _assert_clean(out + err)
+
+
+def test_browser_that_fails_to_open_prints_url(zmail, tmp_path, monkeypatch, capsys):
+    printed: list[str] = []
+    real_print = print
+
+    def watching_print(*args, **kwargs):
+        real_print(*args, **kwargs)
+        text = " ".join(str(a) for a in args)
+        if kwargs.get("file") is sys.stderr and text.startswith(AUTHORIZE_URL):
+            printed.append(text)
+            threading.Thread(target=FakeBrowser(probes=False, repeat=False), args=(text,), daemon=True).start()
+
+    monkeypatch.setattr("builtins.print", watching_print)
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: False)
+    assert run(monkeypatch, "connect", "zmail", "--home-root", str(tmp_path), "--timeout-s", "10") == 0
+    out, err = capsys.readouterr()
+    assert len(printed) == 1 and printed[0] in err
+    assert "the browser did not open" in err
     assert "connected zmail:main" in out
     _assert_clean(out + err)
 

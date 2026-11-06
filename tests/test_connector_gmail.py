@@ -226,6 +226,14 @@ def test_message_get_renders_the_id_and_stays_a_read(monkeypatch):
     ({"to": "not an address", "subject": "s", "body": "b"}, "to"),
     ({"to": "ann@example.com", "subject": "s"}, "body"),
     ({"to": "ann@example.com", "subject": "s", "body": "b", "from": "boss@example.com"}, "unknown"),
+    # RFC 2047 encoded words are refused before decoding could hide a line break.
+    ({"to": "ann@example.com", "subject": "=?utf-8?q?ok=0D=0ABcc=3A_eve=40example.com?=", "body": "b"},
+     "subject"),
+    ({"to": "=?utf-8?q?Ann=0D=0A?= <ann@example.com>", "subject": "s", "body": "b"}, "to"),
+    ({"to": "ann@example.com", "cc": "=?utf-8?b?ZXZl?= <cy@example.net>", "subject": "s", "body": "b"}, "cc"),
+    ({"to": "ann@example.com", "bcc": ["=?iso-8859-1?q?x?= <cy@example.net>"], "subject": "s", "body": "b"},
+     "bcc"),
+    ({"to": "ann@example.com", "subject": "plain =?utf-8?b?QmNj?= tail", "body": "b"}, "subject"),
 ])
 def test_send_refuses_bad_messages_before_any_request(monkeypatch, args, field):
     monkeypatch.setenv("GMAIL_TOKEN", TOKEN)
@@ -375,6 +383,70 @@ def test_card_refuses_a_mail_body_it_cannot_show_exactly():
                          headers={"Content-Type": "message/rfc822"})
     text = describe_request("t", "s", "always_approve", "gmail", good, {}, exact=True)
     assert "mail message (message/rfc822):" in text and "To: Ann <ann@example.com>, bob@example.org" in text
+
+
+def test_build_turns_email_package_errors_into_message_errors():
+    from fabri.tools.mail_message import MessageError
+
+    for args in ({"to": '"Ann\u202e" <ann@example.com>', "subject": "s", "body": "b"},
+                 {"to": "ann@example.com", "subject": "s", "body": "b\ud800"}):
+        with pytest.raises(MessageError):
+            build_message(args)
+
+
+def test_card_revalidates_decoded_headers():
+    from fabri.tools.mail_message import MessageNotShowable, describe_message
+
+    for subject in (b"=?utf-8?q?ok=0D=0ABcc=3A_eve=40example.com?=", b"=?utf-8?q?a=E2=80=AEb?=",
+                    b"=?utf-8?q?=3D=3Futf-8=3Fq=3Fx=3F=3D?="):
+        content = (b"To: ann@example.com\r\nSubject: " + subject + b"\r\nMIME-Version: 1.0\r\n"
+                   b"Content-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n")
+        with pytest.raises(MessageNotShowable):
+            describe_message(content)
+        request = httpx.Request("POST", UPLOAD + "/messages/send", content=content,
+                                headers={"Content-Type": "message/rfc822"})
+        with pytest.raises(RequestNotShowable):
+            describe_request("t", "s", "always_approve", "gmail", request, {}, exact=True)
+    # A long non-ASCII subject is encoded by build_message and decodes back unchanged.
+    subject = "Résumé update " * 30
+    text = describe_message(build_message({"to": "ann@example.com", "subject": subject, "body": "b"}))
+    assert "Subject: " + subject.strip() in text or "Subject: " + subject in text
+
+
+def test_card_refuses_a_mail_message_that_redaction_would_change(home):
+    listener = FakeListener(["approve"])
+    broker, _binding, upstream, registry, _asked = _serve(home, listener)
+    try:
+        for args in ({"to": "ann@example.com", "subject": "key ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                      "body": "b"},
+                     {"to": "ann@example.com", "subject": "s",
+                      "body": "hello\nAuthorization: Bearer abcdefghijklmnop0123456789\nbye"}):
+            out = registry.invoke("gmail_messages_send", args)
+            assert out["ok"] is False
+            assert "redact" in out["error"] and "exactly what Gmail receives" in out["error"]
+            assert "ghp_" not in out["error"] and "abcdefghijklmnop" not in out["error"]
+        assert upstream.requests == [] and listener.asked == []
+    finally:
+        broker.close()
+    # Outside an approval card the message is still shown, redacted.
+    content = build_message({"to": "ann@example.com", "subject": "s",
+                             "body": "key ghp_abcdefghijklmnopqrstuvwxyz0123456789"})
+    request = httpx.Request("POST", UPLOAD + "/messages/send", content=content,
+                            headers={"Content-Type": "message/rfc822"})
+    with pytest.raises(RequestNotShowable):
+        describe_request("t", "s", "always_approve", "gmail", request, {}, exact=True)
+    shown = describe_request("t", "s", "always_approve", "gmail", request, {})
+    assert "ghp_abcdefghijklmnop" not in shown and "[redacted]" in shown
+
+
+def test_compose_is_classed_restricted_and_the_default_set_has_no_restricted_scope():
+    restricted = {gmail._SCOPE + name for name in ("gmail.readonly", "gmail.compose", "gmail.modify")}
+    assert set(gmail.SCOPES_OPTIONAL.values()) == restricted
+    assert not restricted & set(gmail.SCOPES_DEFAULT)
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "connectors" / "gmail.md").read_text(encoding="utf-8")
+    assert "`compose` (`gmail.compose`): drafts. A restricted scope." in doc
+    assert "sensitive scope" not in doc.split("## Scopes", 1)[1].split("##", 1)[0].lower().replace(
+        "sensitive scopes such as `gmail.send`", "")
 
 
 # ---------------------------------------------------------------- identity
