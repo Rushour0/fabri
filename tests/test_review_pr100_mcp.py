@@ -66,6 +66,9 @@ _ECHOED = [
     (CRED, SENTINEL, [CRED], [SENTINEL]),
     ("OPENAI_API_KEY", SENTINEL, [], [SENTINEL]),
     ("DB_PASSWORD", "hunter2", [], ["hunter2"]),
+    ("PGPASSWORD", "12345678", [], ["12345678"]),
+    ("TF_TOKEN_app_terraform_io", "87654321", [], ["87654321"]),
+    ("REDISCLI_AUTH", "redis-pw-1", [], ["redis-pw-1"]),
     ("DATABASE_URL", DB_URL, [], [DB_URL, "s3cretpw"]),
 ]
 
@@ -214,6 +217,11 @@ def test_inherited_credential_urls_are_redaction_secrets(monkeypatch, name, valu
         ("STRIPE_KEY", "999999"),
         ("APP_SECRET", "42424242"),
         ("SMTP_PASS", "yes"),
+        ("PGPASSWORD", "12345678"),
+        ("TF_TOKEN_app_terraform_io", "12345678"),
+        ("REDISCLI_AUTH", "1234"),
+        ("DOCKER_AUTH_CONFIG", '{"auths":{"r":{"auth":"dXNlcjpwYXNz"}}}'),
+        ("COMPOSER_AUTH", '{"github-oauth":{"github.com":"ghp_x123"}}'),
     ],
 )
 def test_flags_and_numbers_under_strong_secret_names_are_redaction_secrets(name, value):

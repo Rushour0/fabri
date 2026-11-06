@@ -407,16 +407,27 @@ _TRIVIAL_ENV_VALUE = re.compile(r"(?i)true|false|yes|no|on|off|\d+")
 # flag-or-number exemption does not apply: DB_PASSWORD=12345678 is a password.
 # A last part such as TOKEN or KEY counts (GITHUB_TOKEN, STRIPE_KEY); the same
 # word earlier in the name does not (TOKEN_LIMIT, MAX_TOKENS,
-# TOKENIZERS_PARALLELISM). PASSWORD and SECRET count anywhere.
+# TOKENIZERS_PARALLELISM). PASSWORD and SECRET count anywhere, even inside a
+# part (PGPASSWORD).
 _STRONG_SECRET_LAST = frozenset({
     "password", "passwd", "pass", "pwd", "secret", "token", "pat", "apikey", "key", "pin",
 })
-_STRONG_SECRET_ANYWHERE = frozenset({"password", "passwd", "secret"})
+_STRONG_SECRET_ANYWHERE = ("password", "passwd", "secret")
+# Standard credential variables the rules above miss: Terraform host tokens,
+# redis-cli, Docker and Composer auth config.
+_STRONG_SECRET_PREFIXES = ("tf_token_",)
+_STRONG_SECRET_NAMES = frozenset({"rediscli_auth", "docker_auth_config", "composer_auth"})
 
 
 def _env_name_is_strong_secret(name: str) -> bool:
-    parts = [p for p in name.lower().split("_") if p]
-    return bool(parts) and (parts[-1] in _STRONG_SECRET_LAST or bool(set(parts) & _STRONG_SECRET_ANYWHERE))
+    lower = name.lower()
+    parts = [p for p in lower.split("_") if p]
+    return bool(parts) and (
+        parts[-1] in _STRONG_SECRET_LAST
+        or any(word in lower for word in _STRONG_SECRET_ANYWHERE)
+        or lower.startswith(_STRONG_SECRET_PREFIXES)
+        or lower in _STRONG_SECRET_NAMES
+    )
 # Names whose value is a connection string that may carry user:password.
 _CONNECTION_NAME_SUFFIXES = ("_url", "_dsn", "_uri")
 
