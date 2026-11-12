@@ -174,9 +174,11 @@ def env_names_mcp_server(tmp_path: Path) -> Path:
     return script
 
 
-def _mcp_names(script: Path, env_mode: str) -> dict:
+def _mcp_names(script: Path, env_mode: str | None) -> dict:
     decl = {"name": "names_srv", "kind": "mcp", "command": [sys.executable, str(script)],
-            "env": {"TOKEN_X": {"secret_ref": "slack:acme"}}, "env_mode": env_mode}
+            "env": {"TOKEN_X": {"secret_ref": "slack:acme"}}}
+    if env_mode is not None:
+        decl["env_mode"] = env_mode
     tools = build_source_tools(decl)
     try:
         out = tools[0].handler({})
@@ -565,3 +567,11 @@ def test_verifier_sees_no_broker_vars(tmp_path: Path, broker_env) -> None:
     verdict = _run_verifier([sys.executable, str(script)], str(tmp_path))
     assert verdict["ok"]
     assert _cred_names(verdict["output"]) == []
+
+
+def test_default_mcp_source_is_allowlisted(env_names_mcp_server: Path, run_tokens) -> None:
+    # No env_mode means the allowlist: the declared env reaches the child,
+    # no FABRI_CRED_* variable does.
+    seen = _mcp_names(env_names_mcp_server, None)
+    assert seen["creds"] == []
+    assert seen["has_token_x"] is True

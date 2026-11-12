@@ -383,7 +383,8 @@ memory store (retrievable in the next run)
 **Security (deferred):**
 - MCP remote tool descriptions flow into the system prompt verbatim (injection risk).
 - MCP server mode unauthenticated + unbounded (`mcp_server.py`).
-- Tool subprocesses inherit full `os.environ` incl. provider keys.
+- Tool subprocesses inherit full `os.environ` incl. provider keys. (Stdio MCP servers no longer do: they get an
+  allowlisted environment plus their declared `env` unless they opt in with `inherit_env` / `env_mode: inherit`.)
 - MCP stdio `_read` has no timeout.
 - `grep_dir` recipe reads any path (no sandbox jail).
 

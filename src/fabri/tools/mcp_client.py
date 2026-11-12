@@ -37,12 +37,18 @@ Hardening:
   and log lines pass through ``redact`` so those values never reach the agent
   or the log. A stdio server's stderr goes to the fabri log (redacted), never
   into the error the agent sees.
-- Environment. ``inherit_env=False`` gives a stdio server only an allowlisted
-  copy of the parent environment (``ENV_ALLOW_EXACT``, ``ENV_ALLOW_PREFIXES``,
-  and proxy variables without a user:password part) plus its own ``env``. The default ``True`` merges
-  ``env`` onto the parent environment. In both modes every ``FABRI_CRED_*``
+- Environment. By default (``inherit_env=False``) a stdio server gets only an
+  allowlisted copy of the parent environment (``ENV_ALLOW_EXACT``,
+  ``ENV_ALLOW_PREFIXES``, and proxy variables without a user:password part)
+  plus its own ``env``. A server that needs a key must declare it in ``env``
+  (or name a ``FABRI_CRED_*`` variable in ``credential_env``). Setting
+  ``inherit_env=True`` is an explicit opt-in that merges ``env`` onto the whole
+  parent environment; inherited values whose name or shape says they hold a
+  credential are then redacted, but that check goes by name and can miss one,
+  which is why it is not the default. In both modes every ``FABRI_CRED_*``
   variable is removed from the parent part except the names in
-  ``credential_env``. The two credential broker variables
+  ``credential_env`` (in the allowlist mode those names are passed even though
+  the allowlist itself holds none). The two credential broker variables
   (``BROKER_ENV_NAMES``) never reach a stdio server, whatever ``env`` or
   ``credential_env`` say.
 - Remote text. Tool descriptions and titles, top level and inside an
@@ -487,7 +493,8 @@ def _inherited_secrets(name: str, value: str) -> list[str]:
 
 
 def _allowlisted_env() -> dict[str, str]:
-    """The parent variables a stdio server may see when ``inherit_env`` is off.
+    """The parent variables a stdio server may see when ``inherit_env`` is off
+    (the default).
     A proxy variable is left out when it has an ``@``, since that means a
     user:password part (``NO_PROXY`` holds hosts and never needs one)."""
     env = {}
@@ -523,7 +530,9 @@ class MCPStdioClient:
     env: dict[str, str] | None = None
     name: str = "mcp"
     timeout_s: float = 30.0
-    inherit_env: bool = True
+    # False (the default) passes only _allowlisted_env() plus `env`. True is an
+    # explicit opt-in to the whole parent environment.
+    inherit_env: bool = False
     # FABRI_CRED_* names this server's own declaration references. Every other
     # FABRI_CRED_* variable is removed from the inherited environment.
     credential_env: frozenset[str] = frozenset()
@@ -541,12 +550,12 @@ class MCPStdioClient:
         return tuple(values)
 
     def start(self) -> None:
-        # Popen's `env=` replaces the whole environment. With inherit_env the
-        # overrides are merged onto the parent environment (None when there
-        # are none, so the child inherits it as is). Without it the child gets
-        # only the allowlisted parent variables plus its own env. Either way
-        # the run's FABRI_CRED_* tokens are removed, except the exact names in
-        # `credential_env`, so a server cannot read another source's token.
+        # Popen's `env=` replaces the whole environment. By default the child
+        # gets only the allowlisted parent variables plus its own env. With
+        # the inherit_env opt-in the overrides are merged onto the whole
+        # parent environment. Either way the run's FABRI_CRED_* tokens are
+        # removed, except the exact names in `credential_env`, so a server
+        # cannot read another source's token.
         # The broker socket path and key are removed last and always: a
         # config that lists them in `credential_env` or sets them in `env`
         # would otherwise hand the run's broker capability to the server.
@@ -554,14 +563,19 @@ class MCPStdioClient:
         if self.inherit_env:
             child_env = {**env_without_credentials(keep=keep), **(self.env or {})}
         else:
-            child_env = {**env_without_credentials(_allowlisted_env()), **(self.env or {})}
+            # The allowlist holds no FABRI_CRED_* name, so the ones this
+            # server declared in `credential_env` are added back by name.
+            declared = {k: v for k, v in os.environ.items() if k in keep and k.startswith(ENV_CREDENTIAL_PREFIX)}
+            child_env = {**env_without_credentials(_allowlisted_env()), **declared, **(self.env or {})}
         for broker_name in BROKER_ENV_NAMES:
             child_env.pop(broker_name, None)
         # The child can echo any credential it was given (in a result, an
         # error or its stderr), so every one of them is redacted, not only
         # the values in `env`. That includes an inherited variable whose name
-        # says it holds a secret (OPENAI_API_KEY, GITHUB_TOKEN, ...): with
-        # inherit_env the child gets the whole parent environment.
+        # says it holds a secret (OPENAI_API_KEY, GITHUB_TOKEN, ...): with the
+        # inherit_env opt-in the child gets the whole parent environment. The
+        # name check is defense in depth only; the allowlist default is what
+        # keeps undeclared keys away from the child.
         secrets: list[str] = []
         for key, value in child_env.items():
             if not value or key == CREDENTIAL_AUDIT_LOG_ENV:
@@ -969,7 +983,8 @@ def build_mcp_tools(
     approval class from the server's tools/list entry (after cleaning).
 
     Reads ``name``, ``command``, ``url``, ``env``, ``headers``, ``timeout_s``,
-    ``inherit_env`` (stdio, default True), ``credential_env`` (stdio, the
+    ``inherit_env`` (stdio, default False: only allowlisted parent variables
+    plus ``env``; True passes the whole parent environment), ``credential_env`` (stdio, the
     FABRI_CRED_* names the server may inherit; default none), ``transport`` (http, an
     ``httpx.BaseTransport`` for tests), ``header_source`` and
     ``credential_hint`` and ``poster`` (http, see ``MCPHttpClient``). Picks the transport by which of
@@ -999,9 +1014,13 @@ def build_mcp_tools(
         )
     elif command:
         inherit = server_cfg.get("inherit_env")
+        if inherit is None:
+            inherit = False
+        elif not isinstance(inherit, bool):
+            raise ValueError(f"mcp server {name!r}: inherit_env must be true or false (got {inherit!r})")
         client = MCPStdioClient(
             command=command, env=server_cfg.get("env"), name=name, timeout_s=timeout_s,
-            inherit_env=True if inherit is None else bool(inherit),
+            inherit_env=inherit,
             credential_env=frozenset(server_cfg.get("credential_env") or ()),
         )
     else:

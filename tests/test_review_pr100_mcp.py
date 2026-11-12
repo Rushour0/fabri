@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import textwrap
 
@@ -56,8 +57,10 @@ _CHILD = textwrap.dedent(
 
 # The env var the child echoes, the value it holds, the credential_env it is
 # declared with, and the strings that must never come back. FABRI_CRED_X comes
-# through credential_env; the others are ordinary inherited variables
-# (inherit_env defaults to True) that nothing declared. OPENAI_API_KEY and
+# through credential_env; the others are ordinary parent variables that
+# nothing declared, so they reach the child only through the inherit_env
+# opt-in (the fixture sets it; the default allowlist keeps them out, see
+# test_default_child_gets_no_undeclared_parent_var). OPENAI_API_KEY and
 # DB_PASSWORD are redacted by name, however short (hunter2 is 7 characters).
 # DATABASE_URL is redacted because its value holds user:password, and so is
 # the bare password.
@@ -81,6 +84,8 @@ def server(request, monkeypatch):
         "name": "leaky",
         "command": [sys.executable, "-c", _CHILD, var],
         "credential_env": credential_env,
+        # The name-based redaction is defense in depth for the opt-in mode.
+        "inherit_env": True,
         "timeout_s": 10,
     })
     handler = dict((m.name, h) for m, h in pairs)["mcp_leaky_echo"]
@@ -151,6 +156,50 @@ def test_names_not_in_credential_env_are_not_inherited_or_needed(monkeypatch):
         c.close()
 
 
+# Parent variables a real child must not see under the default allowlist,
+# whatever their name. MYAPP_CONF has no secret-looking name at all.
+_UNDECLARED = [
+    ("OPENAI_API_KEY", SENTINEL),
+    ("DB_PASSWORD", "12345678"),
+    ("PGPASSWORD", "pg-pw-undeclared"),
+    ("TF_TOKEN_app_terraform_io", "tf-tok-undeclared"),
+    ("MYAPP_CONF", "secretish-undeclared"),
+]
+
+
+@pytest.mark.parametrize(("var", "value"), _UNDECLARED, ids=[n for n, _ in _UNDECLARED])
+def test_default_child_gets_no_undeclared_parent_var(monkeypatch, var, value):
+    monkeypatch.setenv(var, value)
+    client, pairs = build_mcp_tools({
+        "name": "leaky",
+        "command": [sys.executable, "-c", _CHILD, var],
+        "timeout_s": 10,
+    })
+    try:
+        raw = client._request("tools/call", {"name": "echo", "arguments": {"mode": "result"}})
+        assert value not in json.dumps(raw)
+        assert raw["structuredContent"] == {"token": ""}
+    finally:
+        client.close()
+
+
+def test_default_child_gets_declared_env_and_path(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "not-for-the-child")
+    for var, expected in (("SERVER_KEY", SENTINEL), ("PATH", os.environ["PATH"])):
+        client, _ = build_mcp_tools({
+            "name": "leaky",
+            "command": [sys.executable, "-c", _CHILD, var],
+            "env": {"SERVER_KEY": SENTINEL},
+            "timeout_s": 10,
+        })
+        try:
+            raw = client._request("tools/call", {"name": "echo", "arguments": {"mode": "result"}})
+            got = raw["structuredContent"]["token"]
+            assert got == expected
+        finally:
+            client.close()
+
+
 def test_env_values_still_redacted_before_start():
     c = MCPStdioClient(command=["unused"], env={"T": SENTINEL})
     assert c._secrets == (SENTINEL,)
@@ -160,7 +209,7 @@ def test_env_values_still_redacted_before_start():
                                   "DB_PASSWORD", "STRIPE_KEY", "SMTP_PASS"])
 def test_inherited_secret_named_vars_are_redaction_secrets(monkeypatch, name):
     monkeypatch.setenv(name, SENTINEL)
-    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"])
+    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"], inherit_env=True)
     c.start()
     try:
         assert SENTINEL in c._secrets
@@ -176,7 +225,7 @@ def test_flags_numbers_and_plain_inherited_values_are_not_redaction_secrets(monk
     monkeypatch.setenv("PORT", "8080")
     monkeypatch.setenv("FABRI_TEST_PLAIN_SETTING", "plain-long-value-123456")
     monkeypatch.setenv("FABRI_TEST_HOME_URL", "https://example.com/path")
-    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"])
+    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"], inherit_env=True)
     c.start()
     try:
         for value in ("false", "4096", "8080", "plain-long-value-123456", "https://example.com/path"):
@@ -199,7 +248,7 @@ def test_flags_numbers_and_plain_inherited_values_are_not_redaction_secrets(monk
 ])
 def test_inherited_credential_urls_are_redaction_secrets(monkeypatch, name, value, expected):
     monkeypatch.setenv(name, value)
-    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"])
+    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"], inherit_env=True)
     c.start()
     try:
         for piece in expected:

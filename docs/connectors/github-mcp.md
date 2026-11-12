@@ -35,8 +35,9 @@ Then add this block to the agent config:
 
 ```yaml
 tools:
-  mcp_servers:
-    - name: github
+  sources:
+    - kind: mcp
+      name: github
       command:
         - docker
         - run
@@ -45,43 +46,44 @@ tools:
         - -e
         - GITHUB_PERSONAL_ACCESS_TOKEN
         - ghcr.io/github/github-mcp-server
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: {env: GITHUB_PERSONAL_ACCESS_TOKEN}
 ```
+
+A stdio MCP server gets only a short allowlist of the launcher's variables
+(`PATH`, `HOME`, locale, proxy and CA settings, `DOCKER_*`) plus the names it
+declares under `env`. The `env` entry above is what hands the PAT to `docker`.
+A `tools.mcp_servers` entry takes only literal `env` values, so it cannot copy
+the PAT from the launcher without writing it into the YAML; use the
+`tools.sources` form above, or set `inherit_env: true` on the
+`tools.mcp_servers` entry to pass the whole launcher environment (an explicit
+opt-in that also hands the server every other key in it).
 
 This chooses GitHub's official `github-mcp-server` container rather than a
 third-party bridge. The package is the container image
 `ghcr.io/github/github-mcp-server`; `docker` is the executable, and the entire
 invocation is one `command` argv list because fabri has no separate `args` key.
 `-i` keeps stdin open for MCP's stdio transport. Docker's
-`-e GITHUB_PERSONAL_ACCESS_TOKEN` forwards the variable inherited by the
-`docker` process into the container. The official server expects that exact
+`-e GITHUB_PERSONAL_ACCESS_TOKEN` forwards the variable the `docker` process
+got through `env` into the container. The official server expects that exact
 PAT variable name.
 
-fabri also accepts an `env` map for stdio servers and merges it over the
-launcher's environment. Do not put a raw PAT in checked-in YAML, and do not use
+Do not put a raw PAT in checked-in YAML, and do not use
 `${GITHUB_PERSONAL_ACCESS_TOKEN}` there: `yaml.safe_load` does not expand shell
 variables.
 
 ## Credential handles
 
 `fabri.tools.secret_refs` resolves a handle such as `github:acme` from
-`FABRI_CRED_GITHUB_ACME`. The MCP config parser does **not** call that resolver,
-so this is not valid:
+`FABRI_CRED_GITHUB_ACME`. A `tools.sources` entry takes the handle as a spec:
 
 ```yaml
 env:
-  GITHUB_PERSONAL_ACCESS_TOKEN: github:acme
+  GITHUB_PERSONAL_ACCESS_TOKEN: {secret_ref: github:acme}
 ```
 
-For a handle-backed local setup, have the launching shell or secret manager set
-the server's expected variable from the backing variable before fabri starts:
-
-```sh
-export FABRI_CRED_GITHUB_ACME='github_pat_...'
-export GITHUB_PERSONAL_ACCESS_TOKEN="$FABRI_CRED_GITHUB_ACME"
-```
-
-The YAML above then works unchanged because the MCP subprocess inherits the
-launcher environment.
+The `tools.mcp_servers` parser does **not** call that resolver, so a bare
+`github:acme` string there is passed through as the literal value.
 
 ## Least-privilege PAT
 
@@ -162,21 +164,11 @@ The server-config keys read by that parser are therefore:
 `command` and `url` are mutually exclusive, and one is required. There is no
 `args` key.
 
-Environment inheritance is defined at
-`src/fabri/tools/mcp_client.py:87-96`:
-
-```python
-# Popen's `env=` REPLACES the whole environment; passing only the
-# configured overrides would strip PATH/FABRI_HOME and break the server.
-# Merge onto the inherited environment instead.
-child_env = {**os.environ, **self.env} if self.env else None
-self.proc = subprocess.Popen(
-    self.command,
-    stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    env=child_env,
-```
+The child environment is built in `MCPStdioClient.start()` in
+`src/fabri/tools/mcp_client.py`. By default it is the allowlisted part of the
+launcher environment plus the server's `env`; `inherit_env: true` merges `env`
+onto the whole launcher environment instead. Either way every `FABRI_CRED_*`
+variable not named in `credential_env` is removed.
 
 Startup, discovery, and tool naming are visible at
 `src/fabri/tools/mcp_client.py:293-300`:

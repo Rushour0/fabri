@@ -161,8 +161,8 @@ def test_stdio_start_inherits_parent_env_without_credentials(monkeypatch):
     captured = {}
     monkeypatch.setattr(mc.subprocess, "Popen",
                         lambda command, **kw: captured.update(env=kw.get("env")) or _FakeProc([]))
-    MCPStdioClient(command=["s"], name="t").start()  # no env=
-    # The parent env is inherited, minus every connector credential.
+    MCPStdioClient(command=["s"], name="t", inherit_env=True).start()  # no env=
+    # With the opt-in the parent env is inherited, minus every connector credential.
     assert captured["env"]["SOME_PARENT_VAR"] == "kept"
     assert not [k for k in captured["env"] if k.startswith("FABRI_CRED_") and k != "FABRI_CRED_AUDIT_LOG"]
 
@@ -195,7 +195,7 @@ class _ScriptedClient:
     tools: list = []
     call_result: dict = {}
 
-    def __init__(self, command, env=None, name="mcp", timeout_s=30.0, inherit_env=True,
+    def __init__(self, command, env=None, name="mcp", timeout_s=30.0, inherit_env=False,
                  credential_env=frozenset()):
         self.env = env
         self.name = name
@@ -431,9 +431,14 @@ def test_build_mcp_tools_passes_inherit_env_and_timeout(monkeypatch):
     monkeypatch.setattr(mc, "MCPStdioClient", _Capture)
     _Capture.tools = []
     build_mcp_tools({"name": "a", "command": ["srv"]})
-    build_mcp_tools({"name": "b", "command": ["srv"], "inherit_env": False, "timeout_s": 5})
-    assert made[0]["inherit_env"] is True and made[0]["timeout_s"] == 30.0
-    assert made[1]["inherit_env"] is False and made[1]["timeout_s"] == 5.0
+    build_mcp_tools({"name": "b", "command": ["srv"], "inherit_env": True, "timeout_s": 5})
+    build_mcp_tools({"name": "c", "command": ["srv"], "inherit_env": None})
+    # The allowlist is the default; only an explicit true inherits.
+    assert made[0]["inherit_env"] is False and made[0]["timeout_s"] == 30.0
+    assert made[1]["inherit_env"] is True and made[1]["timeout_s"] == 5.0
+    assert made[2]["inherit_env"] is False
+    with pytest.raises(ValueError, match="inherit_env must be true or false"):
+        build_mcp_tools({"name": "d", "command": ["srv"], "inherit_env": "yes"})
 
 
 def test_stdio_read_times_out():
@@ -499,6 +504,61 @@ def test_stdio_allowlisted_env_when_inherit_env_false(monkeypatch):
 
     MCPStdioClient(command=["s"], name="t", inherit_env=False).start()
     assert isinstance(captured["env"], dict) and "AWS_SECRET_ACCESS_KEY" not in captured["env"]
+
+
+# Parent variables the name-based redaction has missed, or could miss. The
+# allowlist default must keep every one of them away from the child.
+_UNDECLARED = {
+    "OPENAI_API_KEY": "sk-undeclared-openai",
+    "DB_PASSWORD": "12345678",
+    "PGPASSWORD": "pg-undeclared-pw",
+    "TF_TOKEN_app_terraform_io": "tf-undeclared-token",
+    "MYAPP_CONF": "secretish-config-value",
+}
+
+
+def test_stdio_default_env_is_allowlisted(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(mc.subprocess, "Popen",
+                        lambda command, **kw: captured.update(env=kw.get("env")) or _FakeProc([]))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", "/home/u")
+    for k, v in _UNDECLARED.items():
+        monkeypatch.setenv(k, v)
+    client = MCPStdioClient(command=["s"], name="t", env={"SERVER_API_KEY": "declared-key"})
+    assert client.inherit_env is False
+    client.start()
+    env = captured["env"]
+    assert env["PATH"] == "/usr/bin:/bin" and env["HOME"] == "/home/u"
+    assert env["SERVER_API_KEY"] == "declared-key"
+    for k, v in _UNDECLARED.items():
+        assert k not in env
+        assert v not in env.values()
+    # build_mcp_tools has the same default.
+    captured.clear()
+    _ScriptedClient.tools = []
+    monkeypatch.setattr(mc.MCPStdioClient, "initialize", lambda self: {})
+    monkeypatch.setattr(mc.MCPStdioClient, "list_tools", lambda self: [])
+    build_mcp_tools({"name": "b", "command": ["srv"]})
+    assert not set(_UNDECLARED) & set(captured["env"])
+
+
+def test_stdio_inherit_opt_in_inherits_and_redacts(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(mc.subprocess, "Popen",
+                        lambda command, **kw: captured.update(env=kw.get("env")) or _FakeProc([]))
+    for k, v in _UNDECLARED.items():
+        monkeypatch.setenv(k, v)
+    client = MCPStdioClient(command=["s"], name="t", inherit_env=True)
+    client.start()
+    env = captured["env"]
+    for k, v in _UNDECLARED.items():
+        assert env[k] == v
+    # The name-based redaction still covers the opt-in mode. MYAPP_CONF has
+    # no secret-looking name, which is the gap the allowlist default closes.
+    for k in ("OPENAI_API_KEY", "DB_PASSWORD", "PGPASSWORD", "TF_TOKEN_app_terraform_io"):
+        assert _UNDECLARED[k] in client._secrets
+    assert _UNDECLARED["MYAPP_CONF"] not in client._secrets
 
 
 def _mock(handler):
@@ -969,10 +1029,12 @@ def test_stdio_start_always_strips_broker_vars(monkeypatch):
     names = sorted(BROKER_ENV_NAMES)
     cases = [
         # The config asks for the broker names by credential_env.
+        {"inherit_env": True, "credential_env": frozenset(names) | {"FABRI_CRED_GH_MAIN"}},
         {"credential_env": frozenset(names) | {"FABRI_CRED_GH_MAIN"}},
         # The config copies them into its own env.
+        {"inherit_env": True, "env": {n: "copied" for n in names}},
         {"env": {n: "copied" for n in names}},
-        # The allowlist mode.
+        # The allowlist mode, both at once.
         {"inherit_env": False, "credential_env": frozenset(names), "env": {n: "copied" for n in names}},
     ]
     for kwargs in cases:
@@ -982,7 +1044,11 @@ def test_stdio_start_always_strips_broker_vars(monkeypatch):
         for n in names:
             assert n not in env
         assert "broker_key_value_for_test" not in env.values()
-    # credential_env still passes the ordinary names it lists.
-    MCPStdioClient(command=["s"], name="t", credential_env=frozenset({"FABRI_CRED_GH_MAIN"})).start()
+    # credential_env still passes the ordinary names it lists, in both modes.
+    MCPStdioClient(command=["s"], name="t", inherit_env=True,
+                   credential_env=frozenset({"FABRI_CRED_GH_MAIN"})).start()
     assert captured["env"]["FABRI_CRED_GH_MAIN"] == "gh_token_value_for_test"
     assert captured["env"]["SOME_PARENT_VAR"] == "kept"
+    MCPStdioClient(command=["s"], name="t", credential_env=frozenset({"FABRI_CRED_GH_MAIN"})).start()
+    assert captured["env"]["FABRI_CRED_GH_MAIN"] == "gh_token_value_for_test"
+    assert "SOME_PARENT_VAR" not in captured["env"]

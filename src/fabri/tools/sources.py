@@ -23,7 +23,8 @@
       - kind: mcp                  # an MCP server (stdio `command` or http `url`)
         name: files
         command: [mcp-files, /srv/data]
-        env_mode: allowlist        # pass the child only a short list of host variables
+        env_mode: allowlist        # the default: a short list of host variables plus `env`
+                                   # (`inherit` opts in to the whole host environment)
         approval_mode: tighten     # the class can only go up from fabri's own pick
         catalog: github            # id of a built-in connector: applies its name-based minimum
       - kind: python               # an in-process callable
@@ -591,11 +592,16 @@ def _build_mcp(decl, *, base_dir, policy, transport, store, dry, broker=None) ->
         cfg["command"] = list(decl["command"])
         if decl.get("env"):
             cfg["env"] = resolve_headers(decl.get("env"), store)
-        # The server may inherit only the FABRI_CRED_* names its own
-        # declaration references; the run's other tokens are removed.
-        cfg["credential_env"] = credential_env_names(
-            secret_refs(decl), actor=os.environ.get("FABRI_RUN_ACTOR") or None)
-    cfg["inherit_env"] = decl.get("env_mode") != "allowlist"
+        # Only an explicit `env_mode: inherit` passes the whole host
+        # environment; the default is the allowlist, so a server must declare
+        # the keys it needs under `env` (resolved above).
+        cfg["inherit_env"] = decl.get("env_mode") == "inherit"
+        if cfg["inherit_env"]:
+            # The server may inherit only the FABRI_CRED_* names its own
+            # declaration references; the run's other tokens are removed.
+            # The allowlist mode needs none: `env` already carries the values.
+            cfg["credential_env"] = credential_env_names(
+                secret_refs(decl), actor=os.environ.get("FABRI_RUN_ACTOR") or None)
     cfg["transport"] = transport
     client, pairs = build_mcp_tools(
         cfg, approval_for=lambda remote, spec: mcp_approval(remote, str(spec.get("description") or ""),

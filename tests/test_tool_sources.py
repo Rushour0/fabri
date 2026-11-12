@@ -209,8 +209,13 @@ def test_mcp_source_passes_env_mode_and_transport(monkeypatch):
     transport = _transport([])
     build_source_tools({"kind": "mcp", "name": "a", "command": ["c"], "env_mode": "allowlist"}, transport=transport)
     assert got["inherit_env"] is False and got["transport"] is transport
+    # The allowlist is the default; only an explicit `env_mode: inherit` inherits.
+    got.clear()
     build_source_tools({"kind": "mcp", "name": "a", "command": ["c"]})
-    assert got["inherit_env"] is True
+    assert got["inherit_env"] is False and "credential_env" not in got
+    got.clear()
+    build_source_tools({"kind": "mcp", "name": "a", "command": ["c"], "env_mode": "inherit"})
+    assert got["inherit_env"] is True and got["credential_env"] == frozenset()
 
 
 def test_sensitive_words():

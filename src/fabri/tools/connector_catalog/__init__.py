@@ -25,7 +25,9 @@ yet is skipped; any other import error propagates. Every loaded module is
 checked once at import time.
 
 Every source a module returns carries ``approval_mode: tighten`` and
-``catalog: <id>``, and a stdio MCP source carries ``env_mode: allowlist``.
+``catalog: <id>``, and a stdio MCP source carries ``env_mode: allowlist``
+(also the default since sources stopped inheriting the host environment; the
+key stays so the written YAML says so).
 The ``catalog`` key lets ``fabri.tools.sources`` look up ``minimum`` when the
 source builds.
 

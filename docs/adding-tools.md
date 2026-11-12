@@ -293,9 +293,13 @@ It prints tokens, name and approval class per tool, biggest first, then the tota
 - An oversized schema, or two tools whose names collide after cleaning, is rejected.
 - Values of your env vars and headers are removed from every error message. A server's stderr is never shown to the
   agent.
-- A stdio source with `env_mode: allowlist` (the catalog default) passes the child only a short list of host
-  variables (`PATH`, `HOME`, locale, proxy and CA settings, `DOCKER_*`) plus the variables you name under `env`.
-  `env_mode: inherit` is the default for hand-written sources.
+- A stdio source passes the child only a short list of host variables (`PATH`, `HOME`, locale, proxy and CA
+  settings, `DOCKER_*`) plus the variables you name under `env`. This is `env_mode: allowlist`, the default for
+  every source. A server that needs a key must declare it under `env`, for example
+  `env: {OPENAI_API_KEY: {env: OPENAI_API_KEY}}`. `env_mode: inherit` is an explicit opt-in that passes the
+  whole host environment; values whose names look like credentials are then redacted from what the server sends
+  back, but that check goes by name and can miss one. A `tools.mcp_servers` entry works the same way, with
+  `inherit_env: true` as its opt-in.
 - MCP over HTTP refuses redirects and refuses private or loopback hosts unless `FABRI_FETCH_ALLOW_PRIVATE` is set.
   The private-host check happens before connecting, so DNS rebinding between the check and the connection is not
   closed.
