@@ -39,6 +39,7 @@ class FakeAdapter(SurfaceAdapter):
         self.secret = secret
         self._hitl = hitl
         self.delivered: list[tuple[str, str]] = []
+        self.outcomes: list[RunOutcome] = []
         self.lifecycle: list[dict] = []
 
     def capabilities(self) -> SurfaceCapabilities:
@@ -74,6 +75,7 @@ class FakeAdapter(SurfaceAdapter):
         return True
 
     def deliver_result(self, target, outcome: RunOutcome):
+        self.outcomes.append(outcome)
         cost = "" if outcome.total_cost_usd is None else f" ${outcome.total_cost_usd}"
         self.delivered.append(("result", outcome.final_text + cost))
         return True
@@ -97,6 +99,7 @@ class FakeService:
         }
         self.submissions: list[dict] = []
         self.answers: list[tuple] = []
+        self.run_dispatcher = None
 
     def submit(self, task, overrides=None, *, catalog_ref=None, origin=None, **kw):
         self.submissions.append(
@@ -179,6 +182,118 @@ def test_full_loop_verify_dispatch_submit_deliver():
     }
     assert ("ack", "On it...") in adapter.delivered
     assert ("result", "Done $0.0123") in adapter.delivered
+
+
+def test_run_outcome_carries_result_details_and_defaults():
+    adapter, service = FakeAdapter(), FakeService()
+    service.result = lambda session_id: {
+        "success": False,
+        "final_text": "Stopped",
+        "structured_output": {"status": "partial"},
+        "usage": {"input_tokens": 4},
+        "cost": {"total_cost_usd": 0.2},
+        "error": ValueError("provider stopped"),
+    }
+
+    _post(adapter, service, {"id": "d1", "kind": "command", "tenant": "T1",
+                             "room": "R1", "text": "run triage the login bug"})
+
+    outcome = adapter.outcomes[0]
+    assert outcome.structured_output == {"status": "partial"}
+    assert outcome.usage == {"input_tokens": 4}
+    assert outcome.cost == {"total_cost_usd": 0.2}
+    assert outcome.error == "provider stopped"
+
+    service.result = lambda session_id: {"success": True, "final_text": "Done"}
+    _post(adapter, service, {"id": "d2", "kind": "command", "tenant": "T1",
+                             "room": "R1", "text": "run triage another bug"})
+
+    defaulted = adapter.outcomes[1]
+    assert defaulted.structured_output is None
+    assert defaulted.usage is None
+    assert defaulted.cost is None
+    assert defaulted.error is None
+
+
+def test_dispatch_uses_service_run_dispatcher_without_starting_a_run():
+    adapter, service = FakeAdapter(), FakeService()
+    dispatched = []
+    service.run_dispatcher = lambda got_adapter, command, target: dispatched.append(
+        (got_adapter, command, target)
+    )
+
+    status, _, _ = pipeline.dispatch(
+        adapter,
+        service,
+        json.dumps({"id": "d1", "kind": "command", "tenant": "T1", "room": "R1",
+                    "text": "run triage the login bug"}).encode(),
+        {"X-Fake-Signature": "s3cret"},
+    )
+
+    assert status == 200
+    assert len(dispatched) == 1
+    assert dispatched[0][0] is adapter
+    assert dispatched[0][1] == Command("run", "the login bug", "triage")
+    assert dispatched[0][2].locator == {"room": "R1"}
+    assert service.submissions == []
+
+
+def test_dispatcher_failure_is_delivered_as_an_error():
+    adapter, service = FakeAdapter(), FakeService()
+
+    def fail(adapter, command, target):
+        raise RuntimeError("queue unavailable")
+
+    service.run_dispatcher = fail
+
+    status, _, _ = _post(
+        adapter, service, {"id": "d1", "kind": "command", "tenant": "T1",
+                           "room": "R1", "text": "run triage the login bug"}
+    )
+
+    assert status == 200
+    assert adapter.delivered[-1][0] == "error"
+    assert service.submissions == []
+
+
+def test_dispatch_without_dispatcher_uses_the_existing_run_path():
+    adapter, service = FakeAdapter(), FakeService()
+
+    status, _, _ = _post(
+        adapter, service, {"id": "d1", "kind": "command", "tenant": "T1",
+                           "room": "R1", "text": "run triage the login bug"}
+    )
+
+    assert status == 200
+    assert len(service.submissions) == 1
+    assert adapter.outcomes[0].final_text == "Done"
+
+
+def test_run_and_deliver_merges_caller_overrides_under_surface_policy():
+    adapter, service = FakeAdapter(hitl=False), FakeService()
+    command = Command("run", "the login bug", "triage")
+    target = ReplyTarget(TenantRef("fake", "T1"), {"room": "R1"})
+    caller_overrides = {
+        "agent": {"model": "caller-model", "max_cost_usd": 99},
+        "tools": {"web": {"enabled": True}},
+    }
+
+    pipeline.run_and_deliver(
+        adapter, service, command, target, overrides=caller_overrides
+    )
+
+    submitted = service.submissions[0]["overrides"]
+    assert submitted["agent"] == {
+        "model": "caller-model",
+        "max_cost_usd": 0.75,
+    }
+    assert submitted["tools"] == {
+        "web": {"enabled": True},
+        "ask_user": {"enabled": False},
+    }
+    assert submitted is not caller_overrides
+    assert submitted["tools"] is not caller_overrides["tools"]
+    assert caller_overrides["agent"]["max_cost_usd"] == 99
 
 
 def test_forged_signature_is_rejected_before_anything_happens():

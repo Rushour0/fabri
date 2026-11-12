@@ -64,7 +64,7 @@ with trace.open("a") as f:
 print(json.dumps({
     "session_id": sid,
     "success": True,
-    "final_text": "all done",
+    "final_text": os.environ.get("TEST_PROVIDER_KEY", "all done"),
     "structured_output": None,
     "outcome": "success",
     "usage": {"cost_usd": 0.0012, "total_cost_usd": 0.0015},
@@ -411,6 +411,71 @@ def test_service_submit_stream_and_cost(tmp_path: Path, fake_agent: Path):
     assert result["cost"]["total_cost_usd"] == 0.0015
     assert result["cost"]["cost_usd"] == 0.0012
     assert result["cost"]["post_run_cost_usd"] == 0.0001
+    svc.close()
+
+
+def test_service_run_env_resolver_sets_run_env_and_receives_context(
+    tmp_path: Path, fake_agent: Path
+):
+    contexts = []
+
+    def resolve(context):
+        contexts.append(context)
+        return {"TEST_PROVIDER_KEY": "key-for-this-run"}
+
+    origin = {"surface": "fake", "tenant_id": "T1"}
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        command_builder=_builder_for(fake_agent),
+        run_env_resolver=resolve,
+    )
+    session_id = svc.submit("build it", user_id="u1", origin=origin)
+
+    assert svc.result(session_id, timeout=30)["final_text"] == "key-for-this-run"
+    assert contexts == [
+        {
+            "session_id": session_id,
+            "catalog_ref": None,
+            "user_id": "u1",
+            "origin": origin,
+            "task": "build it",
+        }
+    ]
+    svc.close()
+
+
+def test_service_run_env_resolver_failure_abandons_submit(tmp_path: Path):
+    failure = RuntimeError("key lookup failed")
+    seen_session_ids = []
+
+    def resolve(context):
+        seen_session_ids.append(context["session_id"])
+        raise failure
+
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        run_env_resolver=resolve,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        svc.submit("build it")
+
+    assert raised.value is failure
+    assert svc.list_sessions() == []
+    assert not (tmp_path / "runs" / seen_session_ids[0]).exists()
+    svc.close()
+
+
+def test_service_run_env_resolver_rejects_non_string_values(tmp_path: Path):
+    svc = FabriService(
+        home_root=tmp_path / "runs",
+        run_env_resolver=lambda context: {"TEST_PROVIDER_KEY": 123},
+    )
+
+    with pytest.raises(TypeError, match="keys and values must be strings"):
+        svc.submit("build it")
+
+    assert svc.list_sessions() == []
     svc.close()
 
 
