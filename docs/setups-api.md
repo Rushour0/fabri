@@ -80,7 +80,7 @@ auth:
 | `DELETE /setups/item?scope=S&kind=K&name=N` | | `204` |
 | `POST /setups/item/disable` | `{scope, kind, name, disabled: bool}` | `{ok}` |
 | `GET /setups/resolved?org=&project=&type=` | | the merged setup, each item tagged with its source layer, the resolved tool set, and the route options |
-| `GET /setups/preview?org=&project=&type=&task=&skill_top_k=&tool_top_k=` | | for one agent type and task: always-loaded skills with sizes, on-demand skills ranked with scores and whether each gets a full index line, tools ranked with scores and whether the model is shown them, prompt size against the budgets, and the ranking method (`embeddings` or `words`) |
+| `GET /setups/preview?org=&project=&type=&task=&skill_top_k=&tool_top_k=` | | for one agent type and task: always-loaded skills with sizes, on-demand skills ranked with scores and whether each gets a full index line, tools ranked with scores and whether the model is shown them, the tool retrieval decision (`tool_retrieval.enabled`, `mode` of `on`/`off`/`auto`, `auto_threshold`), prompt size against the budgets, and the ranking method (`embeddings` or `words`) |
 | `GET /setups/ui` | | the config's `ui:` block, or `{}` |
 | `GET /runs/tool-usage?limit=&agency=` | | per-tool calls, failures, refusals, seconds and run count summed over the newest `limit` runs (default 200) that reported tool usage |
 | `POST /setups/import` | `{scope, format: skill-md\|fabri, files: {path: text}, dry_run}` | `{created, updated, skipped, invalid}` |

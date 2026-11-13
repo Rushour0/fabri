@@ -122,6 +122,8 @@ Leaving `FABRI_PUBLIC_BASE_URL` unset is allowed. The OAuth routes then answer t
 ```sh
 fabri connections list [--provider P] [--json] [--home-root DIR]
 fabri connections remove cakemail acct1
+fabri connections rekey [--home-root DIR]
+fabri connections keygen
 ```
 
 `list` shows `PROVIDER HANDLE SCOPE NAME STATUS EXPIRES`. `--json` prints the same rows. Neither shows a token. `remove`
@@ -136,14 +138,92 @@ revoke it there.
 Connections live in `installs.db`, the same SQLite file as the Slack, GitHub and Linear installs. fabri finds it at
 `--home-root/installs.db`, else `$FABRI_INSTALL_DB`, else `$FABRI_HOME/serve/installs.db`.
 
-**Tokens are stored in plain text in that file. fabri sets it, and its `-wal` and `-shm` side files, to mode 0600
-(owner only) and warns once if the permissions are wider. It does not encrypt the file.** Encryption at rest is a later
-item. Protect the file the way you protect any key file: keep the disk private and do not put the file in a backup or a
-repo that others can read.
+fabri sets the file, and its `-wal` and `-shm` side files, to mode 0600 (owner only) and warns once if the
+permissions are wider. **Without a secret key the tokens in it are plain text.** Set a key (next section) to encrypt
+them. Either way, protect the file the way you protect any key file: keep the disk private and do not put the file in
+a backup or a repo that others can read.
 
 On the first start of a fabri with connections, the old `installs` (Slack) and `linear_installs` tables are copied into
 the new `connections` table and then dropped. Views with the old names and columns stay for one release, so an older
-fabri that opens the file can still read it. Nothing is migrated twice.
+fabri that opens the file can still read it. Nothing is migrated twice. Once tokens are encrypted, an older fabri
+reading those views gets the encrypted text, not a usable token.
+
+### Encryption at rest
+
+Install the extra and set a key:
+
+```sh
+pip install "fabri[encryption]"          # adds the cryptography package
+export FABRI_SECRET_KEY="$(fabri connections keygen)"
+fabri connections rekey                  # encrypt what is already stored
+```
+
+With a key, fabri encrypts the access token, the refresh token, the PKCE verifier of a pending OAuth sign-in and the
+OAuth state signing secret before it writes them. It uses Fernet from `cryptography` (AES-128-CBC with an
+HMAC-SHA256 tag). Each encrypted value starts with `fabri-enc:v1:`. Provider, handle, scope, display name, status and
+expiry stay readable, so `fabri connections list` works without the key.
+
+- **Key sources.** `FABRI_SECRET_KEY` holds the key. `FABRI_SECRET_KEY_FILE` names a file that holds it instead, for
+  a secret mounted by your platform. The environment variable wins when both are set. fabri never logs the key or
+  puts it in an error message. Runs never receive either variable: the launcher removes both from every run's
+  environment even when `FABRI_RUN_ENV_ALLOW` names them or a `FABRI_*` wildcard matches them. Do not try to
+  re-admit them; a run that holds the key can decrypt every tenant's token.
+- **Bad keys fail closed.** A malformed key stops the server (and every `fabri connections` command) at start with
+  an error that says so. A key that is set while `cryptography` is missing fails the same way, with the install
+  hint. A stored value that the key cannot decrypt raises an error for that lookup; fabri never hands out the
+  encrypted text as a token.
+- **Old rows.** Plain-text rows written before the key was set stay readable. Each one is encrypted the next time it
+  is written (a reconnect or a token refresh), or all at once with `fabri connections rekey`.
+- **What `rekey` cleans up.** fabri opens the file with SQLite's `secure_delete` on, so replaced values are
+  overwritten rather than left in free pages. After rewriting, `rekey` checkpoints the WAL and runs `VACUUM`, so no
+  plain-text copy stays in `installs.db` or `installs.db-wal`. Backups, snapshots and copies of the file made
+  before the rekey still hold the plain text. Delete or re-make them.
+- **`rekey` exit status.** It skips a connection that holds a refresh lease (a refresh is running, or one crashed
+  before it released the lease; the next refresh clears it) and a value no configured key can decrypt. It names
+  each unreadable one as `provider:handle`, still rewrites the rest, and exits 1. Run it again, add the missing old
+  key, or reconnect the named connections.
+- **Rotating the key.** Put the new key first and the old one after it, separated by a comma:
+  `FABRI_SECRET_KEY="NEW,OLD"`. fabri encrypts with the first key and decrypts with any of them. Roll out the new
+  list to every process that opens the file (each server and any CLI host) before you run `fabri connections
+  rekey`; a process that still has only the old key cannot read values the rekey moved. Drop the old key once
+  `rekey` exits 0 everywhere.
+- **The `fabri-enc:v1:` prefix.** Any stored value that starts with it is treated as encrypted. A plain-text token
+  that happened to start with that text could not be read back; no vendor issues tokens of that shape.
+- **No key.** fabri works as before and stores plain text. `fabri connections list` prints a warning on stderr with
+  the count of connections that hold a plain-text token.
+- **Losing the key** makes every encrypted token unreadable. Reconnect each connection after you set a new key.
+
+#### Hosted installs need a key
+
+`fabri serve` (or `fabri studio`) treats itself as reachable by others when it binds to an address other than
+loopback (for example `--host 0.0.0.0`), or when `FABRI_PUBLIC_BASE_URL` names a host other than loopback (a
+loopback bind behind a reverse proxy). In that case it refuses to start without a key, with an error that names
+`FABRI_SECRET_KEY`. Gmail and other user tokens therefore never land in plain text on a shared server.
+
+With a key it starts and arms a guard in the process: every secret write (a new connection, a token refresh, a
+pending OAuth sign-in, the state secret) checks for a key first. A library host that arms the guard itself with
+`require_encryption` without a key gets the same refusal per write: `GET /connect/<provider>` answers 503 before the
+browser leaves for the vendor, a pasted token through `POST /connections` answers 400, a callback stores nothing,
+and a refresh is refused before the vendor call so no refresh token is spent.
+
+Set `FABRI_ALLOW_PLAINTEXT_SECRETS=1` to start without a key anyway when you accept plain text on purpose (a
+private network, a disk encrypted some other way).
+
+#### For code that stores its own secrets
+
+`fabri.secret_cipher` is the one module that does this, so another store can use the same key:
+
+- `load_cipher()` returns a `SecretCipher` built from the environment, or None when no key is set. It raises
+  `SecretKeyError` for a key it cannot use.
+- `encrypt_secret(value, cipher)` and `decrypt_secret(value, cipher)` encrypt and decrypt one string. Both pass None
+  through and accept `cipher=None`. A plain-text value decrypts to itself; an encrypted value with no cipher raises
+  `SecretKeyError`.
+- `is_encrypted(value)` tells the two apart, and `SecretCipher.needs_rewrite(value)` is true for plain text or a value
+  under an older key.
+- `plaintext_refusal(cipher)` returns the reason a new secret may not be stored as plain text, or None. Raise
+  `PlaintextRefused` with it before writing.
+
+`ConnectionStore` takes `cipher=` to override the environment, which tests and hosts with their own key handling use.
 
 ## How a run gets its token
 
@@ -287,8 +367,10 @@ stdio MCP server or python source that needs a stored credential, and prefer mov
 - DNS rebinding. The broker checks that the host resolves to a public address right before it sends. The check and
   the send are two lookups. A declared host whose DNS an attacker controls could change its answer between them.
   Pinning the resolved address is a later item. Use hosts you trust.
-- Tokens are stored in plain text in `installs.db` (see [Where it is stored](#where-it-is-stored)). The broker reads
-  that file as the service user; anything else that can read the file reads the tokens. That includes every run
+- Without `FABRI_SECRET_KEY`, tokens are stored in plain text in `installs.db` (see
+  [Encryption at rest](#encryption-at-rest)). The broker reads that file as the service user; anything else that can
+  read the file reads the tokens. With a key, the file alone is not enough, but a process that can read the
+  service's environment or memory can still get the key. That includes every run
   started with `FABRI_ALLOW_SHARED_UID=1`, since those runs execute as the service user. See
   [Runs that share the service's OS user](#runs-that-share-the-services-os-user-fabri_allow_shared_uid).
 - Env fallback. When a ref has no stored row, the broker reads `FABRI_CRED_<PROVIDER>_<HANDLE>` from the service's
@@ -306,6 +388,9 @@ stdio MCP server or python source that needs a stored credential, and prefer mov
 | `FABRI_CRED_SNAPSHOT` | service | `1` puts granted token values in each run's environment and starts no broker. The weaker opt-out. |
 | `FABRI_APPROVAL_TIMEOUT_S` | service and run | Seconds to wait for a person to answer an approval question. Default 300. |
 | `FABRI_CRED_AUDIT_LOG` | service | Path of a JSON-lines file for broker decisions and credential lookups. No values. |
+| `FABRI_SECRET_KEY` | service and CLI | Key, or comma-separated keys (first encrypts), for tokens at rest. See [Encryption at rest](#encryption-at-rest). |
+| `FABRI_SECRET_KEY_FILE` | service and CLI | Path of a file that holds the key, used when `FABRI_SECRET_KEY` is unset. |
+| `FABRI_ALLOW_PLAINTEXT_SECRETS` | service | `1` lets a server reachable by others (non-loopback bind or public base URL) start and store tokens without a key. |
 | `FABRI_FETCH_ALLOW_PRIVATE` | service and run | Lets http and MCP sources call loopback and private addresses, for a local MCP server. Off by default. |
 
 ## When a token stops working

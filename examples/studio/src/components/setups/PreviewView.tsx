@@ -35,7 +35,11 @@ function Result({ p }: { p: Preview }) {
   const toolMax = Math.max(0, ...p.tools.map((t) => t.score));
   const shownTools = p.tools.filter((t) => t.shown).length;
   const toolNote = !p.retrieval.enabled
-    ? `all ${p.tools.length} shown to the model; tool retrieval is off`
+    ? p.retrieval.mode === "auto"
+      ? p.ranking === "words"
+        ? `all ${p.tools.length} shown to the model; tool retrieval turns on by itself once the embeddings extra is installed and there are more than ${p.retrieval.autoThreshold ?? "?"} tools`
+        : `all ${p.tools.length} shown to the model; tool retrieval turns on by itself above ${p.retrieval.autoThreshold ?? "?"} tools`
+      : `all ${p.tools.length} shown to the model; tool retrieval is off`
     : p.ranking === "words"
       ? `all ${p.tools.length} shown to the model; retrieval needs the embeddings extra and keeps every tool without it`
       : `${shownTools} of ${p.tools.length} shown to the model: the top ${p.retrieval.topK ?? "?"} plus pinned tools`;

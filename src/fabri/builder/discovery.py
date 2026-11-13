@@ -69,6 +69,13 @@ def render_tools_listing(
     return "\n".join(lines)
 
 
+def _retrieval_label(value: object) -> str:
+    """``on``, ``off`` or ``auto`` for the plan's tool_retrieval line."""
+    if value == "auto":
+        return "auto"
+    return "on" if value else "off"
+
+
 def build_dry_run_plan(config: dict, tool_defs: list[dict]) -> dict:
     """Assemble the resolved-run summary for ``fabri run --dry-run``.
 
@@ -157,7 +164,7 @@ def render_dry_run_plan(plan: dict, *, task: str | None = None) -> str:
         f"output_format={agent['output_format']}, "
         f"result_format={agent['result_format']}, "
         f"planner={agent['planner_mode']}, "
-        f"tool_retrieval={'on' if agent['tool_retrieval_enabled'] else 'off'}, "
+        f"tool_retrieval={_retrieval_label(agent['tool_retrieval_enabled'])}, "
         f"max_cost={budget}"
     )
 

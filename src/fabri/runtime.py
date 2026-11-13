@@ -321,6 +321,14 @@ def build_tools(tools_cfg: dict, *, approver=None) -> ToolRegistry:
         _register_config_sources(registry, tools_cfg["sources"], tools_cfg.get("policy"), broker=broker)
     if tools_cfg["enabled"] is not None:
         registry.tools = {name: m for name, m in registry.tools.items() if name in tools_cfg["enabled"]}
+    # With tool retrieval on (or auto), the model may not be shown every tool,
+    # so give it find_tools and describe_tool to reach the hidden ones.
+    from fabri.orchestrator.retrieval import tool_retrieval_mode
+
+    if tool_retrieval_mode((tools_cfg.get("retrieval") or {}).get("enabled", False)) != "off":
+        from fabri.tools.catalog import register_registry_meta_tools
+
+        register_registry_meta_tools(registry)
     return registry
 
 

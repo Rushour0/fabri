@@ -31,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
+from fabri.service.trace_store import TraceOpenError, TraceWriter
 
 logger = get_logger()
 
@@ -155,6 +156,8 @@ class AskUserListener:
                     "default": default,
                 }
             )
+        except TraceOpenError as exc:
+            logger.warning("ask_user: refused to append to the run's trace (%s)", exc)
         except Exception:
             # A failing hook must not lose the entry; the caller still waits.
             logger.debug("ask_user on_question hook failed", exc_info=True)
@@ -250,6 +253,10 @@ class AskUserListener:
                         "default": req.get("default"),
                     }
                 )
+            except TraceOpenError as exc:
+                # The run's trace path was refused (a planted symlink or
+                # hardlink): worth an operator's attention, not a debug line.
+                logger.warning("ask_user: refused to append to the run's trace (%s)", exc)
             except Exception:  # pragma: no cover - defensive
                 logger.debug("ask_user on_question hook failed", exc_info=True)
 
@@ -304,13 +311,14 @@ def append_trace_event(trace_path: str | Path, event: dict) -> None:
     Mirrors :func:`fabri.orchestrator.traces.log_event` (same ``ts`` stamping and
     ``flock`` cross-process append), but targets an explicit path -- the service
     runs under a different ``FABRI_HOME`` than the run whose trace it's writing.
-    """
-    import fcntl  # posix-only, same as traces.log_event
 
-    path = Path(trace_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    The run owns the directory the trace sits in, so the write goes through
+    :class:`fabri.service.trace_store.TraceWriter`: no component below the run
+    home is followed if it is a symlink, and a hardlinked or foreign-owned file
+    is refused with :class:`~fabri.service.trace_store.TraceOpenError` before a
+    byte is written.
+    """
     record = {"ts": time.time(), **event}
     line = json.dumps(record) + "\n"
-    with path.open("a") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        f.write(line)
+    with TraceWriter(trace_path) as writer:
+        writer.append(line)

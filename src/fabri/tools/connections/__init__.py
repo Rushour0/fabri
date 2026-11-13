@@ -129,8 +129,13 @@ def connect_static(store: ConnectionStore, entry: Connector, *, handle: str, tok
         raise ConnectError("the token has a line break or a NUL in it")
     provider = store_provider(entry)
     verified = verify_token(entry, token, transport=transport) if verify else {}
-    store.upsert(provider=provider, handle=handle, access_token=token, scope_kind=scope_kind,
-                 display_name=display_name or _display_name(verified), meta={"source": "static"})
+    from fabri.secret_cipher import PlaintextRefused
+
+    try:
+        store.upsert(provider=provider, handle=handle, access_token=token, scope_kind=scope_kind,
+                     display_name=display_name or _display_name(verified), meta={"source": "static"})
+    except PlaintextRefused as exc:
+        raise ConnectError(str(exc)) from None
     row = store.get(provider, handle)
     if row is None:
         raise ConnectError(f"{entry.name}: the connection was not stored")

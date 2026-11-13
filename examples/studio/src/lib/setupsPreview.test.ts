@@ -46,6 +46,7 @@ describe("preview", () => {
     expect(p.tools[0].approval).toBe("read");
     expect(p.budgets.skills_total_chars).toBe(8000);
     expect(p.retrieval.enabled).toBe(false);
+    expect(p.retrieval.mode).toBe("off");
     expect(p.tools[0].source).toBe("baseline");
     expect(p.agentChars).toBe(300);
   });

@@ -16,6 +16,8 @@ yielded in full even if the process finished before tailing began.
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -23,6 +25,7 @@ from pathlib import Path
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType
 from fabri.orchestrator.traces import _SESSION_ID_RE
+from fabri.service.trace_store import READ_CAP_BYTES, TraceReader
 
 logger = get_logger()
 
@@ -31,6 +34,19 @@ logger = get_logger()
 # appends an optional POST_RUN_USAGE for memory-compression cost. Tailing keys
 # off the producing process exiting rather than any single event, so a host
 # reading these doesn't have to know which event is truly last.
+# Longest trace line the tailer parses. A longer line is dropped, so one
+# runaway write (or a sparse file with no newline) cannot grow the buffer
+# without bound.
+MAX_LINE_BYTES = 1 << 20
+_READS_PER_POLL = 16
+# Most bytes one tail_events call reads. A trace past this (a runaway or
+# sparse file) ends the tail with a warning instead of reading forever.
+MAX_TAIL_BYTES = 512 << 20
+# A dropped line still reports its event type, peeked from its first bytes,
+# so a dropped terminal event still ends the stream.
+_PEEK_BYTES = 4096
+_TYPE_RE = re.compile(rb'"type"\s*:\s*"(\w+)"')
+
 _TERMINAL_TYPES = frozenset(
     {EventType.FINAL.value, EventType.FAILED.value, EventType.INCOMPLETE.value}
 )
@@ -44,12 +60,16 @@ def run_trace_path(fabri_home: str | Path, session_id: str) -> Path:
     process-global :func:`fabri.paths.home`. ``session_id`` is validated against
     the same charset :func:`fabri.orchestrator.traces.trace_path` enforces so a
     host-supplied id can't escape the traces dir.
+
+    The home is made absolute but not resolved: resolving would follow a
+    symlinked run home before :mod:`fabri.service.trace_store` gets the
+    chance to refuse it.
     """
     if not session_id or not _SESSION_ID_RE.match(session_id):
         raise ValueError(
             f"invalid session_id {session_id!r}: must match {_SESSION_ID_RE.pattern}"
         )
-    return Path(fabri_home).resolve() / ".fabri" / "traces" / f"{session_id}.jsonl"
+    return Path(os.path.abspath(fabri_home)) / ".fabri" / "traces" / f"{session_id}.jsonl"
 
 
 def tail_events(
@@ -73,50 +93,133 @@ def tail_events(
     """
     path = Path(path)
     deadline = None if timeout is None else time.monotonic() + timeout
-    buf = ""
-    pos = 0
+    # One descriptor for the whole tail, opened without following links and
+    # checked (regular file, service uid, one link). A symlinked or
+    # hardlinked trace raises TraceOpenError; swapping the path after the
+    # open changes nothing because the reader never reopens by path.
+    reader = TraceReader(path)
+    # The unterminated tail of the last chunk. Bounded by MAX_LINE_BYTES: a
+    # longer line is dropped (with a warning) up to its newline.
+    buf = b""
+    dropping = False
+    drop_head = b""
+    drop_bytes = 0
+    truncations = 0
+    total_read = 0
+    stopped = False
     seen_terminal = False
 
-    def _emit(chunk: str) -> Iterator[dict]:
-        nonlocal buf, seen_terminal
-        buf += chunk
-        while "\n" in buf:
-            line, buf = buf.split("\n", 1)
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as e:
-                logger.warning("trace tail %s: skipping malformed line: %s", path.name, e)
-                continue
-            if isinstance(event, dict) and event.get("type") in _TERMINAL_TYPES:
-                seen_terminal = True
-            yield event
+    def _dropped(head: bytes, size: int) -> dict:
+        """The marker yielded in place of a line over MAX_LINE_BYTES."""
+        nonlocal seen_terminal
+        logger.warning("trace tail %s: dropped a %d-byte line (cap %d)", path.name, size, MAX_LINE_BYTES)
+        m = _TYPE_RE.search(head[:_PEEK_BYTES])
+        etype = m.group(1).decode("ascii", "replace") if m else "dropped"
+        if etype in _TERMINAL_TYPES:
+            seen_terminal = True
+        return {"type": etype, "truncated": True, "bytes": size}
 
-    while True:
-        if path.exists():
-            text = path.read_text()
-            if len(text) > pos:
-                yield from _emit(text[pos:])
-                pos = len(text)
+    def _parse(raw: bytes) -> dict | None:
+        nonlocal seen_terminal
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            return None
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as e:
+            logger.warning("trace tail %s: skipping malformed line: %s", path.name, e)
+            return None
+        if isinstance(event, dict) and event.get("type") in _TERMINAL_TYPES:
+            seen_terminal = True
+        return event
 
-        if is_running is None:
-            if seen_terminal:
+    def _emit(chunk: bytes) -> Iterator[dict]:
+        nonlocal buf, dropping, drop_head, drop_bytes
+        # Split once per chunk and carry only the last fragment, so a chunk
+        # of n lines costs O(chunk) rather than O(n * chunk).
+        lines = chunk.split(b"\n")
+        tail = lines.pop()
+        for i, raw in enumerate(lines):
+            if i == 0:
+                if dropping:
+                    dropping = False
+                    buf = b""
+                    yield _dropped(drop_head, drop_bytes + len(raw))
+                    continue
+                raw = buf + raw
+                buf = b""
+            if len(raw) > MAX_LINE_BYTES:
+                yield _dropped(raw[:_PEEK_BYTES], len(raw))
+                continue
+            event = _parse(raw)
+            if event is not None:
+                yield event
+        if lines:
+            buf = b""
+        if dropping:
+            drop_bytes += len(tail)
+            return
+        if len(buf) + len(tail) > MAX_LINE_BYTES:
+            dropping = True
+            drop_head = (buf + tail[:_PEEK_BYTES])[:_PEEK_BYTES]
+            drop_bytes = len(buf) + len(tail)
+            buf = b""
+        else:
+            buf += tail
+
+    def _drain(max_reads: int | None = None) -> Iterator[dict]:
+        nonlocal buf, dropping, truncations, total_read, stopped
+        reads = 0
+        while max_reads is None or reads < max_reads:
+            reads += 1
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning("trace tail %s: timed out after %.1fs", path.name, timeout)
+                stopped = True
                 return
-        elif not is_running():
-            # Producer exited -- do one final drain then stop.
-            if path.exists():
-                text = path.read_text()
-                if len(text) > pos:
-                    yield from _emit(text[pos:])
-                    pos = len(text)
-            return
+            if total_read >= MAX_TAIL_BYTES:
+                logger.warning("trace tail %s: stopped after reading %d bytes (cap %d)",
+                               path.name, total_read, MAX_TAIL_BYTES)
+                stopped = True
+                return
+            chunk = reader.read_new(min(READ_CAP_BYTES, MAX_TAIL_BYTES - total_read))
+            total_read += len(chunk)
+            if reader.truncations != truncations:
+                truncations = reader.truncations
+                logger.warning("trace tail %s: file was truncated; reading again from the start",
+                               path.name)
+                buf = b""
+                dropping = False
+            if not chunk:
+                return
+            yield from _emit(chunk)
 
-        if deadline is not None and time.monotonic() >= deadline:
-            logger.warning("trace tail %s: timed out after %.1fs", path.name, timeout)
-            return
-        time.sleep(poll_interval)
+    try:
+        while True:
+            # Bounded per poll so a producer that writes faster than we read
+            # still lets the timeout and is_running checks run.
+            yield from _drain(_READS_PER_POLL)
+            if stopped:
+                return
+
+            if is_running is None:
+                if seen_terminal:
+                    return
+            elif not is_running():
+                # Producer exited -- do one final drain then stop. The
+                # drain still honours the deadline and the byte cap.
+                yield from _drain()
+                if dropping and not stopped:
+                    # The file ended inside an oversized line: still report it.
+                    dropping = False
+                    yield _dropped(drop_head, drop_bytes)
+                return
+
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning("trace tail %s: timed out after %.1fs", path.name, timeout)
+                return
+            time.sleep(poll_interval)
+    finally:
+        reader.close()
 
 
 def extract_cost(events: list[dict]) -> dict:
