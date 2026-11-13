@@ -544,6 +544,19 @@ def _read_request_line(conn: socket.socket, limit: int = MAX_REQUEST_BYTES) -> b
             return None
 
 
+def _caller_gone(client_gone: Any) -> bool:
+    """Ask a transport whether its caller hung up. A probe that is not
+    callable, raises, or answers with something other than a bool counts as
+    gone: the call is not made."""
+    if not callable(client_gone):
+        return True
+    try:
+        answer = client_gone()
+    except Exception:  # noqa: BLE001 -- a broken probe means a broken caller
+        return True
+    return answer is not False
+
+
 def _client_gone(conn: socket.socket) -> bool:
     """True when the client closed its end (a peek reads EOF)."""
     timeout = conn.gettimeout()
@@ -1012,6 +1025,8 @@ class CredentialBroker:
         the line arrived on, never from the line itself: the pipe is the
         run's identity. The key in the line is still checked. Never raises;
         every failure is a refusal."""
+        if not isinstance(session_id, str) or not session_id:
+            return _refusal("refused", "credential broker: this run is not bound to a channel")
         with self._lock:
             run = self._runs.get(session_id)
         if run is None or run.binding.transport != "channel":
@@ -1400,7 +1415,7 @@ class CredentialBroker:
             if grant_id:
                 run.grants.discard(grant_id)
             raise _Refuse("approval_timeout", f"{tool}: the run ended before the call was made", "timeout")
-        if client_gone is not None and client_gone():
+        if client_gone is not None and _caller_gone(client_gone):
             if grant_id:
                 run.grants.discard(grant_id)
             raise _Refuse("refused", f"{tool}: the caller went away; the call was not made")

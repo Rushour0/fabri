@@ -225,3 +225,44 @@ def test_bind_rejects_unknown_transport(home):
     with pytest.raises(BindError):
         broker.bind(session_id="s-1", config_path=_write_config(home), run_home=home / "r", actor=None,
                     listener=None, transport="tcp")
+
+
+@pytest.mark.parametrize("probe", ["raises", "not_callable", "returns_none"])
+def test_channel_broken_client_gone_probe_counts_as_gone(home, probe):
+    _store(home)
+    upstream = Upstream()
+    broker = CredentialBroker(install_db=home / "installs.db", transport=upstream.transport)
+    try:
+        binding, _ = _channel(broker, home, "sess-chan-0001", listener=FakeListener(["approve"]))
+        line = _line(binding, op="http", source="ck_send", tool="ck_send", path_params={"campaign_id": "c"},
+                     json={})
+
+        def boom():
+            raise RuntimeError("pipe dead")
+
+        gone = {"raises": boom, "not_callable": "yes", "returns_none": lambda: None}[probe]
+        reply = broker.handle_channel_request("sess-chan-0001", line, client_gone=gone)
+        assert reply["result"]["status"] == "refused"
+        assert "went away" in reply["error"]
+        assert upstream.requests == []
+        run = broker._runs["sess-chan-0001"]
+        assert len(run.grants) == 0
+        assert run.pending_approvals == 0
+        assert run.slots._value == cb.MAX_INFLIGHT_PER_RUN
+    finally:
+        broker.close()
+
+
+@pytest.mark.parametrize("sid", [None, 123, ["sess-chan-0001"], {"a": 1}, b"sess-chan-0001", ""])
+def test_channel_non_str_session_id_is_refused(home, sid):
+    _store(home)
+    upstream = Upstream()
+    broker = CredentialBroker(install_db=home / "installs.db", transport=upstream.transport)
+    try:
+        binding, _ = _channel(broker, home, "sess-chan-0001")
+        reply = broker.handle_channel_request(sid, _get_line(binding))  # type: ignore[arg-type]
+        assert reply["ok"] is False
+        assert reply["result"]["status"] == "refused"
+        assert upstream.requests == []
+    finally:
+        broker.close()
