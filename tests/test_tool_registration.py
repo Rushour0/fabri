@@ -205,3 +205,248 @@ def test_openapi_registration_by_operation_id(layers, tmp_path):
     tools = resolve_tools(layers, transport=recorder([]))
     assert set(tools.names()) == {"pet_list", "pet_create"}
     assert json.loads((layers[1][1] / "tools/registered/pets.json").read_text())["decl"]["source"]["operation_ids"] == ["listPets", "createPet"]
+
+
+# ------------------------------------------------------------ mcp server.env
+
+MCP_POLICY = ToolPolicy(allow=("mcp_*",), allowed_kinds=("mcp",), allowed_hosts=None)
+
+_MCP_CHILD = """
+import json, os, sys
+var = sys.argv[1]
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid, method = msg.get("id"), msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        out = {"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": "2024-11-05"}}
+    elif method == "tools/list":
+        out = {"jsonrpc": "2.0", "id": mid, "result": {"tools": [{"name": "echo", "description": "echo",
+               "inputSchema": {"type": "object", "properties": {"v": {"type": "string"}}}}]}}
+    else:
+        out = {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "ok"}],
+               "structuredContent": {"declared": os.environ.get("DECLARED_KEY", ""),
+                                     "parent": os.environ.get("PARENT_ONLY", "")}}}
+    sys.stdout.write(json.dumps(out) + "\\n")
+    sys.stdout.flush()
+"""
+
+
+def mcp_decl(env=None, **server_over):
+    import sys
+
+    server = {"command": [sys.executable, "-c", _MCP_CHILD, "x"], **server_over}
+    if env is not None:
+        server["env"] = env
+    return {"name": "echo", "description": "Echo server.", "kind": "mcp", "server": server, "version": 1}
+
+
+def test_mcp_env_refs_accepted_and_hashed(layers):
+    project = layers[1][1]
+    a = register_tool(project, mcp_decl({"DECLARED_KEY": {"secret_ref": "openai:prod"}}), actor="a", policy=MCP_POLICY)
+    b = register_tool(project, mcp_decl({"DECLARED_KEY": {"env": "HOST_KEY"}}, ) | {"version": 2}, actor="a",
+                      policy=MCP_POLICY)
+    assert a.content_hash != b.content_hash
+    assert a.decl["server"]["env"] == {"DECLARED_KEY": {"secret_ref": "openai:prod"}}
+
+
+@pytest.mark.parametrize("env", [
+    {"K": "sk-live-ABCdef1234567890XYZabc"},
+    {"K": {"value": "hunter2"}},
+    {"K": {"secret_ref": "sk-live-ABCdef1234567890XYZabc"}},
+    {"K": {"secret_ref": "openai:ghp_ABCdef1234567890XYZabc"}},
+    {"K": {"env": "sk_live_ABCdef1234567890XYZabc"}},
+    {"K": {"env": "has space"}},
+    {"bad name": {"env": "HOST_KEY"}},
+    {"K": {"env": "A", "secret_ref": "a:b"}},
+    {},
+])
+def test_mcp_env_literals_rejected(layers, env):
+    with pytest.raises(RegistrationError):
+        register_tool(layers[1][1], mcp_decl(env), actor="a", policy=MCP_POLICY)
+
+
+def test_mcp_env_mode_inherit_rejected(layers):
+    decl = mcp_decl({"K": {"env": "HOST_KEY"}}, env_mode="inherit")
+    with pytest.raises(RegistrationError, match="inherit"):
+        register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY)
+
+
+def test_mcp_env_checked_against_credential_grants(layers):
+    policy = ToolPolicy(allow=("mcp_*",), allowed_kinds=("mcp",), allowed_hosts=None,
+                        credential_grants=(("echo", ("other:*",)),))
+    with pytest.raises(PolicyError):
+        register_tool(layers[1][1], mcp_decl({"K": {"secret_ref": "openai:prod"}}), actor="a", policy=policy)
+
+
+def test_mcp_env_on_http_server_rejected(layers):
+    decl = {"name": "echo", "description": "d", "kind": "mcp", "version": 1,
+            "server": {"url": "https://x.test/mcp", "env": {"K": {"env": "A"}}}}
+    with pytest.raises(RegistrationError):
+        register_tool(layers[1][1], decl, actor="a", policy=ToolPolicy.permissive())
+
+
+def test_registered_stdio_child_gets_declared_var_only(layers, monkeypatch):
+    monkeypatch.setenv("HOST_KEY", "declared-value-1")
+    monkeypatch.setenv("PARENT_ONLY", "undeclared-value-2")
+    project = layers[1][1]
+    register_tool(project, mcp_decl({"DECLARED_KEY": {"env": "HOST_KEY"}}), actor="a", policy=MCP_POLICY)
+    tools = resolve_tools(layers, policy=MCP_POLICY)
+    assert tools.errors == []
+    registry = tools.registry()
+    try:
+        out = registry.invoke("mcp_echo_echo", {"v": "x"})
+        assert out["ok"], out
+        blob = json.dumps(out)
+        assert "undeclared-value-2" not in blob
+        # the declared value comes back redacted, which proves the child had it
+        assert "declared-value-1" not in blob and "[redacted]" in blob
+        raw = (project / "tools/registered/echo.json").read_text() + (project / "tools/registered/_audit.jsonl").read_text()
+        assert "declared-value-1" not in raw and "undeclared-value-2" not in raw
+    finally:
+        for client in getattr(registry, "_mcp_clients", []) or []:
+            client.close()
+
+
+def test_mcp_env_audit_has_no_value(layers, monkeypatch):
+    monkeypatch.setenv("HOST_KEY", "secret-in-host-9")
+    project = layers[1][1]
+    register_tool(project, mcp_decl({"DECLARED_KEY": {"env": "HOST_KEY"}}), actor="a", policy=MCP_POLICY)
+    assert "secret-in-host-9" not in (project / "tools/registered/_audit.jsonl").read_text()
+    assert set(read_audit(project)[0]) == {"ts", "actor", "action", "name", "version", "content_hash"}
+
+
+def test_cli_env_flag_builds_refs():
+    from fabri.setups.cli import _add_env_flags
+
+    decl = {"server": {"command": ["x"]}}
+    _add_env_flags(decl, ["A=openai:prod", "B=HOST_B"])
+    assert decl["server"]["env"] == {"A": {"secret_ref": "openai:prod"}, "B": {"env": "HOST_B"}}
+    with pytest.raises(SystemExit):
+        _add_env_flags({"server": {"command": ["x"]}}, ["noequals"])
+
+
+# ---------------------------------------------- host env gate, server shape
+
+FABRI_NAMES = ["FABRI_CRED_OTHER_PROD", "FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET",
+               "FABRI_ADMIN_TOKEN", "FABRI_SERVICE_TOKEN"]
+
+
+@pytest.mark.parametrize("name", FABRI_NAMES)
+def test_mcp_env_refuses_fabri_host_vars(layers, name):
+    with pytest.raises(PolicyError, match="fabri credential"):
+        register_tool(layers[1][1], mcp_decl({"RENAMED": {"env": name}}), actor="a", policy=MCP_POLICY)
+
+
+def test_http_auth_header_env_refuses_fabri_host_vars(layers):
+    with pytest.raises(PolicyError):
+        register_tool(layers[1][1], http_decl(auth={"header_env": "FABRI_ADMIN_TOKEN"}), actor="a", policy=POLICY)
+
+
+@pytest.mark.parametrize("name", FABRI_NAMES)
+def test_tool_source_build_refuses_fabri_host_vars(name):
+    import sys
+
+    from fabri.tools.sources import ToolSourceError, build_source_tools
+
+    decl = {"kind": "mcp", "name": "echo", "command": [sys.executable, "-c", "pass"],
+            "env": {"RENAMED": {"env": name}}}
+    with pytest.raises(ToolSourceError, match="fabri credential"):
+        build_source_tools(decl)
+
+
+def test_entries_env_specs_refuse_fabri_host_vars():
+    from fabri.setups.tool_entries import EntryError, env_specs
+
+    with pytest.raises(EntryError):
+        env_specs({"X": "FABRI_CRED_BROKER_KEY"})
+
+
+def test_child_env_drops_broker_value_under_renamed_key(monkeypatch):
+    import sys
+
+    from fabri.tools.mcp_client import MCPStdioClient
+
+    monkeypatch.setenv("FABRI_CRED_BROKER_KEY", "broker-secret-77")
+    code = "import os,sys; sys.stdout.write(os.environ.get('RENAMED','none')); sys.stdout.flush()"
+    client = MCPStdioClient(command=[sys.executable, "-c", code], env={"RENAMED": "broker-secret-77"})
+    try:
+        client.start()
+        out = client.proc.stdout.read(4)
+        assert out in (b"none", "none")
+    finally:
+        client.close()
+
+
+def test_mcp_server_unknown_keys_and_secret_args_rejected(layers):
+    with pytest.raises(RegistrationError, match="server accepts only"):
+        register_tool(layers[1][1], mcp_decl(cwd="/"), actor="a", policy=MCP_POLICY)
+    decl = mcp_decl()
+    decl["server"]["command"] = ["npx", "srv", "--token=sk-live-ABCdef1234567890XYZabc"]
+    with pytest.raises(RegistrationError, match="looks like a secret"):
+        register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY)
+
+
+def test_mcp_env_key_that_is_a_secret_rejected(layers):
+    with pytest.raises(RegistrationError):
+        register_tool(layers[1][1], mcp_decl({"AbCdEf0123456789xyzXYZ00aaQQ": {"env": "HOME"}}),
+                      actor="a", policy=MCP_POLICY)
+
+
+@pytest.mark.parametrize("env", ["a-string", ["x"]])
+def test_mcp_env_non_mapping_is_a_clear_error(layers, env):
+    with pytest.raises(RegistrationError, match="server.env must map"):
+        register_tool(layers[1][1], mcp_decl(env), actor="a", policy=MCP_POLICY)
+
+
+def test_cli_env_flag_does_not_echo_value(capsys):
+    from fabri.setups.cli import _add_env_flags
+
+    with pytest.raises(SystemExit) as exc:
+        _add_env_flags({"server": {"command": ["x"]}}, ["sk-live-ABCdef1234567890XYZabc"])
+    assert "sk-live" not in str(exc.value)
+    with pytest.raises(SystemExit, match="mapping"):
+        _add_env_flags({"server": {"command": ["x"], "env": ["x"]}}, ["A=B"])
+
+
+@pytest.mark.parametrize("command", [
+    ["node", "server.js", "--root=/srv/Data/Project2024/workspace"],
+    ["uvx", "mcp-server-git", "--repository", "/Users/x/MyApp2/repo"],
+    ["python", "-m", "myOrg.mcpServers.jiraConnector2"],
+    ["node", "dist/Servers/GithubV2/index.min.js"],
+])
+def test_mcp_ordinary_command_args_accepted(layers, command):
+    decl = mcp_decl()
+    decl["server"]["command"] = command
+    assert register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY).name == "echo"
+
+
+@pytest.mark.parametrize("arg", ["sk-live-ABCdef1234567890XYZabc", "--token=ghp_ABCdef1234567890XYZabc",
+                                 "xoxb-123-456", "--key=Bearer abc"])
+def test_mcp_secret_prefixed_command_args_rejected(layers, arg):
+    decl = mcp_decl()
+    decl["server"]["command"] = ["srv", arg]
+    with pytest.raises(RegistrationError):
+        register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY)
+
+
+@pytest.mark.parametrize("ref", ["broker:key", "broker:socket"])
+def test_broker_secret_refs_refused(layers, ref, monkeypatch):
+    with pytest.raises(RegistrationError, match="broker"):
+        register_tool(layers[1][1], mcp_decl({"K": {"secret_ref": ref}}), actor="a", policy=MCP_POLICY)
+    with pytest.raises(RegistrationError, match="broker"):
+        register_tool(layers[1][1], http_decl(auth={"secret_ref": ref}), actor="a", policy=POLICY)
+    from fabri.tools.secret_refs import MalformedCredentialRefError, resolve_secret
+
+    monkeypatch.setenv("FABRI_CRED_BROKER_KEY", "bk")
+    monkeypatch.setenv("FABRI_CRED_BROKER_SOCKET", "bs")
+    with pytest.raises(MalformedCredentialRefError):
+        resolve_secret(ref)
+
+
+@pytest.mark.parametrize("name", ["FABRI_OTLP_HEADERS", "FABRI_SCOPE_SALT", "FABRI_INSTALL_DB",
+                                  "FABRI_SECRET_KEY", "FABRI_SECRET_KEY_FILE", "FABRI_CRED_SNAPSHOT"])
+def test_more_fabri_host_vars_refused(layers, name):
+    with pytest.raises(PolicyError):
+        register_tool(layers[1][1], mcp_decl({"R": {"env": name}}), actor="a", policy=MCP_POLICY)

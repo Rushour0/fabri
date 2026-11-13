@@ -23,7 +23,8 @@ caller's global allowlist and hot reload apply the same way. Every register,
 unregister, enable and disable appends a line to
 ``tools/registered/_audit.jsonl`` (actor, action, name, version, time,
 content hash). Neither file ever holds a secret value: `auth` only accepts a
-secret reference or an environment variable name.
+secret reference or an environment variable name, and so does `server.env`
+for a stdio MCP server.
 
 Versions: registering a name again with a higher version replaces it; the
 same version with different content is rejected; the same content is a
@@ -47,7 +48,7 @@ import httpx
 
 from fabri.tools.approval import RANK, check_approval, safe_approval
 from fabri.tools.openapi import OpenAPIError, load_openapi, parse_operations
-from fabri.tools.policy import SOURCE_KINDS, PolicyError, ToolPolicy
+from fabri.tools.policy import SOURCE_KINDS, PolicyError, ToolPolicy, check_host_env_ref
 from fabri.tools.sources import TOOL_NAME
 
 REGISTERED_DIR = Path("tools") / "registered"
@@ -56,6 +57,7 @@ DECL_KEYS = frozenset({
     "name", "description", "kind", "input_schema", "endpoint", "method", "source", "server",
     "callable", "auth", "approval", "version", "title", "enabled", "timeout_s",
 })
+SERVER_KEYS = frozenset({"command", "url", "env", "env_mode"})
 AUTH_KEYS = frozenset({"secret_ref", "header_env", "header", "prefix"})
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _SECRET_REF = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}:[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
@@ -196,17 +198,85 @@ def _check_auth(auth: Any) -> None:
         ref = str(auth["secret_ref"])
         if not _SECRET_REF.fullmatch(ref) or looks_like_secret(ref.split(":", 1)[-1]):
             raise RegistrationError("auth.secret_ref must be a reference like provider:handle, not a secret value")
+        _check_not_broker_ref(ref, "auth.secret_ref")
     if "header_env" in auth:
         env = str(auth["header_env"])
         if not _ENV_NAME.fullmatch(env) or looks_like_secret(env):
             raise RegistrationError("auth.header_env must be an environment variable name (A-Z, 0-9, _), "
                                     "not a secret value")
+        check_host_env_ref(env)
     header = auth.get("header", "Authorization")
     if not isinstance(header, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", header):
         raise RegistrationError("auth.header must be a header name")
     prefix = auth.get("prefix", "")
     if not isinstance(prefix, str) or len(prefix) > 16 or looks_like_secret(prefix.strip() or "x"):
         raise RegistrationError("auth.prefix must be a short scheme such as 'Bearer '")
+
+
+_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+_DOTTED_NAME = re.compile(r"^[A-Za-z_][\w-]*(\.[\w-]+)+$")
+
+
+def _arg_looks_like_secret(arg: str) -> bool:
+    """A command argument that looks like a pasted token. Paths and dotted
+    module names are ordinary mixed-case strings, so only the known token
+    prefixes apply to them."""
+    value = arg.split("=", 1)[-1] if arg.startswith("-") else arg
+    if value.strip().lower().startswith(_SECRETISH_PREFIXES):
+        return True
+    if "/" in value or _DOTTED_NAME.fullmatch(value):
+        return False
+    return looks_like_secret(value)
+
+
+def _check_not_broker_ref(ref: str, what: str) -> None:
+    from fabri.tools.credential_store import BROKER_ENV_NAMES, credential_env_var
+
+    provider, _, handle = ref.partition(":")
+    if credential_env_var(provider, handle) in BROKER_ENV_NAMES:
+        raise RegistrationError(f"{what} names the credential broker, which a tool cannot use")
+
+
+def _check_server_env(server: Mapping[str, Any], name: str, policy: ToolPolicy) -> None:
+    """``server.env`` for a stdio MCP server: names mapped to a secret
+    reference or an environment variable name, never a value. A bare string is
+    refused so a pasted value cannot pass for a reference."""
+    mode = server.get("env_mode")
+    if mode == "inherit":
+        raise RegistrationError("env_mode: inherit is not allowed for registered tools; declare the variables "
+                                "the server needs under server.env")
+    if mode not in (None, "allowlist"):
+        raise RegistrationError("env_mode must be omitted or 'allowlist'")
+    env = server.get("env")
+    if env is None:
+        return
+    if not server.get("command"):
+        raise RegistrationError("server.env applies to command servers; an http server uses auth")
+    if not isinstance(env, Mapping) or not env:
+        raise RegistrationError("server.env must map variable names to {secret_ref: ...} or {env: NAME}")
+    refs = []
+    for key, spec in env.items():
+        if not isinstance(key, str) or not _ENV_KEY.fullmatch(key) or looks_like_secret(key):
+            raise RegistrationError("server.env names must be environment variable names")
+        if not isinstance(spec, Mapping) or len(spec) != 1 or next(iter(spec)) not in ("secret_ref", "env"):
+            raise RegistrationError(f"server.env.{key} must be {{secret_ref: provider:handle}} or "
+                                    "{env: NAME}; raw values are not stored")
+        kind, value = next(iter(spec.items()))
+        value = str(value)
+        if kind == "secret_ref":
+            if not _SECRET_REF.fullmatch(value) or looks_like_secret(value.split(":", 1)[-1]):
+                raise RegistrationError(f"server.env.{key}.secret_ref must be a reference like provider:handle, "
+                                        "not a secret value")
+            _check_not_broker_ref(value, f"server.env.{key}.secret_ref")
+            refs.append(value)
+        elif not _ENV_NAME.fullmatch(value) or looks_like_secret(value):
+            raise RegistrationError(f"server.env.{key}.env must be an environment variable name "
+                                    "(A-Z, 0-9, _), not a secret value")
+        else:
+            check_host_env_ref(value)
+    policy.check_secret_refs(name, refs)
 
 
 def _check_url(url: Any, what: str, policy: ToolPolicy) -> str:
@@ -328,10 +398,17 @@ def validate_registration(
         server = decl.get("server")
         if not isinstance(server, Mapping) or bool(server.get("command")) == bool(server.get("url")):
             raise RegistrationError("mcp tools need server: {command: [...]} or server: {url: ...}")
+        unknown_server = set(server) - SERVER_KEYS
+        if unknown_server:
+            raise RegistrationError(f"server accepts only {sorted(SERVER_KEYS)} (unexpected {sorted(unknown_server)})")
         if server.get("url"):
             _check_url(server["url"], "server.url", policy)
         elif not isinstance(server["command"], list) or not all(isinstance(c, str) for c in server["command"]):
             raise RegistrationError("server.command must be a list of strings")
+        elif any(_arg_looks_like_secret(c) for c in server["command"]):
+            raise RegistrationError("server.command holds something that looks like a secret value; "
+                                    "pass it through server.env as a reference")
+        _check_server_env(server, name, policy)
         if not policy.name_allowed(f"mcp_{name}_x") and not policy.name_allowed(name):
             raise PolicyError(f"mcp tools named mcp_{name}_* are not in the policy's allowlist")
         default_approval = "write"
@@ -483,6 +560,8 @@ def to_source_decl(decl: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
         server = decl["server"]
         source = {"kind": "mcp", "name": name, "approval": decl["approval"],
                   **({"url": server["url"]} if server.get("url") else {"command": list(server["command"])})}
+        if server.get("env"):
+            source["env"] = {k: dict(v) for k, v in server["env"].items()}
         allow = [f"mcp_{name}_*"]
     else:
         source = {"kind": "python", "name": name, "callable": decl["callable"], "approval": decl["approval"],

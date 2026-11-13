@@ -32,6 +32,7 @@ from urllib.parse import quote, unquote, urlsplit
 import httpx
 
 from fabri.tools.credential_store import CredentialStore, CredentialStoreError
+from fabri.tools.policy import PolicyError, check_host_env_ref
 from fabri.tools.result import ERROR_KEY, tool_error, tool_ok
 from fabri.tools.secret_refs import resolve_secret
 
@@ -44,6 +45,16 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class HeaderSpecError(ValueError):
     """A header spec is malformed. The message never holds a header value."""
+
+
+def _check_env_ref(header: str, name: Any) -> None:
+    # A header may not copy one of fabri's own secrets (FABRI_CRED_*, broker,
+    # admin and service tokens) out of the host environment; a stored
+    # credential comes through secret_ref so credential_grants apply.
+    try:
+        check_host_env_ref(str(name))
+    except PolicyError as exc:
+        raise HeaderSpecError(f"header {header}: {exc}") from None
 
 
 def check_header_specs(specs: Mapping[str, Any] | None) -> None:
@@ -60,6 +71,8 @@ def check_header_specs(specs: Mapping[str, Any] | None) -> None:
             )
         if "env" in spec and not _ENV_NAME.fullmatch(str(spec["env"])):
             raise HeaderSpecError(f"header {header}: env must be an environment variable name")
+        if "env" in spec:
+            _check_env_ref(header, spec["env"])
         if "secret_ref" in spec and str(spec["secret_ref"]).count(":") != 1:
             raise HeaderSpecError(f"header {header}: secret_ref must look like provider:handle")
         unknown = set(spec) - {"secret_ref", "env", "value", "prefix"}
@@ -100,6 +113,7 @@ def resolve_headers(
             except CredentialStoreError as exc:
                 raise HeaderSpecError(f"header {header}: credential unavailable ({exc})") from None
         elif "env" in spec:
+            _check_env_ref(header, spec["env"])
             value = os.environ.get(str(spec["env"]), "")
             if not value:
                 raise HeaderSpecError(

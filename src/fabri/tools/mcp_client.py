@@ -603,6 +603,11 @@ class MCPStdioClient:
             child_env = {**env_without_credentials(_allowlisted_env()), **declared, **(self.env or {})}
         for broker_name in BROKER_ENV_NAMES:
             child_env.pop(broker_name, None)
+        # A broker value copied under another key (env: {X: {env: <broker
+        # var>}}) is dropped too, whatever the key.
+        broker_values = {os.environ[n] for n in BROKER_ENV_NAMES if os.environ.get(n)}
+        if broker_values:
+            child_env = {k: v for k, v in child_env.items() if v not in broker_values}
         # The child can echo any credential it was given (in a result, an
         # error or its stderr), so every one of them is redacted, not only
         # the values in `env`. That includes an inherited variable whose name
