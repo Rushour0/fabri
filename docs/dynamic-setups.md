@@ -321,25 +321,38 @@ list, so the model can call a tool in the same run even when retrieval hid it.
 
 ### When tool retrieval is on
 
-`tools.retrieval.enabled` takes `true`, `false` or `auto`. The default is
-`auto`:
+`tools.retrieval.enabled` takes `true`, `false` or `auto`:
 
 ```yaml
 tools:
   retrieval:
     enabled: auto        # true: always on. false: always off.
-    auto_threshold: 15   # auto turns on above this many tools
+    auto_threshold: 15   # auto turns on above this many tools (null means 15)
     top_k: 6
 ```
 
-With `auto`, a run narrows the tool list to the top `top_k` tools plus the
-`always_include` ones only when both hold: the embeddings extra is installed
-(`pip install "fabri[embeddings]"`), and the agent has more than
-`auto_threshold` tools. Without embeddings nothing changes from before: every
-tool is shown.
-Set `enabled: false` to keep every tool visible even with embeddings, or
-`enabled: true` to narrow at any tool count. A Python caller of `run_agent`
-keeps the old default (`tool_retrieval_enabled=False`) and can pass `"auto"`.
+An agent built from a setup (`build_agent_config`, the Studio and `fabri serve`
+setups path) defaults to `auto` when it has `find_tools` and `describe_tool`.
+A plain `agent.yaml` run by `fabri run` keeps the old default, `false`, and so
+does a Python caller of `run_agent` or `AgentRunConfig.from_config({})`. Any
+other value, such as `maybe`, is a config error.
+
+With `auto`, a run narrows the tool list to the top `top_k` tools only when
+both hold: the embeddings extra is installed (`pip install "fabri[embeddings]"`),
+and the agent has more than `auto_threshold` tools. Without embeddings every
+tool is shown, as before. `enabled: false` keeps every tool visible even with
+embeddings, and `enabled: true` narrows at any tool count.
+
+Whenever retrieval narrows the list, `ask_user`, `spawn_subagent`, `decompose`,
+`find_tools` and `describe_tool` stay visible on top of `always_include`. When
+retrieval is `true` or `auto`, a plain `fabri run` registry also gets
+`find_tools` and `describe_tool` (ranked on each tool's title and description),
+so a tool retrieval hid can still be found and called in the same run.
+
+Prompt caching: the narrowed list is fixed for the whole run, so the provider's
+prompt cache still hits from step to step. Two runs with different tasks can
+get different lists, so they do not share a cached tool prefix the way runs
+with retrieval off do.
 
 The Studio preview and `GET /setups/preview` make the same decision. The
 response's `tool_retrieval` block carries `enabled` (what a run would do),

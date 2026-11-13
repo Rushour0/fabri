@@ -42,9 +42,9 @@ def _emit_retrieval_event(session_id: str, payload: dict) -> None:
 
 DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
-# With ``tools.retrieval.enabled: auto`` (the config default), top-k tool
-# retrieval turns on only when embeddings are installed and the registry has
-# more tools than this.
+# With ``tools.retrieval.enabled: auto`` (the default for agents built from a
+# setup), top-k tool retrieval turns on only when embeddings are installed and
+# the registry has more tools than this.
 DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD = 15
 # Upper bound on the ActionMemory candidate scan in propose_actions -- keeps it
 # from degrading into an unbounded full-store read as the store grows.
@@ -377,6 +377,12 @@ def tool_retrieval_mode(value: object) -> str:
     raise ValueError(f"tools.retrieval.enabled must be true, false or auto, not {value!r}")
 
 
+def tool_retrieval_threshold(value: object) -> int:
+    """``tools.retrieval.auto_threshold`` as an int. None (or a missing key)
+    means the default; 0 is a real threshold."""
+    return DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD if value is None else int(value)
+
+
 def tool_retrieval_active(
     enabled: object,
     tool_count: int,
@@ -412,7 +418,9 @@ def retrieve_tools(
 
     Embeddings are normalized by `memory.embeddings.embed`, so cosine == dot
     product. Per-tool description vectors are cached at module scope so re-runs
-    over the same registry don't re-embed every tool."""
+    over the same registry don't re-embed every tool. Without the embeddings
+    extra every tool is returned. Whether a run calls this at all is decided by
+    `tool_retrieval_active`."""
     all_tools = list(registry.list())
     if not all_tools:
         return []

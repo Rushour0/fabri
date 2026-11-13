@@ -28,7 +28,7 @@ def test_from_config_defaults_roundtrip():
     # sourced from config, not silently defaulted away.
     assert kwargs["max_steps"] == cfg["agent"]["max_steps"]
     assert kwargs["planner_mode"] == "off"
-    assert kwargs["tool_retrieval_enabled"] == "auto"
+    assert kwargs["tool_retrieval_enabled"] is False
     assert kwargs["max_cost_usd"] is None
     assert kwargs["result_format"] == cfg["tools"]["result_format"]
     assert set(kwargs["tool_retrieval_always_include"]) == set(

@@ -942,17 +942,17 @@ class SetupsApi:
         except SetupError as exc:
             raise ApiError(400, str(exc)) from None
         from fabri.orchestrator.retrieval import (
-            DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD, tool_retrieval_active, tool_retrieval_mode)
+            tool_retrieval_active, tool_retrieval_mode, tool_retrieval_threshold)
 
         retrieval = dict(config["tools"].get("retrieval") or {})
         if tool_top_k is not None:
             retrieval.update(enabled=True, top_k=tool_top_k)
         manifests = registry.list()
         always_include = set(retrieval.get("always_include") or [])
-        auto_threshold = int(retrieval.get("auto_threshold") or DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD)
         try:
+            auto_threshold = tool_retrieval_threshold(retrieval.get("auto_threshold"))
             mode = tool_retrieval_mode(retrieval.get("enabled", "auto"))
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise ApiError(400, str(exc)) from None
         # The same decision run_agent makes: auto is on with embeddings and
         # more than auto_threshold tools.

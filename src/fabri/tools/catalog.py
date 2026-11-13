@@ -439,6 +439,9 @@ def register_meta_tools(registry: "ToolRegistry", toolset: "ResolvedToolSet",
             "examples": entry.examples, "options": entry.options,
         })
 
+    _register_meta_callables(registry, find_tools, describe_tool)
+
+def _register_meta_callables(registry: "ToolRegistry", find_tools, describe_tool) -> None:
     registry.register_callable(ToolManifest(
         name=FIND_TOOLS, title="Find tools",
         description="Search the available tools by what you want to do. Returns tool names with "
@@ -454,3 +457,40 @@ def register_meta_tools(registry: "ToolRegistry", toolset: "ResolvedToolSet",
         command=[], input_schema={"type": "object", "properties": {"name": {"type": "string"}},
                                   "required": ["name"]},
         output_schema={"type": "object"}, approval="read"), describe_tool)
+
+
+def register_registry_meta_tools(registry: "ToolRegistry") -> None:
+    """Add find_tools and describe_tool to a plain registry that has no
+    catalog (``fabri run`` with tool retrieval on). find_tools ranks the
+    registry's own manifests on title and description, the same way the
+    retrieval step does, so a tool retrieval hid can still be found and
+    called in the same run. Does nothing when either name is taken."""
+    if FIND_TOOLS in registry.tools or DESCRIBE_TOOL in registry.tools:
+        return
+    from fabri.orchestrator.retrieval import _tool_text
+    from fabri.ranking import rank
+
+    visible = [n for n in registry.tools if n not in META_TOOLS]
+
+    def find_tools(args: dict) -> dict:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return tool_error("find_tools: `query` is required")
+        k = max(1, min(int(args.get("k") or 5), 20))
+        manifests = {n: registry.tools[n] for n in visible if n in registry.tools}
+        hits = [n for n, _ in rank(query, {n: _tool_text(m) for n, m in manifests.items()})[0]][:k]
+        registry.request_exposure(hits)
+        return tool_ok({"tools": [{"name": n, "title": manifests[n].title,
+                                   "summary": _first_sentence(manifests[n].description or "")} for n in hits]})
+
+    def describe_tool(args: dict) -> dict:
+        name = str(args.get("name") or "")
+        manifest = registry.tools.get(name)
+        if manifest is None or name not in visible:
+            return tool_error(f"describe_tool: no tool named {name!r}")
+        registry.request_exposure([name])
+        return tool_ok({"name": name, "title": manifest.title, "description": manifest.description,
+                        "approval": manifest.approval, "input_schema": manifest.input_schema or {}})
+
+    _register_meta_callables(registry, find_tools, describe_tool)
+

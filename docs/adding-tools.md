@@ -276,7 +276,7 @@ Config-declared MCP servers under `tools.mcp_servers` get approval classes too, 
 ## Tool count and token cost
 
 `fabri setup lint` and `GET /setups/lint` warn when a resolved setup has more than 40 tools or about 16000 tokens of
-tool schema. At that point install the embeddings extra (tool retrieval then turns on by itself above 15 tools, see
+tool schema. At that point install the embeddings extra (an agent built from a setup then turns tool retrieval on by itself above 15 tools, see
 [When tool retrieval is on](dynamic-setups.md#when-tool-retrieval-is-on)) or narrow `allow`. The thresholds are provisional until measured
 on real layers. To see where the tokens go:
 

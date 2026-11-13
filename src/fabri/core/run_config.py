@@ -22,6 +22,7 @@ from fabri.orchestrator.retrieval import (
     DEFAULT_TOP_K,
     RetrievalConfig,
     tool_retrieval_mode,
+    tool_retrieval_threshold,
 )
 
 
@@ -103,12 +104,10 @@ class AgentRunConfig:
             planner_auto_token_threshold=planner.get(
                 "auto_token_threshold", cls.planner_auto_token_threshold
             ),
-            tool_retrieval_enabled=_retrieval_enabled(retrieval.get("enabled", "auto")),
+            tool_retrieval_enabled=_retrieval_enabled(retrieval.get("enabled", False)),
             tool_retrieval_top_k=retrieval.get("top_k", DEFAULT_TOOL_TOP_K),
             tool_retrieval_always_include=tuple(retrieval.get("always_include", [])),
-            tool_retrieval_auto_threshold=int(
-                retrieval.get("auto_threshold", DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD)
-            ),
+            tool_retrieval_auto_threshold=tool_retrieval_threshold(retrieval.get("auto_threshold")),
             max_cost_usd=agent.get("max_cost_usd"),
             response_schema=agent.get("response_schema"),
             response_retries=agent.get("response_retries", cls.response_retries),

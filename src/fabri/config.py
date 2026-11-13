@@ -157,9 +157,11 @@ DEFAULT_CONFIG = {
         # regardless of how the task is worded. `enabled` is true, false or
         # "auto": auto turns retrieval on when the embeddings extra is
         # installed and the agent has more than `auto_threshold` tools, and
-        # leaves every tool visible otherwise. Set false to keep it off.
+        # leaves every tool visible otherwise. A plain config defaults to
+        # false; an agent built from a setup defaults to auto. Any other
+        # value is a config error.
         "retrieval": {
-            "enabled": "auto",
+            "enabled": False,
             "auto_threshold": 15,
             "top_k": 6,
             "always_include": ["spawn_subagent", "ask_user", "decompose"],

@@ -48,6 +48,9 @@ DECOMPOSE_TOOL_NAME = "decompose"
 # The orchestrator prompt references these by name, so they must survive
 # tool-retrieval filtering even when the task wording doesn't match them.
 DEFAULT_ALWAYS_INCLUDE_TOOLS = ("spawn_subagent", "ask_user", "decompose")
+# Kept visible whenever tool retrieval narrows the list, whatever the config
+# says: the orchestration meta tools and the two discovery tools.
+REQUIRED_VISIBLE_TOOLS = (*DEFAULT_ALWAYS_INCLUDE_TOOLS, "find_tools", "describe_tool")
 
 logger = get_logger()
 
@@ -294,7 +297,9 @@ def _run_single_attempt(
             task,
             tools,
             top_k=tool_retrieval_top_k,
-            always_include=tool_retrieval_always_include,
+            # The meta tools the prompt and the discovery path rely on are
+            # always kept, whatever the config lists.
+            always_include=tuple(dict.fromkeys([*tool_retrieval_always_include, *REQUIRED_VISIBLE_TOOLS])),
         )
         filtered_defs = [
             {"name": t.name, "description": t.description, "input_schema": t.input_schema or {"type": "object"}}
