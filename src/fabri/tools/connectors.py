@@ -8,7 +8,7 @@ Credentials are referenced by environment variable name or by a
 
     github     GitHub's official MCP server, local in Docker or the hosted endpoint
     linear     Linear's hosted MCP server
-    slack      three Slack Web API calls: list channels, read history, post a message
+    slack      Slack reads for channels, threads, links and users, plus post and edit
     cakemail   a curated set of Cakemail API calls from a pinned spec; every write needs approval
     composio   Composio's hosted MCP server (experimental, written disabled)
 
@@ -27,9 +27,12 @@ from fabri.tools.connector_catalog import (
     connector_kinds,
     list_connectors,
     request_floor,
+    response_error,
+    shape_request_body,
     spec_rel,
     spec_text,
 )
 
 __all__ = ["CONNECTORS", "Connector", "ConnectorError", "catalog_for_url", "catalog_minimum", "connector_entry",
-           "connector_kinds", "list_connectors", "request_floor", "spec_rel", "spec_text"]
+           "connector_kinds", "list_connectors", "request_floor", "response_error", "shape_request_body",
+           "spec_rel", "spec_text"]

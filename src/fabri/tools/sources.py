@@ -448,7 +448,24 @@ def _build_openapi(decl, *, base_dir, policy, transport, store, dry, broker=None
     return out
 
 
+def _vendor_error(url: str | None, result: dict[str, Any]) -> dict[str, Any]:
+    """Convert an API error inside a successful HTTP response."""
+    if result.get("ok") is not True:
+        return result
+    payload = result.get("result")
+    if not isinstance(payload, Mapping) or "data" not in payload:
+        return result
+    from fabri.tools import connectors
+
+    message = connectors.response_error(url, payload["data"])
+    if message is None:
+        return result
+    return tool_error(message, result={**payload, "status": "error"})
+
+
 def _build_http(decl, *, base_dir, policy, transport, store, dry, broker=None) -> list[SourceTool]:
+    from fabri.tools import connectors
+
     name, url = decl["name"], str(decl["url"])
     method = str(decl.get("method") or "GET").upper()
     timeout = float(decl.get("timeout_s") or 30.0)
@@ -500,15 +517,19 @@ def _build_http(decl, *, base_dir, policy, transport, store, dry, broker=None) -
         reads = method in ("GET", "HEAD", "OPTIONS", "DELETE")
         # The declared query pairs win over an argument of the same name.
         params = {**args, **query} if reads else (query or None)
+        json_body = args if reads else connectors.shape_request_body(target, args)
         if sender is not None:
-            body = {"params": params} if reads else {"params": params, "json_body": args}
-            return sender(method, target, path_params=path_params, extra_headers=dry, timeout_s=timeout,
-                          tool_name=name, floor_url=url, **body)
+            body = {"params": params} if reads else {"params": params, "json_body": json_body}
+            result = sender(method, target, path_params=path_params, extra_headers=dry, timeout_s=timeout,
+                            tool_name=name, floor_url=url, **body)
+            return _vendor_error(target, result)
         if reads:
-            return send(client, method, target, headers=headers, store=store, extra_headers=dry,
-                        params=params, timeout_s=timeout, tool_name=name, floor_url=url)
-        return send(client, method, target, headers=headers, store=store, extra_headers=dry,
-                    params=params, json_body=args, timeout_s=timeout, tool_name=name, floor_url=url)
+            result = send(client, method, target, headers=headers, store=store, extra_headers=dry,
+                          params=params, timeout_s=timeout, tool_name=name, floor_url=url)
+        else:
+            result = send(client, method, target, headers=headers, store=store, extra_headers=dry,
+                          params=params, json_body=json_body, timeout_s=timeout, tool_name=name, floor_url=url)
+        return _vendor_error(target, result)
 
     safe = safe_approval(method, name, url)
     manifest = ToolManifest(
