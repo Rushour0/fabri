@@ -47,7 +47,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -88,6 +88,9 @@ PID_ATTACH_WAIT_S = 10.0
 READ_TIMEOUT_S = 15.0
 BAD_KEY_DELAY_S = 0.5
 MAX_SOCKET_PATH_BYTES = 96
+# Where the in-container shim serves the broker for a channel-bound run.
+CHANNEL_SOCKET_PATH = "/run/fabri/brk.sock"
+TRANSPORTS = frozenset({"socket", "channel"})
 
 MCP_READ_METHODS = frozenset({
     "initialize", "notifications/initialized", "ping", "tools/list", "resources/list", "resources/read",
@@ -217,6 +220,7 @@ class BrokerBinding:
     key: str = field(repr=False)
     actor: str | None
     sources: dict[str, SourceBinding]
+    transport: str = "socket"
 
     def env(self) -> dict[str, str]:
         return {SOCKET_ENV: self.socket_path, KEY_ENV: self.key}
@@ -539,6 +543,19 @@ def _read_request_line(conn: socket.socket, limit: int = MAX_REQUEST_BYTES) -> b
         buf += chunk
         if len(buf) > limit:
             return None
+
+
+def _caller_gone(client_gone: Any) -> bool:
+    """Ask a transport whether its caller hung up. A probe that is not
+    callable, raises, or answers with something other than a bool counts as
+    gone: the call is not made."""
+    if not callable(client_gone):
+        return True
+    try:
+        answer = client_gone()
+    except Exception:  # noqa: BLE001 -- a broken probe means a broken caller
+        return True
+    return answer is not False
 
 
 def _client_gone(conn: socket.socket) -> bool:
@@ -922,14 +939,23 @@ class CredentialBroker:
         actor: str | None,
         listener: AskUserListener | None,
         run_pid: int | None = None,
+        transport: str = "socket",
     ) -> BrokerBinding | None:
         """Bind one run. Returns None (no socket, no env) when its config
         declares no credentialed source. Raises BindError for a config that
         cannot be bound and ValueError when the session is already bound.
 
-        Connections are accepted only from the run's own process tree, so
-        the caller passes `run_pid` here or calls :meth:`attach_run_pid`
-        right after it starts the run."""
+        ``transport="socket"`` (process mode) opens a Unix socket for the
+        run. Connections are accepted only from the run's own process tree,
+        so the caller passes `run_pid` here or calls :meth:`attach_run_pid`
+        right after it starts the run.
+
+        ``transport="channel"`` (container mode) opens no socket. The
+        launcher relays the run's requests through
+        :meth:`handle_channel_request`, and the binding's env names the
+        socket the in-container shim serves."""
+        if transport not in TRANSPORTS:
+            raise BindError(f"credential broker transport must be socket or channel, not {_label(transport, 20)}")
         with self._lock:
             if session_id in self._runs:
                 raise ValueError("this session is already bound to the credential broker")
@@ -939,6 +965,8 @@ class CredentialBroker:
         sources = bind_sources(config, actor=actor, transport=self._transport)
         if not sources:
             return None
+        if transport == "channel":
+            return self._bind_channel(session_id, actor, sources, listener)
         path = socket_path_for(Path(run_home), session_id)
         try:
             path.unlink()
@@ -955,12 +983,7 @@ class CredentialBroker:
             raise
         binding = BrokerBinding(session_id=session_id, socket_path=str(path), key=secrets.token_hex(32),
                                 actor=actor, sources=sources)
-        # Without an injected transport the client connects only to addresses
-        # checked in the same step that connects (no DNS rebinding between
-        # the check and the send). trust_env=False keeps httpx from mounting
-        # proxy transports from the environment, which would bypass that.
-        client = httpx.Client(transport=self._transport or PinnedTransport(), follow_redirects=False,
-                              trust_env=False)
+        client = self._new_client()
         run = _Run(binding, listener, client, run_pid)
         run.server = server
         with self._lock:
@@ -973,6 +996,50 @@ class CredentialBroker:
                                       daemon=True)
         run.thread.start()
         return binding
+
+    def _new_client(self) -> httpx.Client:
+        # Without an injected transport the client connects only to addresses
+        # checked in the same step that connects (no DNS rebinding between
+        # the check and the send). trust_env=False keeps httpx from mounting
+        # proxy transports from the environment, which would bypass that.
+        return httpx.Client(transport=self._transport or PinnedTransport(), follow_redirects=False,
+                            trust_env=False)
+
+    def _bind_channel(self, session_id: str, actor: str | None, sources: dict[str, SourceBinding],
+                      listener: AskUserListener | None) -> BrokerBinding:
+        binding = BrokerBinding(session_id=session_id, socket_path=CHANNEL_SOCKET_PATH,
+                                key=secrets.token_hex(32), actor=actor, sources=sources, transport="channel")
+        client = self._new_client()
+        run = _Run(binding, listener, client, None)
+        with self._lock:
+            if session_id in self._runs:
+                client.close()
+                raise ValueError("this session is already bound to the credential broker")
+            self._runs[session_id] = run
+        return binding
+
+    def handle_channel_request(self, session_id: str, line: bytes,
+                               client_gone: Callable[[], bool] | None = None) -> dict:
+        """Answer one request line that arrived on a channel-bound run's pipe.
+
+        ``session_id`` must come from the launcher's own handle for the pipe
+        the line arrived on, never from the line itself: the pipe is the
+        run's identity. The key in the line is still checked. Never raises;
+        every failure is a refusal."""
+        if not isinstance(session_id, str) or not session_id:
+            return _refusal("refused", "credential broker: this run is not bound to a channel")
+        with self._lock:
+            run = self._runs.get(session_id)
+        if run is None or run.binding.transport != "channel":
+            self._audit_refusal(session_id)
+            return _refusal("refused", "credential broker: this run is not bound to a channel")
+        if not isinstance(line, (bytes, bytearray)):
+            return _refusal("refused", "credential broker refused the request: not bytes")
+        return self._handle_line(run.binding, bytes(line), client_gone=client_gone)
+
+    def _audit_refusal(self, session_id: str) -> None:
+        stub = BrokerBinding(session_id=_label(session_id, 64), socket_path="", key="", actor=None, sources={})
+        self._audit(stub, None, None, None, None, None, "refused", None)
 
     def attach_run_pid(self, session_id: str, pid: int) -> None:
         """Tell the broker which process is the run, once it is started."""
@@ -997,10 +1064,11 @@ class CredentialBroker:
                 run.server.close()
             except OSError:
                 pass
-        try:
-            Path(run.binding.socket_path).unlink()
-        except (FileNotFoundError, OSError):
-            pass
+        if run.binding.transport == "socket":
+            try:
+                Path(run.binding.socket_path).unlink()
+            except (FileNotFoundError, OSError):
+                pass
         run.grants.clear()
         with run.lock:
             run.mcp_tools.clear()
@@ -1042,13 +1110,15 @@ class CredentialBroker:
                              daemon=True).start()
 
     def _peer_allowed(self, run: _Run, conn: socket.socket) -> bool:
+        """Fail closed: the peer must be named by the kernel (uid and pid),
+        run as the service uid, and sit in the run's process tree. A
+        platform that cannot name the peer refuses every connection."""
         uid = peer_uid(conn)
-        if uid is not None and uid != os.getuid():
+        if uid is None or uid != os.getuid():
             return False
         pid = peer_pid(conn)
         if pid is None:
-            # The platform cannot name the peer; the file mode and the key remain.
-            return True
+            return False
         if not run.pid_set.wait(PID_ATTACH_WAIT_S) or run.stop.is_set() or run.run_pid is None:
             return False
         return is_descendant(pid, run.run_pid)
@@ -1085,8 +1155,13 @@ class CredentialBroker:
     # -- request handling ------------------------------------------------
 
     def _handle_line(self, binding: BrokerBinding, line: bytes, *, conn: socket.socket | None = None,
-                     slot: _Slot | None = None) -> dict:
-        """Answer one request line. Never raises; every failure is a refusal."""
+                     slot: _Slot | None = None, client_gone: Callable[[], bool] | None = None) -> dict:
+        """Answer one request line. Never raises; every failure is a refusal.
+
+        ``client_gone`` reports whether the caller hung up; for a socket
+        caller it defaults to peeking ``conn``."""
+        if client_gone is None and conn is not None:
+            client_gone = lambda: _client_gone(conn)  # noqa: E731
         own_slot = None
         try:
             run = self._run_for(binding)
@@ -1112,9 +1187,9 @@ class CredentialBroker:
                 raise _Refuse("refused", "credential broker refused the request: unsupported protocol version")
             op = req.get("op")
             if op == "http":
-                return self._serve_http(run, req, conn, slot)
+                return self._serve_http(run, req, client_gone, slot)
             if op == "mcp":
-                return self._serve_mcp(run, req, conn, slot)
+                return self._serve_mcp(run, req, client_gone, slot)
             raise _Refuse("refused", "credential broker refused the request: op must be http or mcp")
         except _Refuse as r:
             return _refusal(r.status, r.text)
@@ -1269,7 +1344,8 @@ class CredentialBroker:
         except ValueError as exc:
             raise _Refuse("refused", f"{tool}: request refused: {str(exc).removeprefix('refused: ')}") from None
 
-    def _serve_http(self, run: _Run, req: Mapping, conn: socket.socket | None, slot: _Slot) -> dict:
+    def _serve_http(self, run: _Run, req: Mapping, client_gone: Callable[[], bool] | None,
+                    slot: _Slot) -> dict:
         from fabri.tools.http_call import request_hash, secret_ref_provider, send_prepared
 
         binding = run.binding
@@ -1285,7 +1361,7 @@ class CredentialBroker:
                                   prepared, extra)
                 grant_id = self._approve_with_slot(run, slot, tb.name, text, digest)
             store = self._store_for(binding, source, tool=tb.name)
-            self._final_checks(run, conn, grant_id, prepared, extra, tb.name, digest)
+            self._final_checks(run, client_gone, grant_id, prepared, extra, tb.name, digest)
             self._revalidate(tb.name, str(prepared.url))
             out = send_prepared(run.client, prepared, headers=source.header_specs, store=store,
                                 extra_headers=extra, timeout_s=timeout, tool_name=tb.name,
@@ -1330,7 +1406,7 @@ class CredentialBroker:
             raise _Refuse(status, texts.get(status, f"{tool}: approval failed; the call was not made"), decision)
         return grant_id
 
-    def _final_checks(self, run: _Run, conn: socket.socket | None, grant_id: str | None,
+    def _final_checks(self, run: _Run, client_gone: Callable[[], bool] | None, grant_id: str | None,
                       prepared: httpx.Request, extra: Mapping[str, str], tool: str, digest: str) -> None:
         """Right before the send: the run is still bound, the client is still
         there, and the grant (if any) matches the very request about to go."""
@@ -1340,7 +1416,7 @@ class CredentialBroker:
             if grant_id:
                 run.grants.discard(grant_id)
             raise _Refuse("approval_timeout", f"{tool}: the run ended before the call was made", "timeout")
-        if conn is not None and _client_gone(conn):
+        if client_gone is not None and _caller_gone(client_gone):
             if grant_id:
                 run.grants.discard(grant_id)
             raise _Refuse("refused", f"{tool}: the caller went away; the call was not made")
@@ -1481,7 +1557,8 @@ class CredentialBroker:
         run = self._run_for(binding)
         return source, body, extra, self._mcp_class(run, source, parsed)
 
-    def _serve_mcp(self, run: _Run, req: Mapping, conn: socket.socket | None, slot: _Slot) -> dict:
+    def _serve_mcp(self, run: _Run, req: Mapping, client_gone: Callable[[], bool] | None,
+                   slot: _Slot) -> dict:
         from fabri.tools.http_call import request_hash, resolve_headers, secret_ref_provider
         from fabri.tools.mcp_client import _secret_pieces
 
@@ -1507,7 +1584,7 @@ class CredentialBroker:
                                   request, extra)
                 grant_id = self._approve_with_slot(run, slot, label, text, digest)
             store = self._store_for(binding, source, tool=label)
-            self._final_checks(run, conn, grant_id, request, extra, label, digest)
+            self._final_checks(run, client_gone, grant_id, request, extra, label, digest)
             try:
                 resolved = resolve_headers(source.header_specs, store)
             except ValueError:
