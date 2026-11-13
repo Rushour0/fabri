@@ -29,6 +29,17 @@ import sys
 from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
+from fabri.tools.subagent_envelope import (
+    DEFAULT_SUMMARY_MAX_TOKENS,
+    EnvelopeTooLarge,
+    SummaryCapError,
+    bounded_usage,
+    cap_envelope,
+    check_summary_cap,
+)
+from fabri.tools.tool_scope import ScopeError, filter_to_parent, normalize_scope, parent_tool_names
+
+SUMMARY_ENV = "FABRI_SPAWN_SUMMARY_MAX_TOKENS"
 
 logger = get_logger()
 
@@ -87,6 +98,33 @@ def _parent_collection(config_path: str) -> str | None:
         return None
 
 
+def child_response_schema(config_path: str) -> dict | None:
+    """The child config's agent.response_schema, or None. Read from the
+    config file before the child starts, never from what the child reports
+    or from the file after it ran. Unreadable means None."""
+    try:
+        from fabri.config import load_config
+
+        schema = (load_config(str(Path(config_path).resolve())).get("agent") or {}).get("response_schema")
+    except Exception:  # noqa: BLE001
+        return None
+    return schema if isinstance(schema, dict) and schema else None
+
+
+def summary_budget(env: dict | None = None) -> int:
+    """The parent's summary budget from SUMMARY_ENV (set by the parent's
+    registry from tools.spawn_summary_max_tokens), else the default. A bad
+    value raises before anything is spawned."""
+    raw = (os.environ if env is None else env).get(SUMMARY_ENV)
+    if raw is None or raw == "":
+        return DEFAULT_SUMMARY_MAX_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SummaryCapError(f"{SUMMARY_ENV} must be a non-negative integer, got {raw!r}") from None
+    return check_summary_cap(value)
+
+
 def build_runner_command(args: dict, runner_script: Path | None = None) -> list[str]:
     """Pure function so tests can assert flag plumbing without running a real
     sub-agent. Mirrors `make_agent_tool_manifest` from `tools/agent_tool.py`.
@@ -105,6 +143,27 @@ def build_runner_command(args: dict, runner_script: Path | None = None) -> list[
         cmd += ["--system-prompt-file", str(Path(args["system_prompt_path"]).resolve())]
     if args.get("model"):
         cmd += ["--model", str(args["model"])]
+    # A present but malformed tool_scope raises (ScopeError is a ValueError)
+    # instead of falling back to an unscoped child.
+    scope = None
+    if "tool_scope" in args:
+        if args["tool_scope"] is None:
+            raise ScopeError("tool_scope must be a list of tool names, got null")
+        scope = normalize_scope(args["tool_scope"])
+    if scope is not None:
+        # Only names the parent itself has survive (presets are expanded by
+        # the child against its own registry). The child then intersects the
+        # scope with its config's tools, so the scope can only narrow. An
+        # unknown parent tool list refuses the spawn (fail closed).
+        kept, dropped = filter_to_parent(scope, parent_tool_names())
+        if dropped:
+            logger.info("spawn_subagent: dropped tool_scope entries the parent lacks: %s", dropped)
+        if not kept:
+            raise ScopeError(
+                "spawn_subagent: tool_scope names no tool the parent has; "
+                f"dropped {dropped}. Pass tool names you can see, or 'read_only'."
+            )
+        cmd += ["--tool-scope", json.dumps(kept)]
     # NOTE: qdrant reachability across the spawn boundary is handled by the
     # `QDRANT_URL` env override in fabri.config.load_config (the child inherits
     # the env), not by forwarding a flag here -- the tool only sees the on-disk
@@ -147,6 +206,9 @@ def main() -> int:
 
     try:
         cmd = build_runner_command(args)
+        summary_cap = summary_budget()
+        # Snapshot the schema now: the child could edit its own config.
+        schema = child_response_schema(args["config_path"])
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
         return 1
@@ -209,13 +271,29 @@ def main() -> int:
         }))
         return 1
     try:
-        json.loads(stdout)
+        envelope = json.loads(stdout)
     except json.JSONDecodeError as e:
         print(json.dumps({
             "error": f"sub-agent stdout was not JSON: {e}",
             "raw": stdout[:500],
         }))
         return 1
+    # Cap the summary here, on the parent's side, with the parent's budget.
+    # summary_truncated is always set. JSON / structured output that validates
+    # against the schema snapshot is kept whole, and an envelope too large to
+    # return whole fails loudly instead.
+    if isinstance(envelope, dict):
+        try:
+            stdout = json.dumps(cap_envelope(envelope, summary_cap,
+                                             schema=schema))
+        except EnvelopeTooLarge as e:
+            # Keep outcome and (bounded) usage so the parent still rolls the
+            # child's cost into its own.
+            print(json.dumps({"error": str(e), "outcome": envelope.get("outcome"),
+                              "usage": bounded_usage(envelope.get("usage")),
+                              "session_id": envelope.get("session_id"),
+                              "trace_path": envelope.get("trace_path")}))
+            return 1
     sys.stdout.write(stdout + "\n")
     return proc.returncode
 

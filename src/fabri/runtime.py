@@ -278,6 +278,11 @@ def build_tools(tools_cfg: dict, *, approver=None) -> ToolRegistry:
     registry = ToolRegistry(
         [_resolve_manifest_dir(d) for d in manifest_dirs], sandbox_root=sandbox_root, approver=approver
     )
+    # Checked here so a bad value fails at build time, before any spawn.
+    from fabri.tools.subagent_envelope import DEFAULT_SUMMARY_MAX_TOKENS, check_summary_cap
+    _cap = tools_cfg.get("spawn_summary_max_tokens", DEFAULT_SUMMARY_MAX_TOKENS)
+    registry.spawn_summary_max_tokens = check_summary_cap(
+        DEFAULT_SUMMARY_MAX_TOKENS if _cap is None else _cap)
     # `decompose` is a synthetic meta-tool the agent loop injects; a
     # user-shipped tool of the same name would shadow it. Refuse loudly.
     if DECOMPOSE_TOOL_NAME in registry.tools:

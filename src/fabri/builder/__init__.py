@@ -10,7 +10,8 @@ machine-memory output split; the B6 wave planner, which layers declared
 dependency edges into serial/parallel waves with auto-assigned
 ``parallel_group`` tags; and the B4 skills registry, which installs a reusable
 bundle of (prompt + tool manifests + config snippet) into a project so a
-capability carries across products.
+capability carries across products; and the specialist factory, which turns a
+delegated task into a cached child profile with a narrowed tool list.
 """
 from fabri.builder.discovery import (
     build_dry_run_plan,
@@ -31,6 +32,7 @@ from fabri.builder.prompt_kit import (
     format_agent_memory,
     new_prompt,
     render_prompt_template,
+    render_task_brief,
     split_agent_output,
 )
 from fabri.builder.skills import (
@@ -43,6 +45,13 @@ from fabri.builder.skills import (
     new_skill,
     render_skills_listing,
     resolve_skill,
+)
+from fabri.builder.specialists import (
+    ProfileCache,
+    SpecialistError,
+    SpecialistProfile,
+    make_specialist,
+    spawn_args,
 )
 from fabri.builder.tool_writer import (
     new_tool,
@@ -63,9 +72,12 @@ __all__ = [
     "AGENT_MEMORY_MARKER",
     "IDEATION_SPEC_SCHEMA",
     "IdeatorError",
+    "ProfileCache",
     "Skill",
     "SkillError",
     "SpawnDescriptor",
+    "SpecialistError",
+    "SpecialistProfile",
     "Wave",
     "WaveError",
     "WavePlan",
@@ -76,6 +88,7 @@ __all__ = [
     "ideate",
     "install_skill",
     "load_skill",
+    "make_specialist",
     "merge_skill_config",
     "new_prompt",
     "new_skill",
@@ -89,7 +102,9 @@ __all__ = [
     "spec_to_config",
     "render_dry_run_plan",
     "render_prompt_template",
+    "render_task_brief",
     "render_tools_listing",
+    "spawn_args",
     "spawn_descriptors",
     "split_agent_output",
     "test_tool",

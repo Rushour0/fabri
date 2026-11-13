@@ -29,6 +29,7 @@ from fabri.orchestrator.pipeline import process_trace
 from fabri.orchestrator.traces import trace_path
 from fabri.runtime import build_llm, build_memory_store, build_run_llms, build_tool_defs, build_tools
 from fabri.tools.approver import default_approver
+from fabri.tools.tool_scope import ScopeError, apply_child_scope, normalize_scope
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -54,6 +55,9 @@ def main() -> int:
                         help="Override sub-agent agent.system_prompt (inline string). F1.")
     parser.add_argument("--system-prompt-file", dest="system_prompt_file", default=None,
                         help="Override sub-agent agent.system_prompt with file contents. F1.")
+    parser.add_argument("--tool-scope", dest="tool_scope", default=None,
+                        help="JSON list of tool names or presets (read_only) this child may use. "
+                             "Only narrows the config's tools, never widens them.")
     parser.add_argument("--ask-user-socket", dest="ask_user_socket", default=None,
                         help="Path to a Unix socket the ask_user tool routes questions to (A1).")
     cli_args = parser.parse_args()
@@ -122,6 +126,20 @@ def main() -> int:
     # pipe, not a terminal, so default_approver gives the parent's socket
     # (when --ask-user-socket was passed) or None, and None refuses them.
     tools = build_tools(tools_cfg, approver=default_approver())
+    # Per-spawn scope (D1): drop every tool the scope does not allow, then
+    # everything above an inherited ceiling, and pass what is left down as
+    # the ceiling for this child's own children (spawned or static). The
+    # registry keeps its approver, so the approval gate holds for what's left.
+    scope = None
+    if cli_args.tool_scope is not None:
+        try:
+            scope = normalize_scope(json.loads(cli_args.tool_scope))
+        except (json.JSONDecodeError, ScopeError) as e:
+            print(json.dumps({"error": f"--tool-scope is not a list of tool names: {e}"}))
+            return 1
+        if scope is None:
+            scope = []
+    scope_report = apply_child_scope(tools, scope)
     decompose_cfg = tools_cfg["decompose"]
     llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
 
@@ -225,7 +243,9 @@ def main() -> int:
     # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`
     # carries own tokens + grandchildren; the parent's dispatch loop reads
     # it to roll this subtree into its own COGS.
-    print(json.dumps({
+    # The summary cap (D2) is applied by spawn_subagent on the parent's side
+    # with the parent's budget; a static tools.agents[] child is not capped.
+    envelope = {
         "final_text": result["final_text"],
         "structured_output": result.get("structured_output"),
         "outcome": result["outcome"],
@@ -233,7 +253,10 @@ def main() -> int:
         "trace_path": str(trace_path(result["session_id"])),
         "usage": result.get("usage"),
         "memory_actions_applied": result.get("memory_actions_applied", []),
-    }))
+    }
+    if scope_report:
+        envelope["tool_scope"] = scope_report
+    print(json.dumps(envelope))
     return 0 if result["outcome"] in (Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value) else 1
 
 

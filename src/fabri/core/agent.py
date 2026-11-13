@@ -1331,6 +1331,45 @@ def _index_parallel_groups(calls: list[ToolCall]) -> dict[str, list[int]]:
     return groups
 
 
+def _one_writer_per_group(
+    groups: dict[str, list[int]], calls: list[ToolCall], tools: ToolRegistry,
+) -> dict[str, list[int]]:
+    """Keep at most one child that can write in each parallel group.
+
+    A spawn is a reader only when it provably reads (see
+    ``fabri.tools.tool_scope.spawn_is_reader``): a ``tool_scope`` of read
+    tools only, or no scope and a child config whose every tool is read-class
+    with no spawning, no ``tools.agents[]`` and no MCP or other sources.
+    Anything else, a config that fails to load included, is a writer. An
+    unscoped spawn classed a reader gets ``tool_scope: ["read_only"]`` added
+    to its arguments, so a config or manifest dir that changed after the
+    check cannot hand it write tools. The first writer in a group stays;
+    later writers leave the group and run serially before it. See
+    docs/specialists.md."""
+    from fabri.tools.tool_scope import spawn_is_reader
+
+    registry_tools = getattr(tools, "tools", {})
+    out: dict[str, list[int]] = {}
+    for group, idxs in groups.items():
+        kept: list[int] = []
+        writer_seen = False
+        for i in idxs:
+            reader = spawn_is_reader(calls[i].args, registry_tools)
+            if reader and "tool_scope" not in calls[i].args:
+                # Classed a reader from its config. Pin that at spawn time:
+                # the child is narrowed to read tools whatever its config or
+                # manifest dir say by the time it starts.
+                calls[i].args["tool_scope"] = ["read_only"]
+            if not reader:
+                if writer_seen:
+                    logger.info("parallel_group %s: call %d runs serially (one writer at a time)", group, i)
+                    continue
+                writer_seen = True
+            kept.append(i)
+        out[group] = kept
+    return out
+
+
 def _dispatch_tool_calls(
     calls: list[ToolCall],
     tools: ToolRegistry,
@@ -1372,7 +1411,7 @@ def _dispatch_tool_calls(
     # spawn_subagent calls sharing a `parallel_group` arg fan out via
     # threads; other tool kinds stay serial — only sub-agent spawns are
     # slow enough to justify the thread-pool overhead.
-    parallel_indices = _index_parallel_groups(calls)
+    parallel_indices = _one_writer_per_group(_index_parallel_groups(calls), calls, tools)
     parallel_index_set = {i for idxs in parallel_indices.values() for i in idxs}
 
     def _dispatch_one(call: ToolCall) -> dict:

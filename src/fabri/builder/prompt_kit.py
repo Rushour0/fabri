@@ -4,8 +4,8 @@ the user-prose / machine-memory output split consistently.
 Two halves, both project-agnostic:
 
 - :func:`render_prompt_template` / :func:`new_prompt` -- fill the proven prompt
-  skeleton (``ABSOLUTE SCOPE -> RETRIEVED CONTEXT -> CHARTER -> WHAT YOU OWN ->
-  DECOMPOSITION RULES -> VERIFICATION LADDER -> TOOL ROUTING -> HARD INVARIANTS
+  skeleton (``SCOPE -> RETRIEVED CONTEXT -> CHARTER -> WHAT YOU OWN ->
+  DECOMPOSITION RULES -> VERIFICATION LADDER -> TOOL ROUTING -> WORKING RULES
   -> OUTPUT FORMAT``) so a new agent prompt starts from a skeleton, not a blank
   file. Surfaced under the CLI's ``prompt new`` subcommand. NO LLM -- pure,
   deterministic string templating.
@@ -14,6 +14,10 @@ Two halves, both project-agnostic:
   prose and a machine-readable memory block travel together but are mined
   separately. Robust to a missing marker (returns ``(text, None)``).
   :func:`format_agent_memory` is its inverse, so a memory dict round-trips.
+- :func:`render_task_brief` -- the brief a parent hands a delegated child. It
+  has the four parts a delegated task needs (objective, output format, tool
+  guidance, task boundaries). Code supplies the fixed parts; only the task
+  details come from a model.
 """
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ from fabri.memory.output import (
 # `render_prompt_template`; RETRIEVED CONTEXT is injected by the engine at run
 # time, so the template only reserves the slot.
 PROMPT_SKELETON = """\
-# ABSOLUTE SCOPE
+# SCOPE
 
 {scope}
 
@@ -69,7 +73,10 @@ Climb the cheapest rung that proves the work, and stop there:
 
 {tool_routing}
 
-# HARD INVARIANTS
+# WORKING RULES
+
+These are defaults that hold up in most runs. Each says why, so you can judge
+the rare case where it does not fit.
 
 {invariants}
 
@@ -92,8 +99,9 @@ Omit the marker entirely when there is nothing durable to record.
 # Neutral, generic fallbacks so a freshly rendered prompt is coherent and
 # fillable rather than empty. None of these name a domain, app, or game.
 _DEFAULT_SCOPE = (
-    "Work ONLY on the task described below. Do not expand scope, refactor "
-    "unrelated areas, or take on adjacent work you were not explicitly asked for."
+    "Work on the task you were given. Leave unrelated areas and adjacent work "
+    "alone, even when they look easy to improve: changes nobody asked for are "
+    "hard to review and can break things the requester depends on."
 )
 _DEFAULT_OWNS = [
     "<the concrete artifact or surface you are responsible for>",
@@ -115,10 +123,11 @@ _DEFAULT_TOOLS = [
     "<tool_name> -- <when to reach for it and what it returns>",
 ]
 _DEFAULT_INVARIANTS = [
-    "Never invent data or tool results -- act only on what you actually observed.",
-    "Stay within the step and cost budget; prefer one decisive action over many "
-    "exploratory probes.",
-    "Stop when the task is done -- do not gold-plate.",
+    "Act only on what you observed in tool results. A guessed value looks the "
+    "same as a real one to whoever reads your answer, so say when you are unsure.",
+    "Prefer one decisive action over many exploratory probes, because every step "
+    "spends budget the rest of the task may need.",
+    "Stop when the task is done. Extra polish costs time and adds changes to review.",
 ]
 
 
@@ -196,3 +205,81 @@ def new_prompt(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return {"path": str(path), "created": True}
+
+
+# ---------------------------------------------------------------------------
+# render_task_brief: the four parts of a delegated task
+# ---------------------------------------------------------------------------
+
+# A child starts with none of the parent's context, so a vague brief makes it
+# duplicate work, wander, or return the wrong shape. Anthropic's multi-agent
+# research write-up names four parts every delegated task needs; this renders
+# them in a fixed order. The fixed parts (output contract, tool notes, default
+# boundaries) come from code so they read the same on every spawn.
+TASK_BRIEF_SKELETON = """\
+## Objective
+
+{objective}
+
+## Output format
+
+{output_format}
+
+## Tools
+
+{tool_guidance}
+
+## Boundaries
+
+{boundaries}
+"""
+
+DEFAULT_CHILD_OUTPUT_FORMAT = (
+    "Reply with a short summary the parent can act on: what you found or changed, "
+    "the evidence (file paths, ids, numbers), and anything left undone. Aim for "
+    "well under 1,500 words; the parent only sees a capped summary, and your full "
+    "transcript stays in your trace."
+)
+DEFAULT_CHILD_BOUNDARIES = [
+    "Do only this task. The parent owns the overall plan, so leave other parts to it.",
+    "If the task turns out to need a tool you do not have, say so and stop rather "
+    "than working around it; the parent can grant it or do that part itself.",
+]
+
+
+def render_task_brief(
+    objective: str,
+    *,
+    tools: Sequence[str] | None = None,
+    tool_notes: dict[str, str] | None = None,
+    output_format: str | None = None,
+    boundaries: Sequence[str] | None = None,
+) -> str:
+    """The brief for one delegated task, with objective, output format, tool
+    guidance and task boundaries in that order.
+
+    ``objective`` is the only part that normally comes from a model. ``tools``
+    is the child's tool list (from code, after scoping); ``tool_notes`` maps a
+    tool name to a one-line note on when to use it. Extra ``boundaries`` are
+    added after the defaults. Deterministic: the same inputs give the same
+    text."""
+    objective = (objective or "").strip()
+    if not objective:
+        raise ValueError("render_task_brief: objective is required")
+    notes = tool_notes or {}
+    if tools:
+        tool_lines = "\n".join(
+            f"- {t} -- {notes[t]}" if t in notes else f"- {t}" for t in tools
+        )
+        tool_guidance = (
+            "You have only these tools. Start with the cheapest one that can "
+            "answer the question:\n" + tool_lines
+        )
+    else:
+        tool_guidance = "You have no tools for this task. Answer from the brief alone."
+    return TASK_BRIEF_SKELETON.format(
+        objective=objective,
+        output_format=output_format or DEFAULT_CHILD_OUTPUT_FORMAT,
+        tool_guidance=tool_guidance,
+        boundaries=_bullets([*DEFAULT_CHILD_BOUNDARIES, *(boundaries or [])]),
+    )

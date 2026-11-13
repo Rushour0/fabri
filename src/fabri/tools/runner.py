@@ -161,10 +161,16 @@ def run_tool(manifest: ToolManifest, args: dict, extra_env: dict | None = None) 
         truncated = True
     out: dict = {"stderr": stderr} if stderr else {}
     if truncated:
-        # Truncation almost always also breaks the JSON contract, but flagging
-        # it explicitly turns "malformed JSON" into "tool produced too much
-        # output" in the trace, which is the real cause.
+        # Cutting raw stdout breaks the JSON contract, so don't try to parse
+        # it: report the real cause and a short preview. Tools that need a
+        # bounded result cap their own payload before printing (sub-agents do,
+        # see fabri.tools.subagent_envelope), so this only fires on a runaway.
         out["truncated"] = True
+        return tool_error(
+            f"tool output exceeded {RUNNER_OUTPUT_CAP_BYTES} bytes and was cut",
+            preview=stdout[:2000],
+            **out,
+        )
 
     try:
         parsed = json.loads(stdout)
