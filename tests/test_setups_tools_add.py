@@ -373,7 +373,7 @@ def test_add_connectors(monkeypatch, capsys, layer):
     assert entry_yaml(layer, "gh")["sources"][0]["url"] == "https://api.githubcopilot.com/mcp/"
     code, _, _ = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "linear", "--layer", str(layer))
     assert code == 0 and entry_yaml(layer, "linear")["allow"] == ["mcp_linear_*"]
-    code, _, err = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "jira", "--layer", str(layer))
+    code, _, err = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "notion", "--layer", str(layer))
     assert code == 1 and "unknown connector" in err
     text = "".join(p.read_text() for p in (layer / "tools" / "sources").glob("*.yaml"))
     assert "secret_ref: slack:acme" in text and "xox" not in text

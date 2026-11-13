@@ -10,6 +10,8 @@ Each module ``connector_catalog/<id>.py`` exposes:
 
 and may expose:
 
+    CHECK_URL a valid URL passed to ``expand`` during catalog validation when
+              the connector needs a URL
     HOSTS    API hosts the connector owns, lower case, for example ("slack.com",)
     READS    (method, path pattern) pairs it trusts as read, for example
              (("GET", r"/api/conversations[.]list"),); the pattern must match
@@ -60,7 +62,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import urlsplit
 
-MODULE_ORDER: tuple[str, ...] = ("github", "linear", "slack", "cakemail", "gmail", "composio")
+MODULE_ORDER: tuple[str, ...] = ("github", "linear", "slack", "cakemail", "gmail", "jira", "composio")
 
 _CHECK_URL = "https://example.test/mcp"
 
@@ -159,8 +161,9 @@ def _validate(mod: ModuleType, module_name: str) -> Connector:
     for attr in ("shape_body", "response_error"):
         if hasattr(mod, attr) and not callable(getattr(mod, attr)):
             raise ConnectorError(f"connector module {module_name}: {attr} must be callable")
+    check_url = getattr(mod, "CHECK_URL", _CHECK_URL)
     data = mod.expand(entry.name, token_env=None, workspace=None, remote=False,
-                      url=_CHECK_URL if entry.needs_url else None, all_tools=False)
+                      url=check_url if entry.needs_url else None, all_tools=False)
     sources = data.get("sources") if isinstance(data, Mapping) else None
     if not isinstance(sources, list) or not sources:
         raise ConnectorError(f"connector module {module_name}: expand returned no sources")

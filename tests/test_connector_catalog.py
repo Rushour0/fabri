@@ -180,8 +180,8 @@ def test_connector_entry_option_errors():
         connector_entry("github", url="https://example.test/mcp")
     with pytest.raises(ConnectorError, match="all_tools"):
         connector_entry("slack", all_tools=True)
-    with pytest.raises(ConnectorError, match="unknown connector 'jira'"):
-        connector_entry("jira")
+    with pytest.raises(ConnectorError, match="unknown connector 'notion'"):
+        connector_entry("notion")
 
 
 def test_catalog_minimum_slack():
