@@ -333,6 +333,9 @@ def test_rekey_reports_a_busy_checkpoint(tmp_path, key, monkeypatch, capsys):
     try:
         result = ConnectionStore(db, cipher=SecretCipher(key)).rekey()
         assert result["rewritten"] == 1 and result["checkpoint_busy"] is True
+        # A rerun with nothing left to rewrite still checks the checkpoint.
+        again = ConnectionStore(db, cipher=SecretCipher(key)).rekey()
+        assert again["rewritten"] == 0 and again["checkpoint_busy"] is True
         monkeypatch.setenv("FABRI_INSTALL_DB", str(db))
         monkeypatch.setenv(sc.SECRET_KEY_ENV, key)
         plain.upsert(provider="linear", handle="h2", access_token="PLAINACCESS2" + "x" * 40)

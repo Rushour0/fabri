@@ -292,14 +292,16 @@ class ConnectionStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
-            checkpoint_busy = False
+            # Checkpoint on every rekey, not only when rows were rewritten: an
+            # earlier rekey may have left plaintext in the WAL because a reader
+            # was open, and a rerun has to notice that too.
+            busy = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if rewritten:
-                busy = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
                 connection.execute("VACUUM")
-                last = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-                # busy != 0: another connection holds a read transaction, so the
-                # WAL was not fully folded in and old plaintext may remain in it.
-                checkpoint_busy = any(r is not None and r[0] != 0 for r in (busy, last))
+            last = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            # busy != 0: another connection holds a read transaction, so the
+            # WAL was not fully folded in and old plaintext may remain in it.
+            checkpoint_busy = any(r is not None and r[0] != 0 for r in (busy, last))
         self._secure_sidecars()
         result = {"rewritten": rewritten, "skipped": skipped, "unreadable": unreadable}
         if checkpoint_busy:
