@@ -155,6 +155,10 @@ DEFAULT_CONFIG = {
         # stays in the child's trace. 0 turns it off. Static tools.agents[]
         # children are never capped.
         "spawn_summary_max_tokens": 2000,
+        # When true, tools.agents specialists the model calls in the same turn
+        # run concurrently (same cap and budget check as spawn_subagent groups)
+        # instead of one after another. Off by default.
+        "parallel_agents": False,
         "decompose": {"enabled": False, "max_subquestions": DEFAULT_MAX_SUBQUESTIONS},
         # Narrow the system prompt + provider tool list to a task-relevant
         # subset via cosine similarity against each tool's description.
