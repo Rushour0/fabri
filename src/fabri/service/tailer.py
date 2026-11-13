@@ -16,6 +16,7 @@ yielded in full even if the process finished before tailing began.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -32,6 +33,12 @@ logger = get_logger()
 # appends an optional POST_RUN_USAGE for memory-compression cost. Tailing keys
 # off the producing process exiting rather than any single event, so a host
 # reading these doesn't have to know which event is truly last.
+# Longest trace line the tailer parses. A longer line is dropped, so one
+# runaway write (or a sparse file with no newline) cannot grow the buffer
+# without bound.
+MAX_LINE_BYTES = 1 << 20
+_READS_PER_POLL = 16
+
 _TERMINAL_TYPES = frozenset(
     {EventType.FINAL.value, EventType.FAILED.value, EventType.INCOMPLETE.value}
 )
@@ -45,12 +52,16 @@ def run_trace_path(fabri_home: str | Path, session_id: str) -> Path:
     process-global :func:`fabri.paths.home`. ``session_id`` is validated against
     the same charset :func:`fabri.orchestrator.traces.trace_path` enforces so a
     host-supplied id can't escape the traces dir.
+
+    The home is made absolute but not resolved: resolving would follow a
+    symlinked run home before :mod:`fabri.service.trace_store` gets the
+    chance to refuse it.
     """
     if not session_id or not _SESSION_ID_RE.match(session_id):
         raise ValueError(
             f"invalid session_id {session_id!r}: must match {_SESSION_ID_RE.pattern}"
         )
-    return Path(fabri_home).resolve() / ".fabri" / "traces" / f"{session_id}.jsonl"
+    return Path(os.path.abspath(fabri_home)) / ".fabri" / "traces" / f"{session_id}.jsonl"
 
 
 def tail_events(
@@ -79,40 +90,88 @@ def tail_events(
     # hardlinked trace raises TraceOpenError; swapping the path after the
     # open changes nothing because the reader never reopens by path.
     reader = TraceReader(path)
+    # The unterminated tail of the last chunk. Bounded by MAX_LINE_BYTES: a
+    # longer line is dropped (with a warning) up to its newline.
     buf = b""
+    dropping = False
+    truncations = 0
     seen_terminal = False
 
+    def _parse(raw: bytes) -> dict | None:
+        nonlocal seen_terminal
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            return None
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as e:
+            logger.warning("trace tail %s: skipping malformed line: %s", path.name, e)
+            return None
+        if isinstance(event, dict) and event.get("type") in _TERMINAL_TYPES:
+            seen_terminal = True
+        return event
+
     def _emit(chunk: bytes) -> Iterator[dict]:
-        nonlocal buf, seen_terminal
-        buf += chunk
-        while b"\n" in buf:
-            raw, buf = buf.split(b"\n", 1)
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
+        nonlocal buf, dropping
+        # Split once per chunk and carry only the last fragment, so a chunk
+        # of n lines costs O(chunk) rather than O(n * chunk).
+        lines = chunk.split(b"\n")
+        tail = lines.pop()
+        for i, raw in enumerate(lines):
+            if i == 0:
+                if dropping:
+                    dropping = False
+                    buf = b""
+                    continue
+                raw = buf + raw
+                buf = b""
+            if len(raw) > MAX_LINE_BYTES:
+                logger.warning("trace tail %s: dropped a %d-byte line (cap %d)",
+                               path.name, len(raw), MAX_LINE_BYTES)
                 continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as e:
-                logger.warning("trace tail %s: skipping malformed line: %s", path.name, e)
-                continue
-            if isinstance(event, dict) and event.get("type") in _TERMINAL_TYPES:
-                seen_terminal = True
-            yield event
+            event = _parse(raw)
+            if event is not None:
+                yield event
+        if lines:
+            buf = b""
+        if dropping:
+            return
+        if len(buf) + len(tail) > MAX_LINE_BYTES:
+            logger.warning("trace tail %s: dropping a line longer than %d bytes",
+                           path.name, MAX_LINE_BYTES)
+            dropping = True
+            buf = b""
+        else:
+            buf += tail
+
+    def _drain(max_reads: int | None = None) -> Iterator[dict]:
+        nonlocal buf, dropping, truncations
+        reads = 0
+        while max_reads is None or reads < max_reads:
+            reads += 1
+            chunk = reader.read_new()
+            if reader.truncations != truncations:
+                truncations = reader.truncations
+                logger.warning("trace tail %s: file was truncated; reading again from the start",
+                               path.name)
+                buf = b""
+                dropping = False
+            if not chunk:
+                return
+            yield from _emit(chunk)
 
     try:
         while True:
-            chunk = reader.read_new()
-            if chunk:
-                yield from _emit(chunk)
+            # Bounded per poll so a producer that writes faster than we read
+            # still lets the timeout and is_running checks run.
+            yield from _drain(_READS_PER_POLL)
 
             if is_running is None:
                 if seen_terminal:
                     return
             elif not is_running():
                 # Producer exited -- do one final drain then stop.
-                chunk = reader.read_new()
-                if chunk:
-                    yield from _emit(chunk)
+                yield from _drain()
                 return
 
             if deadline is not None and time.monotonic() >= deadline:

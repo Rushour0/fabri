@@ -13,6 +13,18 @@ stores (container mode), so the service never trusts the path itself:
 - a reader or writer keeps its one descriptor for its whole life and never
   reopens by path, so swapping the path after open changes nothing.
 
+The walk root (the run home) is itself opened with ``O_NOFOLLOW``, so a run
+home replaced by a symlink is refused too. Links above the root are trusted:
+the service created that path.
+
+Limits in process mode: the run shares the service's uid and owns its home,
+so it can create the trace file itself and every file it makes passes the
+owner check. The owner and link-count checks only pay off once the service
+creates the trace file before the run starts (container mode, or a launcher
+that precreates it). What process mode does get today is that no link is
+followed, so the service never reads or appends to a file the run pointed it
+at.
+
 A refused open raises :class:`TraceOpenError`.
 """
 from __future__ import annotations
@@ -31,6 +43,10 @@ __all__ = [
     "open_read",
     "trace_root",
 ]
+
+# Default cap on bytes one TraceReader.read_new call returns, so a huge or
+# sparse trace is consumed in bounded pieces instead of in one allocation.
+READ_CAP_BYTES = 4 << 20
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
@@ -70,7 +86,12 @@ def _open_parent(path: Path, root: Path, *, create: bool) -> int:
         raise _refuse(path, "path is outside its trace root") from None
     if create:
         root.mkdir(parents=True, exist_ok=True)
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        fd = os.open(root, _DIR_FLAGS)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _refuse(path, "run home is not a plain directory") from None
+        raise
     for part in rel.parts:
         if part in ("", ".", ".."):
             os.close(fd)
@@ -183,7 +204,12 @@ class TraceReader:
 
     The file is opened on the first :meth:`read_new` that finds it, then the
     descriptor is kept and read from its last offset, so each poll costs only
-    the bytes appended since the last one.
+    the bytes appended since the last one. One call returns at most
+    ``max_bytes``; call again while it returns data.
+
+    If the file shrinks below the read offset (truncated and rewritten), the
+    reader starts again from offset 0 and bumps :attr:`truncations`, so a
+    caller can drop any partial line it buffered.
     """
 
     def __init__(self, path: str | Path, *, root: str | Path | None = None) -> None:
@@ -191,14 +217,17 @@ class TraceReader:
         self._root = root
         self._fd: int | None = None
         self._closed = False
+        self._offset = 0
+        self.truncations = 0
 
     @property
     def opened(self) -> bool:
         return self._fd is not None
 
-    def read_new(self, chunk: int = 1 << 20) -> bytes:
-        """Bytes appended since the last call. Empty when the file does not
-        exist yet. Raises :class:`TraceOpenError` for a refused path."""
+    def read_new(self, max_bytes: int = READ_CAP_BYTES) -> bytes:
+        """Up to ``max_bytes`` bytes appended since the last call. Empty when
+        the file does not exist yet or has nothing new. Raises
+        :class:`TraceOpenError` for a refused path."""
         if self._closed:
             return b""
         if self._fd is None:
@@ -206,12 +235,19 @@ class TraceReader:
                 self._fd = open_read(self.path, root=self._root)
             except FileNotFoundError:
                 return b""
+        if os.fstat(self._fd).st_size < self._offset:
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            self._offset = 0
+            self.truncations += 1
         parts: list[bytes] = []
-        while True:
-            data = os.read(self._fd, chunk)
+        left = max(1, int(max_bytes))
+        while left > 0:
+            data = os.read(self._fd, min(left, 1 << 20))
             if not data:
                 break
             parts.append(data)
+            left -= len(data)
+            self._offset += len(data)
         return b"".join(parts)
 
     def close(self) -> None:

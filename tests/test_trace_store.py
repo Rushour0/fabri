@@ -288,3 +288,121 @@ def test_foreign_owned_file_is_refused(layout, monkeypatch):
         open_read(trace)
     with pytest.raises(TraceOpenError):
         append_trace_event(trace, {"type": "ask_user"})
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_one_huge_chunk_parses_in_linear_time(layout, monkeypatch):
+    """20 MiB arriving in a single read_new is split once, not per line."""
+    trace, _, _ = layout
+    line = (json.dumps({"type": "step", "pad": "x" * 80}) + "\n").encode()
+    n = (20 << 20) // len(line)
+    trace.write_bytes(line * n)
+    real = TraceReader.read_new
+    monkeypatch.setattr(TraceReader, "read_new", lambda self, max_bytes=0: real(self, 64 << 20))
+    start = time.monotonic()
+    count = sum(1 for _ in tail_events(trace, is_running=lambda: False))
+    assert count == n
+    assert time.monotonic() - start < 10
+
+
+def test_read_new_is_capped(layout):
+    trace, _, _ = layout
+    trace.write_bytes(b"a" * (3 << 20))
+    with TraceReader(trace) as reader:
+        assert len(reader.read_new(1 << 20)) == 1 << 20
+        assert len(reader.read_new(1 << 20)) == 1 << 20
+        assert len(reader.read_new()) == 1 << 20
+        assert reader.read_new() == b""
+
+
+def test_oversized_line_is_dropped_and_neighbours_kept(layout):
+    from fabri.service.tailer import MAX_LINE_BYTES
+
+    trace, _, _ = layout
+    big = json.dumps({"type": "step", "pad": "y" * (MAX_LINE_BYTES + 10)}) + "\n"
+    trace.write_text(_event(1) + big + _event(2) + big + _event(3, "final"))
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert got == [{"type": "step", "n": 1}, {"type": "step", "n": 2}, {"type": "final", "n": 3}]
+
+
+def test_sparse_file_without_newlines_stays_bounded(layout):
+    import tracemalloc
+
+    trace, _, _ = layout
+    with open(trace, "wb") as f:
+        f.truncate(256 << 20)  # 256 MiB of holes, no newline
+    with open(trace, "ab") as f:
+        f.write(b"\n" + _event(7, "final").encode())
+    tracemalloc.start()
+    try:
+        got = list(tail_events(trace, is_running=lambda: False))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert got == [{"type": "final", "n": 7}]
+    assert peak < 48 << 20
+
+
+def test_truncated_trace_is_read_again_from_the_start(layout):
+    trace, _, _ = layout
+    trace.write_text(_event(1) + _event(2) + _event(3))
+    with TraceReader(trace) as reader:
+        assert reader.read_new() == (_event(1) + _event(2) + _event(3)).encode()
+        os.truncate(trace, 0)
+        with open(trace, "a") as f:
+            f.write(_event(4))
+        assert reader.read_new() == _event(4).encode()
+        assert reader.truncations == 1
+
+
+def test_tail_survives_truncation(layout):
+    trace, _, _ = layout
+    trace.write_text(_event(1) + '{"type": "step", "partial')
+    state = {"n": 0}
+
+    def is_running() -> bool:
+        state["n"] += 1
+        if state["n"] == 1:
+            os.truncate(trace, 0)
+            with open(trace, "a") as f:
+                f.write(_event(2, "final"))
+            return True
+        return False
+
+    got = list(tail_events(trace, is_running=is_running, poll_interval=0.0))
+    assert got == [{"type": "step", "n": 1}, {"type": "final", "n": 2}]
+
+
+def test_symlinked_run_home_is_refused(layout):
+    trace, _, _ = layout
+    trace.write_text('{"secret": "victim"}\n')
+    run_home = trace.parent.parent.parent
+    evil = run_home.parent / "evilhome"
+    os.symlink(run_home, evil)
+    evil_trace = run_trace_path(evil, SID)
+    assert str(evil_trace).startswith(str(evil))  # not resolved to the victim's home
+    with pytest.raises(TraceOpenError):
+        list(tail_events(evil_trace, is_running=lambda: False))
+    with pytest.raises(TraceOpenError):
+        append_trace_event(evil_trace, {"type": "ask_user"})
+    assert trace.read_text() == '{"secret": "victim"}\n'
+
+
+def test_listener_logs_refused_trace_append_at_warning(layout, monkeypatch):
+    from unittest import mock
+
+    from fabri.service import ask_user_listener as aul
+
+    trace, secret, _ = layout
+    os.symlink(secret, trace)
+    fake_logger = mock.Mock()
+    monkeypatch.setattr(aul, "logger", fake_logger)
+    listener = aul.AskUserListener(str(trace.parent / "unused.sock"),
+                                   lambda q: append_trace_event(trace, {"type": "ask_user", **q}))
+    pending = listener.ask_local(question_id="q1", question="?", options=None, default=None)
+    assert pending is not None
+    assert fake_logger.warning.called
+    assert "refused" in fake_logger.warning.call_args[0][0]
+    assert secret.read_text() == "SECRET-TOKEN-ROW\n"

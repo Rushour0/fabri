@@ -31,7 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
-from fabri.service.trace_store import TraceWriter
+from fabri.service.trace_store import TraceOpenError, TraceWriter
 
 logger = get_logger()
 
@@ -156,6 +156,8 @@ class AskUserListener:
                     "default": default,
                 }
             )
+        except TraceOpenError as exc:
+            logger.warning("ask_user: refused to append to the run's trace (%s)", exc)
         except Exception:
             # A failing hook must not lose the entry; the caller still waits.
             logger.debug("ask_user on_question hook failed", exc_info=True)
@@ -251,6 +253,10 @@ class AskUserListener:
                         "default": req.get("default"),
                     }
                 )
+            except TraceOpenError as exc:
+                # The run's trace path was refused (a planted symlink or
+                # hardlink): worth an operator's attention, not a debug line.
+                logger.warning("ask_user: refused to append to the run's trace (%s)", exc)
             except Exception:  # pragma: no cover - defensive
                 logger.debug("ask_user on_question hook failed", exc_info=True)
 
