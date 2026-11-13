@@ -539,13 +539,28 @@ def test_byte_cap_ends_the_stream_with_a_marker(layout, monkeypatch):
     assert got[-1] == {"type": "dropped", "reason": "cap", "truncated": True}
 
 
-def test_read_trace_at_reads_at_most_the_tail_cap(layout, monkeypatch):
+def test_read_trace_at_reads_the_end_of_a_big_trace(layout, monkeypatch):
+    """result() reads at most RESULT_TRACE_BYTES, from the end, so the final
+    event at the end of a big trace is still found."""
     from fabri.service import service as svc
 
     trace, _, _ = layout
-    monkeypatch.setattr(svc, "MAX_TAIL_BYTES", 1 << 16)
+    monkeypatch.setattr(svc, "RESULT_TRACE_BYTES", 1 << 16)
     with open(trace, "wb") as f:
         f.write(_event(1).encode() + b"\n")
-        f.truncate(64 << 20)  # sparse: a read of the whole file would be 64 MiB
+        f.write(b"x" * (200 << 10) + b"\n")  # filler bigger than the cap
+        f.write(b'{"ts": 1.0, "event_id": "e9", "type": "final", "answer": "end"}\n')
     got = svc._read_trace_at(trace)
-    assert got and got[0]["n"] == 1
+    assert got == [{"ts": 1.0, "event_id": "e9", "type": "final", "answer": "end"}]
+
+
+def test_type_peek_skips_leading_scalar_keys_but_not_nested_objects():
+    from fabri.service.tailer import _TYPE_RE
+
+    real = b'{"ts": 1731490000.123, "event_id": "abc-1", "type": "final", "answer": "' + b"y" * 10
+    assert _TYPE_RE.match(real).group(1) == b"final"
+    nested = b'{"ts": 1.0, "data": {"type": "final"}, "type": "tool_result"'
+    assert _TYPE_RE.match(nested) is None
+    escaped = b'{"note": "say \\"type\\": \\"final\\"", "type": "step"'
+    m = _TYPE_RE.match(escaped)
+    assert m is None or m.group(1) != b"final"

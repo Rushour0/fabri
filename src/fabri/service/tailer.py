@@ -47,7 +47,14 @@ MAX_TAIL_BYTES = 512 << 20
 _PEEK_BYTES = 4096
 # Anchored to the line start so a nested "type" key, or text from the middle
 # of a payload, is never read as the event type.
-_TYPE_RE = re.compile(rb'^\s*\{\s*"type"\s*:\s*"(\w+)"')
+# The top-level "type" of a trace event. Real events start with scalar keys
+# (ts, event_id) before "type", so leading scalar keys are skipped, but a
+# nested object or array before "type" stops the match: a nested
+# {"type": "final"} inside a big payload is never read as the event type.
+_TYPE_RE = re.compile(
+    rb'^\s*\{(?:\s*"\w+"\s*:\s*(?:"[^"\\]*"|[-\d.eE+]+|true|false|null)\s*,)*'
+    rb'\s*"type"\s*:\s*"(\w+)"'
+)
 
 _TERMINAL_TYPES = frozenset(
     {EventType.FINAL.value, EventType.FAILED.value, EventType.INCOMPLETE.value}

@@ -119,6 +119,8 @@ class PersistedRunUnavailableError(RuntimeError):
 # The usage event is one of the last lines of a trace; reading only the tail
 # keeps /runs/tool-usage cheap however long the runs were.
 TOOL_USAGE_TAIL_BYTES = 256 * 1024
+# result() reads at most this much of a trace, from the end.
+RESULT_TRACE_BYTES = 64 * 1024 * 1024
 
 
 def _open_trace(path: Path):
@@ -1024,11 +1026,18 @@ def _read_trace_at(path: Path) -> list[dict]:
         return []
     with f:
         size = os.fstat(f.fileno()).st_size
-        if size > MAX_TAIL_BYTES:
-            _LOG.warning("trace %s is %d bytes; reading only the first %d", path, size, MAX_TAIL_BYTES)
-        text = f.read(MAX_TAIL_BYTES).decode("utf-8", errors="replace")
+        cut = size > RESULT_TRACE_BYTES
+        if cut:
+            # The final and usage events sit at the end of a trace, so read
+            # the last part of a big one and drop its cut first line.
+            _LOG.warning("trace %s is %d bytes; reading only the last %d", path, size, RESULT_TRACE_BYTES)
+            f.seek(size - RESULT_TRACE_BYTES)
+        text = f.read(RESULT_TRACE_BYTES).decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if cut:
+        lines = lines[1:]
     out: list[dict] = []
-    for line in text.splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue
