@@ -408,3 +408,45 @@ def test_cli_env_flag_does_not_echo_value(capsys):
     assert "sk-live" not in str(exc.value)
     with pytest.raises(SystemExit, match="mapping"):
         _add_env_flags({"server": {"command": ["x"], "env": ["x"]}}, ["A=B"])
+
+
+@pytest.mark.parametrize("command", [
+    ["node", "server.js", "--root=/srv/Data/Project2024/workspace"],
+    ["uvx", "mcp-server-git", "--repository", "/Users/x/MyApp2/repo"],
+    ["python", "-m", "myOrg.mcpServers.jiraConnector2"],
+    ["node", "dist/Servers/GithubV2/index.min.js"],
+])
+def test_mcp_ordinary_command_args_accepted(layers, command):
+    decl = mcp_decl()
+    decl["server"]["command"] = command
+    assert register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY).name == "echo"
+
+
+@pytest.mark.parametrize("arg", ["sk-live-ABCdef1234567890XYZabc", "--token=ghp_ABCdef1234567890XYZabc",
+                                 "xoxb-123-456", "--key=Bearer abc"])
+def test_mcp_secret_prefixed_command_args_rejected(layers, arg):
+    decl = mcp_decl()
+    decl["server"]["command"] = ["srv", arg]
+    with pytest.raises(RegistrationError):
+        register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY)
+
+
+@pytest.mark.parametrize("ref", ["broker:key", "broker:socket"])
+def test_broker_secret_refs_refused(layers, ref, monkeypatch):
+    with pytest.raises(RegistrationError, match="broker"):
+        register_tool(layers[1][1], mcp_decl({"K": {"secret_ref": ref}}), actor="a", policy=MCP_POLICY)
+    with pytest.raises(RegistrationError, match="broker"):
+        register_tool(layers[1][1], http_decl(auth={"secret_ref": ref}), actor="a", policy=POLICY)
+    from fabri.tools.secret_refs import MalformedCredentialRefError, resolve_secret
+
+    monkeypatch.setenv("FABRI_CRED_BROKER_KEY", "bk")
+    monkeypatch.setenv("FABRI_CRED_BROKER_SOCKET", "bs")
+    with pytest.raises(MalformedCredentialRefError):
+        resolve_secret(ref)
+
+
+@pytest.mark.parametrize("name", ["FABRI_OTLP_HEADERS", "FABRI_SCOPE_SALT", "FABRI_INSTALL_DB",
+                                  "FABRI_SECRET_KEY", "FABRI_SECRET_KEY_FILE", "FABRI_CRED_SNAPSHOT"])
+def test_more_fabri_host_vars_refused(layers, name):
+    with pytest.raises(PolicyError):
+        register_tool(layers[1][1], mcp_decl({"R": {"env": name}}), actor="a", policy=MCP_POLICY)

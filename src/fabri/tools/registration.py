@@ -198,6 +198,7 @@ def _check_auth(auth: Any) -> None:
         ref = str(auth["secret_ref"])
         if not _SECRET_REF.fullmatch(ref) or looks_like_secret(ref.split(":", 1)[-1]):
             raise RegistrationError("auth.secret_ref must be a reference like provider:handle, not a secret value")
+        _check_not_broker_ref(ref, "auth.secret_ref")
     if "header_env" in auth:
         env = str(auth["header_env"])
         if not _ENV_NAME.fullmatch(env) or looks_like_secret(env):
@@ -213,6 +214,29 @@ def _check_auth(auth: Any) -> None:
 
 
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+_DOTTED_NAME = re.compile(r"^[A-Za-z_][\w-]*(\.[\w-]+)+$")
+
+
+def _arg_looks_like_secret(arg: str) -> bool:
+    """A command argument that looks like a pasted token. Paths and dotted
+    module names are ordinary mixed-case strings, so only the known token
+    prefixes apply to them."""
+    value = arg.split("=", 1)[-1] if arg.startswith("-") else arg
+    if value.strip().lower().startswith(_SECRETISH_PREFIXES):
+        return True
+    if "/" in value or _DOTTED_NAME.fullmatch(value):
+        return False
+    return looks_like_secret(value)
+
+
+def _check_not_broker_ref(ref: str, what: str) -> None:
+    from fabri.tools.credential_store import BROKER_ENV_NAMES, credential_env_var
+
+    provider, _, handle = ref.partition(":")
+    if credential_env_var(provider, handle) in BROKER_ENV_NAMES:
+        raise RegistrationError(f"{what} names the credential broker, which a tool cannot use")
 
 
 def _check_server_env(server: Mapping[str, Any], name: str, policy: ToolPolicy) -> None:
@@ -245,6 +269,7 @@ def _check_server_env(server: Mapping[str, Any], name: str, policy: ToolPolicy) 
             if not _SECRET_REF.fullmatch(value) or looks_like_secret(value.split(":", 1)[-1]):
                 raise RegistrationError(f"server.env.{key}.secret_ref must be a reference like provider:handle, "
                                         "not a secret value")
+            _check_not_broker_ref(value, f"server.env.{key}.secret_ref")
             refs.append(value)
         elif not _ENV_NAME.fullmatch(value) or looks_like_secret(value):
             raise RegistrationError(f"server.env.{key}.env must be an environment variable name "
@@ -380,8 +405,7 @@ def validate_registration(
             _check_url(server["url"], "server.url", policy)
         elif not isinstance(server["command"], list) or not all(isinstance(c, str) for c in server["command"]):
             raise RegistrationError("server.command must be a list of strings")
-        elif any(looks_like_secret(c.split("=", 1)[-1] if c.startswith("-") else c)
-                 and not (c.startswith(("/", "./")) and os.path.exists(c)) for c in server["command"]):
+        elif any(_arg_looks_like_secret(c) for c in server["command"]):
             raise RegistrationError("server.command holds something that looks like a secret value; "
                                     "pass it through server.env as a reference")
         _check_server_env(server, name, policy)

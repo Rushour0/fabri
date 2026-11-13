@@ -36,7 +36,9 @@ class PolicyError(ValueError):
     """A tool or declaration falls outside the caller's policy."""
 
 
-_FABRI_SECRET_ENV = re.compile(r"^FABRI_(CRED_.*|AUTH_.*|.*(TOKEN|KEY|SECRET|PASSWORD|SOCKET))$")
+_FABRI_SECRET_ENV = re.compile(
+    r"^FABRI_(CRED_.*|AUTH_.*|.*(TOKEN|KEY|SECRET|PASSWORD|SOCKET)|SECRET_KEY_FILE|OTLP_HEADERS|SCOPE_SALT"
+    r"|INSTALL_DB)$")
 
 
 def check_host_env_ref(name: str) -> str:

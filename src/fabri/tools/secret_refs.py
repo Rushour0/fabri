@@ -122,6 +122,10 @@ def resolve_secret(ref: str, store: CredentialStore | None = None) -> str:
             "Credential reference requires a non-empty provider and handle"
         )
 
+    from fabri.tools.credential_store import BROKER_ENV_NAMES, credential_env_var
+
+    if credential_env_var(provider, handle) in BROKER_ENV_NAMES:
+        raise MalformedCredentialRefError("Credential reference names the credential broker, which is not a secret")
     credential_store = store if store is not None else default_credential_store()
     return credential_store.get(provider, handle)
 
