@@ -227,6 +227,13 @@ class ToolRegistry:
             except Exception as e:
                 return tool_error(f"{name}: handler raised {type(e).__name__}: {e}")
         extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else {}
+        # Forward an inherited tool ceiling explicitly so sandboxes that do
+        # not copy os.environ (DockerSandbox) still pass it to sub-agents.
+        import os
+
+        from fabri.tools.tool_scope import CEILING_ENV
+        if CEILING_ENV in os.environ:
+            extra_env[CEILING_ENV] = os.environ[CEILING_ENV]
         if is_spawn_tool(name, manifest):
             # The spawn drops any requested tool_scope entry this registry
             # lacks (see fabri.tools.tool_scope), and caps the child's summary

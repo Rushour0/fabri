@@ -193,6 +193,52 @@ def apply_child_scope(registry: "ToolRegistry", scope: list[str] | None,
     return report
 
 
+_CONFIG_READ_ONLY_CACHE: dict[tuple[str, int, int], bool] = {}
+
+
+def child_config_is_read_only(config_path: object) -> bool:
+    """True only when the child config at ``config_path`` loads and every tool
+    it builds is read-class, with no spawn tool, no ``tools.agents[]``, no
+    MCP servers and no ``tools.sources``. Anything else, including a load
+    failure, is False. Results are cached by path, mtime and size."""
+    if not isinstance(config_path, str) or not config_path:
+        return False
+    try:
+        path = Path(config_path).resolve()
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except (OSError, ValueError):
+        return False
+    if key in _CONFIG_READ_ONLY_CACHE:
+        return _CONFIG_READ_ONLY_CACHE[key]
+    result = False
+    try:
+        from fabri.config import load_config
+        from fabri.runtime import build_tools
+        from fabri.tools.registry import is_spawn_tool
+
+        tools_cfg = load_config(str(path))["tools"]
+        if not (tools_cfg.get("agents") or tools_cfg.get("mcp_servers") or tools_cfg.get("sources")):
+            registry = build_tools(tools_cfg)
+            result = bool(registry.tools) and all(
+                is_read_tool(n, m) and not is_spawn_tool(n, m) for n, m in registry.tools.items())
+    except Exception:  # noqa: BLE001 -- fail closed
+        result = False
+    _CONFIG_READ_ONLY_CACHE[key] = result
+    return result
+
+
+def spawn_is_reader(args: object, tools: Mapping[str, "ToolManifest"]) -> bool:
+    """Whether a spawn_subagent call can only read. With a ``tool_scope`` the
+    scope decides (:func:`scope_is_read_only`). Without one the child gets its
+    whole config, so it reads only when :func:`child_config_is_read_only`."""
+    if not isinstance(args, dict):
+        return False
+    if "tool_scope" in args:
+        return scope_is_read_only(args["tool_scope"], tools)
+    return child_config_is_read_only(args.get("config_path"))
+
+
 def scope_is_read_only(scope: object, tools: Mapping[str, "ToolManifest"]) -> bool:
     """True when a requested scope can only ever give the child read tools,
     judged against the parent's registry ``tools``. No scope, a malformed

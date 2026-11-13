@@ -38,7 +38,12 @@ preset `read_only`.
   it starts, spawned or a static `tools.agents[]` child, inherits that and
   drops every tool not named in it, then passes its own (possibly smaller)
   list down. A grandchild can never see more tools than its scoped ancestor,
-  even if it is spawned without a scope.
+  even if it is spawned without a scope. The registry forwards the ceiling to
+  every tool explicitly, so sandboxes that do not copy the host environment
+  (DockerSandbox) still pass it on.
+- The ceiling matches by tool name. A descendant config that defines its own
+  tool under an allowed name (say a `read_file` that runs a shell) keeps it.
+  Keep tool names consistent across the configs a scoped tree can reach.
 - `read_only` keeps tools whose manifest says `approval: read`, plus the
   bundled local read tools (`read_file`, `grep`, `list_dir`, `file_stats`,
   `regex_lines`, `echo_tool`, `sum_tool`) when their manifest has no approval
@@ -77,17 +82,22 @@ approval through the ask-user socket as described above.
 
 Parallel children should either only read or touch nothing the others touch.
 The loop enforces this. In one `parallel_group`, a spawn is a reader only when
-its `tool_scope` can give it nothing but read tools, judged against the
-parent's registry: `read_only`, or names the parent knows as read-class. Every
-other spawn is a writer, including one with no scope, a malformed scope, or a
-scope naming a tool the parent does not know, a tool that writes, a network
-tool or `spawn_subagent`. The first writer runs alongside the readers; any
-later writer in that group leaves it and runs serially before the group
-starts.
+it provably reads:
 
-This changes old behavior: unscoped spawns that share a `parallel_group` used
-to all run at once, and now only the first does. To fan out readers in
-parallel, give each one `tool_scope: ["read_only"]` (or a list of read tools).
+- with a `tool_scope`: the scope gives it read tools only, judged against the
+  parent's registry (`read_only`, or names the parent knows as read-class);
+- without a scope: its child config loads, every tool it builds is
+  read-class, and it has no spawn tool, no `tools.agents[]`, no MCP servers
+  and no `tools.sources`.
+
+Every other spawn is a writer: a config that fails to load, a malformed
+scope, an unknown tool, or any tool that writes or reaches the network. The
+first writer runs alongside the readers; any later writer in that group leaves
+it and runs serially before the group starts.
+
+`examples/02-parallel-fanout` keeps fanning out: its `worker.yaml` only has
+`read_file`, `list_dir` and `grep`. A child config with `write_file`, `bash`,
+`fetch_url` or `spawn_subagent` now runs one at a time within a group.
 
 ## Summary envelope
 
@@ -99,17 +109,21 @@ Through `spawn_subagent`, each child returns:
   on the parent's side, so the child's own config cannot change it. A bad
   value fails when tools are built, before anything is spawned.
 - `outcome`, `usage`, `session_id` and `trace_path`, always.
-- `summary_truncated`, always. When it is true, `final_text_tokens` gives the
-  original size, or `memory_actions_applied_dropped` says side data was
-  removed. The full text is in the child's trace.
+- `summary_truncated`, always. When it is true, `final_text_tokens` or
+  `structured_output_tokens` gives the original size, or
+  `memory_actions_applied_dropped` says side data was removed. The full text is in the child's trace.
 
-What is never cut:
+Typed output:
 
-- `structured_output` is kept whole.
-- A `final_text` that parses as JSON is kept whole.
-- If the envelope is still over 900 KiB after the prose cut, the spawn fails
-  with an error that names `session_id` and `trace_path`, instead of cutting
-  structured data.
+- When the child config declares `agent.response_schema`, a `final_text`
+  that parses as JSON and the `structured_output` are kept whole. The spawn
+  reads the schema from the child config file, not from what the child says.
+- Without a schema, JSON gets the same budget as prose. An over-budget value
+  becomes `{"truncated": true, "text": "<cut JSON text>"}`, so it stays valid
+  JSON and the parent can see it was cut.
+- If the envelope is still over 900 KiB, the spawn fails with an error that
+  carries `outcome`, bounded `usage`, `session_id` and `trace_path`, so the
+  parent still records the child's cost.
 
 `usage` and `memory_actions_applied` are reduced when either is over 8 KiB:
 `usage` keeps its token and cost fields, and the actions list is replaced by a
@@ -169,9 +183,12 @@ profile with a name, a system prompt and a tool list.
   `default_cache_dir()` is `.fabri/specialists` under `FABRI_HOME`. On a hit
   the designer does not run.
 - A cached profile is checked on load. Its key must be 16 hex characters and
-  match its file name, its prompt must equal what code renders from its stored
-  fields and match the stored hash, and its tools are intersected with the
-  current parent's tools. A file that fails is ignored.
+  match its file name. Every designer field must be exactly what the cleaning
+  and length limits above produce, the tool list must be sorted and unique,
+  notes may only name its tools, and the name must follow from role and key.
+  Its prompt must equal what code renders from those fields and match the
+  stored hash, and its tools are intersected with the current parent's tools.
+  A file that fails any check is ignored.
 
 `spawn_args(profile, task, config_path)` builds the `spawn_subagent` call: the
 profile's prompt goes in `system_prompt_inline`, the task brief goes in `task`,

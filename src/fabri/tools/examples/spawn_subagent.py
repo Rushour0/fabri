@@ -33,6 +33,7 @@ from fabri.tools.subagent_envelope import (
     DEFAULT_SUMMARY_MAX_TOKENS,
     EnvelopeTooLarge,
     SummaryCapError,
+    bounded_usage,
     cap_envelope,
     check_summary_cap,
 )
@@ -95,6 +96,18 @@ def _parent_collection(config_path: str) -> str | None:
     except Exception as e:  # noqa: BLE001 -- config errors shouldn't kill spawn
         logger.warning("spawn_subagent: could not read parent collection from %s: %s", config_path, e)
         return None
+
+
+def child_has_response_schema(config_path: str) -> bool:
+    """True when the child config declares agent.response_schema, i.e. the
+    parent asked for typed output and gets it whole. Read from the config
+    file here, not from what the child reports. Unreadable means False."""
+    try:
+        from fabri.config import load_config
+
+        return bool((load_config(str(Path(config_path).resolve())).get("agent") or {}).get("response_schema"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def summary_budget(env: dict | None = None) -> int:
@@ -267,9 +280,14 @@ def main() -> int:
     # and an envelope too large to return whole fails loudly instead.
     if isinstance(envelope, dict):
         try:
-            stdout = json.dumps(cap_envelope(envelope, summary_cap))
+            stdout = json.dumps(cap_envelope(envelope, summary_cap,
+                                             has_schema=child_has_response_schema(args["config_path"])))
         except EnvelopeTooLarge as e:
-            print(json.dumps({"error": str(e), "session_id": envelope.get("session_id"),
+            # Keep outcome and (bounded) usage so the parent still rolls the
+            # child's cost into its own.
+            print(json.dumps({"error": str(e), "outcome": envelope.get("outcome"),
+                              "usage": bounded_usage(envelope.get("usage")),
+                              "session_id": envelope.get("session_id"),
                               "trace_path": envelope.get("trace_path")}))
             return 1
     sys.stdout.write(stdout + "\n")

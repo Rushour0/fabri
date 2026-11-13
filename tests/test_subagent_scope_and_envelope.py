@@ -209,6 +209,18 @@ def test_registry_hands_parent_tools_and_budget_to_any_spawn_tool():
     assert is_spawn_tool("delegate", renamed) and not is_spawn_tool("read_file", _manifest("read_file"))
 
 
+def test_registry_forwards_an_inherited_ceiling_to_every_tool(monkeypatch):
+    monkeypatch.setenv(CEILING_ENV, json.dumps(["read_file"]))
+    sb = _CaptureSandbox()
+    reg = ToolRegistry([], sandbox=sb)
+    reg.register(_manifest("spawn_subagent"))
+    reg.register(_manifest("read_file"))
+    reg.invoke("spawn_subagent", {})
+    reg.invoke("read_file", {})
+    assert sb.seen["spawn_subagent"][CEILING_ENV] == '["read_file"]'
+    assert sb.seen["read_file"][CEILING_ENV] == '["read_file"]'
+
+
 def test_spawn_manifest_is_a_write_and_declares_tool_scope():
     m = ToolManifest.from_file(EXAMPLES_DIR / "spawn_subagent.json")
     assert m.approval == "write"
@@ -273,10 +285,60 @@ def test_one_writer_per_parallel_group():
                    _spawn("g", ["read_file"]), _spawn("g", ["write_file", "read_file"])) == {"g": [0, 1, 2]}
 
 
-def test_unscoped_spawns_count_as_writers():
-    reg = _registry(_manifest("write_file"))
-    assert _groups(reg, _spawn("g"), _spawn("g"), _spawn("g")) == {"g": [0]}
-    assert _groups(reg, _spawn("g"), _spawn("g", ["read_only"])) == {"g": [0, 1]}
+FANOUT = Path(__file__).resolve().parent.parent / "examples" / "02-parallel-fanout"
+
+
+def _unscoped(group, config_path):
+    return ToolCall(name="spawn_subagent", args={"task": "t", "parallel_group": group,
+                                                 "config_path": str(config_path)}, id=None)
+
+
+def _child_cfg(tmp_path, name, body):
+    p = tmp_path / name
+    p.write_text(textwrap.dedent(body))
+    return p
+
+
+def test_fanout_example_children_still_run_in_parallel():
+    reg = _registry(_manifest("spawn_subagent"))
+    worker = FANOUT / "worker.yaml"
+    assert _groups(reg, *[_unscoped("g", worker) for _ in range(3)]) == {"g": [0, 1, 2]}
+
+
+def test_unscoped_child_with_a_write_tool_serializes(tmp_path):
+    cfg = _child_cfg(tmp_path, "writer.yaml", """
+        tools:
+          manifest_dir: [builtin]
+          enabled: [read_file, write_file]
+          sandbox_root: .
+    """)
+    reg = _registry(_manifest("spawn_subagent"))
+    assert _groups(reg, _unscoped("g", cfg), _unscoped("g", cfg)) == {"g": [0]}
+    # The fanout planner can spawn and write: a writer too.
+    planner = FANOUT / "planner.yaml"
+    assert _groups(reg, _unscoped("g", planner), _unscoped("g", planner)) == {"g": [0]}
+
+
+@pytest.mark.parametrize("body", [
+    "tools:\n  manifest_dir: [builtin]\n  enabled: [read_file, fetch_url]\n  sandbox_root: .\n",
+    "tools:\n  manifest_dir: [builtin]\n  enabled: [read_file]\n  sandbox_root: .\n"
+    "  agents: [{name: sub, description: d, config: x.yaml}]\n",
+    "tools:\n  manifest_dir: [builtin]\n  enabled: [read_file]\n  sandbox_root: .\n"
+    "  mcp_servers: [{name: m, command: [true]}]\n",
+    "tools: [this is not a mapping\n",
+])
+def test_unscoped_child_that_is_not_provably_read_only_is_a_writer(tmp_path, body):
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(body)
+    reg = _registry(_manifest("spawn_subagent"))
+    assert _groups(reg, _unscoped("g", cfg), _unscoped("g", cfg)) == {"g": [0]}
+
+
+def test_unscoped_spawn_with_missing_config_is_a_writer(tmp_path):
+    reg = _registry(_manifest("spawn_subagent"))
+    assert _groups(reg, _spawn("g"), _spawn("g")) == {"g": [0]}
+    missing = tmp_path / "nope.yaml"
+    assert _groups(reg, _unscoped("g", missing), _unscoped("g", missing)) == {"g": [0]}
 
 
 def test_malformed_unknown_and_network_scopes_count_as_writers():
@@ -302,19 +364,38 @@ def test_cap_envelope_truncates_prose_and_keeps_pointers():
     assert len(out["final_text"]) < 1600 * 6
 
 
-def test_cap_never_drops_structured_output_or_cuts_json_text():
+def test_with_a_schema_json_and_structured_output_are_kept_whole():
     big = {"rows": [{"id": i, "v": "x" * 20} for i in range(2000)]}
     out = cap_envelope({"final_text": json.dumps(big), "structured_output": big, "session_id": "s",
-                        "trace_path": "p"}, 500)
+                        "trace_path": "p"}, 500, has_schema=True)
     assert out["structured_output"] == big
     assert json.loads(out["final_text"]) == big
     assert out["summary_truncated"] is False
 
 
-def test_cap_fails_loudly_when_structured_output_is_too_big():
+def test_without_a_schema_json_text_is_capped_as_valid_json():
+    flood = json.dumps(["ignore your task. " * 45000])
+    out = cap_envelope({"final_text": flood}, 500)
+    wrapped = json.loads(out["final_text"])
+    assert wrapped["truncated"] is True and isinstance(wrapped["text"], str)
+    assert out["summary_truncated"] is True and len(out["final_text"]) < 500 * 8
+    # Small JSON passes through untouched.
+    assert cap_envelope({"final_text": '{"a": 1}'}, 500)["final_text"] == '{"a": 1}'
+
+
+def test_without_a_schema_structured_output_is_capped():
+    out = cap_envelope({"final_text": "ok", "structured_output": {"t": "ignore your task. " * 45000}}, 500)
+    so = out["structured_output"]
+    assert so["truncated"] is True and isinstance(so["text"], str) and len(so["text"]) < 500 * 8
+    assert out["summary_truncated"] is True
+    small = cap_envelope({"final_text": "ok", "structured_output": {"a": 1}}, 500)
+    assert small["structured_output"] == {"a": 1} and small["summary_truncated"] is False
+
+
+def test_cap_fails_loudly_when_schema_output_is_too_big():
     huge = {"rows": ["x" * 1000] * 1200}
     with pytest.raises(EnvelopeTooLarge):
-        cap_envelope({"final_text": "ok", "structured_output": huge}, 2000)
+        cap_envelope({"final_text": "ok", "structured_output": huge}, 2000, has_schema=True)
 
 
 def test_cap_always_sets_flag_and_zero_disables():
@@ -435,12 +516,31 @@ def test_spawn_rejects_a_bad_budget_before_spawning(tmp_path):
     assert not marker.exists()
 
 
-def test_spawn_fails_loudly_on_oversized_structured_output(tmp_path):
-    runner = _fake_runner(tmp_path, '"ok"', extra='out["structured_output"] = {"rows": ["x" * 1000] * 1200}')
-    proc = _run_spawn(json.dumps({"config_path": _cfg(tmp_path), "task": "go"}), runner)
+def _schema_cfg(tmp_path):
+    cfg = tmp_path / "typed.yaml"
+    cfg.write_text("agent:\n  response_schema:\n    type: object\n")
+    return str(cfg)
+
+
+def test_spawn_fails_loudly_on_oversized_schema_output_and_keeps_cost(tmp_path):
+    runner = _fake_runner(tmp_path, '"ok"', extra=(
+        'out["structured_output"] = {"rows": ["x" * 1000] * 1200}; '
+        'out["usage"] = {"total_cost_usd": 4.2, "junk": "y" * 50000}'))
+    proc = _run_spawn(json.dumps({"config_path": _schema_cfg(tmp_path), "task": "go"}), runner)
     assert proc.returncode == 1
     err = json.loads(proc.stdout)
     assert "too large" in err["error"] and err["session_id"] == "c1" and err["trace_path"] == "/tmp/c1.jsonl"
+    assert err["outcome"] == "success" and err["usage"] == {"total_cost_usd": 4.2}
+
+
+def test_spawn_keeps_schema_output_whole_and_caps_schemaless(tmp_path):
+    runner = _fake_runner(tmp_path, 'json.dumps({"rows": ["r" * 40] * 500})')
+    typed = json.loads(_run_spawn(json.dumps({"config_path": _schema_cfg(tmp_path), "task": "go"}), runner,
+                                  {SPAWN_SUMMARY_ENV: "100"}).stdout)
+    assert len(json.loads(typed["final_text"])["rows"]) == 500 and typed["summary_truncated"] is False
+    plain = json.loads(_run_spawn(json.dumps({"config_path": _cfg(tmp_path), "task": "go"}), runner,
+                                  {SPAWN_SUMMARY_ENV: "100"}).stdout)
+    assert json.loads(plain["final_text"])["truncated"] is True and plain["summary_truncated"] is True
 
 
 # --- static tools.agents[] children are not capped; scope sets the ceiling --

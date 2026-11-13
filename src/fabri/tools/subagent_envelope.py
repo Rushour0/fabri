@@ -10,13 +10,19 @@ and is applied on the parent's side, in ``spawn_subagent.py``. Static
 
 Rules:
 
-- Only a prose ``final_text`` is cut. A ``final_text`` that parses as JSON is
-  kept whole, and ``structured_output`` is never dropped: a parent that asked
-  for typed output gets all of it or a loud error.
+- A prose ``final_text`` over budget is cut and gets a note pointing at the
+  trace.
+- When the child config declares ``agent.response_schema`` (the parent asked
+  for typed output), a ``final_text`` that parses as JSON and the
+  ``structured_output`` are kept whole: the parent gets all of it or a loud
+  error. Without a schema, JSON gets the same budget as prose; an over-budget
+  value is replaced by ``{"truncated": true, "text": "<cut JSON text>"}`` so
+  it stays valid JSON.
 - ``usage`` and ``memory_actions_applied`` are bounded too, since they ride in
   the same tool result.
 - If the envelope is still larger than :data:`HARD_MAX_BYTES` after that, it
-  raises :class:`EnvelopeTooLarge` instead of cutting anything structured.
+  raises :class:`EnvelopeTooLarge`; the spawn turns that into an error that
+  still carries ``outcome`` and bounded ``usage`` so the parent records cost.
 - ``summary_truncated`` is always set, so a reader can tell "not cut" from
   "never checked".
 """
@@ -113,12 +119,20 @@ def _size(value: object) -> int:
         return SIDE_FIELD_MAX_BYTES + 1
 
 
+def bounded_usage(usage: object) -> object:
+    """``usage`` as is when small, else just its token and cost fields."""
+    if usage is None or _size(usage) <= SIDE_FIELD_MAX_BYTES:
+        return usage
+    if not isinstance(usage, dict):
+        return None
+    return {k: usage[k] for k in _USAGE_KEYS if k in usage and _size(usage[k]) < 256}
+
+
 def _bound_side_fields(out: dict) -> bool:
     cut = False
     usage = out.get("usage")
     if usage is not None and _size(usage) > SIDE_FIELD_MAX_BYTES:
-        out["usage"] = ({k: usage[k] for k in _USAGE_KEYS if k in usage and _size(usage[k]) < 256}
-                        if isinstance(usage, dict) else None)
+        out["usage"] = bounded_usage(usage)
         cut = True
     actions = out.get("memory_actions_applied")
     if actions is not None and _size(actions) > SIDE_FIELD_MAX_BYTES:
@@ -128,21 +142,48 @@ def _bound_side_fields(out: dict) -> bool:
     return cut
 
 
+def _cut_json(text: str, max_tokens: int) -> tuple[str, int] | None:
+    """An over-budget JSON text as ``{"truncated": true, "text": <cut>}``."""
+    capped = _cap_text(text, max_tokens)
+    if capped is None:
+        return None
+    return json.dumps({"truncated": True, "text": capped[0]}), capped[1]
+
+
 def cap_envelope(envelope: dict, max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
-                 *, hard_max_bytes: int = HARD_MAX_BYTES) -> dict:
-    """A copy of ``envelope`` with a prose ``final_text`` cut to ``max_tokens``
-    (0 means no cut) and side fields bounded. Always sets
-    ``summary_truncated``. Raises :class:`EnvelopeTooLarge` when what is left
-    is over ``hard_max_bytes``."""
+                 *, has_schema: bool = False, hard_max_bytes: int = HARD_MAX_BYTES) -> dict:
+    """A copy of ``envelope`` with ``final_text`` and ``structured_output`` held
+    to ``max_tokens`` (0 means no cut) and side fields bounded. With
+    ``has_schema`` (the child declared a response schema) JSON text and
+    structured output are kept whole. Always sets ``summary_truncated``.
+    Raises :class:`EnvelopeTooLarge` when what is left is over
+    ``hard_max_bytes``."""
     max_tokens = check_summary_cap(max_tokens)
     out = dict(envelope)
     truncated = False
     text = out.get("final_text")
-    if max_tokens and isinstance(text, str) and not _is_json(text):
-        capped = _cap_text(text, max_tokens)
+    if max_tokens and isinstance(text, str):
+        if _is_json(text):
+            capped = None if has_schema else _cut_json(text, max_tokens)
+            if capped is not None:
+                out["final_text"], out["final_text_tokens"] = capped
+                truncated = True
+        else:
+            capped = _cap_text(text, max_tokens)
+            if capped is not None:
+                out["final_text"] = capped[0] + TRUNCATION_NOTE
+                out["final_text_tokens"] = capped[1]
+                truncated = True
+    structured = out.get("structured_output")
+    if max_tokens and structured is not None and not has_schema:
+        try:
+            dumped = json.dumps(structured)
+        except (TypeError, ValueError):
+            dumped = str(structured)
+        capped = _cut_json(dumped, max_tokens)
         if capped is not None:
-            out["final_text"] = capped[0] + TRUNCATION_NOTE
-            out["final_text_tokens"] = capped[1]
+            out["structured_output"] = json.loads(capped[0])
+            out["structured_output_tokens"] = capped[1]
             truncated = True
     truncated = _bound_side_fields(out) or truncated
     out["summary_truncated"] = truncated

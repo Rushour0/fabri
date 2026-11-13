@@ -102,9 +102,9 @@ class SpecialistProfile:
 
     @classmethod
     def from_dict(cls, data: dict) -> "SpecialistProfile":
-        tools = data.get("tools") or ()
-        owns = data.get("owns") or ()
-        notes = data.get("tool_notes") or {}
+        tools = data.get("tools", [])
+        owns = data.get("owns", [])
+        notes = data.get("tool_notes", {})
         if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
             raise TypeError("tools must be a list of strings")
         if not isinstance(owns, list) or not isinstance(notes, dict):
@@ -172,7 +172,7 @@ class ProfileCache:
             profile = SpecialistProfile.from_dict(json.loads(path.read_text()))
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        if profile.cache_key != key or not _prompt_matches(profile):
+        if profile.cache_key != key or not _fields_clean(profile) or not _prompt_matches(profile):
             logger.warning("specialist profile %s on disk failed verification; ignoring it", key)
             return None
         self._mem[key] = profile
@@ -223,8 +223,7 @@ def _clean(text: object, limit: int) -> str:
     code markers removed, capped. Designer output is untrusted; this keeps it
     from adding sections or fences to the prompt, though it cannot make the
     words themselves safe."""
-    line = " ".join(str(text).split())
-    line = re.sub(r"[#`<>]", "", line)
+    line = " ".join(re.sub(r"[#`<>]", "", str(text)).split())
     return line[:limit].strip()
 
 
@@ -239,6 +238,26 @@ def _render(role: str, owns: Sequence[str], tools: Sequence[str], notes: dict[st
             "back a summary the parent can act on without rereading your work."
         ),
     )
+
+
+_ROLE_MAX, _LINE_MAX, _OWNS_MAX = 60, 120, 3
+
+
+def _fields_clean(profile: SpecialistProfile) -> bool:
+    """True when every designer field is exactly what :func:`_clean` and the
+    length limits would produce, and the name follows from role and key. A
+    hand-edited file that sneaks in newlines, markers or long text fails."""
+    if not profile.role or _clean(profile.role, _ROLE_MAX) != profile.role:
+        return False
+    if len(profile.owns) > _OWNS_MAX or any(not o or _clean(o, _LINE_MAX) != o for o in profile.owns):
+        return False
+    if not profile.tools or len(set(profile.tools)) != len(profile.tools) or list(profile.tools) != sorted(profile.tools):
+        return False
+    if any(not re.fullmatch(r"[A-Za-z0-9_.:-]+", t) for t in profile.tools):
+        return False
+    if any(t not in profile.tools or not n or _clean(n, _LINE_MAX) != n for t, n in profile.tool_notes.items()):
+        return False
+    return profile.name == f"{_slug(profile.role)}_{profile.cache_key[:6]}"
 
 
 def _prompt_matches(profile: SpecialistProfile) -> bool:
@@ -300,9 +319,10 @@ def make_specialist(
     if not chosen:
         raise SpecialistError("specialist designer picked no tool the parent has")
     raw_notes = spec.get("tool_notes") if isinstance(spec.get("tool_notes"), dict) else {}
-    notes = {t: _clean(raw_notes[t], 120) for t in chosen if t in raw_notes and _clean(raw_notes[t], 120)}
-    role = _clean(spec["role"], 60) or "specialist"
-    owns = tuple(c for c in (_clean(o, 120) for o in (spec.get("owns") or [])) if c)[:3]
+    notes = {t: _clean(raw_notes[t], _LINE_MAX) for t in chosen
+             if t in raw_notes and _clean(raw_notes[t], _LINE_MAX)}
+    role = _clean(spec["role"], _ROLE_MAX) or "specialist"
+    owns = tuple(c for c in (_clean(o, _LINE_MAX) for o in (spec.get("owns") or [])) if c)[:_OWNS_MAX]
 
     system_prompt = _render(role, owns, chosen, notes)
     profile = SpecialistProfile(

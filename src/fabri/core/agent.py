@@ -1322,14 +1322,14 @@ def _one_writer_per_group(
 ) -> dict[str, list[int]]:
     """Keep at most one child that can write in each parallel group.
 
-    A spawn is a reader only when its ``tool_scope`` can give it nothing but
-    read tools, judged against this registry (``read_only``, or names this
-    registry knows as read-class). Every other spawn is a writer: one with no
-    scope (it gets its whole config), a malformed scope, or a scope naming a
-    tool that is unknown here, writes, or reaches the network. The first
-    writer in a group stays; later writers leave the group and run serially
-    before it. See docs/specialists.md."""
-    from fabri.tools.tool_scope import scope_is_read_only
+    A spawn is a reader only when it provably reads (see
+    ``fabri.tools.tool_scope.spawn_is_reader``): a ``tool_scope`` of read
+    tools only, or no scope and a child config whose every tool is read-class
+    with no spawning, no ``tools.agents[]`` and no MCP or other sources.
+    Anything else, a config that fails to load included, is a writer. The
+    first writer in a group stays; later writers leave the group and run
+    serially before it. See docs/specialists.md."""
+    from fabri.tools.tool_scope import spawn_is_reader
 
     registry_tools = getattr(tools, "tools", {})
     out: dict[str, list[int]] = {}
@@ -1337,7 +1337,7 @@ def _one_writer_per_group(
         kept: list[int] = []
         writer_seen = False
         for i in idxs:
-            if not scope_is_read_only(calls[i].args.get("tool_scope"), registry_tools):
+            if not spawn_is_reader(calls[i].args, registry_tools):
                 if writer_seen:
                     logger.info("parallel_group %s: call %d runs serially (one writer at a time)", group, i)
                     continue

@@ -20,6 +20,10 @@ import pytest
 from fabri.core.agent import _dispatch_tool_calls
 from fabri.core.llm import ToolCall
 
+# The read-only leaf of examples/02-parallel-fanout. A spawn of a read-only
+# child config is a reader, so these spawns still fan out in parallel.
+FANOUT_WORKER = Path(__file__).resolve().parent.parent / "examples" / "02-parallel-fanout" / "worker.yaml"
+
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
 
 
@@ -34,8 +38,8 @@ class _RaisingTools:
 def test_parallel_future_exception_yields_paired_error_blocks(tmp_path):
     # Two spawn_subagent calls in the same parallel_group -> threaded dispatch.
     calls = [
-        ToolCall(name="spawn_subagent", args={"parallel_group": "g", "tool_scope": ["read_only"]}, id="a"),
-        ToolCall(name="spawn_subagent", args={"parallel_group": "g", "tool_scope": ["read_only"]}, id="b"),
+        ToolCall(name="spawn_subagent", args={"parallel_group": "g", "config_path": str(FANOUT_WORKER)}, id="a"),
+        ToolCall(name="spawn_subagent", args={"parallel_group": "g", "config_path": str(FANOUT_WORKER)}, id="b"),
     ]
     messages: list[dict] = []
     had_failure = _dispatch_tool_calls(
