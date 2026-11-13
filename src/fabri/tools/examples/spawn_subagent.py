@@ -98,16 +98,17 @@ def _parent_collection(config_path: str) -> str | None:
         return None
 
 
-def child_has_response_schema(config_path: str) -> bool:
-    """True when the child config declares agent.response_schema, i.e. the
-    parent asked for typed output and gets it whole. Read from the config
-    file here, not from what the child reports. Unreadable means False."""
+def child_response_schema(config_path: str) -> dict | None:
+    """The child config's agent.response_schema, or None. Read from the
+    config file before the child starts, never from what the child reports
+    or from the file after it ran. Unreadable means None."""
     try:
         from fabri.config import load_config
 
-        return bool((load_config(str(Path(config_path).resolve())).get("agent") or {}).get("response_schema"))
+        schema = (load_config(str(Path(config_path).resolve())).get("agent") or {}).get("response_schema")
     except Exception:  # noqa: BLE001
-        return False
+        return None
+    return schema if isinstance(schema, dict) and schema else None
 
 
 def summary_budget(env: dict | None = None) -> int:
@@ -206,6 +207,8 @@ def main() -> int:
     try:
         cmd = build_runner_command(args)
         summary_cap = summary_budget()
+        # Snapshot the schema now: the child could edit its own config.
+        schema = child_response_schema(args["config_path"])
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
         return 1
@@ -276,12 +279,13 @@ def main() -> int:
         }))
         return 1
     # Cap the summary here, on the parent's side, with the parent's budget.
-    # summary_truncated is always set; structured / JSON output is never cut,
-    # and an envelope too large to return whole fails loudly instead.
+    # summary_truncated is always set. JSON / structured output that validates
+    # against the schema snapshot is kept whole, and an envelope too large to
+    # return whole fails loudly instead.
     if isinstance(envelope, dict):
         try:
             stdout = json.dumps(cap_envelope(envelope, summary_cap,
-                                             has_schema=child_has_response_schema(args["config_path"])))
+                                             schema=schema))
         except EnvelopeTooLarge as e:
             # Keep outcome and (bounded) usage so the parent still rolls the
             # child's cost into its own.

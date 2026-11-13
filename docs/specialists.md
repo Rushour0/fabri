@@ -95,6 +95,12 @@ scope, an unknown tool, or any tool that writes or reaches the network. The
 first writer runs alongside the readers; any later writer in that group leaves
 it and runs serially before the group starts.
 
+An unscoped spawn classed a reader this way gets `tool_scope: ["read_only"]`
+added to its call before it runs. The check is cached by config path, mtime
+and size, so it can go stale (a write tool added to the manifest dir, or a
+config swapped in place). The added scope means the child is narrowed to read
+tools at spawn time whatever its config says by then.
+
 `examples/02-parallel-fanout` keeps fanning out: its `worker.yaml` only has
 `read_file`, `list_dir` and `grep`. A child config with `write_file`, `bash`,
 `fetch_url` or `spawn_subagent` now runs one at a time within a group.
@@ -116,8 +122,11 @@ Through `spawn_subagent`, each child returns:
 Typed output:
 
 - When the child config declares `agent.response_schema`, a `final_text`
-  that parses as JSON and the `structured_output` are kept whole. The spawn
-  reads the schema from the child config file, not from what the child says.
+  that parses as JSON and the `structured_output` are kept whole if they
+  validate against that schema (fabri's own validator in
+  `fabri.core.structured`). The spawn reads the schema from the child config
+  file before the child starts, so a child that edits its own config cannot
+  exempt itself. Output that fails validation gets the normal cap.
 - Without a schema, JSON gets the same budget as prose. An over-budget value
   becomes `{"truncated": true, "text": "<cut JSON text>"}`, so it stays valid
   JSON and the parent can see it was cut.

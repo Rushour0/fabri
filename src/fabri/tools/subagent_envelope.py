@@ -14,10 +14,12 @@ Rules:
   trace.
 - When the child config declares ``agent.response_schema`` (the parent asked
   for typed output), a ``final_text`` that parses as JSON and the
-  ``structured_output`` are kept whole: the parent gets all of it or a loud
-  error. Without a schema, JSON gets the same budget as prose; an over-budget
-  value is replaced by ``{"truncated": true, "text": "<cut JSON text>"}`` so
-  it stays valid JSON.
+  ``structured_output`` are kept whole if they validate against that schema:
+  the parent gets all of it or a loud error. The spawn reads the schema
+  before the child starts, so a child cannot add one to its own config.
+  Without a schema, or for output that does not validate, JSON gets the same
+  budget as prose; an over-budget value is replaced by
+  ``{"truncated": true, "text": "<cut JSON text>"}`` so it stays valid JSON.
 - ``usage`` and ``memory_actions_applied`` are bounded too, since they ride in
   the same tool result.
 - If the envelope is still larger than :data:`HARD_MAX_BYTES` after that, it
@@ -150,21 +152,33 @@ def _cut_json(text: str, max_tokens: int) -> tuple[str, int] | None:
     return json.dumps({"truncated": True, "text": capped[0]}), capped[1]
 
 
+def _matches(value: object, schema: dict | None) -> bool:
+    if not isinstance(schema, dict) or not schema:
+        return False
+    from fabri.core.structured import validate
+
+    try:
+        return not validate(value, schema)
+    except Exception:  # noqa: BLE001 -- a validator error is "does not match"
+        return False
+
+
 def cap_envelope(envelope: dict, max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
-                 *, has_schema: bool = False, hard_max_bytes: int = HARD_MAX_BYTES) -> dict:
+                 *, schema: dict | None = None, hard_max_bytes: int = HARD_MAX_BYTES) -> dict:
     """A copy of ``envelope`` with ``final_text`` and ``structured_output`` held
-    to ``max_tokens`` (0 means no cut) and side fields bounded. With
-    ``has_schema`` (the child declared a response schema) JSON text and
-    structured output are kept whole. Always sets ``summary_truncated``.
-    Raises :class:`EnvelopeTooLarge` when what is left is over
-    ``hard_max_bytes``."""
+    to ``max_tokens`` (0 means no cut) and side fields bounded. ``schema`` is
+    the child's response schema, read by the caller before the child ran: a
+    JSON ``final_text`` or a ``structured_output`` that validates against it
+    is kept whole; one that does not gets the normal cap. Always sets
+    ``summary_truncated``. Raises :class:`EnvelopeTooLarge` when what is left
+    is over ``hard_max_bytes``."""
     max_tokens = check_summary_cap(max_tokens)
     out = dict(envelope)
     truncated = False
     text = out.get("final_text")
     if max_tokens and isinstance(text, str):
         if _is_json(text):
-            capped = None if has_schema else _cut_json(text, max_tokens)
+            capped = None if _matches(json.loads(text), schema) else _cut_json(text, max_tokens)
             if capped is not None:
                 out["final_text"], out["final_text_tokens"] = capped
                 truncated = True
@@ -175,7 +189,7 @@ def cap_envelope(envelope: dict, max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
                 out["final_text_tokens"] = capped[1]
                 truncated = True
     structured = out.get("structured_output")
-    if max_tokens and structured is not None and not has_schema:
+    if max_tokens and structured is not None and not _matches(structured, schema):
         try:
             dumped = json.dumps(structured)
         except (TypeError, ValueError):

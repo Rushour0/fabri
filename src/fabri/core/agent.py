@@ -1340,9 +1340,12 @@ def _one_writer_per_group(
     ``fabri.tools.tool_scope.spawn_is_reader``): a ``tool_scope`` of read
     tools only, or no scope and a child config whose every tool is read-class
     with no spawning, no ``tools.agents[]`` and no MCP or other sources.
-    Anything else, a config that fails to load included, is a writer. The
-    first writer in a group stays; later writers leave the group and run
-    serially before it. See docs/specialists.md."""
+    Anything else, a config that fails to load included, is a writer. An
+    unscoped spawn classed a reader gets ``tool_scope: ["read_only"]`` added
+    to its arguments, so a config or manifest dir that changed after the
+    check cannot hand it write tools. The first writer in a group stays;
+    later writers leave the group and run serially before it. See
+    docs/specialists.md."""
     from fabri.tools.tool_scope import spawn_is_reader
 
     registry_tools = getattr(tools, "tools", {})
@@ -1351,7 +1354,13 @@ def _one_writer_per_group(
         kept: list[int] = []
         writer_seen = False
         for i in idxs:
-            if not spawn_is_reader(calls[i].args, registry_tools):
+            reader = spawn_is_reader(calls[i].args, registry_tools)
+            if reader and "tool_scope" not in calls[i].args:
+                # Classed a reader from its config. Pin that at spawn time:
+                # the child is narrowed to read tools whatever its config or
+                # manifest dir say by the time it starts.
+                calls[i].args["tool_scope"] = ["read_only"]
+            if not reader:
                 if writer_seen:
                     logger.info("parallel_group %s: call %d runs serially (one writer at a time)", group, i)
                     continue

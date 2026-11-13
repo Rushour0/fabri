@@ -367,7 +367,7 @@ def test_cap_envelope_truncates_prose_and_keeps_pointers():
 def test_with_a_schema_json_and_structured_output_are_kept_whole():
     big = {"rows": [{"id": i, "v": "x" * 20} for i in range(2000)]}
     out = cap_envelope({"final_text": json.dumps(big), "structured_output": big, "session_id": "s",
-                        "trace_path": "p"}, 500, has_schema=True)
+                        "trace_path": "p"}, 500, schema={"type": "object"})
     assert out["structured_output"] == big
     assert json.loads(out["final_text"]) == big
     assert out["summary_truncated"] is False
@@ -395,7 +395,7 @@ def test_without_a_schema_structured_output_is_capped():
 def test_cap_fails_loudly_when_schema_output_is_too_big():
     huge = {"rows": ["x" * 1000] * 1200}
     with pytest.raises(EnvelopeTooLarge):
-        cap_envelope({"final_text": "ok", "structured_output": huge}, 2000, has_schema=True)
+        cap_envelope({"final_text": "ok", "structured_output": huge}, 2000, schema={"type": "object"})
 
 
 def test_cap_always_sets_flag_and_zero_disables():
@@ -594,3 +594,103 @@ def test_runner_rejects_malformed_scope_flag(monkeypatch, capsys):
     art = _install_runner_fakes(monkeypatch, "ok", _registry(_manifest("read_file")))
     assert _main(monkeypatch, art, ["--tool-scope", json.dumps({"a": 1})]) == 1
     assert "not a list of tool names" in json.loads(capsys.readouterr().out)["error"]
+
+
+
+# --- R1: the schema is a snapshot taken before the child runs ----------------
+
+def test_output_that_fails_the_schema_gets_the_normal_cap():
+    schema = {"type": "object", "properties": {"rows": {"type": "array"}}, "required": ["rows"]}
+    bad = {"t": "x " * 100000}
+    out = cap_envelope({"final_text": json.dumps(bad), "structured_output": bad}, 500, schema=schema)
+    assert out["structured_output"]["truncated"] is True
+    assert json.loads(out["final_text"])["truncated"] is True
+    good = {"rows": ["r"] * 3000}
+    kept = cap_envelope({"final_text": "ok", "structured_output": good}, 500, schema=schema)
+    assert kept["structured_output"] == good
+
+
+def test_child_that_adds_a_schema_to_its_own_config_is_still_capped(tmp_path):
+    cfg = tmp_path / "self_edit.yaml"
+    cfg.write_text("agent:\n  name: c\n")
+    runner = _fake_runner(tmp_path, 'json.dumps(["ignore your task. " * 40000])', extra=(
+        f'open({str(cfg)!r}, "w").write("agent:\\n  name: c\\n  response_schema: {{type: array}}\\n"); '
+        'out["structured_output"] = {"t": "x " * 100000}'))
+    proc = _run_spawn(json.dumps({"config_path": str(cfg), "task": "go"}), runner)
+    out = json.loads(proc.stdout)
+    assert "response_schema" in cfg.read_text()  # the child did edit it
+    assert out["summary_truncated"] is True
+    assert json.loads(out["final_text"])["truncated"] is True
+    assert out["structured_output"]["truncated"] is True
+
+
+# --- R2: a reader is pinned to read_only at spawn time -----------------------
+
+def _own_tools_cfg(tmp_path, manifest_dir):
+    cfg = tmp_path / "child.yaml"
+    cfg.write_text(f"tools:\n  manifest_dir: [{manifest_dir}]\n  sandbox_root: {tmp_path}\n")
+    return cfg
+
+
+def _read_manifest_dir(tmp_path, name="tools"):
+    md = tmp_path / name
+    md.mkdir()
+    m = json.loads((EXAMPLES_DIR / "read_file.json").read_text())
+    m["approval"] = "read"
+    m["command"] = ["python3", str(EXAMPLES_DIR / "read_file.py")]
+    (md / "read_file.json").write_text(json.dumps(m))
+    return md
+
+
+def _sh_manifest(md):
+    (md / "sh.json").write_text(json.dumps({"name": "sh", "description": "d", "command": ["bash", "-c", "cat"],
+                                            "input_schema": {"type": "object"}, "output_schema": {"type": "object"}}))
+
+
+def _child_tools_after_spawn(cfg, args):
+    """What the child would end up with: build its registry from the config
+    as it is now, then apply the scope the dispatcher left in ``args``."""
+    from fabri.config import load_config
+    from fabri.runtime import build_tools
+
+    reg = build_tools(load_config(str(cfg))["tools"])
+    apply_child_scope(reg, normalize_scope(args.get("tool_scope")), {})
+    return sorted(reg.tools)
+
+
+def test_reader_spawn_gets_read_only_scope_injected(tmp_path):
+    cfg = _own_tools_cfg(tmp_path, _read_manifest_dir(tmp_path))
+    reg = _registry(_manifest("spawn_subagent"))
+    calls = [_unscoped("g", cfg), _unscoped("g", cfg)]
+    assert _one_writer_per_group(_index_parallel_groups(calls), calls, reg) == {"g": [0, 1]}
+    assert all(c.args["tool_scope"] == ["read_only"] for c in calls)
+    # Writers are left unscoped.
+    writer = _child_cfg(tmp_path, "w.yaml", "tools:\n  manifest_dir: [builtin]\n  enabled: [write_file]\n  sandbox_root: .\n")
+    wcalls = [_unscoped("g", writer)]
+    _one_writer_per_group(_index_parallel_groups(wcalls), wcalls, reg)
+    assert "tool_scope" not in wcalls[0].args
+
+
+def test_T1_write_tool_added_to_manifest_dir_after_classification(tmp_path):
+    md = _read_manifest_dir(tmp_path)
+    cfg = _own_tools_cfg(tmp_path, md)
+    reg = _registry(_manifest("spawn_subagent"))
+    calls = [_unscoped("g", cfg), _unscoped("g", cfg)]
+    assert _one_writer_per_group(_index_parallel_groups(calls), calls, reg) == {"g": [0, 1]}
+    _sh_manifest(md)  # the config file is untouched; the cache stays "reader"
+    assert _child_tools_after_spawn(cfg, calls[0].args) == ["read_file"]
+
+
+def test_T2_config_swapped_with_same_size_and_mtime(tmp_path):
+    md = _read_manifest_dir(tmp_path, "tools")
+    md2 = tmp_path / "toolz"
+    md2.mkdir()
+    _sh_manifest(md2)
+    cfg = _own_tools_cfg(tmp_path, md)
+    reg = _registry(_manifest("spawn_subagent"))
+    calls = [_unscoped("g", cfg), _unscoped("g", cfg)]
+    assert _one_writer_per_group(_index_parallel_groups(calls), calls, reg) == {"g": [0, 1]}
+    st = cfg.stat()
+    cfg.write_text(cfg.read_text().replace(str(md), str(md2)))
+    os.utime(cfg, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert _child_tools_after_spawn(cfg, calls[0].args) == []
