@@ -53,6 +53,7 @@ from fabri.service.launcher import (
 )
 from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
+from fabri.service import trace_store
 from fabri.service.surfaces.github import GitHubAdapter
 from fabri.service.surfaces.linear import LinearAdapter
 from fabri.service.surfaces.registry import SurfaceRegistry
@@ -120,8 +121,25 @@ class PersistedRunUnavailableError(RuntimeError):
 TOOL_USAGE_TAIL_BYTES = 256 * 1024
 
 
+def _open_trace(path: Path):
+    """The trace as a binary file object opened through trace_store, so a
+    run cannot point the service at another file with a symlink or a
+    hardlink. None when it is missing or refused."""
+    try:
+        fd = trace_store.open_read(path)
+    except FileNotFoundError:
+        return None
+    except trace_store.TraceOpenError as exc:
+        _LOG.warning("refused to read trace %s: %s", path, exc)
+        return None
+    return os.fdopen(fd, "rb")
+
+
 def _trace_tail_lines(path: Path, limit: int = TOOL_USAGE_TAIL_BYTES) -> list[str]:
-    with path.open("rb") as f:
+    f = _open_trace(path)
+    if f is None:
+        return []
+    with f:
         f.seek(0, 2)
         size = f.tell()
         f.seek(max(0, size - limit))
@@ -1001,10 +1019,13 @@ def _read_trace_at(path: Path) -> list[dict]:
     """Read a completed trace by absolute path (the run may live under a
     different ``FABRI_HOME`` than this process). Skips malformed lines, mirroring
     :func:`fabri.orchestrator.traces.read_trace`."""
-    if not path.exists():
+    f = _open_trace(path)
+    if f is None:
         return []
+    with f:
+        text = f.read().decode("utf-8", errors="replace")
     out: list[dict] = []
-    for line in path.read_text().splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue

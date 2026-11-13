@@ -406,3 +406,30 @@ def test_listener_logs_refused_trace_append_at_warning(layout, monkeypatch):
     assert fake_logger.warning.called
     assert "refused" in fake_logger.warning.call_args[0][0]
     assert secret.read_text() == "SECRET-TOKEN-ROW\n"
+
+
+def test_service_trace_readers_refuse_a_symlinked_trace(tmp_path):
+    """result() and the tool-usage totals read traces through trace_store,
+    so a run cannot point them at another file."""
+    from fabri.service.service import _read_trace_at, _trace_tail_lines
+
+    victim = tmp_path / "victim.jsonl"
+    victim.write_text('{"type": "final", "answer": "VICTIM SECRET"}\n')
+    traces = tmp_path / "run" / ".fabri" / "traces"
+    traces.mkdir(parents=True)
+    trace = traces / "t.jsonl"
+    trace.symlink_to(victim)
+    assert _read_trace_at(trace) == []
+    assert _trace_tail_lines(trace) == []
+
+
+def test_service_trace_readers_read_a_plain_trace(tmp_path):
+    from fabri.service.service import _read_trace_at, _trace_tail_lines
+
+    traces = tmp_path / "run" / ".fabri" / "traces"
+    traces.mkdir(parents=True)
+    trace = traces / "t.jsonl"
+    trace.write_text('{"type": "final", "answer": "ok"}\nnot json\n')
+    assert _read_trace_at(trace) == [{"type": "final", "answer": "ok"}]
+    assert _trace_tail_lines(trace) == ['{"type": "final", "answer": "ok"}', "not json"]
+    assert _read_trace_at(traces / "missing.jsonl") == []
