@@ -511,7 +511,41 @@ def test_tail_stops_at_the_byte_cap(layout, monkeypatch):
     trace.write_bytes(line * ((8 << 20) // len(line)))
     monkeypatch.setattr(tailer, "MAX_TAIL_BYTES", 1 << 20)
     got = list(tail_events(trace, is_running=lambda: False))
-    assert 0 < len(got) <= (1 << 20) // len(line)
+    assert 0 < len(got) <= (1 << 20) // len(line) + 1  # +1: the cap marker
     # Also while running: the cap ends the tail rather than polling forever.
     got = list(tail_events(trace, is_running=lambda: True, poll_interval=0.0, timeout=5))
-    assert 0 < len(got) <= (1 << 20) // len(line)
+    assert 0 < len(got) <= (1 << 20) // len(line) + 1  # +1: the cap marker
+
+
+def test_nested_type_in_an_oversized_line_is_not_read_as_final(layout):
+    from fabri.service.tailer import MAX_LINE_BYTES
+
+    trace, _, _ = layout
+    line = json.dumps({"data": {"type": "final"}, "type": "tool_result", "pad": "x" * (MAX_LINE_BYTES + 10)})
+    trace.write_text(line + "\n" + _event(2))
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert got[0]["type"] == "dropped" and got[0]["truncated"] is True
+    assert got[1] == {"type": "step", "n": 2}
+
+
+def test_byte_cap_ends_the_stream_with_a_marker(layout, monkeypatch):
+    from fabri.service import tailer
+
+    trace, _, _ = layout
+    line = _event(1).encode()
+    trace.write_bytes(line * ((2 << 20) // len(line)))
+    monkeypatch.setattr(tailer, "MAX_TAIL_BYTES", 1 << 20)
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert got[-1] == {"type": "dropped", "reason": "cap", "truncated": True}
+
+
+def test_read_trace_at_reads_at_most_the_tail_cap(layout, monkeypatch):
+    from fabri.service import service as svc
+
+    trace, _, _ = layout
+    monkeypatch.setattr(svc, "MAX_TAIL_BYTES", 1 << 16)
+    with open(trace, "wb") as f:
+        f.write(_event(1).encode() + b"\n")
+        f.truncate(64 << 20)  # sparse: a read of the whole file would be 64 MiB
+    got = svc._read_trace_at(trace)
+    assert got and got[0]["n"] == 1

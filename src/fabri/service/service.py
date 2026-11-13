@@ -59,7 +59,7 @@ from fabri.service.surfaces.linear import LinearAdapter
 from fabri.service.surfaces.registry import SurfaceRegistry
 from fabri.service.surfaces.slack import SlackAdapter
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
-from fabri.service.tailer import extract_cost, run_trace_path, tail_events
+from fabri.service.tailer import MAX_TAIL_BYTES, extract_cost, run_trace_path, tail_events
 
 # Short base dir for per-run ask_user sockets. AF_UNIX paths are capped (~104
 # bytes on macOS), so we deliberately avoid nesting them under a deep run home.
@@ -1023,7 +1023,10 @@ def _read_trace_at(path: Path) -> list[dict]:
     if f is None:
         return []
     with f:
-        text = f.read().decode("utf-8", errors="replace")
+        size = os.fstat(f.fileno()).st_size
+        if size > MAX_TAIL_BYTES:
+            _LOG.warning("trace %s is %d bytes; reading only the first %d", path, size, MAX_TAIL_BYTES)
+        text = f.read(MAX_TAIL_BYTES).decode("utf-8", errors="replace")
     out: list[dict] = []
     for line in text.splitlines():
         line = line.strip()

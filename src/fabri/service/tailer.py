@@ -45,7 +45,9 @@ MAX_TAIL_BYTES = 512 << 20
 # A dropped line still reports its event type, peeked from its first bytes,
 # so a dropped terminal event still ends the stream.
 _PEEK_BYTES = 4096
-_TYPE_RE = re.compile(rb'"type"\s*:\s*"(\w+)"')
+# Anchored to the line start so a nested "type" key, or text from the middle
+# of a payload, is never read as the event type.
+_TYPE_RE = re.compile(rb'^\s*\{\s*"type"\s*:\s*"(\w+)"')
 
 _TERMINAL_TYPES = frozenset(
     {EventType.FINAL.value, EventType.FAILED.value, EventType.INCOMPLETE.value}
@@ -113,7 +115,7 @@ def tail_events(
         """The marker yielded in place of a line over MAX_LINE_BYTES."""
         nonlocal seen_terminal
         logger.warning("trace tail %s: dropped a %d-byte line (cap %d)", path.name, size, MAX_LINE_BYTES)
-        m = _TYPE_RE.search(head[:_PEEK_BYTES])
+        m = _TYPE_RE.match(head[:_PEEK_BYTES])
         etype = m.group(1).decode("ascii", "replace") if m else "dropped"
         if etype in _TERMINAL_TYPES:
             seen_terminal = True
@@ -180,6 +182,7 @@ def tail_events(
                 logger.warning("trace tail %s: stopped after reading %d bytes (cap %d)",
                                path.name, total_read, MAX_TAIL_BYTES)
                 stopped = True
+                yield {"type": "dropped", "reason": "cap", "truncated": True}
                 return
             chunk = reader.read_new(min(READ_CAP_BYTES, MAX_TAIL_BYTES - total_read))
             total_read += len(chunk)
