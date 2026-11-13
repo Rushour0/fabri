@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -41,7 +41,7 @@ logger = get_logger()
 
 # Bump when the designer prompt, the schema, or the rendering changes, so old
 # cached profiles stop matching.
-FACTORY_VERSION = 1
+FACTORY_VERSION = 2
 
 DESIGNER_SCHEMA = {
     "type": "object",
@@ -76,6 +76,13 @@ class SpecialistError(RuntimeError):
     """The designer call failed or returned something unusable."""
 
 
+_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _prompt_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class SpecialistProfile:
     name: str
@@ -84,41 +91,78 @@ class SpecialistProfile:
     tools: tuple[str, ...]
     tool_notes: dict[str, str] = field(default_factory=dict)
     cache_key: str = ""
+    owns: tuple[str, ...] = ()
+    prompt_sha256: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["tools"] = list(self.tools)
+        d["owns"] = list(self.owns)
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "SpecialistProfile":
+        tools = data.get("tools") or ()
+        owns = data.get("owns") or ()
+        notes = data.get("tool_notes") or {}
+        if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+            raise TypeError("tools must be a list of strings")
+        if not isinstance(owns, list) or not isinstance(notes, dict):
+            raise TypeError("bad owns / tool_notes")
         return cls(
             name=str(data["name"]), role=str(data["role"]), system_prompt=str(data["system_prompt"]),
-            tools=tuple(data.get("tools") or ()), tool_notes=dict(data.get("tool_notes") or {}),
-            cache_key=str(data.get("cache_key") or ""),
+            tools=tuple(tools), tool_notes={str(k): str(v) for k, v in notes.items()},
+            cache_key=str(data.get("cache_key") or ""), owns=tuple(str(o) for o in owns),
+            prompt_sha256=str(data.get("prompt_sha256") or ""),
         )
 
 
-def profile_cache_key(task_kind: str, parent_tools: Sequence[str]) -> str:
-    """A stable hash of everything that shapes a profile. ``task_kind`` is
-    normalized (case and whitespace) so trivial rewordings still hit."""
+def file_sha256(path: str | Path) -> str:
+    """Hash of a file's bytes, for the cache key (a child config, a policy)."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def profile_cache_key(
+    task_kind: str,
+    parent_tools: Sequence[str],
+    *,
+    model: str | None = None,
+    config_hash: str | None = None,
+    policy: object = None,
+) -> str:
+    """A stable hash of everything that shapes a profile: the task kind
+    (case and whitespace normalized so trivial rewordings still hit), the
+    parent's tool names, the designer model, a hash of the child config the
+    profile will run under, the policy in force, and the factory version."""
     kind = " ".join((task_kind or "").lower().split())
     payload = json.dumps(
-        {"v": FACTORY_VERSION, "kind": kind, "tools": sorted(set(parent_tools))},
-        sort_keys=True, separators=(",", ":"),
+        {"v": FACTORY_VERSION, "kind": kind, "tools": sorted(set(parent_tools)), "model": model,
+         "config": config_hash, "policy": policy},
+        sort_keys=True, separators=(",", ":"), default=str,
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 class ProfileCache:
     """Profiles by cache key, in memory, mirrored to ``directory`` as one
-    JSON file per key when a directory is given. Unreadable files are misses."""
+    JSON file per key when a directory is given.
+
+    Keys must be 16 lowercase hex characters, so a key can never name a path
+    outside the directory. A file is a miss when it is unreadable, its stored
+    key differs from its file name, or its prompt does not match the prompt
+    code renders from its fields (see :func:`make_specialist`)."""
 
     def __init__(self, directory: str | Path | None = None):
         self.directory = Path(directory) if directory is not None else None
         self._mem: dict[str, SpecialistProfile] = {}
 
+    @staticmethod
+    def _check_key(key: str) -> None:
+        if not isinstance(key, str) or not _KEY_RE.match(key):
+            raise SpecialistError(f"bad profile cache key {key!r}")
+
     def get(self, key: str) -> SpecialistProfile | None:
+        self._check_key(key)
         if key in self._mem:
             return self._mem[key]
         if self.directory is None:
@@ -128,10 +172,14 @@ class ProfileCache:
             profile = SpecialistProfile.from_dict(json.loads(path.read_text()))
         except (OSError, ValueError, KeyError, TypeError):
             return None
+        if profile.cache_key != key or not _prompt_matches(profile):
+            logger.warning("specialist profile %s on disk failed verification; ignoring it", key)
+            return None
         self._mem[key] = profile
         return profile
 
     def put(self, profile: SpecialistProfile) -> None:
+        self._check_key(profile.cache_key)
         self._mem[profile.cache_key] = profile
         if self.directory is None:
             return
@@ -170,6 +218,35 @@ def _design(task: str, parent_tools: Sequence[str], llm) -> dict:
     return value
 
 
+def _clean(text: object, limit: int) -> str:
+    """One line of designer text: whitespace collapsed, markdown heading and
+    code markers removed, capped. Designer output is untrusted; this keeps it
+    from adding sections or fences to the prompt, though it cannot make the
+    words themselves safe."""
+    line = " ".join(str(text).split())
+    line = re.sub(r"[#`<>]", "", line)
+    return line[:limit].strip()
+
+
+def _render(role: str, owns: Sequence[str], tools: Sequence[str], notes: dict[str, str]) -> str:
+    return render_prompt_template(
+        role,
+        owns=list(owns) or None,
+        tools=[f"{t} -- {notes[t]}" if t in notes else t for t in tools],
+        charter=(
+            f"You are a {role} working on one task delegated by a parent agent. "
+            "Your brief arrives as the user message. Do that task well and hand "
+            "back a summary the parent can act on without rereading your work."
+        ),
+    )
+
+
+def _prompt_matches(profile: SpecialistProfile) -> bool:
+    rendered = _render(profile.role, profile.owns, profile.tools, profile.tool_notes)
+    return (rendered == profile.system_prompt
+            and _prompt_hash(rendered) == profile.prompt_sha256)
+
+
 def make_specialist(
     task: str,
     parent_tools: Sequence[str],
@@ -177,26 +254,45 @@ def make_specialist(
     *,
     task_kind: str | None = None,
     cache: ProfileCache | None = None,
+    model: str | None = None,
+    config_path: str | Path | None = None,
+    policy: object = None,
 ) -> SpecialistProfile:
     """The profile for a specialist that does ``task`` with a subset of
     ``parent_tools``. ``task_kind`` is the cache handle (defaults to the task
     text); pass a short stable label such as ``"triage failing test"`` when
-    many tasks of one kind should share a profile. ``llm`` runs only on a
-    cache miss. Raises :class:`SpecialistError` when the designer fails or
-    picks no tool the parent has."""
+    many tasks of one kind should share a profile. ``model``, ``config_path``
+    (the child config the profile will run under; its bytes are hashed) and
+    ``policy`` are part of the cache key. ``llm`` runs only on a cache miss.
+
+    A cached profile is re-checked on load: its tools are intersected with
+    ``parent_tools`` and its prompt must equal what code renders from its
+    fields. Raises :class:`SpecialistError` when the designer fails or picks
+    no tool the parent has."""
     if not task or not task.strip():
         raise SpecialistError("task must be non-empty")
-    key = profile_cache_key(task_kind or task, parent_tools)
+    config_hash = file_sha256(config_path) if config_path is not None else None
+    key = profile_cache_key(task_kind or task, parent_tools, model=model, config_hash=config_hash,
+                            policy=policy)
+    offered = set(parent_tools)
     if cache is not None:
         hit = cache.get(key)
         if hit is not None:
-            logger.info("specialist profile cache hit %s (%s)", key, hit.name)
-            return hit
+            tools = tuple(t for t in hit.tools if t in offered)
+            if tools == hit.tools:
+                logger.info("specialist profile cache hit %s (%s)", key, hit.name)
+                return hit
+            if tools:
+                notes = {t: n for t, n in hit.tool_notes.items() if t in tools}
+                prompt = _render(hit.role, hit.owns, tools, notes)
+                logger.warning("cached specialist %s named tools the parent lacks; narrowed", key)
+                return replace(hit, tools=tools, tool_notes=notes, system_prompt=prompt,
+                               prompt_sha256=_prompt_hash(prompt))
+            logger.warning("cached specialist %s has no tool the parent has; redesigning", key)
     if llm is None:
         raise SpecialistError("no LLM to design a specialist and no cached profile")
 
     spec = _design(task, parent_tools, llm)
-    offered = set(parent_tools)
     chosen = sorted({t for t in spec.get("tools") or [] if isinstance(t, str) and t in offered})
     invented = sorted({t for t in spec.get("tools") or [] if isinstance(t, str)} - offered)
     if invented:
@@ -204,27 +300,23 @@ def make_specialist(
     if not chosen:
         raise SpecialistError("specialist designer picked no tool the parent has")
     raw_notes = spec.get("tool_notes") if isinstance(spec.get("tool_notes"), dict) else {}
-    notes = {t: " ".join(str(raw_notes[t]).split())[:200] for t in chosen if t in raw_notes}
-    role = " ".join(str(spec["role"]).split())[:80] or "specialist"
-    owns = [" ".join(str(o).split())[:200] for o in (spec.get("owns") or []) if str(o).strip()][:5]
+    notes = {t: _clean(raw_notes[t], 120) for t in chosen if t in raw_notes and _clean(raw_notes[t], 120)}
+    role = _clean(spec["role"], 60) or "specialist"
+    owns = tuple(c for c in (_clean(o, 120) for o in (spec.get("owns") or [])) if c)[:3]
 
-    system_prompt = render_prompt_template(
-        role,
-        owns=owns or None,
-        tools=[f"{t} -- {notes[t]}" if t in notes else t for t in chosen],
-        charter=(
-            f"You are a {role} working on one task delegated by a parent agent. "
-            "Your brief arrives as the user message. Do that task well and hand "
-            "back a summary the parent can act on without rereading your work."
-        ),
-    )
+    system_prompt = _render(role, owns, chosen, notes)
     profile = SpecialistProfile(
         name=f"{_slug(role)}_{key[:6]}", role=role, system_prompt=system_prompt,
-        tools=tuple(chosen), tool_notes=notes, cache_key=key,
+        tools=tuple(chosen), tool_notes=notes, cache_key=key, owns=owns,
+        prompt_sha256=_prompt_hash(system_prompt),
     )
     if cache is not None:
         cache.put(profile)
     return profile
+
+
+_RESERVED_SPAWN_KEYS = frozenset({"config_path", "task", "system_prompt_inline", "system_prompt_path",
+                                  "tool_scope"})
 
 
 def spawn_args(
@@ -246,5 +338,8 @@ def spawn_args(
         "system_prompt_inline": profile.system_prompt,
         "tool_scope": list(profile.tools),
     }
+    clash = sorted(_RESERVED_SPAWN_KEYS & set(extra))
+    if clash:
+        raise SpecialistError(f"spawn_args: {', '.join(clash)} come from the profile and cannot be overridden")
     args.update(extra)
     return args
