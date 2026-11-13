@@ -413,24 +413,45 @@ _TRIVIAL_ENV_VALUE = re.compile(r"(?i)true|false|yes|no|on|off|\d+")
 # flag-or-number exemption does not apply: DB_PASSWORD=12345678 is a password.
 # A last part such as TOKEN or KEY counts (GITHUB_TOKEN, STRIPE_KEY); the same
 # word earlier in the name does not (TOKEN_LIMIT, MAX_TOKENS,
-# TOKENIZERS_PARALLELISM). PASSWORD and SECRET count anywhere, even inside a
-# part (PGPASSWORD).
+# TOKENIZERS_PARALLELISM). PASSWORD, PASSWD and SECRET count as any whole
+# part of the name (DB_PASSWORD_HASH, AWS_SECRET_ACCESS_KEY), unless the last
+# part says the variable describes a setting about secrets rather than holding
+# one (PASSWORD_POLICY, PASSWORD_MIN_LENGTH). Inside a part they do not count
+# (SECRETARIAT_NAME); the standard names that embed them (PGPASSWORD) are
+# listed instead.
 _STRONG_SECRET_LAST = frozenset({
     "password", "passwd", "pass", "pwd", "secret", "token", "pat", "apikey", "key", "pin",
 })
-_STRONG_SECRET_ANYWHERE = ("password", "passwd", "secret")
-# Standard credential variables the rules above miss: Terraform host tokens,
-# redis-cli, Docker and Composer auth config.
+_STRONG_SECRET_PARTS = frozenset({"password", "passwd", "secret"})
+_SETTING_LAST = frozenset({
+    "policy", "length", "len", "min", "max", "rules", "pattern", "regex", "complexity", "hint",
+    "expiry", "ttl", "name",
+})
+# Standard credential variables the rules above miss: PostgreSQL and MySQL
+# client passwords, Terraform host tokens, redis-cli, Docker and Composer auth
+# config.
 _STRONG_SECRET_PREFIXES = ("tf_token_",)
-_STRONG_SECRET_NAMES = frozenset({"rediscli_auth", "docker_auth_config", "composer_auth"})
+_STRONG_SECRET_NAMES = frozenset({
+    "pgpassword", "mysql_pwd", "rediscli_auth", "docker_auth_config", "composer_auth",
+})
+
+
+def _env_name_parts(name: str) -> list[str]:
+    return [p for p in name.lower().replace("-", "_").split("_") if p]
+
+
+def _secret_part_counts(parts: list[str]) -> bool:
+    """True when PASSWORD, PASSWD or SECRET is a whole part of the name and the
+    name does not end in a setting word."""
+    return bool(set(parts) & _STRONG_SECRET_PARTS) and parts[-1] not in _SETTING_LAST
 
 
 def _env_name_is_strong_secret(name: str) -> bool:
     lower = name.lower()
-    parts = [p for p in lower.split("_") if p]
+    parts = _env_name_parts(name)
     return bool(parts) and (
         parts[-1] in _STRONG_SECRET_LAST
-        or any(word in lower for word in _STRONG_SECRET_ANYWHERE)
+        or _secret_part_counts(parts)
         or lower.startswith(_STRONG_SECRET_PREFIXES)
         or lower in _STRONG_SECRET_NAMES
     )
@@ -443,11 +464,17 @@ _SECRET_NAME_SUFFIXES = ("_key", "_pass", "_pat", "_pwd")
 
 
 def _env_name_is_secret(name: str) -> bool:
-    """True when an environment variable's name says it holds a credential."""
-    from fabri.tools.approver import _names_secret
+    """True when an environment variable's name says it holds a credential.
+    The approver's secret words count anywhere in the name, except PASSWORD,
+    PASSWD and SECRET, which count only as whole parts (see
+    ``_secret_part_counts``), so SECRETARIAT_NAME and PASSWORD_POLICY are
+    ordinary settings."""
+    from fabri.tools.approver import _SECRET_KEY_PARTS
 
-    lower = name.lower()
-    return _names_secret(lower) or lower.endswith(_SECRET_NAME_SUFFIXES)
+    lower = name.lower().replace("-", "_")
+    if lower.endswith(_SECRET_NAME_SUFFIXES) or _env_name_is_strong_secret(name):
+        return True
+    return any(word in lower for word in _SECRET_KEY_PARTS if word not in _STRONG_SECRET_PARTS)
 
 
 def _url_credentials(value: str) -> list[str]:
@@ -542,6 +569,13 @@ class MCPStdioClient:
     # Every credential value start() handed the child: its own env values and
     # the FABRI_CRED_* values it inherited through credential_env.
     _child_secrets: tuple[str, ...] = field(default=(), init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # A string such as "false" is truthy and would inherit the whole
+        # parent environment, so only a real bool is accepted.
+        if type(self.inherit_env) is not bool:
+            raise TypeError(f"mcp server {self.name!r}: inherit_env must be a bool "
+                            f"(got {type(self.inherit_env).__name__})")
 
     @property
     def _secrets(self) -> tuple[str, ...]:

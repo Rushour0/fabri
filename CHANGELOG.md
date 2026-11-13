@@ -8,8 +8,10 @@ that ships.
 
 - Behaviour change: stdio MCP servers no longer inherit the whole parent
   environment. By default a server gets only an allowlist of host variables
-  (`PATH`, `HOME`, locale, proxy and CA settings, `DOCKER_*`) plus the
-  variables it declares under `env`, and the `FABRI_CRED_*` names it lists in
+  (`PATH`, `HOME`, locale, proxy and CA settings, and selected Docker
+  settings: `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CERT_PATH`,
+  `DOCKER_TLS_VERIFY`, `DOCKER_CONFIG`) plus the variables it declares under
+  `env`, and the `FABRI_CRED_*` names it lists in
   `credential_env`. This holds for `tools.mcp_servers` entries,
   `kind: mcp` tool sources and registered MCP tools. A server that read an API
   key from the environment without declaring it will now start without that

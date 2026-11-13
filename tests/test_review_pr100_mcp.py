@@ -287,3 +287,43 @@ def test_flags_and_numbers_under_loose_names_stay_visible(name, value):
     from fabri.tools.mcp_client import _inherited_secrets
 
     assert _inherited_secrets(name, value) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("PASSWORD_POLICY", "must-be-strong"), ("PASSWORD_MIN_LENGTH", "minimum-12"),
+     ("SECRETARIAT_NAME", "Alice-Smith")],
+)
+def test_ordinary_names_with_secret_words_are_not_redaction_secrets(monkeypatch, name, value):
+    from fabri.tools.mcp_client import _inherited_secrets
+
+    assert _inherited_secrets(name, value) == []
+    monkeypatch.setenv(name, value)
+    c = MCPStdioClient(command=[sys.executable, "-c", "import time; time.sleep(5)"], inherit_env=True)
+    c.start()
+    try:
+        assert value not in c._secrets
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("flag", ["false", "true", "False", 0, 1, None])
+def test_inherit_env_must_be_a_real_bool(monkeypatch, flag):
+    # "false" is truthy: before the check it gave the child the whole parent
+    # environment. Now the client refuses it before any child starts.
+    monkeypatch.setenv("MYAPP_CONF", "secretish-undeclared")
+    with pytest.raises(TypeError, match="inherit_env must be a bool"):
+        MCPStdioClient(command=[sys.executable, "-c", _CHILD, "MYAPP_CONF"], inherit_env=flag)
+
+
+@pytest.mark.parametrize(("flag", "expected"), [(False, ""), (True, "secretish-undeclared")])
+def test_real_child_bool_inherit_env(monkeypatch, flag, expected):
+    monkeypatch.setenv("MYAPP_CONF", "secretish-undeclared")
+    c = MCPStdioClient(command=[sys.executable, "-c", _CHILD, "MYAPP_CONF"], inherit_env=flag, timeout_s=10)
+    c.start()
+    try:
+        c.initialize()
+        raw = c._request("tools/call", {"name": "echo", "arguments": {"mode": "result"}})
+        assert raw["structuredContent"] == {"token": expected}
+    finally:
+        c.close()

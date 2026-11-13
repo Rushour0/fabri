@@ -51,8 +51,9 @@ tools:
 ```
 
 A stdio MCP server gets only a short allowlist of the launcher's variables
-(`PATH`, `HOME`, locale, proxy and CA settings, `DOCKER_*`) plus the names it
-declares under `env`. The `env` entry above is what hands the PAT to `docker`.
+(`PATH`, `HOME`, locale, proxy and CA settings, and selected Docker settings:
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CERT_PATH`, `DOCKER_TLS_VERIFY`,
+`DOCKER_CONFIG`) plus the names it declares under `env`. The `env` entry above is what hands the PAT to `docker`.
 A `tools.mcp_servers` entry takes only literal `env` values, so it cannot copy
 the PAT from the launcher without writing it into the YAML; use the
 `tools.sources` form above, or set `inherit_env: true` on the

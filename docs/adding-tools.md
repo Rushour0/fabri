@@ -294,7 +294,8 @@ It prints tokens, name and approval class per tool, biggest first, then the tota
 - Values of your env vars and headers are removed from every error message. A server's stderr is never shown to the
   agent.
 - A stdio source passes the child only a short list of host variables (`PATH`, `HOME`, locale, proxy and CA
-  settings, `DOCKER_*`) plus the variables you name under `env`. This is `env_mode: allowlist`, the default for
+  settings, and selected Docker settings: `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CERT_PATH`,
+  `DOCKER_TLS_VERIFY`, `DOCKER_CONFIG`) plus the variables you name under `env`. This is `env_mode: allowlist`, the default for
   every source. A server that needs a key must declare it under `env`, for example
   `env: {OPENAI_API_KEY: {env: OPENAI_API_KEY}}`. `env_mode: inherit` is an explicit opt-in that passes the
   whole host environment; values whose names look like credentials are then redacted from what the server sends
