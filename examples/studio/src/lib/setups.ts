@@ -686,7 +686,7 @@ export interface PreviewTool {
 export interface Preview {
   ranking: "embeddings" | "words";
   skillTopK: number | null;
-  retrieval: { enabled: boolean; topK: number | null };
+  retrieval: { enabled: boolean; topK: number | null; mode: "on" | "off" | "auto"; autoThreshold: number | null };
   always: { name: string; chars: number; source: string }[];
   onDemand: PreviewSkill[];
   moved: { name: string; reason: string }[];
@@ -713,7 +713,12 @@ export function normPreview(raw: unknown): Preview {
   return {
     ranking: r.ranking === "embeddings" ? "embeddings" : "words",
     skillTopK: typeof r.skill_top_k === "number" ? r.skill_top_k : null,
-    retrieval: { enabled: tr.enabled === true, topK: typeof tr.top_k === "number" ? tr.top_k : null },
+    retrieval: {
+      enabled: tr.enabled === true,
+      topK: typeof tr.top_k === "number" ? tr.top_k : null,
+      mode: tr.mode === "on" || tr.mode === "auto" ? tr.mode : "off",
+      autoThreshold: typeof tr.auto_threshold === "number" ? tr.auto_threshold : null,
+    },
     always: arr(skills.always).map((x) => ({ name: str(x.name), chars: num(x.chars), source: str(x.source) })),
     onDemand: arr(skills.on_demand).map((x) => ({ name: str(x.name), score: num(x.score), full: x.full === true, source: str(x.source) })),
     moved: arr(skills.moved).map((x) => ({ name: str(x.name), reason: str(x.reason) })),

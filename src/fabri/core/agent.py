@@ -22,12 +22,14 @@ from fabri.memory.store import QdrantMemoryStore
 from fabri.memory.output import split_agent_output
 from fabri.orchestrator.convention_application import validate_branch_selection
 from fabri.orchestrator.retrieval import (
+    DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD,
     DEFAULT_TOOL_TOP_K,
     DEFAULT_TOP_K,
     RetrievalConfig,
     retrieve_context,
     retrieve_context_with_meta,
     retrieve_tools,
+    tool_retrieval_active,
 )
 from fabri.orchestrator.traces import log_event
 from fabri.tools.registry import ToolRegistry
@@ -198,9 +200,10 @@ def _run_single_attempt(
     planner_mode: str = "off",
     planner_max_items: int = DEFAULT_MAX_PLAN_ITEMS,
     planner_auto_token_threshold: int = 80,
-    tool_retrieval_enabled: bool = False,
+    tool_retrieval_enabled: bool | str = False,
     tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K,
     tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
+    tool_retrieval_auto_threshold: int = DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD,
     max_cost_usd: float | None = None,
     narrator_llm: LLMBackend | None = None,
     response_schema: dict | None = None,
@@ -282,6 +285,10 @@ def _run_single_attempt(
     # run so the prompt cache still hits across steps. The model is given the
     # exact list the backend will accept calls on — a mismatch would prompt
     # calls the backend can't dispatch.
+    # ``auto`` (the config default) resolves here, where the tool count is known.
+    tool_retrieval_enabled = tool_retrieval_active(
+        tool_retrieval_enabled, len(tools.list()), auto_threshold=tool_retrieval_auto_threshold
+    )
     if tool_retrieval_enabled:
         visible_tools = retrieve_tools(
             task,
@@ -1237,9 +1244,10 @@ def run_agent(
     planner_mode: str = "off",
     planner_max_items: int = DEFAULT_MAX_PLAN_ITEMS,
     planner_auto_token_threshold: int = 80,
-    tool_retrieval_enabled: bool = False,
+    tool_retrieval_enabled: bool | str = False,
     tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K,
     tool_retrieval_always_include: tuple[str, ...] = DEFAULT_ALWAYS_INCLUDE_TOOLS,
+    tool_retrieval_auto_threshold: int = DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD,
     max_cost_usd: float | None = None,
     narrator_llm: LLMBackend | None = None,
     response_schema: dict | None = None,
@@ -1281,6 +1289,7 @@ def run_agent(
         tool_retrieval_enabled=tool_retrieval_enabled,
         tool_retrieval_top_k=tool_retrieval_top_k,
         tool_retrieval_always_include=tool_retrieval_always_include,
+        tool_retrieval_auto_threshold=tool_retrieval_auto_threshold,
         max_cost_usd=max_cost_usd,
         narrator_llm=narrator_llm,
         response_schema=response_schema,

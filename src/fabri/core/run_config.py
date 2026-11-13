@@ -16,7 +16,13 @@ from dataclasses import dataclass, replace
 
 from fabri.core.agent import DEFAULT_MAX_PARALLEL_SPAWNS
 from fabri.core.decompose import DEFAULT_MAX_SUBQUESTIONS
-from fabri.orchestrator.retrieval import DEFAULT_TOOL_TOP_K, DEFAULT_TOP_K, RetrievalConfig
+from fabri.orchestrator.retrieval import (
+    DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD,
+    DEFAULT_TOOL_TOP_K,
+    DEFAULT_TOP_K,
+    RetrievalConfig,
+    tool_retrieval_mode,
+)
 
 
 def planner_mode_from_cfg(planner_cfg: dict) -> str:
@@ -30,6 +36,12 @@ def planner_mode_from_cfg(planner_cfg: dict) -> str:
             return "off"
         return mode
     return "off"
+
+
+def _retrieval_enabled(value: object) -> bool | str:
+    """``tools.retrieval.enabled`` as True, False or ``"auto"``."""
+    mode = tool_retrieval_mode(value)
+    return "auto" if mode == "auto" else mode == "on"
 
 
 @dataclass(frozen=True)
@@ -48,9 +60,11 @@ class AgentRunConfig:
     planner_mode: str = "off"
     planner_max_items: int = 8
     planner_auto_token_threshold: int = 80
-    tool_retrieval_enabled: bool = False
+    # True, False or "auto" (see orchestrator.retrieval.tool_retrieval_active).
+    tool_retrieval_enabled: bool | str = False
     tool_retrieval_top_k: int = DEFAULT_TOOL_TOP_K
     tool_retrieval_always_include: tuple[str, ...] = ()
+    tool_retrieval_auto_threshold: int = DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD
     max_cost_usd: float | None = None
     response_schema: dict | None = None
     response_retries: int = 1
@@ -89,9 +103,12 @@ class AgentRunConfig:
             planner_auto_token_threshold=planner.get(
                 "auto_token_threshold", cls.planner_auto_token_threshold
             ),
-            tool_retrieval_enabled=retrieval.get("enabled", False),
+            tool_retrieval_enabled=_retrieval_enabled(retrieval.get("enabled", "auto")),
             tool_retrieval_top_k=retrieval.get("top_k", DEFAULT_TOOL_TOP_K),
             tool_retrieval_always_include=tuple(retrieval.get("always_include", [])),
+            tool_retrieval_auto_threshold=int(
+                retrieval.get("auto_threshold", DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD)
+            ),
             max_cost_usd=agent.get("max_cost_usd"),
             response_schema=agent.get("response_schema"),
             response_retries=agent.get("response_retries", cls.response_retries),
@@ -127,6 +144,7 @@ class AgentRunConfig:
             "tool_retrieval_enabled": self.tool_retrieval_enabled,
             "tool_retrieval_top_k": self.tool_retrieval_top_k,
             "tool_retrieval_always_include": self.tool_retrieval_always_include,
+            "tool_retrieval_auto_threshold": self.tool_retrieval_auto_threshold,
             "max_cost_usd": self.max_cost_usd,
             "response_schema": self.response_schema,
             "response_retries": self.response_retries,

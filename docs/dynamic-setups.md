@@ -319,6 +319,32 @@ adds two meta tools that are always present:
 Either one asks the agent loop to add what it returned to the provider tool
 list, so the model can call a tool in the same run even when retrieval hid it.
 
+### When tool retrieval is on
+
+`tools.retrieval.enabled` takes `true`, `false` or `auto`. The default is
+`auto`:
+
+```yaml
+tools:
+  retrieval:
+    enabled: auto        # true: always on. false: always off.
+    auto_threshold: 15   # auto turns on above this many tools
+    top_k: 6
+```
+
+With `auto`, a run narrows the tool list to the top `top_k` tools plus the
+`always_include` ones only when both hold: the embeddings extra is installed
+(`pip install "fabri[embeddings]"`), and the agent has more than
+`auto_threshold` tools. Without embeddings nothing changes from before: every
+tool is shown.
+Set `enabled: false` to keep every tool visible even with embeddings, or
+`enabled: true` to narrow at any tool count. A Python caller of `run_agent`
+keeps the old default (`tool_retrieval_enabled=False`) and can pass `"auto"`.
+
+The Studio preview and `GET /setups/preview` make the same decision. The
+response's `tool_retrieval` block carries `enabled` (what a run would do),
+`mode` (`on`, `off` or `auto`) and `auto_threshold`.
+
 `fabri tools sync --layers ... --global-allow FILE` prints added, removed and
 changed tools against the last sync and saves `catalog.json` in the deepest
 layer's `tools/.fabri-state` (hidden files never change the content hash).

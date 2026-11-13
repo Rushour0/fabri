@@ -75,8 +75,9 @@ def test_preview_ranks_skills_and_tools(client):
     on_demand = body["skills"]["on_demand"]
     assert on_demand[0]["name"] == "mobile-sync" and on_demand[0]["full"] is True
     assert [s["full"] for s in on_demand].count(True) == 3
-    # Retrieval is off by default, so a run shows every tool, meta tools included.
-    assert body["tool_retrieval"]["enabled"] is False
+    # Retrieval is auto by default and stays off without embeddings, so a run
+    # shows every tool, meta tools included.
+    assert body["tool_retrieval"]["enabled"] is False and body["tool_retrieval"]["mode"] == "auto"
     names = {t["name"] for t in body["tools"]}
     assert names == {"tickets_search", "ticket_get", "ticket_reply", "find_tools", "describe_tool", "load_skill"}
     assert all(t["shown"] for t in body["tools"])
@@ -102,7 +103,8 @@ def test_preview_with_retrieval_follows_retrieve_tools(client):
     http, _ = client
     # Without embeddings retrieve_tools keeps every tool, and so does the preview.
     body = http.get("/setups/preview", params={"type": "support", "task": "refund", "tool_top_k": "1"}).json()
-    assert body["tool_retrieval"] == {"enabled": True, "top_k": 1, "always_include": sorted(body["tool_retrieval"]["always_include"])}
+    assert body["tool_retrieval"] == {"enabled": True, "top_k": 1, "mode": "on", "auto_threshold": 15,
+                                      "always_include": sorted(body["tool_retrieval"]["always_include"])}
     assert all(t["shown"] for t in body["tools"])
     assert {t["name"] for t in body["tools"] if t["pinned"]} >= {"find_tools", "describe_tool"}
 
