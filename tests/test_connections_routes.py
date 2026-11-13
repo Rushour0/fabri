@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
+from fabri import secret_cipher
 from fabri.service import linear_oauth
 from fabri.service.auth import sign_session
 from fabri.service.connections_routes import ConnectionsApi
@@ -59,7 +60,8 @@ def env(monkeypatch):
                  "FABRI_AUTH_ADMINS", "FABRI_AUTH_SIGNUP", "FABRI_AUTH_DB_PATH", "FABRI_AUTH_ENABLED",
                  "FABRI_AUTH_CONFIG", "FABRI_INSTALL_DB", "FABRI_OAUTH_STATE_SECRET",
                  "FABRI_FETCH_ALLOW_PRIVATE", "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET",
-                 "SLACK_SIGNING_SECRET", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET", "ACME_CLIENT_ID"):
+                 "SLACK_SIGNING_SECRET", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET", "ACME_CLIENT_ID",
+                 "FABRI_SECRET_KEY", "FABRI_SECRET_KEY_FILE", "FABRI_ALLOW_PLAINTEXT_SECRETS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FABRI_AUTH_SECRET", "secret")
     monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", BASE)
@@ -614,6 +616,7 @@ def test_auth_off_connect_start_refuses_cross_site_pages(make_server, monkeypatc
 
 def test_auth_on_refuses_cross_site_even_for_an_admin(make_server, monkeypatch):
     monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", HOSTED)
+    monkeypatch.setenv("FABRI_SECRET_KEY", secret_cipher.generate_key())  # hosted needs a key
     server, service = make_server(INVITE_ONLY)
     boss_headers, _ = session(service, BOSS)
     body = {"provider": "cakemail", "token": PASTED, "verify": False}
@@ -693,8 +696,15 @@ def test_serve_refuses_a_hosted_base_with_auth_off(tmp_path, monkeypatch):
         service.close()
 
 
+def test_hosted_start_without_a_key_is_refused(make_server, monkeypatch):
+    monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", HOSTED)
+    with pytest.raises(StartRefused, match="FABRI_SECRET_KEY"):
+        make_server(INVITE_ONLY)
+
+
 def test_serve_starts_hosted_with_auth_on(make_server, monkeypatch):
     monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", HOSTED)
+    monkeypatch.setenv("FABRI_SECRET_KEY", secret_cipher.generate_key())  # hosted needs a key
     server, _ = make_server(INVITE_ONLY)
     assert client(server).get("/health").status_code == 200
     monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", "http://fabri.example.test")
@@ -733,3 +743,16 @@ def test_serve_http_mounts_a_default_connections_api(tmp_path):
         server.server_close()
     finally:
         service.close()
+
+
+def test_hosted_install_without_key_refuses_oauth_and_paste(make_server, vendor, monkeypatch):
+    monkeypatch.delenv(secret_cipher.SECRET_KEY_ENV, raising=False)
+    monkeypatch.delenv(secret_cipher.ALLOW_PLAINTEXT_ENV, raising=False)
+    server, service = make_server()
+    secret_cipher.require_encryption("fabri serve is bound to the non-loopback address 0.0.0.0")
+    try:
+        resp = client(server).get("/connect/acme")
+        assert resp.status_code == 503 and "FABRI_SECRET_KEY" in resp.text
+        assert service.connection_store.list() == []
+    finally:
+        secret_cipher.require_encryption(None)

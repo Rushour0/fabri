@@ -153,7 +153,7 @@ def shared_uid_allowed(env: Mapping[str, str] | None = None) -> bool:
 _ALLOW_ENV_VAR = "FABRI_RUN_ENV_ALLOW"
 
 # Names no allowlist, operator setting or caller env can put in a run.
-_NEVER_IN_RUN = frozenset({"FABRI_INSTALL_DB"})
+_NEVER_IN_RUN = frozenset({"FABRI_INSTALL_DB", "FABRI_SECRET_KEY", "FABRI_SECRET_KEY_FILE"})
 
 
 def _operator_allowlist(base_env: dict) -> tuple[str, ...]:

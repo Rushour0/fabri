@@ -270,7 +270,7 @@ class OAuthCodeProvider:
         except (TypeError, ValueError):
             expires_in = None
         provider = store_provider(self.entry)
-        from fabri.service.connection_store import ScopeConflict
+        from fabri.service.connection_store import PlaintextRefused, ScopeConflict
 
         try:
             # keep_scope reads the stored row's scope kind in the upsert's own
@@ -290,7 +290,7 @@ class OAuthCodeProvider:
                 now=now,
                 keep_scope=True,
             )
-        except ScopeConflict as exc:
+        except (ScopeConflict, PlaintextRefused) as exc:
             raise ConnectError(str(exc)) from None
         stored = store.get(provider, handle)
         if stored is None:  # pragma: no cover -- the upsert above wrote it

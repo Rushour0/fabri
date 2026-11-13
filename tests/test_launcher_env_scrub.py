@@ -526,3 +526,19 @@ def test_snapshot_opt_out_restores_values(
     assert acme_ok, "the run did not get its declared value"
     assert seen["socket"] is None
     assert "FABRI_INSTALL_DB" not in seen["names"]
+
+
+def test_secret_key_never_reaches_a_run_even_when_re_admitted():
+    """The key that decrypts installs.db is never re-admitted, not even by a
+    FABRI_* wildcard in FABRI_RUN_ENV_ALLOW."""
+    base = {
+        "FABRI_RUN_ENV_ALLOW": "FABRI_*,FABRI_SECRET_KEY,FABRI_SECRET_KEY_FILE",
+        "FABRI_SECRET_KEY": "k",
+        "FABRI_SECRET_KEY_FILE": "/run/secrets/fabri_key",
+        "FABRI_SESSION_ID": "s",
+    }
+
+    child = build_child_env(base, allow=("FABRI_SECRET_KEY",))
+
+    assert "FABRI_SECRET_KEY" not in child and "FABRI_SECRET_KEY_FILE" not in child
+    assert child["FABRI_SESSION_ID"] == "s"

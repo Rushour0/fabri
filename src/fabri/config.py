@@ -154,9 +154,15 @@ DEFAULT_CONFIG = {
         # Narrow the system prompt + provider tool list to a task-relevant
         # subset via cosine similarity against each tool's description.
         # `always_include` lists tools the orchestrator prompt assumes exist
-        # regardless of how the task is worded.
+        # regardless of how the task is worded. `enabled` is true, false or
+        # "auto": auto turns retrieval on when the embeddings extra is
+        # installed and the agent has more than `auto_threshold` tools, and
+        # leaves every tool visible otherwise. A plain config defaults to
+        # false; an agent built from a setup defaults to auto. Any other
+        # value is a config error.
         "retrieval": {
             "enabled": False,
+            "auto_threshold": 15,
             "top_k": 6,
             "always_include": ["spawn_subagent", "ask_user", "decompose"],
         },

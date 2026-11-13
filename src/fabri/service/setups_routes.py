@@ -941,12 +941,23 @@ class SetupsApi:
             config, registry = build_agent_config(resolved, agent_type, tool_set=tools, task=task)
         except SetupError as exc:
             raise ApiError(400, str(exc)) from None
+        from fabri.orchestrator.retrieval import (
+            tool_retrieval_active, tool_retrieval_mode, tool_retrieval_threshold)
+
         retrieval = dict(config["tools"].get("retrieval") or {})
         if tool_top_k is not None:
             retrieval.update(enabled=True, top_k=tool_top_k)
         manifests = registry.list()
         always_include = set(retrieval.get("always_include") or [])
-        if retrieval.get("enabled"):
+        try:
+            auto_threshold = tool_retrieval_threshold(retrieval.get("auto_threshold"))
+            mode = tool_retrieval_mode(retrieval.get("enabled", "auto"))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, str(exc)) from None
+        # The same decision run_agent makes: auto is on with embeddings and
+        # more than auto_threshold tools.
+        retrieval["enabled"] = tool_retrieval_active(mode, len(manifests), auto_threshold=auto_threshold)
+        if retrieval["enabled"]:
             shown = {m.name for m in retrieve_tools(task, registry, top_k=int(retrieval.get("top_k") or 6),
                                                     always_include=always_include)}
         else:
@@ -967,6 +978,7 @@ class SetupsApi:
             "ranking": "embeddings" if embeddings_available() else "words",
             "skill_top_k": skill_top_k if skill_top_k is not None else resolved.setup.get("skill_index_top_k"),
             "tool_retrieval": {"enabled": bool(retrieval.get("enabled")), "top_k": retrieval.get("top_k"),
+                               "mode": mode, "auto_threshold": auto_threshold,
                                "always_include": sorted(always_include)},
             "skills": {"always": always, "on_demand": on_demand_rows, "moved": moved},
             "tools": tool_rows,

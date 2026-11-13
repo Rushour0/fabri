@@ -108,3 +108,14 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.get_closest_marker("live"):
             item.add_marker(skip_live)
+
+
+@pytest.fixture(autouse=True)
+def _reset_secret_guard():
+    """serve_http arms a process-wide guard (fabri.secret_cipher) when the
+    server is reachable by others. Disarm it after every test so it never
+    leaks into the next one."""
+    yield
+    from fabri.secret_cipher import require_encryption
+
+    require_encryption(None)

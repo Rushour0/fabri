@@ -20,8 +20,9 @@ Protocol: one connection per request, one UTF-8 JSON line in, one JSON line
 out, then close. See ``docs/connections.md`` for the operator view.
 
 No token value is written to a log line, an audit line, an error text or a
-reply. Secrets at rest stay plaintext in the 0600 install database; the
-broker only reads them.
+reply. Secrets at rest sit in the 0600 install database, encrypted when
+FABRI_SECRET_KEY is set (see ``fabri.secret_cipher``); the broker only reads
+them.
 """
 from __future__ import annotations
 

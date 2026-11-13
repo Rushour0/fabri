@@ -10,7 +10,8 @@ import httpx
 from fabri.setups.resolver import ResolvedSetup
 from fabri.setups.skill_tool import LOAD_SKILL, register_load_skill
 from fabri.setups.toolset import ResolvedToolSet, resolve_tools
-from fabri.tools.catalog import META_TOOLS
+from fabri.orchestrator.retrieval import tool_retrieval_mode
+from fabri.tools.catalog import FIND_TOOLS, META_TOOLS, register_registry_meta_tools
 from fabri.tools.credential_store import CredentialStore
 from fabri.tools.policy import ToolPolicy
 from fabri.tools.registry import ToolRegistry
@@ -81,8 +82,16 @@ def build_agent_config(
     existing = agent_cfg.get("system_prompt_prefix") or ""
     agent_cfg["system_prompt_prefix"] = "\n\n".join(p for p in (prompt, existing) if p)
     tools_cfg = cfg["tools"]
-    tools_cfg["enabled"] = list(registry.tools)
     retrieval = dict(tools_cfg.get("retrieval") or {})
+    # An agent built from a setup defaults to auto tool retrieval (on with
+    # embeddings and more than auto_threshold tools) when it has find_tools to
+    # reach what retrieval hides. An explicit tools.retrieval.enabled wins.
+    explicit = "enabled" in ((((base_config or {}).get("tools") or {}).get("retrieval")) or {})
+    if not explicit:
+        retrieval["enabled"] = "auto" if FIND_TOOLS in registry.tools else False
+    if tool_retrieval_mode(retrieval.get("enabled")) != "off" and registry.tools:
+        register_registry_meta_tools(registry)  # no-op when the catalog ones are there
+    tools_cfg["enabled"] = list(registry.tools)
     always = [*META_TOOLS, *([LOAD_SKILL] if has_load_skill else [])]
     retrieval["always_include"] = list(dict.fromkeys([*(retrieval.get("always_include") or []), *always]))
     tools_cfg["retrieval"] = retrieval

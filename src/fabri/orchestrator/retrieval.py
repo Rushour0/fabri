@@ -42,6 +42,10 @@ def _emit_retrieval_event(session_id: str, payload: dict) -> None:
 
 DEFAULT_TOP_K = 5
 DEFAULT_TOOL_TOP_K = 6
+# With ``tools.retrieval.enabled: auto`` (the default for agents built from a
+# setup), top-k tool retrieval turns on only when embeddings are installed and
+# the registry has more tools than this.
+DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD = 15
 # Upper bound on the ActionMemory candidate scan in propose_actions -- keeps it
 # from degrading into an unbounded full-store read as the store grows.
 _ACTION_SCAN_LIMIT = 200
@@ -354,6 +358,52 @@ def _tool_vector(manifest: "ToolManifest") -> list[float]:
     return vec
 
 
+def tool_retrieval_mode(value: object) -> str:
+    """``on``, ``off`` or ``auto`` for a ``tools.retrieval.enabled`` value.
+
+    True and ``on``/``true``/``yes`` mean on, False and ``off``/``false``/``no``
+    mean off, None and ``auto`` mean auto. Anything else raises ValueError."""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if value is None:
+        return "auto"
+    text = str(value).strip().lower()
+    if text in ("on", "true", "yes", "1"):
+        return "on"
+    if text in ("off", "false", "no", "0"):
+        return "off"
+    if text == "auto":
+        return "auto"
+    raise ValueError(f"tools.retrieval.enabled must be true, false or auto, not {value!r}")
+
+
+def tool_retrieval_threshold(value: object) -> int:
+    """``tools.retrieval.auto_threshold`` as an int. None (or a missing key)
+    means the default; 0 is a real threshold."""
+    return DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD if value is None else int(value)
+
+
+def tool_retrieval_active(
+    enabled: object,
+    tool_count: int,
+    *,
+    auto_threshold: int = DEFAULT_TOOL_RETRIEVAL_AUTO_THRESHOLD,
+    embeddings: bool | None = None,
+) -> bool:
+    """Whether a run narrows its tool list with ``retrieve_tools``.
+
+    ``on`` and ``off`` are taken as given. ``auto`` is on only when embeddings
+    are available (``embeddings`` overrides the check) and ``tool_count`` is
+    above ``auto_threshold``; without embeddings every tool stays visible, as
+    before auto existed."""
+    mode = tool_retrieval_mode(enabled)
+    if mode != "auto":
+        return mode == "on"
+    if embeddings is None:
+        embeddings = embeddings_available()
+    return bool(embeddings) and tool_count > int(auto_threshold)
+
+
 def retrieve_tools(
     task: str,
     registry: "ToolRegistry",
@@ -368,7 +418,9 @@ def retrieve_tools(
 
     Embeddings are normalized by `memory.embeddings.embed`, so cosine == dot
     product. Per-tool description vectors are cached at module scope so re-runs
-    over the same registry don't re-embed every tool."""
+    over the same registry don't re-embed every tool. Without the embeddings
+    extra every tool is returned. Whether a run calls this at all is decided by
+    `tool_retrieval_active`."""
     all_tools = list(registry.list())
     if not all_tools:
         return []
