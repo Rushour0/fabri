@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 import sys
 
 import pytest
@@ -213,6 +214,25 @@ def _serve(tmp_path, monkeypatch, *, host="127.0.0.1", base=None, key=None, allo
         service.close()
 
 
+def test_serve_http_tolerates_a_store_without_a_cipher_attribute(tmp_path, monkeypatch):
+    import types
+
+    from fabri.service.http_server import StartRefused, serve_http
+    from fabri.service.service import FabriService
+
+    monkeypatch.delenv(sc.SECRET_KEY_ENV, raising=False)
+    monkeypatch.delenv(sc.SECRET_KEY_FILE_ENV, raising=False)
+    monkeypatch.delenv(sc.ALLOW_PLAINTEXT_ENV, raising=False)
+    monkeypatch.delenv("FABRI_PUBLIC_BASE_URL", raising=False)
+    service = FabriService(home_root=tmp_path / "home")
+    service.connection_store = types.SimpleNamespace()  # no .cipher
+    try:
+        with pytest.raises(StartRefused, match="FABRI_SECRET_KEY"):
+            serve_http(service, host="0.0.0.0", port=0)
+    finally:
+        service.close()
+
+
 def test_serve_http_on_loopback_does_not_arm_the_guard(tmp_path, monkeypatch):
     _serve(tmp_path, monkeypatch)
     assert sc.encryption_required() is None
@@ -276,8 +296,9 @@ def test_rekey_skips_unreadable_and_leased_rows(tmp_path, key, monkeypatch, caps
     plain.upsert(provider="slack", handle="plain", access_token=ACCESS)
     plain.upsert(provider="linear", handle="leased", access_token="a", refresh_token="r")
     with sqlite3.connect(db) as conn:
-        # An expired lease still counts: only its holder may change the row.
-        conn.execute("UPDATE connections SET refresh_lease_until=1 WHERE handle='leased'")
+        # A live lease (or one expired under 10 minutes ago) blocks the rewrite.
+        conn.execute("UPDATE connections SET refresh_lease_until=? WHERE handle='leased'",
+                     (time.time() - 60,))
     store = ConnectionStore(db, cipher=SecretCipher(key))
     assert store.rekey() == {"rewritten": 1, "skipped": 1, "unreadable": ["slack:lost"]}
     assert store.get_token("slack", "plain") == ACCESS
@@ -287,6 +308,42 @@ def test_rekey_skips_unreadable_and_leased_rows(tmp_path, key, monkeypatch, caps
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 1 and "slack:lost" in capsys.readouterr().err
+
+
+def test_rekey_rewrites_rows_with_an_abandoned_lease(tmp_path, key):
+    db = tmp_path / "installs.db"
+    plain = ConnectionStore(db, cipher=None)
+    plain.upsert(provider="linear", handle="stale", access_token="a", refresh_token="r")
+    plain.upsert(provider="linear", handle="live", access_token="a", refresh_token="r")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE connections SET refresh_lease_until=1 WHERE handle='stale'")
+        conn.execute("UPDATE connections SET refresh_lease_until=? WHERE handle='live'",
+                     (time.time() + 60,))
+    result = ConnectionStore(db, cipher=SecretCipher(key)).rekey()
+    assert result == {"rewritten": 1, "skipped": 1, "unreadable": []}
+
+
+def test_rekey_reports_a_busy_checkpoint(tmp_path, key, monkeypatch, capsys):
+    db = tmp_path / "installs.db"
+    plain = ConnectionStore(db, cipher=None)
+    plain.upsert(provider="linear", handle="h", access_token="PLAINACCESS" + "x" * 40)
+    reader = sqlite3.connect(db)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM connections").fetchall()  # holds a read snapshot
+    try:
+        result = ConnectionStore(db, cipher=SecretCipher(key)).rekey()
+        assert result["rewritten"] == 1 and result["checkpoint_busy"] is True
+        monkeypatch.setenv("FABRI_INSTALL_DB", str(db))
+        monkeypatch.setenv(sc.SECRET_KEY_ENV, key)
+        plain.upsert(provider="linear", handle="h2", access_token="PLAINACCESS2" + "x" * 40)
+        monkeypatch.setattr(sys, "argv", ["fabri", "connections", "rekey"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        err = capsys.readouterr().err
+        assert exc.value.code == 1 and "checkpoint" in err
+    finally:
+        reader.close()
+    assert "checkpoint_busy" not in ConnectionStore(db, cipher=SecretCipher(key)).rekey()
 
 
 def test_non_ascii_after_prefix_and_bad_key_file_are_clean_errors(tmp_path, key):
