@@ -23,6 +23,7 @@ from pathlib import Path
 from fabri.core.logging_setup import get_logger
 from fabri.events import EventType
 from fabri.orchestrator.traces import _SESSION_ID_RE
+from fabri.service.trace_store import TraceReader
 
 logger = get_logger()
 
@@ -73,16 +74,20 @@ def tail_events(
     """
     path = Path(path)
     deadline = None if timeout is None else time.monotonic() + timeout
-    buf = ""
-    pos = 0
+    # One descriptor for the whole tail, opened without following links and
+    # checked (regular file, service uid, one link). A symlinked or
+    # hardlinked trace raises TraceOpenError; swapping the path after the
+    # open changes nothing because the reader never reopens by path.
+    reader = TraceReader(path)
+    buf = b""
     seen_terminal = False
 
-    def _emit(chunk: str) -> Iterator[dict]:
+    def _emit(chunk: bytes) -> Iterator[dict]:
         nonlocal buf, seen_terminal
         buf += chunk
-        while "\n" in buf:
-            line, buf = buf.split("\n", 1)
-            line = line.strip()
+        while b"\n" in buf:
+            raw, buf = buf.split(b"\n", 1)
+            line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
             try:
@@ -94,29 +99,28 @@ def tail_events(
                 seen_terminal = True
             yield event
 
-    while True:
-        if path.exists():
-            text = path.read_text()
-            if len(text) > pos:
-                yield from _emit(text[pos:])
-                pos = len(text)
+    try:
+        while True:
+            chunk = reader.read_new()
+            if chunk:
+                yield from _emit(chunk)
 
-        if is_running is None:
-            if seen_terminal:
+            if is_running is None:
+                if seen_terminal:
+                    return
+            elif not is_running():
+                # Producer exited -- do one final drain then stop.
+                chunk = reader.read_new()
+                if chunk:
+                    yield from _emit(chunk)
                 return
-        elif not is_running():
-            # Producer exited -- do one final drain then stop.
-            if path.exists():
-                text = path.read_text()
-                if len(text) > pos:
-                    yield from _emit(text[pos:])
-                    pos = len(text)
-            return
 
-        if deadline is not None and time.monotonic() >= deadline:
-            logger.warning("trace tail %s: timed out after %.1fs", path.name, timeout)
-            return
-        time.sleep(poll_interval)
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning("trace tail %s: timed out after %.1fs", path.name, timeout)
+                return
+            time.sleep(poll_interval)
+    finally:
+        reader.close()
 
 
 def extract_cost(events: list[dict]) -> dict:
