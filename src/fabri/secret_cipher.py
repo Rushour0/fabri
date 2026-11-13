@@ -13,6 +13,10 @@ Key sources, first match wins:
   rotated by putting the new one first and running ``fabri connections rekey``.
 * ``FABRI_SECRET_KEY_FILE``: a path to a file holding the same text.
 
+A stored value that starts with the prefix is always treated as encrypted. A
+plaintext token that happens to start with ``fabri-enc:v1:`` therefore cannot
+be read back; no real vendor token has that shape.
+
 ``fabri connections keygen`` prints a new key. A key is never logged and never
 appears in an error message.
 
@@ -29,10 +33,11 @@ Public API, kept small so other stores can adopt it:
 * ``require_encryption(reason)``, ``plaintext_refusal(cipher)`` and
   ``PlaintextRefused``: the hosted-install guard (see below)
 
-The hosted-install guard: ``fabri serve`` bound to a non-loopback address
-calls ``require_encryption``. From then on a store asks
-``plaintext_refusal(cipher)`` before it writes a new token and refuses when no
-key is configured, unless ``FABRI_ALLOW_PLAINTEXT_SECRETS=1`` is set.
+The hosted-install guard: ``fabri serve`` bound to a non-loopback address, or
+with a non-loopback ``FABRI_PUBLIC_BASE_URL``, refuses to start without a key
+unless ``FABRI_ALLOW_PLAINTEXT_SECRETS=1`` is set, and calls
+``require_encryption``. From then on a store asks ``plaintext_refusal(cipher)``
+before every secret write and refuses when no key is configured.
 """
 from __future__ import annotations
 
@@ -129,10 +134,9 @@ class SecretCipher:
             return False
         if not is_encrypted(value):
             return True
-        token = value[len(PREFIX):].encode("ascii")
         try:
-            self._primary.decrypt(token)
-        except self._invalid:
+            self._primary.decrypt(value[len(PREFIX):].encode("ascii"))
+        except (self._invalid, UnicodeError):
             return True
         return False
 
@@ -146,6 +150,8 @@ def _key_text(env: Mapping[str, str]) -> str | None:
         return None
     try:
         text = Path(path).expanduser().read_text(encoding="utf-8").strip()
+    except UnicodeError:
+        raise SecretKeyError(f"{SECRET_KEY_FILE_ENV} is not a UTF-8 text file") from None
     except OSError as exc:
         raise SecretKeyError(f"{SECRET_KEY_FILE_ENV} cannot be read: {type(exc).__name__}") from None
     if not text:

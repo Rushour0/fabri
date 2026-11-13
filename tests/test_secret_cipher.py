@@ -134,8 +134,8 @@ def test_rekey_encrypts_plaintext_and_rotates_old_key(tmp_path, key):
     ConnectionStore(db, cipher=SecretCipher(old)).upsert(provider="linear", handle="w",
                                                           access_token="lin", refresh_token=REFRESH)
     rotated = ConnectionStore(db, cipher=SecretCipher(f"{key},{old}"))
-    assert rotated.rekey() == {"rewritten": 3, "skipped": 0}
-    assert rotated.rekey() == {"rewritten": 0, "skipped": 0}
+    assert rotated.rekey() == {"rewritten": 3, "skipped": 0, "unreadable": []}
+    assert rotated.rekey() == {"rewritten": 0, "skipped": 0, "unreadable": []}
     fresh = ConnectionStore(db, cipher=SecretCipher(key))
     assert fresh.get_token("slack", "T1") == ACCESS
     assert fresh.get_token("linear", "w") == "lin"
@@ -193,17 +193,109 @@ def test_hosted_guard_refuses_plaintext_writes_unless_opted_out(tmp_path, monkey
         provider="gmail", handle="u2", access_token=ACCESS)
 
 
-def test_serve_http_sets_the_guard_only_off_loopback(tmp_path):
+def _serve(tmp_path, monkeypatch, *, host="127.0.0.1", base=None, key=None, allow=False):
     from fabri.service.http_server import serve_http
     from fabri.service.service import FabriService
 
+    if base:
+        monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", base)
+    else:
+        monkeypatch.delenv("FABRI_PUBLIC_BASE_URL", raising=False)
+    if key:
+        monkeypatch.setenv(sc.SECRET_KEY_ENV, key)
+    if allow:
+        monkeypatch.setenv(sc.ALLOW_PLAINTEXT_ENV, "1")
     service = FabriService(home_root=tmp_path / "home")
+    service.auth_enabled = bool(base)  # a hosted base URL needs auth on to start at all
     try:
-        server = serve_http(service, host="127.0.0.1", port=0)
-        server.server_close()
-        assert sc.encryption_required() is None
-        server = serve_http(service, host="0.0.0.0", port=0)
-        server.server_close()
-        assert "0.0.0.0" in (sc.encryption_required() or "")
+        serve_http(service, host=host, port=0).server_close()
     finally:
         service.close()
+
+
+def test_serve_http_on_loopback_does_not_arm_the_guard(tmp_path, monkeypatch):
+    _serve(tmp_path, monkeypatch)
+    assert sc.encryption_required() is None
+
+
+@pytest.mark.parametrize("host,base", [("0.0.0.0", None), ("127.0.0.1", "https://fabri.example.test")])
+def test_serve_http_reachable_by_others_refuses_to_start_without_a_key(tmp_path, monkeypatch, host, base):
+    from fabri.service.http_server import StartRefused
+
+    with pytest.raises(StartRefused, match="FABRI_SECRET_KEY"):
+        _serve(tmp_path, monkeypatch, host=host, base=base)
+    assert sc.encryption_required() is None
+
+
+@pytest.mark.parametrize("host,base", [("0.0.0.0", None), ("127.0.0.1", "https://fabri.example.test")])
+def test_serve_http_reachable_by_others_arms_with_a_key_or_opt_out(tmp_path, monkeypatch, key, host, base):
+    _serve(tmp_path, monkeypatch, host=host, base=base, key=key)
+    assert sc.encryption_required()
+    sc.require_encryption(None)
+    monkeypatch.delenv(sc.SECRET_KEY_ENV)
+    _serve(tmp_path / "b", monkeypatch, host=host, base=base, allow=True)
+    assert sc.encryption_required()
+
+
+def test_guard_covers_every_secret_write(tmp_path):
+    calls = []
+    store = ConnectionStore(tmp_path / "installs.db", cipher=None,
+                            refreshers={"linear": lambda rt: calls.append(rt) or {"access_token": "new"}})
+    store.upsert(provider="linear", handle="w", access_token="a", refresh_token="r", expires_in=1, now=T0)
+    sc.require_encryption("test")
+    with pytest.raises(PlaintextRefused):
+        store.get_token("linear", "w", now=T0)
+    assert calls == []
+    with pytest.raises(PlaintextRefused):
+        store.state_secret()
+    with pytest.raises(PlaintextRefused):
+        store.pending_put(nonce="n", provider="linear", handle=None, scope_kind="org", user_id=None,
+                          code_verifier="v", scopes="", redirect_uri="http://x/cb")
+    sc.require_encryption(None)
+    secret = store.state_secret()
+    sc.require_encryption("test")
+    assert store.state_secret() == secret  # reading an existing secret writes nothing
+
+
+def test_rekey_leaves_no_plaintext_in_the_file_or_wal(tmp_path, key):
+    db = tmp_path / "installs.db"
+    plain = ConnectionStore(db, cipher=None)
+    for i in range(5):
+        plain.upsert(provider="linear", handle=f"h{i}", access_token=f"PLAINACCESS{i}" + "x" * 40,
+                     refresh_token=f"PLAINREFRESH{i}" + "y" * 40, expires_in=3600)
+    assert ConnectionStore(db, cipher=SecretCipher(key)).rekey()["rewritten"] == 5
+    blob = b"".join(p.read_bytes() for p in tmp_path.iterdir())
+    assert b"PLAINACCESS" not in blob and b"PLAINREFRESH" not in blob
+
+
+def test_rekey_skips_unreadable_and_leased_rows(tmp_path, key, monkeypatch, capsys):
+    db = tmp_path / "installs.db"
+    ConnectionStore(db, cipher=SecretCipher(generate_key())).upsert(provider="slack", handle="lost",
+                                                                    access_token="L")
+    plain = ConnectionStore(db, cipher=None)
+    plain.upsert(provider="slack", handle="plain", access_token=ACCESS)
+    plain.upsert(provider="linear", handle="leased", access_token="a", refresh_token="r")
+    with sqlite3.connect(db) as conn:
+        # An expired lease still counts: only its holder may change the row.
+        conn.execute("UPDATE connections SET refresh_lease_until=1 WHERE handle='leased'")
+    store = ConnectionStore(db, cipher=SecretCipher(key))
+    assert store.rekey() == {"rewritten": 1, "skipped": 1, "unreadable": ["slack:lost"]}
+    assert store.get_token("slack", "plain") == ACCESS
+    monkeypatch.setenv("FABRI_INSTALL_DB", str(db))
+    monkeypatch.setenv(sc.SECRET_KEY_ENV, key)
+    monkeypatch.setattr(sys, "argv", ["fabri", "connections", "rekey"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1 and "slack:lost" in capsys.readouterr().err
+
+
+def test_non_ascii_after_prefix_and_bad_key_file_are_clean_errors(tmp_path, key):
+    cipher = SecretCipher(key)
+    assert cipher.needs_rewrite(sc.PREFIX + "café") is True
+    with pytest.raises(SecretKeyError):
+        cipher.decrypt(sc.PREFIX + "café")
+    path = tmp_path / "key.bin"
+    path.write_bytes(b"\xff\xfe" + key.encode())
+    with pytest.raises(SecretKeyError, match="UTF-8") as exc:
+        sc.load_cipher({sc.SECRET_KEY_FILE_ENV: str(path)})
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__

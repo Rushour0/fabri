@@ -189,6 +189,11 @@ class ConnectionStore:
         non-loopback address) without a key refuses."""
         return plaintext_refusal(self.cipher)
 
+    def _check_plaintext(self) -> None:
+        refusal = self.plaintext_refusal()
+        if refusal:
+            raise PlaintextRefused(refusal)
+
     def plaintext_count(self) -> int:
         """How many stored connections still hold a plaintext token."""
         with self._connect() as connection:
@@ -200,21 +205,29 @@ class ConnectionStore:
             if any(v and not is_encrypted(v) for v in (row["access_token"], row["refresh_token"]))
         )
 
-    def rekey(self, *, now: float | None = None) -> dict:
+    def rekey(self) -> dict:
         """Rewrite every stored secret with the first configured key.
 
         Plaintext values get encrypted and values under an older key (a later
         entry in ``FABRI_SECRET_KEY``) move to the first key. A connection
-        whose token is being refreshed right now is skipped, since changing
-        its stored refresh token would drop the refresh result; run it again
-        later. Returns counts: ``rewritten``, ``skipped``. Raises
-        SecretKeyError when no key is configured or a value cannot be read.
+        that holds a refresh lease is skipped, since changing its stored
+        refresh token would drop the refresh result; run it again later. A
+        value no configured key can read is skipped and named in
+        ``unreadable`` (``provider:handle``, ``pending_oauth`` or
+        ``service_secrets:<name>``); the rest are still rewritten.
+
+        Afterwards the WAL is checkpointed and the file vacuumed, so the old
+        plaintext does not stay in free pages or the WAL. Copies of the file
+        made before (backups, snapshots) still hold it.
+
+        Returns ``{"rewritten", "skipped", "unreadable"}``. Raises
+        SecretKeyError when no key is configured.
         """
         cipher = self.cipher
         if cipher is None:
             raise SecretKeyError("no secret key is configured; set FABRI_SECRET_KEY first")
-        now = time.time() if now is None else now
         rewritten = skipped = 0
+        unreadable: list[str] = []
 
         def fresh(value):
             return cipher.encrypt(cipher.decrypt(value)) if cipher.needs_rewrite(value) else value
@@ -226,11 +239,14 @@ class ConnectionStore:
                     "SELECT provider, handle, access_token, refresh_token, refresh_lease_until "
                     "FROM connections"
                 ).fetchall():
-                    access, refresh = fresh(row["access_token"]), fresh(row["refresh_token"])
+                    try:
+                        access, refresh = fresh(row["access_token"]), fresh(row["refresh_token"])
+                    except SecretKeyError:
+                        unreadable.append(f"{row['provider']}:{row['handle']}")
+                        continue
                     if access == row["access_token"] and refresh == row["refresh_token"]:
                         continue
-                    lease = row["refresh_lease_until"]
-                    if lease is not None and lease > now:
+                    if row["refresh_lease_until"] is not None:
                         skipped += 1
                         continue
                     connection.execute(
@@ -242,7 +258,11 @@ class ConnectionStore:
                 for row in connection.execute(
                     "SELECT nonce, code_verifier FROM pending_oauth"
                 ).fetchall():
-                    value = fresh(row["code_verifier"])
+                    try:
+                        value = fresh(row["code_verifier"])
+                    except SecretKeyError:
+                        unreadable.append("pending_oauth")
+                        continue
                     if value != row["code_verifier"]:
                         connection.execute(
                             "UPDATE pending_oauth SET code_verifier=? WHERE nonce=?",
@@ -250,7 +270,11 @@ class ConnectionStore:
                         )
                         rewritten += 1
                 for row in connection.execute("SELECT name, value FROM service_secrets").fetchall():
-                    value = fresh(row["value"])
+                    try:
+                        value = fresh(row["value"])
+                    except SecretKeyError:
+                        unreadable.append(f"service_secrets:{row['name']}")
+                        continue
                     if value != row["value"]:
                         connection.execute(
                             "UPDATE service_secrets SET value=? WHERE name=?", (value, row["name"])
@@ -261,8 +285,12 @@ class ConnectionStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+            if rewritten:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("VACUUM")
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._secure_sidecars()
-        return {"rewritten": rewritten, "skipped": skipped}
+        return {"rewritten": rewritten, "skipped": skipped, "unreadable": unreadable}
 
     # -- file handling -----------------------------------------------------
 
@@ -321,6 +349,9 @@ class ConnectionStore:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
+        # Overwrite deleted and replaced content instead of leaving it in free
+        # pages, so an old plaintext token does not linger after a rewrite.
+        connection.execute("PRAGMA secure_delete=ON")
         try:
             yield connection
         finally:
@@ -449,9 +480,7 @@ class ConnectionStore:
             raise ValueError("scope_kind must be 'org' or 'user'")
         if not access_token:
             raise ValueError("access_token must not be empty")
-        refusal = self.plaintext_refusal()
-        if refusal:
-            raise PlaintextRefused(refusal)
+        self._check_plaintext()
         access_token = self._enc(access_token)
         refresh_token = self._enc(refresh_token)
         now = time.time() if now is None else now
@@ -544,6 +573,12 @@ class ConnectionStore:
         if pinned:
             return pinned
         with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM service_secrets WHERE name='oauth_state'"
+            ).fetchone()
+            if row is not None:
+                return self._dec(row["value"])
+            self._check_plaintext()
             connection.execute(
                 "INSERT OR IGNORE INTO service_secrets(name, value, created_at) VALUES(?,?,?)",
                 ("oauth_state", self._enc(secrets.token_urlsafe(48)), time.time()),
@@ -574,6 +609,7 @@ class ConnectionStore:
             raise ValueError("scope_kind must be 'org' or 'user'")
         if not nonce:
             raise ValueError("nonce must not be empty")
+        self._check_plaintext()
         now = time.time() if now is None else now
         with self._connect() as connection:
             connection.execute("DELETE FROM pending_oauth WHERE expires_at < ?", (now,))
@@ -719,6 +755,9 @@ class ConnectionStore:
         therefore spend a refresh token once, and a slow vendor never blocks
         other writes to the file.
         """
+        # Checked before the lease and the vendor call, so a refused write
+        # never spends a refresh token.
+        self._check_plaintext()
         state, row = self._claim_refresh(provider, handle, now)
         if state == "done":
             return row

@@ -2137,8 +2137,15 @@ def cmd_connections_rekey(args: argparse.Namespace) -> None:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"encrypted {counts['rewritten']} stored secret(s) with the current key")
+    failed = False
     if counts["skipped"]:
-        print(f"skipped {counts['skipped']} connection(s) that were refreshing; run it again", file=sys.stderr)
+        print(f"skipped {counts['skipped']} connection(s) that hold a refresh lease; run it again", file=sys.stderr)
+        failed = True
+    if counts["unreadable"]:
+        print("no configured key can read: " + ", ".join(counts["unreadable"])
+              + "; add the old key to FABRI_SECRET_KEY, or reconnect these", file=sys.stderr)
+        failed = True
+    if failed:
         sys.exit(1)
 
 
