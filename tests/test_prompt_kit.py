@@ -33,14 +33,14 @@ none
 # ---------------------------------------------------------------------------
 
 _SECTION_HEADERS = [
-    "ABSOLUTE SCOPE",
+    "SCOPE",
     "RETRIEVED CONTEXT",
     "CHARTER",
     "WHAT YOU OWN",
     "DECOMPOSITION RULES",
     "VERIFICATION LADDER",
     "TOOL ROUTING",
-    "HARD INVARIANTS",
+    "WORKING RULES",
     "OUTPUT FORMAT",
 ]
 
@@ -78,7 +78,7 @@ def test_new_prompt_writes_a_file_from_template(tmp_path):
     assert result["created"] is True
     body = out.read_text()
     # a real starter, not a blank file
-    assert "# ABSOLUTE SCOPE" in body
+    assert "# SCOPE" in body
     assert "# OUTPUT FORMAT" in body
     assert len(body) > 200
 
@@ -92,7 +92,7 @@ def test_new_prompt_refuses_to_clobber_without_force(tmp_path):
     # force overwrites
     forced = new_prompt("p", output=out, force=True)
     assert forced["created"] is True
-    assert "# ABSOLUTE SCOPE" in out.read_text()
+    assert "# SCOPE" in out.read_text()
 
 
 # ---------------------------------------------------------------------------
