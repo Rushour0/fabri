@@ -252,11 +252,17 @@ def test_run_agent_with_tool_retrieval_narrows_system_prompt(tmp_path):
         tool_retrieval_always_include=(),
     )
     sys_prompt = backend.system
-    # Only the top-2 task-relevant tools end up in "Available tools:".
+    # The top-2 task-relevant tools end up in "Available tools:", plus the
+    # required tools (ask_user, spawn_subagent, ...) that are registered,
+    # which retrieval never hides.
+    from fabri.core.agent import REQUIRED_VISIBLE_TOOLS
+
     available_block = sys_prompt.split("Available tools:")[1].split("\n\n")[0]
     listed = [line[2:].split(":")[0] for line in available_block.splitlines() if line.startswith("- ")]
-    assert len(listed) == 2
-    assert "read_file" in listed  # the obviously relevant tool survives
+    picked = [name for name in listed if name not in REQUIRED_VISIBLE_TOOLS]
+    assert len(picked) == 2
+    assert "read_file" in picked  # the obviously relevant tool survives
+    assert {"ask_user", "spawn_subagent"} <= set(listed)
 
 
 def test_run_agent_emits_usage_event_and_returns_usage(tmp_path):
