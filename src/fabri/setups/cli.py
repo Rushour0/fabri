@@ -308,7 +308,8 @@ def cmd_setups_tools_add_connector(args: argparse.Namespace) -> None:
 
     _add(args, lambda: connector_tool_entry(
         args.connector, name=args.name, token_env=args.token_env, workspace=args.workspace,
-        remote=args.remote, approval=args.approval, connect=args.connect))
+        remote=args.remote, approval=args.approval, connect=args.connect,
+        url=args.url, include=args.include, all_tools=args.all_tools))
 
 
 def cmd_setups_tools_list(args: argparse.Namespace) -> None:
@@ -409,8 +410,13 @@ def cmd_setups_tools_connectors(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(rows)
         return
-    print(_table([[c["name"], ",".join(c["kinds"]), c["env_var"], c["summary"]] for c in rows],
-                 ["NAME", "KIND", "TOKEN ENV", "WHAT"]))
+    def note(c: dict) -> str:
+        parts = (["curated"] if c.get("curated") else []) + (["experimental"] if c.get("experimental") else [])
+        return ",".join(parts) or "-"
+
+    print(_table([[c["name"], ",".join(c["kinds"]), c.get("auth_kind", "pat"), c["env_var"], note(c), c["summary"]]
+                  for c in rows],
+                 ["NAME", "KIND", "AUTH", "TOKEN ENV", "NOTE", "WHAT"]))
 
 
 # ---------------------------------------------------------------- parser
@@ -483,13 +489,17 @@ def _add_setups_tools(setup_sub: argparse._SubParsersAction) -> None:
     _add_args(p)
     p.set_defaults(func=cmd_setups_tools_add_mcp)
 
-    p = add_sub.add_parser("connector", help="A ready-made source: github, linear or slack")
+    p = add_sub.add_parser("connector", help="A ready-made source: cakemail, github, linear, slack; composio is experimental")
     p.add_argument("connector", help="See `fabri setups tools connectors`")
     p.add_argument("--name", default=None)
     p.add_argument("--token-env", default=None, metavar="VAR", help="Env var holding the token")
     p.add_argument("--workspace", default=None, help="Use the credential store ref <provider>:<workspace>")
     p.add_argument("--remote", action="store_true", help="github: the hosted MCP server instead of Docker")
     p.add_argument("--connect", action="store_true", help="Reach the server now to list its tools")
+    p.add_argument("--url", default=None, help="Server URL, for a connector that needs one (composio)")
+    p.add_argument("--include", nargs="+", default=None, metavar="NAME",
+                   help="Replace the curated tool list with these tools (exact names for composio)")
+    p.add_argument("--all-tools", action="store_true", help="Every tool the connector has, not the curated set")
     _add_args(p)
     p.set_defaults(func=cmd_setups_tools_add_connector)
 

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import logging
+import socket
 from types import SimpleNamespace
-from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 
-from fabri.service import slack_oauth
+from fabri.service.connection_store import ConnectionStore
+from fabri.service.connections_routes import ConnectionsApi
 from fabri.service.http_server import _Handler, _SLACK_UNINSTALL_RE
+from fabri.service.install_store import SlackInstallStore
 
 pytestmark = pytest.mark.unit
 
@@ -40,126 +44,156 @@ def _handler(path: str, store: _InstallStore | None = None) -> _Handler:
         serve_studio=False,
     )
     handler.path = path
+    # A same-origin Studio request; auth is off, so mutations need one.
+    handler.headers = {"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080",
+                       "Sec-Fetch-Site": "same-origin"}
     return handler
 
 
-def test_slack_install_redirect_and_unconfigured_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    install_url = "https://slack.com/oauth/v2/authorize?state=signed-state"
-    monkeypatch.setattr(slack_oauth, "build_install_redirect", lambda: install_url)
-    handler = _handler("/slack/install")
-    responses: list[int] = []
-    headers: list[tuple[str, str]] = []
-    handler.send_response = responses.append
-    handler.send_header = lambda name, value: headers.append((name, value))
+SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+BASE = "https://fabri.example.test"
+
+
+@pytest.fixture
+def slack_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("FABRI_ADMIN_TOKEN", "FABRI_SERVICE_TOKEN", "FABRI_OAUTH_STATE_SECRET",
+                 "FABRI_FETCH_ALLOW_PRIVATE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SLACK_CLIENT_ID", "slack-client")
+    monkeypatch.setenv("SLACK_CLIENT_SECRET", "client-secret-never-log")
+    monkeypatch.setenv("FABRI_PUBLIC_BASE_URL", BASE)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *a, **k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))])
+
+
+class _Slack:
+    """A fake Slack token endpoint that records every request."""
+
+    def __init__(self, body: dict) -> None:
+        self.body = body
+        self.seen: list[httpx.Request] = []
+        self.transport = httpx.MockTransport(self._handle)
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request)
+        if str(request.url) == SLACK_TOKEN_URL:
+            return httpx.Response(200, json=self.body)
+        return httpx.Response(404)
+
+
+def _alias_handler(path: str, store: ConnectionStore, transport=None) -> tuple[_Handler, list, list]:
+    """A handler wired to a ConnectionsApi over a real store. Returns it with
+    the lists that collect (status, headers) and JSON responses."""
+    service = SimpleNamespace(auth_enabled=False, connection_store=store)
+    handler = object.__new__(_Handler)
+    handler.server = SimpleNamespace(service=service, serve_studio=False,
+                                     connections_api=ConnectionsApi(service, transport=transport))
+    handler.path = path
+    # A same-origin browser request to a loopback fabri, as Studio sends.
+    handler.headers = {"Host": "127.0.0.1:8080", "Sec-Fetch-Site": "same-origin"}
+    sent: list = []
+    json_sent: list = []
+    handler.send_response = lambda code: sent.append(("status", code))
+    handler.send_header = lambda name, value: sent.append((name, value))
     handler.end_headers = lambda: None
+    handler._send_json = lambda code, payload, **kwargs: json_sent.append((code, payload))
+    return handler, sent, json_sent
+
+
+def _start(store: ConnectionStore) -> str:
+    """Run GET /slack/install and return the signed state from the redirect."""
+    handler, sent, _ = _alias_handler("/slack/install", store)
+    handler.do_GET()
+    location = dict(sent)["Location"]
+    return parse_qs(urlsplit(location).query)["state"][0]
+
+
+def test_slack_install_redirect_and_unconfigured_response(
+    tmp_path, slack_env, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ConnectionStore(tmp_path / "installs.db")
+    handler, sent, _ = _alias_handler("/slack/install", store)
 
     handler.do_GET()
 
-    assert responses == [302]
-    assert ("Location", install_url) in headers
+    assert ("status", 302) in sent
+    location = urlsplit(dict(sent)["Location"])
+    assert f"{location.scheme}://{location.netloc}{location.path}" == "https://slack.com/oauth/v2/authorize"
+    query = parse_qs(location.query)
+    assert query["redirect_uri"] == [f"{BASE}/slack/oauth/callback"]
+    assert query["client_id"] == ["slack-client"]
 
-    monkeypatch.setattr(slack_oauth, "build_install_redirect", lambda: None)
-    handler = _handler("/slack/install/")
-    json_responses: list[tuple[int, dict]] = []
-    handler._send_json = lambda code, payload: json_responses.append((code, payload))
+    monkeypatch.delenv("SLACK_CLIENT_SECRET")
+    handler, sent, json_sent = _alias_handler("/slack/install/", store)
 
     handler.do_GET()
 
-    assert json_responses == [
-        (500, {"error": "Slack install is not configured"})
-    ]
+    assert sent == []
+    assert json_sent == [(500, {"error": "slack OAuth is not configured"})]
 
 
-def test_slack_callback_rejects_bad_state_before_exchange(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = _InstallStore()
-    handler = _handler("/slack/oauth/callback", store)
-    redirects: list[str] = []
-    handler._redirect_studio = redirects.append
-    verify_state = Mock(return_value=False)
-    exchange_code = Mock()
-    monkeypatch.setattr(slack_oauth, "verify_state", verify_state)
-    monkeypatch.setattr(slack_oauth, "exchange_code", exchange_code)
-    monkeypatch.setenv("SLACK_SIGNING_SECRET", "signing-secret")
+def test_slack_callback_rejects_bad_state_before_exchange(tmp_path, slack_env) -> None:
+    store = ConnectionStore(tmp_path / "installs.db")
+    slack = _Slack({"ok": True, "access_token": "xoxb-secret", "team": {"id": "T1"}})
+    _start(store)
+    handler, sent, _ = _alias_handler(
+        "/slack/oauth/callback?state=bad-state&code=oauth-code", store, slack.transport)
 
-    handler._slack_oauth_callback(
-        {"state": ["bad-state"], "code": ["oauth-code"]}
-    )
+    handler.do_GET()
 
-    verify_state.assert_called_once_with("bad-state", "signing-secret")
-    exchange_code.assert_not_called()
-    assert store.upsert_calls == []
-    assert redirects == ["/?slack=error#settings"]
+    assert slack.seen == []
+    assert store.list() == []
+    assert dict(sent)["Location"] == "/?slack=error#settings"
 
 
-def test_slack_callback_upserts_install_and_redirects(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = _InstallStore()
-    handler = _handler("/slack/oauth/callback", store)
-    redirects: list[str] = []
-    handler._redirect_studio = redirects.append
-    verify_state = Mock(return_value=True)
-    exchange_code = Mock(return_value={
+def test_slack_callback_upserts_install_and_redirects(tmp_path, slack_env) -> None:
+    store = ConnectionStore(tmp_path / "installs.db")
+    slack = _Slack({
         "ok": True,
         "access_token": "xoxb-secret",
         "team": {"id": "T1", "name": "Acme"},
         "scope": "chat:write",
     })
-    monkeypatch.setattr(slack_oauth, "verify_state", verify_state)
-    monkeypatch.setattr(slack_oauth, "exchange_code", exchange_code)
-    monkeypatch.setenv("SLACK_SIGNING_SECRET", "signing-secret")
+    state = _start(store)
+    handler, sent, _ = _alias_handler(
+        f"/slack/oauth/callback?state={state}&code=oauth-code", store, slack.transport)
 
-    handler._slack_oauth_callback(
-        {"state": ["signed-state"], "code": ["oauth-code"]}
-    )
+    handler.do_GET()
 
-    verify_state.assert_called_once_with("signed-state", "signing-secret")
-    exchange_code.assert_called_once_with("oauth-code")
-    assert store.upsert_calls == [{
-        "team_id": "T1",
-        "bot_token": "xoxb-secret",
-        "team_name": "Acme",
-        "scopes": "chat:write",
-    }]
-    assert redirects == ["/?slack=connected#settings"]
+    (exchange,) = slack.seen
+    form = parse_qs(exchange.content.decode())
+    assert form["code"] == ["oauth-code"]
+    assert form["redirect_uri"] == [f"{BASE}/slack/oauth/callback"]
+    legacy = SlackInstallStore(store.path)
+    assert legacy.get("T1") == {
+        "team_id": "T1", "team_name": "Acme", "scopes": "chat:write",
+        "installed_at": legacy.get("T1")["installed_at"],
+        "updated_at": legacy.get("T1")["updated_at"],
+    }
+    assert legacy.get_token("T1") == "xoxb-secret"
+    assert dict(sent)["Location"] == "/?slack=connected#settings"
 
 
 def test_slack_callback_rejection_does_not_log_secrets(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    tmp_path, slack_env, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    signing_secret = "signing-secret-never-log"
     token = "xoxb-token-never-log"
     code = "oauth-code-never-log"
-    handler = _handler("/slack/oauth/callback")
-    redirects: list[str] = []
-    handler._redirect_studio = redirects.append
-    monkeypatch.setenv("SLACK_SIGNING_SECRET", signing_secret)
-    monkeypatch.setattr(slack_oauth, "verify_state", lambda _state, _secret: True)
-    monkeypatch.setattr(
-        slack_oauth,
-        "exchange_code",
-        lambda _code: {
-            "ok": False,
-            "error": "invalid_code",
-            "access_token": token,
-        },
-    )
-    caplog.set_level(logging.WARNING, logger="fabri")
+    store = ConnectionStore(tmp_path / "installs.db")
+    slack = _Slack({"ok": False, "error": "invalid_code", "access_token": token})
+    state = _start(store)
+    handler, sent, _ = _alias_handler(
+        f"/slack/oauth/callback?state={state}&code={code}", store, slack.transport)
+    caplog.set_level(logging.WARNING)
 
-    handler._slack_oauth_callback(
-        {"state": ["signed-state"], "code": [code]}
-    )
+    handler.do_GET()
 
     assert "invalid_code" in caplog.text
-    assert signing_secret not in caplog.text
+    assert "client-secret-never-log" not in caplog.text
     assert token not in caplog.text
     assert code not in caplog.text
-    assert redirects == ["/?slack=error#settings"]
+    assert store.list() == []
+    assert dict(sent)["Location"] == "/?slack=error#settings"
 
 
 def test_slack_installs_response_reprojects_token_free_fields() -> None:

@@ -36,6 +36,8 @@ dependencies = [
     "tiktoken>=0.7",
     "pyyaml>=6.0",
     "litellm>=1.0",
+    # Already imported at top level by fabri.tools (sources, http_call, openapi).
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -106,6 +108,8 @@ include = ["fabri*"]
 # S2: Dockerfile.base ships with the wheel so consumers can build
 # `fabri/sandbox:latest` directly from an installed package.
 "fabri.sandbox" = ["Dockerfile.base"]
+# The pinned, trimmed OpenAPI specs that catalog connectors copy into a layer.
+"fabri.tools.connector_catalog" = ["specs/*.json"]
 # B4: bundled example skills are data (skill.yaml + config snippet + prompt +
 # tool manifest/executable pairs), not importable modules, so they must be
 # declared here or a wheel install drops them and `fabri skills list` shows none.

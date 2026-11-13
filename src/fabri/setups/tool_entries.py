@@ -46,6 +46,9 @@ from fabri.tools.approval import (
     stricter,
 )
 from fabri.tools.connectors import CONNECTORS, ConnectorError, connector_entry
+from fabri.tools.credential_store import ACTOR_SENTINEL
+from fabri.tools.connectors import spec_rel as _catalog_spec_rel
+from fabri.tools.connectors import spec_text as _catalog_spec_text
 from fabri.tools.openapi import (
     OpenAPIError,
     filter_operations,
@@ -62,6 +65,7 @@ SECRET_REF = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}:[A-Za-z0-9][A-Za-z0-9_.-]{0,
 HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _SECRET_QUERY_KEYS = frozenset({"key", "api_key", "apikey", "token", "access_token", "secret", "password",
                                 "sig", "signature", "auth"})
+_MAIL_WORDS = ("mail", "sms", "campaign", "message", "notif")
 _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
 HEADER = "# Added with `fabri setups tools add {how}`. Plain YAML: edit, review and commit it like code.\n" \
          "# Credentials are env var names or secret refs only.\n"
@@ -361,25 +365,110 @@ def mcp_entry(
                      approval_floor=floor)
 
 
+def _widen_pinned_names(kind: str, data: dict[str, Any], include: Sequence[str], **expand_args: Any) -> None:
+    """For a pinned-spec connector that writes a `names` map (the curated
+    subset only), rebuild the map from every operation in the spec, drop the
+    ones the deny list names, and keep the tools `include` asks for. A name
+    that matches nothing is an error that lists the closest real names."""
+    import difflib
+
+    source = next((s for s in data.get("sources") or [] if s.get("kind") == "openapi"
+                   and isinstance(s.get("names"), dict)), None)
+    if source is None:
+        return
+    try:
+        full = connector_entry(kind, all_tools=True, **expand_args)
+    except ConnectorError as exc:
+        raise EntryError(str(exc)) from None
+    full_source = next((s for s in full.get("sources") or [] if s.get("kind") == "openapi"), None)
+    if full_source is None or not isinstance(full_source.get("names"), dict):
+        return
+    deny = [str(d) for d in full_source.get("deny") or []]
+    available = {op_id: tool for op_id, tool in full_source["names"].items()
+                 if not any(fnmatch.fnmatchcase(n, d) for n in (op_id, tool) for d in deny)}
+    chosen: dict[str, str] = {}
+    unknown = []
+    for want in include:
+        hit = [(op_id, tool) for op_id, tool in available.items() if fnmatch.fnmatchcase(op_id, want) or fnmatch.fnmatchcase(tool, want)]
+        if not hit:
+            unknown.append(want)
+        chosen.update(hit)
+    if unknown:
+        pool = sorted({*available, *available.values()})
+        lines = []
+        for want in unknown:
+            close = difflib.get_close_matches(want, pool, n=3, cutoff=0.5)
+            lines.append(want + (f" (close: {', '.join(close)})" if close else ""))
+        raise EntryError(f"{kind}: no such tool in the pinned spec, or it is denied: {'; '.join(lines)}")
+    source["names"] = dict(full_source["names"])
+    if isinstance(full_source.get("approval"), dict):
+        source["approval"] = dict(full_source["approval"])
+    data["allow"] = list(chosen.values())
+
+
 def connector_tool_entry(kind: str, *, name: str | None = None, token_env: str | None = None,
                          workspace: str | None = None, remote: bool = False, approval: str | None = None,
-                         connect: bool = False) -> ToolEntry:
+                         connect: bool = False, url: str | None = None, include: Sequence[str] | None = None,
+                         all_tools: bool = False) -> ToolEntry:
+    """A ToolEntry for a catalog connector. `include` replaces the curated
+    allow list (tool names or fnmatch patterns for openapi; names for mcp);
+    `all_tools` widens it to every tool; the two cannot be combined. A
+    connector that needs an explicit list refuses an empty `include` and any
+    wildcard in it. A connector with a pinned spec writes that spec with the
+    entry."""
+    include = [str(p) for p in include or ()]
+    if include and all_tools:
+        raise EntryError("--include and --all-tools cannot be combined")
     if token_env:
         check_env_name(token_env, "--token-env")
-    if workspace and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", workspace):
+    # ${actor} is the one non-handle value: it resolves to the run's user.
+    if (workspace and workspace != ACTOR_SENTINEL
+            and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", workspace)):
         raise EntryError("--workspace must be a handle such as acme or T0123")
     if kind not in CONNECTORS:
         raise EntryError(f"unknown connector {kind!r}; known: {', '.join(sorted(CONNECTORS))}")
     name = check_name(name or kind)
+    connector = CONNECTORS[kind]
+    if connector.needs_include:
+        if all_tools:
+            raise EntryError(f"{kind} exposes many tools; --all-tools is not available, pass --include "
+                             "with exact tool names")
+        if not include:
+            raise EntryError(f"{kind} exposes many tools; pass --include with exact tool names")
+        if any(ch in p for p in include for ch in "*?["):
+            raise EntryError(f"{kind} --include takes exact tool names, not patterns")
     try:
-        data = connector_entry(kind, name=name, token_env=token_env, workspace=workspace, remote=remote)
+        data = connector_entry(kind, name=name, token_env=token_env, workspace=workspace, remote=remote,
+                               url=url, all_tools=all_tools)
+        rel = _catalog_spec_rel(kind, name)
+        text = _catalog_spec_text(kind) if rel else None
     except ConnectorError as exc:
         raise EntryError(str(exc)) from None
+    sources = data.get("sources") or []
+    kinds = {str(s.get("kind")) for s in sources}
+    if include or all_tools:
+        if "openapi" in kinds:
+            data["allow"] = list(include) if include else ["*"]
+            if include:
+                _widen_pinned_names(kind, data, include, name=name, token_env=token_env,
+                                    workspace=workspace, remote=remote, url=url)
+        elif "mcp" in kinds:
+            mcp_name = next(str(s.get("name") or name) for s in sources if s.get("kind") == "mcp")
+            data["allow"] = [f"mcp_{mcp_name}_{p}" for p in include] if include else [f"mcp_{mcp_name}_*"]
+        elif include:
+            raise EntryError(f"connector {kind} has no tool list to narrow, so --include does not apply")
+    spec_doc = None
+    if rel and text is not None:
+        try:
+            spec_doc = load_openapi(yaml.safe_load(text))
+        except OpenAPIError as exc:
+            raise EntryError(f"packaged spec for {kind} is not valid: {exc}") from None
     floor = _floor(approval)
     if floor == "always_approve":
-        for source in data["sources"]:
+        for source in sources:
             source["approval"] = "always_approve"
-    return ToolEntry(name=name, how=f"connector {kind}", data=data, connect=connect, approval_floor=floor)
+    return ToolEntry(name=name, how=f"connector {kind}", data=data, spec_rel=rel, spec_text=text,
+                     spec_doc=spec_doc, connect=connect, approval_floor=floor)
 
 
 # ---------------------------------------------------------------- preview and write
@@ -446,6 +535,7 @@ def preview_entry(
         client = built[0].extra.get("client") if built else None
         if client is not None and hasattr(client, "close"):
             client.close()
+    _mail_hint(entry, report)
     built_names = {t["name"] for t in report.tools} | set(report.hidden)
     missing = [a for a in allow if not any(ch in a for ch in "*?[") and a not in built_names]
     if missing and not report.errors and (entry.connect or "mcp" not in report.kinds):
@@ -453,6 +543,23 @@ def preview_entry(
     if entry.connect and not report.errors:
         _pin_mcp(entry, report)
     return report
+
+
+def _mail_hint(entry: ToolEntry, report: EntryReport) -> None:
+    """For an OpenAPI entry, say so when non-GET operations sit at `write` and the API
+    looks like one that sends mail, messages or campaigns. A word match is a hint, not a proof."""
+    if entry.spec_doc is None or "openapi" not in report.kinds:
+        return
+    writes = [t for t in report.tools
+              if str(t.get("method") or "").upper() != "GET" and t["approval"] == "write"]
+    if not writes:
+        return
+    title = str((entry.spec_doc.get("info") or {}).get("title") or "").lower()
+    haystack = [title] + [f"{t['name']} {t.get('path') or ''}".lower() for t in report.tools]
+    if any(word in text for word in _MAIL_WORDS for text in haystack):
+        report.warnings.append(
+            f"{len(writes)} non-GET operations are classed write; pass --approval always_approve "
+            "if this API sends mail, messages or campaigns")
 
 
 def _pin_mcp(entry: ToolEntry, report: EntryReport) -> None:

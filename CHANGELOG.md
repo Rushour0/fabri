@@ -4,6 +4,25 @@ All notable changes land here, newest first. Versions follow PyPI
 immutability: never reuse a version number; cut a new one for any change
 that ships.
 
+## Unreleased
+
+- Behaviour change: stdio MCP servers no longer inherit the whole parent
+  environment. By default a server gets only an allowlist of host variables
+  (`PATH`, `HOME`, locale, proxy and CA settings, and selected Docker
+  settings: `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CERT_PATH`,
+  `DOCKER_TLS_VERIFY`, `DOCKER_CONFIG`) plus the variables it declares under
+  `env`, and the `FABRI_CRED_*` names it lists in
+  `credential_env`. This holds for `tools.mcp_servers` entries,
+  `kind: mcp` tool sources and registered MCP tools. A server that read an API
+  key from the environment without declaring it will now start without that
+  key: declare it under `env` (in a tool source,
+  `env: {NAME: {env: NAME}}` copies it from the host). To opt back in to full
+  inheritance, set `inherit_env: true` on a `tools.mcp_servers` entry or
+  `env_mode: inherit` on a tool source. In that mode inherited values whose
+  names look like credentials are still redacted from what the server sends
+  back, but that check goes by name and can miss one, which is why it is no
+  longer the default. `inherit_env` must now be a boolean.
+
 ## 0.27.0
 
 **See what an agent gets for a task, and fit Studio to your product.**

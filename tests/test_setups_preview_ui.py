@@ -42,7 +42,8 @@ def client(starter, tmp_path):
     service = FabriService(home_root=tmp_path / "home")
     server = serve_http(service, port=0, setups_api=api)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    http = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}")
+    http = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                        headers={"Sec-Fetch-Site": "same-origin"})
     yield http, service
     server.shutdown()
     server.server_close()
@@ -176,3 +177,27 @@ def test_setups_init_copies_the_starter(tmp_path, monkeypatch, capsys):
     assert "fabri studio --setups-config" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         main()  # refuses a non-empty directory
+
+
+def test_api_connector_body_passes_new_fields(tmp_path):
+    root = tmp_path / "setups"
+    (root / "companies/acme").mkdir(parents=True)
+    service = FabriService(home_root=tmp_path / "home")
+    server = serve_http(service, port=0, setups_api=SetupsApi(root, policy="strict"))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    client = httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                          headers={"Sec-Fetch-Site": "same-origin"})
+    try:
+        body = {"scope": "org:acme", "source": "connector", "connector": "github", "dry_run": True}
+        # all_tools reaches the catalog, which refuses it for an entry that takes no such option.
+        refused = client.post("/tools/sources", json={**body, "all_tools": True})
+        assert refused.status_code == 400
+        assert "all_tools" in refused.json()["error"] or "all-tools" in refused.json()["error"]
+        # url and include are read with the same type checks as the other body lists.
+        assert client.post("/tools/sources", json={**body, "include": "x"}).status_code == 400
+        assert client.post("/tools/sources", json={**body, "url": 5}).status_code == 400
+        assert not (root / "companies/acme/tools").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        service.close()

@@ -15,6 +15,7 @@ Coverage:
 """
 import http.client
 import json
+import os
 import sys
 import textwrap
 import threading
@@ -736,7 +737,7 @@ def test_http_transport_submit_stream_cost(tmp_path: Path, fake_agent: Path):
         # submit
         conn = http.client.HTTPConnection(host, port, timeout=30)
         conn.request("POST", "/runs", body=json.dumps({"task": "go"}),
-                     headers={"Content-Type": "application/json"})
+                     headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"})
         resp = conn.getresponse()
         submit = json.loads(resp.read().decode())
         conn.close()
@@ -769,7 +770,7 @@ def _http_post(conn_host, port, path, payload):
     conn = http.client.HTTPConnection(conn_host, port, timeout=30)
     conn.request(
         "POST", path, body=json.dumps(payload),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Sec-Fetch-Site": "same-origin"},
     )
     resp = conn.getresponse()
     body = resp.read().decode()
@@ -860,4 +861,372 @@ def test_http_unknown_run_events_and_result_are_json_404(tmp_path: Path):
         assert json.loads(body) == expected
     finally:
         server.shutdown()
+        svc.close()
+
+
+# --- credential broker wiring ------------------------------------------------
+
+# Writes a start event, records which broker names it sees and whether the
+# broker socket exists. A copy named *_sleepy.py then sleeps.
+_FAKE_AGENT_BROKER = """
+import json, os, time
+from pathlib import Path
+
+home = Path(os.environ["FABRI_HOME"])
+sid = os.environ["FABRI_SESSION_ID"]
+trace = home / ".fabri" / "traces" / (sid + ".jsonl")
+trace.parent.mkdir(parents=True, exist_ok=True)
+with trace.open("a") as f:
+    f.write(json.dumps({"type": "start", "task": "t"}) + "\\n")
+    f.flush()
+sock = os.environ.get("FABRI_CRED_BROKER_SOCKET")
+seen = {
+    "broker_names": sorted(k for k in os.environ if k.startswith("FABRI_CRED_BROKER_")),
+    "other_cred_names": sorted(k for k in os.environ
+                               if k.startswith("FABRI_CRED_") and not k.startswith("FABRI_CRED_BROKER_")),
+    "socket_exists": bool(sock and os.path.exists(sock)),
+}
+if Path(__file__).name.endswith("_sleepy.py"):
+    time.sleep(60)
+print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                  "final_text": json.dumps(seen)}))
+"""
+
+_CK_SOURCE = {
+    "name": "ck", "kind": "http", "url": "https://api.example.test/contacts", "method": "GET",
+    "headers": {"Authorization": {"secret_ref": "cakemail:main", "prefix": "Bearer "}},
+}
+_MCP_POLICY = {"allowed_kinds": ["http", "openapi", "mcp"]}
+_STDIO_SOURCE = {
+    "name": "gh", "kind": "mcp", "command": ["gh-mcp"],
+    "env": {"GH_TOKEN": {"secret_ref": "github:main"}},
+}
+
+
+def _write_template(path: Path, sources: list | None, policy: dict | None = None) -> Path:
+    import yaml
+
+    body: dict = {"llm": {"model": "m"}}
+    if sources is not None:
+        body["tools"] = {"sources": sources}
+        if policy is not None:
+            body["tools"]["policy"] = policy
+    path.write_text(yaml.safe_dump(body))
+    return path
+
+
+@pytest.fixture
+def broker_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("FABRI_CRED_SNAPSHOT", raising=False)
+    monkeypatch.delenv("FABRI_CRED_AUDIT_LOG", raising=False)
+    # Runs here share the test's OS user, so stored credentials need the
+    # local development opt-in. The refusal tests below remove it.
+    monkeypatch.setenv("FABRI_ALLOW_SHARED_UID", "1")
+    return monkeypatch
+
+
+def _broker_service(tmp_path: Path, template: Path, name: str = "runs", *, sleepy: bool = False) -> FabriService:
+    # The run env is an allowlist, so the sleep switch is the script's name.
+    script = tmp_path / ("fake_agent_broker_sleepy.py" if sleepy else "fake_agent_broker.py")
+    script.write_text(textwrap.dedent(_FAKE_AGENT_BROKER))
+    return FabriService(template_config=str(template), home_root=tmp_path / name,
+                        command_builder=_builder_for(script))
+
+
+def _wait_until(predicate, timeout: float = 15.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+def test_submit_binds_broker_and_passes_env_only_for_credentialed_templates(tmp_path: Path, broker_env):
+    credentialed = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    plain = _write_template(tmp_path / "plain.yaml", [
+        {"name": "pub", "kind": "http", "url": "https://api.example.test/x", "method": "GET"}])
+
+    svc = _broker_service(tmp_path, credentialed, "runs-ck")
+    attached: list[tuple[str, int]] = []
+    real_attach = svc.credential_broker.attach_run_pid
+
+    def record_attach(session_id, pid):
+        attached.append((session_id, pid))
+        real_attach(session_id, pid)
+
+    svc.credential_broker.attach_run_pid = record_attach
+    try:
+        sid = svc.submit("t")
+        bound = svc.credential_broker.bindings()
+        assert sid in bound
+        assert set(bound[sid].sources) == {"ck"}
+        # The service's own database, never whatever FABRI_INSTALL_DB names.
+        assert svc.credential_broker.install_db == svc.home_root / "installs.db"
+        assert attached == [(sid, svc._handle(sid).proc.pid)]
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+    assert seen["other_cred_names"] == []
+    assert seen["socket_exists"] is True
+
+    svc = _broker_service(tmp_path, plain, "runs-plain")
+    try:
+        sid = svc.submit("t")
+        assert svc.credential_broker.bindings() == {}
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == []
+    assert seen["socket_exists"] is False
+
+
+def test_submit_bind_error_is_400_and_leaves_no_run(tmp_path: Path, broker_env):
+    from fabri.service.http_server import serve_http
+
+    template = _write_template(tmp_path / "stdio.yaml", [_STDIO_SOURCE], _MCP_POLICY)
+    svc = _broker_service(tmp_path, template)
+    def _entries():
+        # SQLite may add -wal/-shm side files whenever installs.db is read.
+        return {p.name for p in svc.home_root.iterdir() if not p.name.endswith(("-wal", "-shm"))}
+
+    before = _entries()
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    host, port = server.server_address[0], server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _http_post(host, port, "/runs", {"task": "go"})
+        assert status == 400
+        error = json.loads(body)["error"]
+        assert "source gh" in error
+        assert "stdio" in error
+        assert "FABRI_CRED_SNAPSHOT" in error
+        # Nothing of the refused run is left: no run home, no listener, no
+        # binding, no history.
+        assert _entries() == before
+        assert svc._asks == {}
+        assert svc._runs == {}
+        assert svc.credential_broker.bindings() == {}
+        assert svc.list_sessions() == []
+    finally:
+        server.shutdown()
+        svc.close()
+
+
+def test_stdio_mcp_with_a_stored_credential_runs_under_the_snapshot_opt_out(tmp_path: Path, broker_env):
+    broker_env.setenv("FABRI_CRED_SNAPSHOT", "1")
+    template = _write_template(tmp_path / "stdio.yaml", [_STDIO_SOURCE], _MCP_POLICY)
+    svc = _broker_service(tmp_path, template)
+    try:
+        sid = svc.submit("t")
+        assert svc.credential_broker.bindings() == {}
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == []
+
+
+def test_release_on_cancel_and_on_finish(tmp_path: Path, broker_env):
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+
+    # Cancel: the binding and its socket go with the run.
+    svc = _broker_service(tmp_path, template, "runs-cancel", sleepy=True)
+    try:
+        sid = svc.submit("long task")
+        socket_path = Path(svc.credential_broker.bindings()[sid].socket_path)
+        for ev in svc.stream(sid, timeout=30):
+            if ev.get("type") == "start":
+                break
+        assert socket_path.exists()
+        assert svc.cancel(sid)["status"] == "cancelled"
+        assert sid not in svc.credential_broker.bindings()
+        assert not socket_path.exists()
+    finally:
+        svc.close()
+
+    # Natural completion, with nobody calling result() or cancel().
+    svc = _broker_service(tmp_path, template, "runs-finish")
+    paths: dict[str, Path] = {}
+    real_attach = svc.credential_broker.attach_run_pid
+
+    def note_socket(session_id, pid):
+        # Runs before the end-of-run watcher starts, so the binding is still there.
+        paths[session_id] = Path(svc.credential_broker.bindings()[session_id].socket_path)
+        real_attach(session_id, pid)
+
+    svc.credential_broker.attach_run_pid = note_socket
+    try:
+        sid = svc.submit("t")
+        socket_path = paths[sid]
+        assert _wait_until(lambda: sid not in svc.credential_broker.bindings())
+        assert not socket_path.exists()
+    finally:
+        svc.close()
+
+
+def _serve_in_thread(svc: FabriService):
+    from fabri.service.http_server import serve_http
+
+    server = serve_http(svc, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[0], server.server_address[1]
+
+
+def test_same_uid_run_with_stored_credentials_is_refused_with_400(tmp_path: Path, broker_env):
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    assert svc.launch_isolation == "shared_uid"
+
+    def _entries():
+        return {p.name for p in svc.home_root.iterdir() if not p.name.endswith(("-wal", "-shm"))}
+
+    before = _entries()
+    server, host, port = _serve_in_thread(svc)
+    try:
+        status, body = _http_post(host, port, "/runs", {"task": "go"})
+        assert status == 400
+        error = json.loads(body)["error"]
+        assert "FABRI_ALLOW_SHARED_UID=1" in error
+        assert "same OS user" in error
+        assert "installs.db" in error
+        assert "sources ck" in error
+        # Nothing of the refused run is left behind.
+        assert _entries() == before
+        assert svc._asks == {}
+        assert svc._runs == {}
+        assert svc.credential_broker.bindings() == {}
+        assert svc.list_sessions() == []
+    finally:
+        server.shutdown()
+        svc.close()
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes", ""])
+def test_same_uid_opt_in_must_be_exactly_1(tmp_path: Path, broker_env, value: str):
+    broker_env.setenv("FABRI_ALLOW_SHARED_UID", value)
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    try:
+        with pytest.raises(ValueError, match="FABRI_ALLOW_SHARED_UID=1"):
+            svc.submit("t")
+        assert svc.credential_broker.bindings() == {}
+    finally:
+        svc.close()
+
+
+def test_same_uid_opt_in_lets_a_brokered_run_start(tmp_path: Path, broker_env):
+    assert os.environ.get("FABRI_ALLOW_SHARED_UID") == "1"
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    try:
+        sid = svc.submit("t")
+        assert sid in svc.credential_broker.bindings()
+        seen = json.loads(svc.result(sid, timeout=30)["final_text"])
+    finally:
+        svc.close()
+    assert seen["broker_names"] == ["FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET"]
+    assert seen["socket_exists"] is True
+
+
+def test_same_uid_check_ignores_runs_without_stored_credentials(tmp_path: Path, broker_env):
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    plain = _write_template(tmp_path / "plain.yaml", [
+        {"name": "pub", "kind": "http", "url": "https://api.example.test/x", "method": "GET"}])
+    svc = _broker_service(tmp_path, plain)
+    try:
+        sid = svc.submit("t")
+        assert svc.result(sid, timeout=30)["success"] is True
+    finally:
+        svc.close()
+
+
+def test_isolated_launch_mode_passes_the_same_uid_check(tmp_path: Path, broker_env):
+    # The hook a container or separate-user launch mode sets. With it, no
+    # opt-in is needed.
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    template = _write_template(tmp_path / "ck.yaml", [_CK_SOURCE])
+    svc = _broker_service(tmp_path, template)
+    svc.launch_isolation = "container"
+    try:
+        sid = svc.submit("t")
+        assert sid in svc.credential_broker.bindings()
+        assert svc.result(sid, timeout=30)["success"] is True
+    finally:
+        svc.close()
+
+
+def test_isolation_values_other_than_container_count_as_shared_uid():
+    from fabri.service.launcher import runs_share_service_uid
+    assert runs_share_service_uid("shared_uid")
+    assert runs_share_service_uid("anything-else")
+    assert not runs_share_service_uid("container")
+
+
+def test_snapshot_mode_is_refused_for_same_user_runs_without_the_opt_in(tmp_path: Path, broker_env):
+    from fabri.service.credential_broker import BindError
+    broker_env.setenv("FABRI_CRED_SNAPSHOT", "1")
+    broker_env.delenv("FABRI_ALLOW_SHARED_UID", raising=False)
+    template = _write_template(tmp_path / "stdio.yaml", [_STDIO_SOURCE], _MCP_POLICY)
+    svc = _broker_service(tmp_path, template)
+    try:
+        with pytest.raises(BindError, match="FABRI_ALLOW_SHARED_UID"):
+            svc.submit("t")
+        assert svc.list_sessions() == []
+    finally:
+        svc.close()
+
+
+_FAKE_AGENT_ACTOR = """
+import json, os
+from pathlib import Path
+
+home = Path(os.environ["FABRI_HOME"])
+sid = os.environ["FABRI_SESSION_ID"]
+trace = home / ".fabri" / "traces" / (sid + ".jsonl")
+trace.parent.mkdir(parents=True, exist_ok=True)
+trace.write_text("")
+print(json.dumps({"session_id": sid, "success": True, "outcome": "success",
+                  "final_text": json.dumps({"actor": os.environ.get("FABRI_RUN_ACTOR")})}))
+"""
+
+
+def test_submit_sets_FABRI_RUN_ACTOR_for_owned_runs_only(tmp_path: Path, broker_env):
+    # A stray value in the service env must never reach a run as its actor.
+    broker_env.setenv("FABRI_RUN_ACTOR", "service-env-actor")
+    script = tmp_path / "fake_agent_actor.py"
+    script.write_text(textwrap.dedent(_FAKE_AGENT_ACTOR))
+    template = _write_template(tmp_path / "actor.yaml", [{
+        "name": "mail", "kind": "http", "url": "https://api.example.test/mail", "method": "GET",
+        "headers": {"Authorization": {"secret_ref": "gmail:${actor}", "prefix": "Bearer "}},
+    }])
+    svc = FabriService(template_config=str(template), home_root=tmp_path / "runs",
+                       command_builder=_builder_for(script))
+    bound: dict = {}
+    real_bind = svc.credential_broker.bind
+
+    def recording_bind(**kwargs):
+        binding = real_bind(**kwargs)
+        bound[kwargs["session_id"]] = binding
+        return binding
+
+    svc.credential_broker.bind = recording_bind
+    try:
+        owned = svc.submit("t", user_id="u1")
+        assert bound[owned].actor == "u1"
+        assert bound[owned].sources["mail"].refs == (("gmail", "u1"),)
+        assert json.loads(svc.result(owned, timeout=30)["final_text"]) == {"actor": "u1"}
+
+        shared = svc.submit("t")
+        assert bound[shared].actor is None
+        # A run without a user gets no handle for the ${actor} ref, so the
+        # broker refuses it on every call.
+        assert bound[shared].sources["mail"].refs == ()
+        assert json.loads(svc.result(shared, timeout=30)["final_text"]) == {"actor": None}
+    finally:
         svc.close()

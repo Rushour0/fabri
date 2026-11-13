@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import json
 import re
@@ -1104,14 +1105,19 @@ def _run_verifier(command: list[str] | str, cwd: str | None) -> dict:
     one override: stdout that parses as JSON carrying ``{"ok": true|false}``
     wins over the exit code (some verifiers exit 0 but report failures in body).
     """
+    # Host code still gets no connector tokens: its output goes back to the
+    # model as the repair hint, so a token it printed would reach the trace.
+    from fabri.tools.credential_store import env_without_credentials
+
+    env = env_without_credentials()
     try:
         if isinstance(command, str):
             proc = subprocess.run(
-                command, cwd=cwd, shell=True, capture_output=True, text=True
+                command, cwd=cwd, shell=True, capture_output=True, text=True, env=env
             )
         else:
             proc = subprocess.run(
-                list(command), cwd=cwd, capture_output=True, text=True
+                list(command), cwd=cwd, capture_output=True, text=True, env=env
             )
     except (OSError, ValueError) as e:
         # A verifier that can't even launch (missing binary, bad cwd) is a
@@ -1436,7 +1442,9 @@ def _dispatch_tool_calls(
         workers = max(1, min(len(idx_list), max_parallel_spawns))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_idx = {
-                pool.submit(_dispatch_one, calls[i]): i for i in idx_list
+                # Each call runs in a copy of this run's context, so context
+                # variables (the run's install database, memory scope) hold.
+                pool.submit(contextvars.copy_context().run, _dispatch_one, calls[i]): i for i in idx_list
             }
             for future in as_completed(future_to_idx):
                 i = future_to_idx[future]

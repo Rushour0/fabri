@@ -159,38 +159,34 @@ def test_count_tokens_uses_model_specific_encoder():
 
 # -------------------- MCP HTTP ----------------------------------------------
 
-def test_mcp_http_client_serializes_jsonrpc_post():
+def test_mcp_http_client_serializes_jsonrpc_post(monkeypatch):
     """The HTTP client must POST a valid JSON-RPC envelope and return the
-    `result` field on a 200 response. We stub urllib so no network hits."""
+    `result` field on a 200 response. A mock transport keeps it offline."""
+    import httpx
     from fabri.tools.mcp_client import MCPHttpClient
 
+    monkeypatch.setenv("FABRI_FETCH_ALLOW_PRIVATE", "1")
     captured = {}
 
-    def _fake_urlopen(req, timeout=None):
-        captured["url"] = req.full_url
-        captured["body"] = req.data
-        captured["headers"] = dict(req.headers)
-        body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}).encode()
-        class _R:
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def read(self): return body
-        return _R()
+    def handler(request):
+        msg = json.loads(request.content)
+        if "id" not in msg:
+            return httpx.Response(202)
+        if msg["method"] == "tools/list":
+            captured["url"] = str(request.url)
+            captured["body"] = msg
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": []}})
 
-    import urllib.request as _ur
-    orig = _ur.urlopen
-    _ur.urlopen = _fake_urlopen
+    c = MCPHttpClient(url="https://x.example/jsonrpc", name="test", transport=httpx.MockTransport(handler))
+    c.start()
     try:
-        c = MCPHttpClient(url="https://x.example/jsonrpc", name="test")
-        c.start()
         result = c.list_tools()
     finally:
-        _ur.urlopen = orig
+        c.close()
 
     assert captured["url"] == "https://x.example/jsonrpc"
-    sent = json.loads(captured["body"])
-    assert sent["jsonrpc"] == "2.0"
-    assert sent["method"] == "tools/list"
+    assert captured["body"]["jsonrpc"] == "2.0"
+    assert captured["body"]["method"] == "tools/list"
     assert result == []
 
 
