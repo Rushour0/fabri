@@ -129,12 +129,31 @@ def _load_decl(path: str) -> dict:
     return data
 
 
+def _add_env_flags(decl: dict, flags: list[str]) -> None:
+    """`--env NAME=ref` into server.env. A ref with a colon is a secret
+    reference (provider:handle); otherwise it is an environment variable name.
+    Values are never accepted here, only references."""
+    server = decl.get("server")
+    if not isinstance(server, dict):
+        raise SystemExit("--env needs a declaration with a server: {command: [...]} block")
+    env = dict(server.get("env") or {})
+    for flag in flags:
+        name, sep, ref = flag.partition("=")
+        if not sep or not name or not ref:
+            raise SystemExit(f"--env expects NAME=ref, got {name or flag!r}")
+        env[name] = {"secret_ref": ref} if ":" in ref else {"env": ref}
+    server["env"] = env
+
+
 def cmd_tools_register(args: argparse.Namespace) -> None:
     from fabri.tools.policy import PolicyError
     from fabri.tools.registration import RegistrationError, register_tool
 
     try:
-        tool = register_tool(args.layer, _load_decl(args.file), actor=_actor(args),
+        decl = _load_decl(args.file)
+        if args.env:
+            _add_env_flags(decl, args.env)
+        tool = register_tool(args.layer, decl, actor=_actor(args),
                              policy=_policy(args.policy, strict=True))
     except (RegistrationError, PolicyError, ValueError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -605,6 +624,9 @@ def add_setup_commands(sub: argparse._SubParsersAction, p_tools: argparse.Argume
     p.add_argument("--file", required=True, help="Declaration as JSON or YAML")
     p.add_argument("--policy", default=None, metavar="FILE",
                    help="Policy YAML (default: http and openapi only, no DELETE, no python)")
+    p.add_argument("--env", action="append", default=[], metavar="NAME=REF",
+                   help="Give a stdio MCP tool a variable: REF is provider:handle (secret reference) or an "
+                        "environment variable name. Never a value. Repeatable.")
     p.add_argument("--actor", default=None)
     p.set_defaults(func=cmd_tools_register)
 

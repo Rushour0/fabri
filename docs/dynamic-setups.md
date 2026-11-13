@@ -265,6 +265,24 @@ environment variable name and never a raw value, and the policy: allowlist,
 `python_modules`. The default policy allows http and openapi only, with no
 DELETE and no python.
 
+A registered stdio MCP server runs with a small allowlisted environment, not
+the host's. To give it a key, declare it under `server.env`, one entry per
+variable, each a `{secret_ref: provider:handle}` or `{env: HOST_VAR_NAME}`
+reference, the same shapes a `kind: mcp` tool source uses:
+
+```
+"server": {"command": ["npx", "some-mcp"],
+           "env": {"OPENAI_API_KEY": {"secret_ref": "openai:prod"}}}
+```
+
+A literal value, a bare string or a value that looks like a token is refused.
+Secret refs are also checked against the policy's `credential_grants`. The
+refs are part of the content hash, so changing one needs a new version.
+`env_mode: inherit` (pass the whole host environment) is refused for
+registered tools. `fabri tools register` takes `--env NAME=REF` (repeatable),
+where REF is `provider:handle` or an environment variable name. `server.env`
+is for command servers only; an http server uses `auth`.
+
 Each tool is stored as `tools/registered/<name>.json`. Registering a higher
 version replaces it; the same version with different content is refused.
 Every register, unregister, enable and disable appends a line to
@@ -273,7 +291,7 @@ content hash. The resolver merges registered tools with `tools.yaml`, so the
 global cap and hot reload apply the same way.
 
 ```
-fabri tools register --layer DIR --file decl.json [--policy policy.yaml]
+fabri tools register --layer DIR --file decl.json [--policy policy.yaml] [--env NAME=REF ...]
 fabri tools unregister --layer DIR --name N
 fabri tools enable|disable --layer DIR --name N
 fabri tools list --layers ...     # SOURCE column: declared, registered or openapi

@@ -23,7 +23,8 @@ caller's global allowlist and hot reload apply the same way. Every register,
 unregister, enable and disable appends a line to
 ``tools/registered/_audit.jsonl`` (actor, action, name, version, time,
 content hash). Neither file ever holds a secret value: `auth` only accepts a
-secret reference or an environment variable name.
+secret reference or an environment variable name, and so does `server.env`
+for a stdio MCP server.
 
 Versions: registering a name again with a higher version replaces it; the
 same version with different content is rejected; the same content is a
@@ -209,6 +210,46 @@ def _check_auth(auth: Any) -> None:
         raise RegistrationError("auth.prefix must be a short scheme such as 'Bearer '")
 
 
+_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def _check_server_env(server: Mapping[str, Any], name: str, policy: ToolPolicy) -> None:
+    """``server.env`` for a stdio MCP server: names mapped to a secret
+    reference or an environment variable name, never a value. A bare string is
+    refused so a pasted value cannot pass for a reference."""
+    mode = server.get("env_mode")
+    if mode == "inherit":
+        raise RegistrationError("env_mode: inherit is not allowed for registered tools; declare the variables "
+                                "the server needs under server.env")
+    if mode not in (None, "allowlist"):
+        raise RegistrationError("env_mode must be omitted or 'allowlist'")
+    env = server.get("env")
+    if env is None:
+        return
+    if not server.get("command"):
+        raise RegistrationError("server.env applies to command servers; an http server uses auth")
+    if not isinstance(env, Mapping) or not env:
+        raise RegistrationError("server.env must map variable names to {secret_ref: ...} or {env: NAME}")
+    refs = []
+    for key, spec in env.items():
+        if not isinstance(key, str) or not _ENV_KEY.fullmatch(key):
+            raise RegistrationError("server.env names must be environment variable names")
+        if not isinstance(spec, Mapping) or len(spec) != 1 or next(iter(spec)) not in ("secret_ref", "env"):
+            raise RegistrationError(f"server.env.{key} must be {{secret_ref: provider:handle}} or "
+                                    "{env: NAME}; raw values are not stored")
+        kind, value = next(iter(spec.items()))
+        value = str(value)
+        if kind == "secret_ref":
+            if not _SECRET_REF.fullmatch(value) or looks_like_secret(value.split(":", 1)[-1]):
+                raise RegistrationError(f"server.env.{key}.secret_ref must be a reference like provider:handle, "
+                                        "not a secret value")
+            refs.append(value)
+        elif not _ENV_NAME.fullmatch(value) or looks_like_secret(value):
+            raise RegistrationError(f"server.env.{key}.env must be an environment variable name "
+                                    "(A-Z, 0-9, _), not a secret value")
+    policy.check_secret_refs(name, refs)
+
+
 def _check_url(url: Any, what: str, policy: ToolPolicy) -> str:
     if not isinstance(url, str) or urlparse(url).scheme not in ("http", "https") or not urlparse(url).hostname:
         raise RegistrationError(f"{what} must be an http or https URL")
@@ -332,6 +373,7 @@ def validate_registration(
             _check_url(server["url"], "server.url", policy)
         elif not isinstance(server["command"], list) or not all(isinstance(c, str) for c in server["command"]):
             raise RegistrationError("server.command must be a list of strings")
+        _check_server_env(server, name, policy)
         if not policy.name_allowed(f"mcp_{name}_x") and not policy.name_allowed(name):
             raise PolicyError(f"mcp tools named mcp_{name}_* are not in the policy's allowlist")
         default_approval = "write"
@@ -483,6 +525,8 @@ def to_source_decl(decl: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
         server = decl["server"]
         source = {"kind": "mcp", "name": name, "approval": decl["approval"],
                   **({"url": server["url"]} if server.get("url") else {"command": list(server["command"])})}
+        if server.get("env"):
+            source["env"] = {k: dict(v) for k, v in server["env"].items()}
         allow = [f"mcp_{name}_*"]
     else:
         source = {"kind": "python", "name": name, "callable": decl["callable"], "approval": decl["approval"],
