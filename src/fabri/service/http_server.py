@@ -977,6 +977,13 @@ def serve_http(
     refusal = hosted_start_refusal(service)
     if refusal:
         raise StartRefused(f"fabri serve refused to start: {refusal}")
+    from fabri.secret_cipher import require_encryption
+    from fabri.service.request_guard import is_loopback_host
+
+    # A server others can reach stores new tokens only under a key (or an
+    # explicit FABRI_ALLOW_PLAINTEXT_SECRETS=1). See fabri.secret_cipher.
+    if not is_loopback_host(host):
+        require_encryption(f"fabri serve is bound to the non-loopback address {host or '0.0.0.0'}")
     if connections_api is None and getattr(service, "connection_store", None) is not None:
         from fabri.service.connections_routes import ConnectionsApi
 

@@ -431,6 +431,12 @@ class ConnectionsApi:
             raise _Refused(500, f"{entry.name} OAuth is not configured")
         from fabri.tools.connections import ConnectError
 
+        # Refuse before the browser round trip when the token could not be
+        # stored at the end of it (a hosted install with no secret key).
+        plaintext_refusal = getattr(self.store, "plaintext_refusal", None)
+        refused = plaintext_refusal() if callable(plaintext_refusal) else None
+        if refused:
+            raise _Refused(503, refused)
         callback = entry.oauth.callback_alias or f"/connect/{entry.name}/callback"
         try:
             url = oauth.begin(self.store, redirect_uri=base + callback, scope_kind=scope,

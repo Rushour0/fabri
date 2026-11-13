@@ -1,9 +1,14 @@
 """One table of connections (provider, handle) to third-party accounts.
 
 Every credential fabri holds for a vendor lives here: Slack bot tokens, Linear
-OAuth tokens, pasted API keys and PATs. Secrets at rest are plaintext in a
-0600 file in this release. Nothing in this module logs a token, and the row
-dicts it returns never carry a token column.
+OAuth tokens, pasted API keys and PATs. The file is 0600. When a secret key is
+configured (``FABRI_SECRET_KEY`` or ``FABRI_SECRET_KEY_FILE``, see
+``fabri.secret_cipher``) the access token, refresh token, PKCE verifier and
+OAuth state secret are stored encrypted; without one they are plaintext. Old
+plaintext values stay readable and are encrypted on their next write, or all
+at once by ``ConnectionStore.rekey`` (``fabri connections rekey``). Nothing in
+this module logs a token, and the row dicts it returns never carry a token
+column.
 
 The file is ``installs.db``. On first open the legacy ``installs`` (Slack) and
 ``linear_installs`` (Linear) tables are copied into ``connections`` and
@@ -24,6 +29,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
+from fabri.secret_cipher import (
+    PlaintextRefused,
+    SecretCipher,
+    SecretKeyError,
+    decrypt_secret,
+    encrypt_secret,
+    is_encrypted,
+    load_cipher,
+    plaintext_refusal,
+)
+
 logger = logging.getLogger(__name__)
 
 # Refresh a token this many seconds before it expires.
@@ -43,6 +59,9 @@ REFRESH_WAIT_S = 20.0
 Refresher = Callable[[str], dict]
 
 SCOPE_KINDS = ("org", "user")
+
+# Default for ConnectionStore(cipher=...): read the key from the environment.
+_FROM_ENV = object()
 
 
 class ScopeConflict(ValueError):
@@ -123,15 +142,23 @@ def default_refreshers() -> dict[str, Refresher]:
 class ConnectionStore:
     """Connections keyed by (provider, handle).
 
-    Secrets at rest are plaintext in a 0600 file in this release. A refresher
+    Secrets are encrypted at rest when a key is configured (pass ``cipher``,
+    or leave it to ``FABRI_SECRET_KEY``), else plaintext in a 0600 file. A
+    malformed key, or a key set without the ``cryptography`` package, raises
+    SecretKeyError here, so the store never falls back to plaintext. A refresher
     per provider (a callable taking the refresh token and returning the
     vendor's token response) lets ``get_token`` swap in a new access token
     when the stored one is within REFRESH_MARGIN_S of expiring.
     """
 
     def __init__(
-        self, path: str | Path, refreshers: Mapping[str, Refresher] | None = None
+        self,
+        path: str | Path,
+        refreshers: Mapping[str, Refresher] | None = None,
+        *,
+        cipher: SecretCipher | None | object = _FROM_ENV,
     ) -> None:
+        self.cipher: SecretCipher | None = load_cipher() if cipher is _FROM_ENV else cipher  # type: ignore[assignment]
         self.path = Path(path)
         self.refreshers: dict[str, Refresher] = dict(refreshers or {})
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +169,100 @@ class ConnectionStore:
 
     def __repr__(self) -> str:
         return f"ConnectionStore({str(self.path)!r})"
+
+    # -- secrets at rest ----------------------------------------------------
+
+    @property
+    def encrypted(self) -> bool:
+        """True when new secrets are written encrypted."""
+        return self.cipher is not None
+
+    def _enc(self, value: str | None) -> str | None:
+        return encrypt_secret(value, self.cipher)
+
+    def _dec(self, value: str | None) -> str | None:
+        return decrypt_secret(value, self.cipher)
+
+    def plaintext_refusal(self) -> str | None:
+        """Why a new token may not be stored here as plaintext, or None.
+        Only an install that requires encryption (``fabri serve`` on a
+        non-loopback address) without a key refuses."""
+        return plaintext_refusal(self.cipher)
+
+    def plaintext_count(self) -> int:
+        """How many stored connections still hold a plaintext token."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT access_token, refresh_token FROM connections"
+            ).fetchall()
+        return sum(
+            1 for row in rows
+            if any(v and not is_encrypted(v) for v in (row["access_token"], row["refresh_token"]))
+        )
+
+    def rekey(self, *, now: float | None = None) -> dict:
+        """Rewrite every stored secret with the first configured key.
+
+        Plaintext values get encrypted and values under an older key (a later
+        entry in ``FABRI_SECRET_KEY``) move to the first key. A connection
+        whose token is being refreshed right now is skipped, since changing
+        its stored refresh token would drop the refresh result; run it again
+        later. Returns counts: ``rewritten``, ``skipped``. Raises
+        SecretKeyError when no key is configured or a value cannot be read.
+        """
+        cipher = self.cipher
+        if cipher is None:
+            raise SecretKeyError("no secret key is configured; set FABRI_SECRET_KEY first")
+        now = time.time() if now is None else now
+        rewritten = skipped = 0
+
+        def fresh(value):
+            return cipher.encrypt(cipher.decrypt(value)) if cipher.needs_rewrite(value) else value
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for row in connection.execute(
+                    "SELECT provider, handle, access_token, refresh_token, refresh_lease_until "
+                    "FROM connections"
+                ).fetchall():
+                    access, refresh = fresh(row["access_token"]), fresh(row["refresh_token"])
+                    if access == row["access_token"] and refresh == row["refresh_token"]:
+                        continue
+                    lease = row["refresh_lease_until"]
+                    if lease is not None and lease > now:
+                        skipped += 1
+                        continue
+                    connection.execute(
+                        "UPDATE connections SET access_token=?, refresh_token=? "
+                        "WHERE provider=? AND handle=?",
+                        (access, refresh, row["provider"], row["handle"]),
+                    )
+                    rewritten += 1
+                for row in connection.execute(
+                    "SELECT nonce, code_verifier FROM pending_oauth"
+                ).fetchall():
+                    value = fresh(row["code_verifier"])
+                    if value != row["code_verifier"]:
+                        connection.execute(
+                            "UPDATE pending_oauth SET code_verifier=? WHERE nonce=?",
+                            (value, row["nonce"]),
+                        )
+                        rewritten += 1
+                for row in connection.execute("SELECT name, value FROM service_secrets").fetchall():
+                    value = fresh(row["value"])
+                    if value != row["value"]:
+                        connection.execute(
+                            "UPDATE service_secrets SET value=? WHERE name=?", (value, row["name"])
+                        )
+                        rewritten += 1
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        self._secure_sidecars()
+        return {"rewritten": rewritten, "skipped": skipped}
 
     # -- file handling -----------------------------------------------------
 
@@ -319,11 +440,20 @@ class ConnectionStore:
         write transaction, and ScopeConflict is raised (nothing written) when
         it differs from ``scope_kind``. A user flow then cannot replace an org
         row that has the same handle, nor the reverse.
+
+        The tokens are encrypted when the store has a key. PlaintextRefused
+        is raised (nothing written) on an install that requires a key and
+        has none; see ``plaintext_refusal``.
         """
         if scope_kind not in SCOPE_KINDS:
             raise ValueError("scope_kind must be 'org' or 'user'")
         if not access_token:
             raise ValueError("access_token must not be empty")
+        refusal = self.plaintext_refusal()
+        if refusal:
+            raise PlaintextRefused(refusal)
+        access_token = self._enc(access_token)
+        refresh_token = self._enc(refresh_token)
         now = time.time() if now is None else now
         expires_at = now + float(expires_in) if expires_in else None
         meta_json = json.dumps(dict(meta)) if meta is not None else None
@@ -416,13 +546,13 @@ class ConnectionStore:
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO service_secrets(name, value, created_at) VALUES(?,?,?)",
-                ("oauth_state", secrets.token_urlsafe(48), time.time()),
+                ("oauth_state", self._enc(secrets.token_urlsafe(48)), time.time()),
             )
             row = connection.execute(
                 "SELECT value FROM service_secrets WHERE name='oauth_state'"
             ).fetchone()
         self._secure_sidecars()
-        return row["value"]
+        return self._dec(row["value"])
 
     def pending_put(
         self,
@@ -455,7 +585,7 @@ class ConnectionStore:
                 ) VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    nonce, provider, handle, scope_kind, user_id, code_verifier,
+                    nonce, provider, handle, scope_kind, user_id, self._enc(code_verifier),
                     scopes, redirect_uri, now, now + PENDING_TTL_S,
                 ),
             )
@@ -488,6 +618,8 @@ class ConnectionStore:
                     (nonce,),
                 ).fetchone()
                 live = dict(row) if row is not None and row["expires_at"] >= now else None
+                if live is not None:
+                    live["code_verifier"] = self._dec(live["code_verifier"])
                 if live is not None and check is not None:
                     check(dict(live))
                 if row is not None:
@@ -568,10 +700,10 @@ class ConnectionStore:
         if row is None or row["status"] == "revoked":
             return None
         if row["expires_at"] is None or row["expires_at"] - now > REFRESH_MARGIN_S:
-            return row["access_token"]
+            return self._dec(row["access_token"])
         refresher = self.refreshers.get(provider)
         if refresher is None or not row["refresh_token"]:
-            return row["access_token"] if row["expires_at"] > now else None
+            return self._dec(row["access_token"]) if row["expires_at"] > now else None
         return self._refresh(provider, handle, refresher, now)
 
     def _refresh(
@@ -592,9 +724,11 @@ class ConnectionStore:
             return row
         if state == "busy":
             return self._await_refresh(provider, handle, now, row)
+        # ``spent`` is the stored value (maybe encrypted). The WHERE clauses
+        # below compare against it, the vendor gets its plaintext.
         spent = row["refresh_token"]
         try:
-            fresh = refresher(spent)
+            fresh = refresher(self._dec(spent))
             access = fresh["access_token"]
             if not access:
                 raise KeyError("access_token")
@@ -603,7 +737,7 @@ class ConnectionStore:
             logger.warning(
                 "%s token refresh failed for a connection: %s", provider, type(exc).__name__,
             )
-            return row["access_token"] if (row["expires_at"] or 0) > now else None
+            return self._dec(row["access_token"]) if (row["expires_at"] or 0) > now else None
         expires_in = fresh.get("expires_in")
         with self._connect() as connection:
             cur = connection.execute(
@@ -611,8 +745,8 @@ class ConnectionStore:
                 "updated_at=?, refresh_lease_until=NULL "
                 "WHERE provider=? AND handle=? AND refresh_token=? AND status!='revoked'",
                 (
-                    access,
-                    fresh.get("refresh_token") or spent,
+                    self._enc(access),
+                    self._enc(fresh.get("refresh_token") or self._dec(spent)),
                     now + float(expires_in) if expires_in else None,
                     now,
                     provider,
@@ -647,10 +781,10 @@ class ConnectionStore:
                     return "done", None
                 if row["expires_at"] is None or row["expires_at"] - now > REFRESH_MARGIN_S:
                     connection.execute("ROLLBACK")
-                    return "done", row["access_token"]
+                    return "done", self._dec(row["access_token"])
                 if not row["refresh_token"]:
                     connection.execute("ROLLBACK")
-                    return "done", row["access_token"] if row["expires_at"] > now else None
+                    return "done", self._dec(row["access_token"]) if row["expires_at"] > now else None
                 lease = row["refresh_lease_until"]
                 if lease is not None and lease > now:
                     connection.execute("ROLLBACK")
@@ -685,13 +819,13 @@ class ConnectionStore:
             return None
         if row["expires_at"] is not None and row["expires_at"] <= now:
             return None
-        return row["access_token"]
+        return self._dec(row["access_token"])
 
     def _await_refresh(self, provider: str, handle: str, now: float, row: dict) -> str | None:
         """Another caller is refreshing. A token that is still valid is used
         at once; an expired one waits up to REFRESH_WAIT_S for the result."""
         if (row["expires_at"] or 0) > now:
-            return row["access_token"]
+            return self._dec(row["access_token"])
         spent = row["refresh_token"]
         deadline = time.monotonic() + REFRESH_WAIT_S
         while time.monotonic() < deadline:

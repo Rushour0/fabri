@@ -1862,7 +1862,13 @@ def _connection_store(args: argparse.Namespace, *, create: bool):
         file_was_open = db.exists() and bool(db.stat().st_mode & 0o077)
     except OSError:
         file_was_open = False
-    store = ConnectionStore(db, refreshers=default_refreshers())
+    from fabri.secret_cipher import SecretKeyError
+
+    try:
+        store = ConnectionStore(db, refreshers=default_refreshers())
+    except SecretKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
     try:
         file_open = bool(db.stat().st_mode & 0o077)
         dir_open = bool(db.parent.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH))
@@ -2073,9 +2079,23 @@ def cmd_connect(args: argparse.Namespace) -> None:
     print(f"  {next_step(entry, args.handle)}")
 
 
+def _warn_plaintext(store) -> None:
+    """Say on stderr when stored tokens are plaintext, and how to fix it."""
+    count = store.plaintext_count()
+    if not count:
+        return
+    if store.encrypted:
+        print(f"warning: {count} connection(s) still hold a plaintext token; run `fabri connections rekey`",
+              file=sys.stderr)
+    else:
+        print(f"warning: {count} connection(s) hold plaintext tokens; set FABRI_SECRET_KEY "
+              "(`fabri connections keygen` makes one) and run `fabri connections rekey`", file=sys.stderr)
+
+
 def cmd_connections_list(args: argparse.Namespace) -> None:
     store = _connection_store(args, create=False)
     rows = store.list(args.provider)
+    _warn_plaintext(store)
     if args.json:
         print(json.dumps(rows, indent=2, default=str))
         return
@@ -2105,6 +2125,31 @@ def cmd_connections_remove(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"removed {args.provider}:{args.handle} and its stored token. The app or grant stays with "
           f"{args.provider} until someone revokes it there.")
+
+
+def cmd_connections_rekey(args: argparse.Namespace) -> None:
+    from fabri.secret_cipher import SecretKeyError
+
+    store = _connection_store(args, create=False)
+    try:
+        counts = store.rekey()
+    except SecretKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"encrypted {counts['rewritten']} stored secret(s) with the current key")
+    if counts["skipped"]:
+        print(f"skipped {counts['skipped']} connection(s) that were refreshing; run it again", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_connections_keygen(args: argparse.Namespace) -> None:
+    from fabri.secret_cipher import SecretKeyError, generate_key
+
+    try:
+        print(generate_key())
+    except SecretKeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def main() -> None:
@@ -2641,7 +2686,12 @@ def main() -> None:
     p_conn_rm.add_argument("provider")
     p_conn_rm.add_argument("handle")
     p_conn_rm.set_defaults(func=cmd_connections_remove)
-    for p_cmd in (p_connect, p_conn_list, p_conn_rm):
+    p_conn_rekey = conns_sub.add_parser(
+        "rekey", help="Encrypt every stored secret with the first FABRI_SECRET_KEY key (plaintext or an older key)")
+    p_conn_rekey.set_defaults(func=cmd_connections_rekey)
+    p_conn_keygen = conns_sub.add_parser("keygen", help="Print a new key for FABRI_SECRET_KEY")
+    p_conn_keygen.set_defaults(func=cmd_connections_keygen)
+    for p_cmd in (p_connect, p_conn_list, p_conn_rm, p_conn_rekey):
         p_cmd.add_argument("--home-root", dest="home_root", default=None,
                            help="The server's --home-root (default: $FABRI_INSTALL_DB, then $FABRI_HOME/serve)")
 

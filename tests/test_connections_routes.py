@@ -733,3 +733,18 @@ def test_serve_http_mounts_a_default_connections_api(tmp_path):
         server.server_close()
     finally:
         service.close()
+
+
+def test_hosted_install_without_key_refuses_oauth_and_paste(make_server, vendor, monkeypatch):
+    from fabri import secret_cipher
+
+    monkeypatch.delenv(secret_cipher.SECRET_KEY_ENV, raising=False)
+    monkeypatch.delenv(secret_cipher.ALLOW_PLAINTEXT_ENV, raising=False)
+    server, service = make_server()
+    secret_cipher.require_encryption("fabri serve is bound to the non-loopback address 0.0.0.0")
+    try:
+        resp = client(server).get("/connect/acme")
+        assert resp.status_code == 503 and "FABRI_SECRET_KEY" in resp.text
+        assert service.connection_store.list() == []
+    finally:
+        secret_cipher.require_encryption(None)

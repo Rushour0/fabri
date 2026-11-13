@@ -43,6 +43,7 @@ dependencies = [
 [project.optional-dependencies]
 embeddings = ["sentence-transformers>=3.0"]
 repo-github = ["PyJWT[crypto]>=2.8"]
+encryption = ["cryptography>=42"]   # FABRI_SECRET_KEY: encrypt stored connection tokens
 sqlite = ["sqlite-vec>=0.1.6"]         # G16: embedded vector store (no docker)
 bm25 = ["rank-bm25>=0.2.2"]            # client-side BM25 for Qdrant hybrid retrieval
 # One-command install for the self-improving stack — memory (sqlite-vec store +

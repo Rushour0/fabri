@@ -3,8 +3,9 @@
 Slack and Linear tokens live in the ``connections`` table
 (``fabri.service.connection_store``); the two classes here keep their old
 names, signatures and row shapes as thin wrappers over ``ConnectionStore``.
-Secrets at rest are plaintext in a 0600 file in this release, and no token is
-ever logged. ``GitHubInstallStore`` holds no token and keeps its own table.
+Secrets at rest are encrypted when FABRI_SECRET_KEY is set and plaintext in
+the 0600 file otherwise (see ``fabri.secret_cipher``), and no token is ever
+logged. ``GitHubInstallStore`` holds no token and keeps its own table.
 """
 from __future__ import annotations
 
