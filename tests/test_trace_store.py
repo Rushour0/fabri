@@ -324,7 +324,10 @@ def test_oversized_line_is_dropped_and_neighbours_kept(layout):
     big = json.dumps({"type": "step", "pad": "y" * (MAX_LINE_BYTES + 10)}) + "\n"
     trace.write_text(_event(1) + big + _event(2) + big + _event(3, "final"))
     got = list(tail_events(trace, is_running=lambda: False))
-    assert got == [{"type": "step", "n": 1}, {"type": "step", "n": 2}, {"type": "final", "n": 3}]
+    size = len(big) - 1
+    marker = {"type": "step", "truncated": True, "bytes": size}
+    assert got == [{"type": "step", "n": 1}, marker, {"type": "step", "n": 2}, marker,
+                   {"type": "final", "n": 3}]
 
 
 def test_sparse_file_without_newlines_stays_bounded(layout):
@@ -341,7 +344,7 @@ def test_sparse_file_without_newlines_stays_bounded(layout):
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert got == [{"type": "final", "n": 7}]
+    assert got == [{"type": "dropped", "truncated": True, "bytes": 256 << 20}, {"type": "final", "n": 7}]
     assert peak < 48 << 20
 
 
@@ -433,3 +436,82 @@ def test_service_trace_readers_read_a_plain_trace(tmp_path):
     assert _read_trace_at(trace) == [{"type": "final", "answer": "ok"}]
     assert _trace_tail_lines(trace) == ['{"type": "final", "answer": "ok"}', "not json"]
     assert _read_trace_at(traces / "missing.jsonl") == []
+
+
+def test_oversized_final_event_still_ends_the_stream(layout):
+    """A dropped terminal line yields a typed marker, so a tail with no
+    is_running predicate stops instead of waiting for its timeout."""
+    from fabri.service.tailer import MAX_LINE_BYTES
+
+    trace, _, _ = layout
+    final = json.dumps({"type": "final", "answer": "x" * (MAX_LINE_BYTES + 100)}) + "\n"
+    trace.write_text(_event(1) + final + json.dumps({"type": "usage"}) + "\n")
+    start = time.monotonic()
+    got = list(tail_events(trace, is_running=None, timeout=5))
+    assert time.monotonic() - start < 2
+    assert got[0] == {"type": "step", "n": 1}
+    assert got[1] == {"type": "final", "truncated": True, "bytes": len(final) - 1}
+
+
+def test_oversized_line_split_across_polls_reports_its_type(layout):
+    from fabri.service.tailer import MAX_LINE_BYTES
+
+    trace, _, _ = layout
+    body = json.dumps({"type": "final", "answer": "z" * (MAX_LINE_BYTES * 3)})
+    cut = MAX_LINE_BYTES + 10
+    trace.write_text(body[:cut])
+    state = {"n": 0}
+
+    def is_running() -> bool:
+        state["n"] += 1
+        if state["n"] == 1:
+            with open(trace, "a") as f:
+                f.write(body[cut:] + "\n")
+            return True
+        return False
+
+    got = list(tail_events(trace, is_running=is_running, poll_interval=0.0))
+    assert got == [{"type": "final", "truncated": True, "bytes": len(body)}]
+
+
+def test_oversized_line_at_eof_is_still_reported(layout):
+    from fabri.service.tailer import MAX_LINE_BYTES
+
+    trace, _, _ = layout
+    body = json.dumps({"type": "failed", "error": "e" * (MAX_LINE_BYTES * 2)})  # no newline
+    trace.write_text(body)
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert got == [{"type": "failed", "truncated": True, "bytes": len(body)}]
+
+
+def test_final_drain_honours_timeout(layout, monkeypatch):
+    from fabri.service import tailer
+
+    trace, _, _ = layout
+    with open(trace, "wb") as f:
+        f.truncate(64 << 20)
+    real = TraceReader.read_new
+
+    def slow(self, max_bytes=0):
+        time.sleep(0.05)
+        return real(self, min(max_bytes, 1 << 20))
+
+    monkeypatch.setattr(tailer.TraceReader, "read_new", slow)
+    start = time.monotonic()
+    list(tail_events(trace, is_running=lambda: False, timeout=0.3))
+    # 64 reads at 50 ms would take 3.2 s without the deadline check.
+    assert time.monotonic() - start < 1.5
+
+
+def test_tail_stops_at_the_byte_cap(layout, monkeypatch):
+    from fabri.service import tailer
+
+    trace, _, _ = layout
+    line = _event(1).encode()
+    trace.write_bytes(line * ((8 << 20) // len(line)))
+    monkeypatch.setattr(tailer, "MAX_TAIL_BYTES", 1 << 20)
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert 0 < len(got) <= (1 << 20) // len(line)
+    # Also while running: the cap ends the tail rather than polling forever.
+    got = list(tail_events(trace, is_running=lambda: True, poll_interval=0.0, timeout=5))
+    assert 0 < len(got) <= (1 << 20) // len(line)
