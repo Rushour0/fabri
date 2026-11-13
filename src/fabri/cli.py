@@ -2145,6 +2145,11 @@ def cmd_connections_rekey(args: argparse.Namespace) -> None:
         print("no configured key can read: " + ", ".join(counts["unreadable"])
               + "; add the old key to FABRI_SECRET_KEY, or reconnect these", file=sys.stderr)
         failed = True
+    if counts.get("checkpoint_busy"):
+        print("warning: another connection held a read transaction, so the WAL was not fully "
+              "checkpointed and plaintext may remain in it; stop other readers and run it again",
+              file=sys.stderr)
+        failed = True
     if failed:
         sys.exit(1)
 

@@ -139,6 +139,9 @@ def default_refreshers() -> dict[str, Refresher]:
     return refreshers
 
 
+_ABANDONED_LEASE_SECONDS = 600
+
+
 class ConnectionStore:
     """Connections keyed by (provider, handle).
 
@@ -212,6 +215,7 @@ class ConnectionStore:
         entry in ``FABRI_SECRET_KEY``) move to the first key. A connection
         that holds a refresh lease is skipped, since changing its stored
         refresh token would drop the refresh result; run it again later. A
+        lease that expired more than 10 minutes ago is abandoned and rewritten. A
         value no configured key can read is skipped and named in
         ``unreadable`` (``provider:handle``, ``pending_oauth`` or
         ``service_secrets:<name>``); the rest are still rewritten.
@@ -220,7 +224,9 @@ class ConnectionStore:
         plaintext does not stay in free pages or the WAL. Copies of the file
         made before (backups, snapshots) still hold it.
 
-        Returns ``{"rewritten", "skipped", "unreadable"}``. Raises
+        Returns ``{"rewritten", "skipped", "unreadable"}``, plus
+        ``checkpoint_busy: True`` when another connection's read transaction
+        kept the WAL checkpoint from finishing (plaintext may remain in it). Raises
         SecretKeyError when no key is configured.
         """
         cipher = self.cipher
@@ -246,7 +252,8 @@ class ConnectionStore:
                         continue
                     if access == row["access_token"] and refresh == row["refresh_token"]:
                         continue
-                    if row["refresh_lease_until"] is not None:
+                    lease = row["refresh_lease_until"]
+                    if lease is not None and lease > time.time() - _ABANDONED_LEASE_SECONDS:
                         skipped += 1
                         continue
                     connection.execute(
@@ -285,12 +292,21 @@ class ConnectionStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+            # Checkpoint on every rekey, not only when rows were rewritten: an
+            # earlier rekey may have left plaintext in the WAL because a reader
+            # was open, and a rerun has to notice that too.
+            busy = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if rewritten:
-                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 connection.execute("VACUUM")
-                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            last = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            # busy != 0: another connection holds a read transaction, so the
+            # WAL was not fully folded in and old plaintext may remain in it.
+            checkpoint_busy = any(r is not None and r[0] != 0 for r in (busy, last))
         self._secure_sidecars()
-        return {"rewritten": rewritten, "skipped": skipped, "unreadable": unreadable}
+        result = {"rewritten": rewritten, "skipped": skipped, "unreadable": unreadable}
+        if checkpoint_busy:
+            result["checkpoint_busy"] = True
+        return result
 
     # -- file handling -----------------------------------------------------
 

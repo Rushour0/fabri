@@ -59,7 +59,7 @@ from fabri.service.surfaces.linear import LinearAdapter
 from fabri.service.surfaces.registry import SurfaceRegistry
 from fabri.service.surfaces.slack import SlackAdapter
 from fabri.service.sync import FileSyncHook, NoOpSyncHook
-from fabri.service.tailer import extract_cost, run_trace_path, tail_events
+from fabri.service.tailer import MAX_TAIL_BYTES, extract_cost, run_trace_path, tail_events
 
 # Short base dir for per-run ask_user sockets. AF_UNIX paths are capped (~104
 # bytes on macOS), so we deliberately avoid nesting them under a deep run home.
@@ -119,6 +119,8 @@ class PersistedRunUnavailableError(RuntimeError):
 # The usage event is one of the last lines of a trace; reading only the tail
 # keeps /runs/tool-usage cheap however long the runs were.
 TOOL_USAGE_TAIL_BYTES = 256 * 1024
+# result() reads at most this much of a trace, from the end.
+RESULT_TRACE_BYTES = 64 * 1024 * 1024
 
 
 def _open_trace(path: Path):
@@ -1023,9 +1025,19 @@ def _read_trace_at(path: Path) -> list[dict]:
     if f is None:
         return []
     with f:
-        text = f.read().decode("utf-8", errors="replace")
+        size = os.fstat(f.fileno()).st_size
+        cut = size > RESULT_TRACE_BYTES
+        if cut:
+            # The final and usage events sit at the end of a trace, so read
+            # the last part of a big one and drop its cut first line.
+            _LOG.warning("trace %s is %d bytes; reading only the last %d", path, size, RESULT_TRACE_BYTES)
+            f.seek(size - RESULT_TRACE_BYTES)
+        text = f.read(RESULT_TRACE_BYTES).decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if cut:
+        lines = lines[1:]
     out: list[dict] = []
-    for line in text.splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue

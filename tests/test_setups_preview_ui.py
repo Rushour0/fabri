@@ -109,6 +109,14 @@ def test_preview_with_retrieval_follows_retrieve_tools(client):
     assert {t["name"] for t in body["tools"] if t["pinned"]} >= {"find_tools", "describe_tool"}
 
 
+def test_preview_pins_the_required_visible_tools(client):
+    from fabri.core.agent import REQUIRED_VISIBLE_TOOLS
+
+    http, _ = client
+    body = http.get("/setups/preview", params={"type": "support", "task": "refund"}).json()
+    assert set(REQUIRED_VISIBLE_TOOLS) <= set(body["tool_retrieval"]["always_include"])
+
+
 def test_preview_validates_input(client):
     http, _ = client
     assert http.get("/setups/preview", params={"type": "support"}).status_code == 400

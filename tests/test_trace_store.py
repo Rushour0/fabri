@@ -511,7 +511,56 @@ def test_tail_stops_at_the_byte_cap(layout, monkeypatch):
     trace.write_bytes(line * ((8 << 20) // len(line)))
     monkeypatch.setattr(tailer, "MAX_TAIL_BYTES", 1 << 20)
     got = list(tail_events(trace, is_running=lambda: False))
-    assert 0 < len(got) <= (1 << 20) // len(line)
+    assert 0 < len(got) <= (1 << 20) // len(line) + 1  # +1: the cap marker
     # Also while running: the cap ends the tail rather than polling forever.
     got = list(tail_events(trace, is_running=lambda: True, poll_interval=0.0, timeout=5))
-    assert 0 < len(got) <= (1 << 20) // len(line)
+    assert 0 < len(got) <= (1 << 20) // len(line) + 1  # +1: the cap marker
+
+
+def test_nested_type_in_an_oversized_line_is_not_read_as_final(layout):
+    from fabri.service.tailer import MAX_LINE_BYTES
+
+    trace, _, _ = layout
+    line = json.dumps({"data": {"type": "final"}, "type": "tool_result", "pad": "x" * (MAX_LINE_BYTES + 10)})
+    trace.write_text(line + "\n" + _event(2))
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert got[0]["type"] == "dropped" and got[0]["truncated"] is True
+    assert got[1] == {"type": "step", "n": 2}
+
+
+def test_byte_cap_ends_the_stream_with_a_marker(layout, monkeypatch):
+    from fabri.service import tailer
+
+    trace, _, _ = layout
+    line = _event(1).encode()
+    trace.write_bytes(line * ((2 << 20) // len(line)))
+    monkeypatch.setattr(tailer, "MAX_TAIL_BYTES", 1 << 20)
+    got = list(tail_events(trace, is_running=lambda: False))
+    assert got[-1] == {"type": "dropped", "reason": "cap", "truncated": True}
+
+
+def test_read_trace_at_reads_the_end_of_a_big_trace(layout, monkeypatch):
+    """result() reads at most RESULT_TRACE_BYTES, from the end, so the final
+    event at the end of a big trace is still found."""
+    from fabri.service import service as svc
+
+    trace, _, _ = layout
+    monkeypatch.setattr(svc, "RESULT_TRACE_BYTES", 1 << 16)
+    with open(trace, "wb") as f:
+        f.write(_event(1).encode() + b"\n")
+        f.write(b"x" * (200 << 10) + b"\n")  # filler bigger than the cap
+        f.write(b'{"ts": 1.0, "event_id": "e9", "type": "final", "answer": "end"}\n')
+    got = svc._read_trace_at(trace)
+    assert got == [{"ts": 1.0, "event_id": "e9", "type": "final", "answer": "end"}]
+
+
+def test_type_peek_skips_leading_scalar_keys_but_not_nested_objects():
+    from fabri.service.tailer import _TYPE_RE
+
+    real = b'{"ts": 1731490000.123, "event_id": "abc-1", "type": "final", "answer": "' + b"y" * 10
+    assert _TYPE_RE.match(real).group(1) == b"final"
+    nested = b'{"ts": 1.0, "data": {"type": "final"}, "type": "tool_result"'
+    assert _TYPE_RE.match(nested) is None
+    escaped = b'{"note": "say \\"type\\": \\"final\\"", "type": "step"'
+    m = _TYPE_RE.match(escaped)
+    assert m is None or m.group(1) != b"final"

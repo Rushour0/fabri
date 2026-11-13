@@ -1008,7 +1008,7 @@ def serve_http(
         # an explicit FABRI_ALLOW_PLAINTEXT_SECRETS=1). Refusing here, rather
         # than per write, means no plaintext write can happen while armed.
         store = getattr(service, "connection_store", None)
-        cipher = store.cipher if store is not None else load_cipher()
+        cipher = getattr(store, "cipher", None) if store is not None else load_cipher()
         require_encryption(reason)
         refused = plaintext_refusal(cipher)
         if refused:

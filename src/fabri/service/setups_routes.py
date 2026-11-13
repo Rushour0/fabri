@@ -948,7 +948,11 @@ class SetupsApi:
         if tool_top_k is not None:
             retrieval.update(enabled=True, top_k=tool_top_k)
         manifests = registry.list()
-        always_include = set(retrieval.get("always_include") or [])
+        # Same union run_agent passes: the config list plus the tools that stay
+        # visible whatever the config says.
+        from fabri.core.agent import REQUIRED_VISIBLE_TOOLS
+
+        always_include = set(retrieval.get("always_include") or []) | set(REQUIRED_VISIBLE_TOOLS)
         try:
             auto_threshold = tool_retrieval_threshold(retrieval.get("auto_threshold"))
             mode = tool_retrieval_mode(retrieval.get("enabled", "auto"))
