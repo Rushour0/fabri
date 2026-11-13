@@ -20,6 +20,7 @@ Every response maps to fabri's tool result shape:
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import os
@@ -75,9 +76,25 @@ def check_header_specs(specs: Mapping[str, Any] | None) -> None:
             _check_env_ref(header, spec["env"])
         if "secret_ref" in spec and str(spec["secret_ref"]).count(":") != 1:
             raise HeaderSpecError(f"header {header}: secret_ref must look like provider:handle")
-        unknown = set(spec) - {"secret_ref", "env", "value", "prefix"}
+        unknown = set(spec) - {"secret_ref", "env", "value", "prefix", "basic_user"}
         if unknown:
             raise HeaderSpecError(f"header {header}: unknown keys {sorted(unknown)}")
+        basic_user = spec.get("basic_user")
+        if basic_user is not None:
+            if not isinstance(basic_user, Mapping):
+                raise HeaderSpecError(f"header {header}: basic_user must be a mapping")
+            if "secret_ref" in basic_user:
+                raise HeaderSpecError(f"header {header}: basic_user does not allow secret_ref")
+            unknown_user = set(basic_user) - {"env", "value"}
+            if unknown_user:
+                raise HeaderSpecError(f"header {header}: basic_user has unknown keys {sorted(unknown_user)}")
+            user_keys = {"env", "value"} & set(basic_user)
+            if len(user_keys) != 1:
+                raise HeaderSpecError(f"header {header}: basic_user needs exactly one of env or value")
+            if "env" in basic_user and not _ENV_NAME.fullmatch(str(basic_user["env"])):
+                raise HeaderSpecError(
+                    f"header {header}: basic_user env must be an environment variable name"
+                )
 
 
 def secret_ref_provider(specs: Mapping[str, Any] | None) -> str | None:
@@ -123,6 +140,21 @@ def resolve_headers(
             value = str(spec["value"])
         else:
             raise HeaderSpecError(f"header {header}: give secret_ref, env or value")
+        basic_user = spec.get("basic_user")
+        if isinstance(basic_user, Mapping):
+            if "env" in basic_user:
+                user_env = str(basic_user["env"])
+                user = os.environ.get(user_env, "")
+                if not user:
+                    raise HeaderSpecError(
+                        f"header {header}: environment variable {user_env} is not set for basic_user"
+                    )
+            elif "value" in basic_user:
+                user = str(basic_user["value"])
+            else:
+                raise HeaderSpecError(f"header {header}: basic_user needs env or value")
+            encoded = base64.b64encode(f"{user}:{value}".encode()).decode("ascii")
+            value = encoded
         out[header] = prefix + value
     return out
 

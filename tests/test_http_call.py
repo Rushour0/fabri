@@ -16,8 +16,10 @@ from fabri.tools.http_call import (
     MAX_EXTRA_HEADERS,
     HeaderSpecError,
     check_extra_headers,
+    check_header_specs,
     prepare,
     request_hash,
+    resolve_headers,
     send,
     send_prepared,
 )
@@ -194,6 +196,67 @@ def test_check_extra_headers_rules():
 
     with pytest.raises(HeaderSpecError, match="mapping"):
         check_extra_headers([("X-A", "1")])  # type: ignore[arg-type]
+
+
+def test_basic_header_resolves_env_user_and_env_token(monkeypatch):
+    monkeypatch.setenv("JIRA_EMAIL", "agent@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "api-token")
+    spec = {
+        "Authorization": {
+            "env": "JIRA_API_TOKEN",
+            "prefix": "Basic ",
+            "basic_user": {"env": "JIRA_EMAIL"},
+        }
+    }
+
+    assert resolve_headers(spec) == {
+        "Authorization": "Basic YWdlbnRAZXhhbXBsZS5jb206YXBpLXRva2Vu"
+    }
+
+
+def test_basic_header_accepts_literal_user(monkeypatch):
+    monkeypatch.setenv("JIRA_API_TOKEN", "api-token")
+    spec = {
+        "Authorization": {
+            "env": "JIRA_API_TOKEN",
+            "prefix": "Basic ",
+            "basic_user": {"value": "agent@example.com"},
+        }
+    }
+
+    assert resolve_headers(spec) == {
+        "Authorization": "Basic YWdlbnRAZXhhbXBsZS5jb206YXBpLXRva2Vu"
+    }
+
+
+@pytest.mark.parametrize(
+    "basic_user, match",
+    [
+        ({"secret_ref": "jira:email"}, "does not allow secret_ref"),
+        ({"env": "JIRA_EMAIL", "extra": "x"}, "unknown keys"),
+    ],
+    ids=["secret-ref", "unknown-key"],
+)
+def test_basic_header_refuses_bad_user_specs(basic_user, match):
+    with pytest.raises(HeaderSpecError, match=match):
+        check_header_specs({"Authorization": {"value": "token", "basic_user": basic_user}})
+
+
+def test_basic_header_missing_user_env_does_not_leak_token(monkeypatch):
+    token = "api-token-that-must-stay-hidden"
+    monkeypatch.setenv("JIRA_API_TOKEN", token)
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    spec = {
+        "Authorization": {
+            "env": "JIRA_API_TOKEN",
+            "prefix": "Basic ",
+            "basic_user": {"env": "JIRA_EMAIL"},
+        }
+    }
+
+    with pytest.raises(HeaderSpecError, match="Authorization.*JIRA_EMAIL") as caught:
+        resolve_headers(spec)
+    assert token not in str(caught.value)
 
 
 def test_send_prepared_resolves_redacts_and_hints_401():
