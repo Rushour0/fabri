@@ -61,6 +61,9 @@ DEFAULT_CONFIG = {
         "subagent": {
             "max_steps": None,
             "max_cost_usd": None,
+            # Cap on the summary a child returns to its parent, in tokens.
+            # The full text stays in the child trace. 0 turns the cap off.
+            "summary_max_tokens": 2000,
         },
         # B8: bounded auto-repair. After a run finishes, if `enabled` and a
         # failure signal is present, fabri re-enters the agent with the failure

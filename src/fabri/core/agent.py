@@ -1317,6 +1317,35 @@ def _index_parallel_groups(calls: list[ToolCall]) -> dict[str, list[int]]:
     return groups
 
 
+def _one_writer_per_group(
+    groups: dict[str, list[int]], calls: list[ToolCall], tools: ToolRegistry,
+) -> dict[str, list[int]]:
+    """Keep at most one scoped child that can write in each parallel group.
+
+    A spawn whose ``tool_scope`` only allows read tools is a reader. A spawn
+    with a scope that allows any other tool is a writer: the first writer in a
+    group stays, and later writers leave the group, so they run serially
+    before it instead of beside it. Spawns with no ``tool_scope`` keep the
+    old behavior (they fan out as before); they are expected to work in
+    independent sandboxes. See docs/specialists.md."""
+    from fabri.tools.tool_scope import scope_is_read_only
+
+    out: dict[str, list[int]] = {}
+    for group, idxs in groups.items():
+        kept: list[int] = []
+        writer_seen = False
+        for i in idxs:
+            scope = calls[i].args.get("tool_scope")
+            if scope is not None and not scope_is_read_only(scope, getattr(tools, "tools", {})):
+                if writer_seen:
+                    logger.info("parallel_group %s: call %d runs serially (one writer at a time)", group, i)
+                    continue
+                writer_seen = True
+            kept.append(i)
+        out[group] = kept
+    return out
+
+
 def _dispatch_tool_calls(
     calls: list[ToolCall],
     tools: ToolRegistry,
@@ -1358,7 +1387,7 @@ def _dispatch_tool_calls(
     # spawn_subagent calls sharing a `parallel_group` arg fan out via
     # threads; other tool kinds stay serial — only sub-agent spawns are
     # slow enough to justify the thread-pool overhead.
-    parallel_indices = _index_parallel_groups(calls)
+    parallel_indices = _one_writer_per_group(_index_parallel_groups(calls), calls, tools)
     parallel_index_set = {i for idxs in parallel_indices.values() for i in idxs}
 
     def _dispatch_one(call: ToolCall) -> dict:

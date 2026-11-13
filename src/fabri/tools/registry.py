@@ -213,8 +213,16 @@ class ToolRegistry:
                 return self._callables[name](args)
             except Exception as e:
                 return tool_error(f"{name}: handler raised {type(e).__name__}: {e}")
-        extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else None
-        return self.sandbox.run_tool(manifest, args, extra_env=extra_env)
+        extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else {}
+        if name == "spawn_subagent":
+            # The spawn drops any requested tool_scope entry this registry
+            # lacks, so a child can never be scoped to a tool its parent
+            # does not have (see fabri.tools.tool_scope).
+            import json
+
+            from fabri.tools.tool_scope import PARENT_TOOLS_ENV
+            extra_env[PARENT_TOOLS_ENV] = json.dumps(sorted(self.tools))
+        return self.sandbox.run_tool(manifest, args, extra_env=extra_env or None)
 
     def invoke_batch(self, calls: list[dict]) -> dict:
         """Dispatch a list of `{name, args}` calls inside one tool invocation.

@@ -1,6 +1,6 @@
 {
   "name": "spawn_subagent",
-  "description": "Spawn a fabri sub-agent as a fresh subprocess. EXPENSIVE: a sub-agent re-runs the entire agent loop, so it costs far more than doing the work inline. Spawn ONLY when a subtask is genuinely independent of your other work, can run in parallel with it, AND is large enough to overflow your own context. Do NOT spawn for sequential or dependent steps, for work you can do yourself in this loop, or just because the tool exists -- handle those inline. When you do spawn, give a self-contained task and expect a short summary back, not a transcript. Mechanics: optional `model` overrides the sub-agent's configured llm.model for this one call (e.g. pin a cheaper execution-tier model for a domain child); system_prompt_inline / system_prompt_path overrides the sub-agent's configured prompt for this one call; `additional_context` is prepended to the task; `parallel_group` is a tag the parent loop reads to fan out genuinely-parallel spawns concurrently (see F2); `memory_collection_suffix` optionally namespaces the child's qdrant collection as `<parent_collection>_<suffix>` (sanitized lowercase `[a-z0-9_-]`, capped 32 chars), omit to inherit the parent's. Returns the sub-agent's {final_text, outcome, session_id, trace_path, usage} (usage.total_cost_usd rolls the whole subtree's cost up to the parent).",
+  "description": "Spawn a fabri sub-agent as a fresh subprocess. EXPENSIVE: a sub-agent re-runs the entire agent loop, so it costs far more than doing the work inline. Spawn ONLY when a subtask is genuinely independent of your other work, can run in parallel with it, AND is large enough to overflow your own context. Do NOT spawn for sequential or dependent steps, for work you can do yourself in this loop, or just because the tool exists -- handle those inline. When you do spawn, give a self-contained task and expect a short summary back, not a transcript. Mechanics: optional `model` overrides the sub-agent's configured llm.model for this one call (e.g. pin a cheaper execution-tier model for a domain child); system_prompt_inline / system_prompt_path overrides the sub-agent's configured prompt for this one call; `additional_context` is prepended to the task; `parallel_group` is a tag the parent loop reads to fan out genuinely-parallel spawns concurrently (see F2); `memory_collection_suffix` optionally namespaces the child's qdrant collection as `<parent_collection>_<suffix>` (sanitized lowercase `[a-z0-9_-]`, capped 32 chars), omit to inherit the parent's. `tool_scope` narrows the child's tools for this one call: a list of tool names you have, or \"read_only\" for read tools only. It never adds a tool the child's config lacks, and names you don't have are dropped. In one parallel_group at most one scoped child that can write runs at a time. Returns the sub-agent's {final_text, outcome, session_id, trace_path, usage}; final_text is a summary capped near 2,000 tokens (summary_truncated says when it was cut; read trace_path for the rest). usage.total_cost_usd rolls the whole subtree's cost up to the parent.",
   "command": ["python3", "spawn_subagent.py"],
   "input_schema": {
     "type": "object",
@@ -13,7 +13,8 @@
       "additional_context": {"type": "string"},
       "parallel_group": {"type": "string"},
       "memory_collection_suffix": {"type": "string"},
-      "timeout_s": {"type": "integer"}
+      "timeout_s": {"type": "integer"},
+      "tool_scope": {"type": "array", "items": {"type": "string"}, "description": "Tool names (from your own tools) the child may use, or \"read_only\". Narrows only."}
     },
     "required": ["config_path", "task"]
   },
@@ -24,11 +25,13 @@
       "outcome": {"type": "string"},
       "session_id": {"type": "string"},
       "trace_path": {"type": "string"},
+      "summary_truncated": {"type": "boolean"},
       "usage": {
         "type": "object",
         "description": "Child token totals + cost. `total_cost_usd` = own tokens + grandchildren; the parent rolls it into its own COGS."
       }
     }
   },
+  "approval": "write",
   "timeout_s": 600
 }

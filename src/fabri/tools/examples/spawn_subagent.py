@@ -29,6 +29,8 @@ import sys
 from pathlib import Path
 
 from fabri.core.logging_setup import get_logger
+from fabri.tools.subagent_envelope import DEFAULT_SUMMARY_MAX_TOKENS, cap_envelope
+from fabri.tools.tool_scope import filter_to_parent, normalize_scope, parent_tool_names
 
 logger = get_logger()
 
@@ -105,6 +107,20 @@ def build_runner_command(args: dict, runner_script: Path | None = None) -> list[
         cmd += ["--system-prompt-file", str(Path(args["system_prompt_path"]).resolve())]
     if args.get("model"):
         cmd += ["--model", str(args["model"])]
+    scope = normalize_scope(args.get("tool_scope"))
+    if scope is not None:
+        # Only names the parent itself has survive (presets are expanded by
+        # the child against its own registry). The child then intersects the
+        # scope with its config's tools, so the scope can only narrow.
+        kept, dropped = filter_to_parent(scope, parent_tool_names())
+        if dropped:
+            logger.info("spawn_subagent: dropped tool_scope entries the parent lacks: %s", dropped)
+        if not kept:
+            raise ValueError(
+                "spawn_subagent: tool_scope names no tool the parent has; "
+                f"dropped {dropped}. Pass tool names you can see, or 'read_only'."
+            )
+        cmd += ["--tool-scope", json.dumps(kept)]
     # NOTE: qdrant reachability across the spawn boundary is handled by the
     # `QDRANT_URL` env override in fabri.config.load_config (the child inherits
     # the env), not by forwarding a flag here -- the tool only sees the on-disk
@@ -209,13 +225,21 @@ def main() -> int:
         }))
         return 1
     try:
-        json.loads(stdout)
+        envelope = json.loads(stdout)
     except json.JSONDecodeError as e:
         print(json.dumps({
             "error": f"sub-agent stdout was not JSON: {e}",
             "raw": stdout[:500],
         }))
         return 1
+    # The runner already capped the summary with the child config's budget.
+    # Cap again at the default here only when the runner did not (an older
+    # or custom runner), so the parent's context stays bounded either way.
+    # An envelope under the cap passes through verbatim.
+    if isinstance(envelope, dict) and "summary_truncated" not in envelope and "final_text" in envelope:
+        capped = cap_envelope(envelope, DEFAULT_SUMMARY_MAX_TOKENS)
+        if capped["summary_truncated"]:
+            stdout = json.dumps(capped)
     sys.stdout.write(stdout + "\n")
     return proc.returncode
 
