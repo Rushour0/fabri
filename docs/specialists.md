@@ -23,19 +23,36 @@ and with tool retrieval.
 `spawn_subagent` takes an optional `tool_scope`: a list of tool names, or the
 preset `read_only`.
 
-- The parent's registry passes its own tool names to the spawn. Any name the
-  parent does not have is dropped. If nothing is left, the spawn is refused.
+- The value must be a list of non-empty strings (a single string also works).
+  A dict, number, boolean, null or a list holding anything else is refused, so
+  a malformed scope never turns into an unscoped child.
+- The parent's registry passes its own tool names to the spawn in
+  `FABRI_PARENT_TOOLS`. It does this for any tool that runs
+  `spawn_subagent.py`, whatever the tool is called. Any name the parent does
+  not have is dropped. If nothing is left, the spawn is refused. If a scope is
+  given and that list is missing or unreadable, the spawn is refused too.
 - The child builds its tools from its own config as usual, then removes every
   tool the scope does not allow. A name in the scope that the child's config
   lacks is reported under `tool_scope.unmatched` and ignored.
+- The child then writes the names it kept to `FABRI_TOOL_CEILING`. Every agent
+  it starts, spawned or a static `tools.agents[]` child, inherits that and
+  drops every tool not named in it, then passes its own (possibly smaller)
+  list down. A grandchild can never see more tools than its scoped ancestor,
+  even if it is spawned without a scope.
 - `read_only` keeps tools whose manifest says `approval: read`, plus the
-  bundled read tools (`read_file`, `grep`, `list_dir`, `file_stats`,
-  `regex_lines`, `fetch_url`, `web_search`, `echo_tool`, `sum_tool`,
-  `find_tools`) when their manifest has no approval class.
+  bundled local read tools (`read_file`, `grep`, `list_dir`, `file_stats`,
+  `regex_lines`, `echo_tool`, `sum_tool`) when their manifest has no approval
+  class and runs fabri's own bundled script. A config tool that reuses one of
+  those names with a different command does not count. `fetch_url` and
+  `web_search` are not in the preset because they can send data out.
 
 The scope can only remove tools. It is applied in
 `fabri/tools/agent_runner_tool.py` right after `build_tools`, and the code is
 in `fabri/tools/tool_scope.py`.
+
+The `decompose` meta tool is not in the registry, so a scope does not remove
+it. A scoped child can still split its task with `decompose` when its config
+enables it.
 
 The model can ask for a scope, but code decides what it gets: the request is
 cut down to the parent's tools and then to the child's config. The factory
@@ -59,30 +76,50 @@ approval through the ask-user socket as described above.
 ### One writer at a time
 
 Parallel children should either only read or touch nothing the others touch.
-The loop enforces part of this. In one `parallel_group`, a spawn whose scope
-allows any tool that is not read-class counts as a writer. The first writer
-runs alongside the readers; any later writer in that group leaves it and runs
-serially before the group starts.
+The loop enforces this. In one `parallel_group`, a spawn is a reader only when
+its `tool_scope` can give it nothing but read tools, judged against the
+parent's registry: `read_only`, or names the parent knows as read-class. Every
+other spawn is a writer, including one with no scope, a malformed scope, or a
+scope naming a tool the parent does not know, a tool that writes, a network
+tool or `spawn_subagent`. The first writer runs alongside the readers; any
+later writer in that group leaves it and runs serially before the group
+starts.
 
-Spawns with no `tool_scope` keep the old behavior and still fan out together,
-because existing agencies rely on that and give each child its own sandbox. If
-you fan out unscoped children that can write, make sure their sandboxes do not
-overlap.
+This changes old behavior: unscoped spawns that share a `parallel_group` used
+to all run at once, and now only the first does. To fan out readers in
+parallel, give each one `tool_scope: ["read_only"]` (or a list of read tools).
 
 ## Summary envelope
 
-Each child returns:
+Through `spawn_subagent`, each child returns:
 
-- `final_text`: its summary, capped at `agent.subagent.summary_max_tokens`
-  tokens (default 2000; 0 turns the cap off).
+- `final_text`: a prose summary capped at the parent's
+  `tools.spawn_summary_max_tokens` (default 2000; 0 turns the cap off). The
+  parent's registry passes that budget to the spawn, and the spawn applies it
+  on the parent's side, so the child's own config cannot change it. A bad
+  value fails when tools are built, before anything is spawned.
 - `outcome`, `usage`, `session_id` and `trace_path`, always.
-- `summary_truncated`: true when the summary or the structured output was cut.
-  When it is, `final_text_tokens` or `structured_output_dropped_tokens` gives
-  the original size. The full text is in the child's trace.
+- `summary_truncated`, always. When it is true, `final_text_tokens` gives the
+  original size, or `memory_actions_applied_dropped` says side data was
+  removed. The full text is in the child's trace.
 
-The cap cuts only the summary field, so the envelope stays valid JSON. Code is
-in `fabri/tools/subagent_envelope.py`. `spawn_subagent` applies the default cap
-again if a runner sent an envelope that was never capped.
+What is never cut:
+
+- `structured_output` is kept whole.
+- A `final_text` that parses as JSON is kept whole.
+- If the envelope is still over 900 KiB after the prose cut, the spawn fails
+  with an error that names `session_id` and `trace_path`, instead of cutting
+  structured data.
+
+`usage` and `memory_actions_applied` are reduced when either is over 8 KiB:
+`usage` keeps its token and cost fields, and the actions list is replaced by a
+count.
+
+Static `tools.agents[]` children are not capped. They return their full
+envelope as before.
+
+Code is in `fabri/tools/subagent_envelope.py` and
+`fabri/tools/examples/spawn_subagent.py`.
 
 The runner's 1 MiB stdout limit is still there as a last resort for any tool.
 When it fires, the tool result now says the output was too large and includes
@@ -118,15 +155,29 @@ profile with a name, a system prompt and a tool list.
   role, what the specialist owns, the tools it needs and a note per tool.
 - Code drops any tool name the parent lacks, sorts the list and renders the
   system prompt from the prompt-kit skeleton.
-- The profile is cached under a hash of the task kind, the parent's tool names
-  and a factory version. Pass `task_kind` (for example `"triage failing
-  test"`) to let many tasks share one profile. Pass a `ProfileCache(dir)` to
-  keep profiles on disk; `default_cache_dir()` is `.fabri/specialists` under
-  `FABRI_HOME`. On a hit the designer does not run.
+- Designer text is flattened to one line, stripped of `#`, backticks and
+  angle brackets, and capped (role 60 characters, at most 3 ownership lines
+  and one note per tool, 120 characters each). That stops it from adding
+  sections to the prompt. It does not make the words safe: a task that carries
+  an injection can still steer the role text, so treat the factory's output
+  like any other model output.
+- The profile is cached under a hash of the task kind, the parent's tool
+  names, the designer `model`, a hash of the child config file
+  (`config_path`), the `policy` in force and a factory version. Pass
+  `task_kind` (for example `"triage failing test"`) to let many tasks share
+  one profile. Pass a `ProfileCache(dir)` to keep profiles on disk;
+  `default_cache_dir()` is `.fabri/specialists` under `FABRI_HOME`. On a hit
+  the designer does not run.
+- A cached profile is checked on load. Its key must be 16 hex characters and
+  match its file name, its prompt must equal what code renders from its stored
+  fields and match the stored hash, and its tools are intersected with the
+  current parent's tools. A file that fails is ignored.
 
 `spawn_args(profile, task, config_path)` builds the `spawn_subagent` call: the
 profile's prompt goes in `system_prompt_inline`, the task brief goes in `task`,
-and the profile's tools go in `tool_scope`.
+and the profile's tools go in `tool_scope`. Extra keyword arguments (for example
+`parallel_group` or `timeout_s`) are passed through, but they cannot replace
+`tool_scope` or the system prompt.
 
 The system prompt depends only on the profile, so it is byte-identical across
 spawns of the same profile. The task-specific text goes in the user message.
