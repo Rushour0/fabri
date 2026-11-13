@@ -1,64 +1,154 @@
-"""The output contract a sub-agent hands back to its parent.
+"""The output contract a spawned sub-agent hands back to its parent.
 
-A child's whole transcript stays in its own trace. The parent gets a short
-envelope: a summary capped at a token budget, the outcome, and the
-``session_id`` + ``trace_path`` it needs to read the rest. The cap is applied
-to the summary field only, so the envelope is always valid JSON. The byte cap
-in ``fabri.tools.runner`` is a last-resort ceiling for any tool and cuts raw
-stdout, which breaks JSON; this cap runs first and keeps the envelope whole.
+A child's whole transcript stays in its own trace. Through ``spawn_subagent``
+the parent gets a short envelope: a summary capped at a token budget, the
+outcome, and the ``session_id`` + ``trace_path`` it needs to read the rest.
+
+The budget comes from the parent's config (``tools.spawn_summary_max_tokens``)
+and is applied on the parent's side, in ``spawn_subagent.py``. Static
+``tools.agents[]`` children are not capped.
+
+Rules:
+
+- Only a prose ``final_text`` is cut. A ``final_text`` that parses as JSON is
+  kept whole, and ``structured_output`` is never dropped: a parent that asked
+  for typed output gets all of it or a loud error.
+- ``usage`` and ``memory_actions_applied`` are bounded too, since they ride in
+  the same tool result.
+- If the envelope is still larger than :data:`HARD_MAX_BYTES` after that, it
+  raises :class:`EnvelopeTooLarge` instead of cutting anything structured.
+- ``summary_truncated`` is always set, so a reader can tell "not cut" from
+  "never checked".
 """
 from __future__ import annotations
 
 import json
 
 DEFAULT_SUMMARY_MAX_TOKENS = 2000
+# Under the runner's 1 MiB stdout cap with room for the error wrapper.
+HARD_MAX_BYTES = 900 * 1024
+# usage / memory_actions_applied above this size (JSON bytes) are reduced.
+SIDE_FIELD_MAX_BYTES = 8 * 1024
 TRUNCATION_NOTE = "\n\n[summary truncated; full text is in the child trace at trace_path]"
+_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+               "cost_usd", "total_cost_usd", "model")
 
 
-def _count_tokens(text: str) -> int:
+class EnvelopeTooLarge(ValueError):
+    """The envelope cannot fit the hard cap without cutting structured data."""
+
+
+class SummaryCapError(ValueError):
+    """A summary budget that is not a non-negative integer."""
+
+
+def check_summary_cap(value: object) -> int:
+    """Validate a summary budget. Accepts a non-negative int (bools refused)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SummaryCapError(f"summary cap must be a non-negative integer, got {value!r}")
+    return value
+
+
+def _encoding():
     try:
-        from fabri.memory.compress import count_tokens
+        import tiktoken
 
-        return count_tokens(text)
-    except Exception:  # noqa: BLE001 -- tokenizer missing: fall back to ~4 chars/token
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001 -- no tokenizer: fall back to ~4 chars/token
+        return None
+
+
+def count_tokens(text: str) -> int:
+    """Token count of ``text`` (cl100k), ~4 chars/token without tiktoken.
+    Special-token strings are counted as plain text, never raised on."""
+    enc = _encoding()
+    if enc is None:
+        return (len(text) + 3) // 4
+    try:
+        return len(enc.encode(text, disallowed_special=()))
+    except Exception:  # noqa: BLE001 -- e.g. lone surrogates
         return (len(text) + 3) // 4
 
 
-def _cap_tokens(text: str, max_tokens: int) -> str:
+def _cap_text(text: str, max_tokens: int) -> tuple[str, int] | None:
+    """(cut text, original token estimate) when ``text`` is over budget, else
+    None. Very long input is sliced by characters first so the tokenizer
+    never sees megabytes."""
+    if len(text) <= max_tokens:  # every token is at least one character
+        return None
+    window = text[: max_tokens * 8]
+    enc = _encoding()
     try:
-        from fabri.memory.compress import enforce_token_cap
-
-        return enforce_token_cap(text, max_tokens)
+        tokens = enc.encode(window, disallowed_special=()) if enc else None
     except Exception:  # noqa: BLE001
-        return text[: max_tokens * 4]
+        tokens = None
+    if tokens is None:
+        if len(text) <= max_tokens * 4:
+            return None
+        return text[: max_tokens * 4], (len(text) + 3) // 4
+    if len(window) == len(text) and len(tokens) <= max_tokens:
+        return None
+    original = len(tokens) if len(window) == len(text) else max(len(tokens), (len(text) + 3) // 4)
+    cut = enc.decode(tokens[:max_tokens])
+    if " " in cut.rstrip():
+        cut = cut.rstrip().rsplit(" ", 1)[0]
+    return cut, original
 
 
-def cap_envelope(envelope: dict, max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS) -> dict:
-    """Return a copy of ``envelope`` whose ``final_text`` fits ``max_tokens``
-    and whose ``structured_output`` is dropped when it alone exceeds the
-    budget. Adds ``summary_truncated`` and, when cut, ``final_text_tokens``
-    (the original size). Every other key passes through unchanged.
-    ``max_tokens <= 0`` disables the cap."""
+def _is_json(text: str) -> bool:
+    s = text.strip()
+    if not s or s[0] not in "{[":
+        return False
+    try:
+        json.loads(s)
+    except (ValueError, RecursionError):
+        return False
+    return True
+
+
+def _size(value: object) -> int:
+    try:
+        return len(json.dumps(value).encode("utf-8", "replace"))
+    except (TypeError, ValueError):
+        return SIDE_FIELD_MAX_BYTES + 1
+
+
+def _bound_side_fields(out: dict) -> bool:
+    cut = False
+    usage = out.get("usage")
+    if usage is not None and _size(usage) > SIDE_FIELD_MAX_BYTES:
+        out["usage"] = ({k: usage[k] for k in _USAGE_KEYS if k in usage and _size(usage[k]) < 256}
+                        if isinstance(usage, dict) else None)
+        cut = True
+    actions = out.get("memory_actions_applied")
+    if actions is not None and _size(actions) > SIDE_FIELD_MAX_BYTES:
+        out["memory_actions_applied"] = []
+        out["memory_actions_applied_dropped"] = len(actions) if isinstance(actions, list) else 1
+        cut = True
+    return cut
+
+
+def cap_envelope(envelope: dict, max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
+                 *, hard_max_bytes: int = HARD_MAX_BYTES) -> dict:
+    """A copy of ``envelope`` with a prose ``final_text`` cut to ``max_tokens``
+    (0 means no cut) and side fields bounded. Always sets
+    ``summary_truncated``. Raises :class:`EnvelopeTooLarge` when what is left
+    is over ``hard_max_bytes``."""
+    max_tokens = check_summary_cap(max_tokens)
     out = dict(envelope)
-    if max_tokens <= 0:
-        return out
-    text = out.get("final_text")
     truncated = False
-    if isinstance(text, str):
-        n = _count_tokens(text)
-        if n > max_tokens:
-            out["final_text"] = _cap_tokens(text, max_tokens) + TRUNCATION_NOTE
-            out["final_text_tokens"] = n
+    text = out.get("final_text")
+    if max_tokens and isinstance(text, str) and not _is_json(text):
+        capped = _cap_text(text, max_tokens)
+        if capped is not None:
+            out["final_text"] = capped[0] + TRUNCATION_NOTE
+            out["final_text_tokens"] = capped[1]
             truncated = True
-    structured = out.get("structured_output")
-    if structured is not None:
-        try:
-            size = _count_tokens(json.dumps(structured))
-        except (TypeError, ValueError):
-            size = max_tokens + 1
-        if size > max_tokens:
-            out["structured_output"] = None
-            out["structured_output_dropped_tokens"] = size
-            truncated = True
+    truncated = _bound_side_fields(out) or truncated
     out["summary_truncated"] = truncated
+    size = _size(out)
+    if size > hard_max_bytes:
+        raise EnvelopeTooLarge(
+            f"sub-agent result is {size} bytes after capping the summary (limit {hard_max_bytes}); "
+            "its structured or JSON output is too large to return whole")
     return out

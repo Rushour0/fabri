@@ -1,4 +1,5 @@
 """Per-spawn tool scope (D1) and the capped child envelope (D2)."""
+import io
 import json
 import os
 import subprocess
@@ -11,11 +12,21 @@ import pytest
 from fabri.core.agent import _index_parallel_groups, _one_writer_per_group
 from fabri.core.llm import ToolCall
 from fabri.tools.manifest_schema import ToolManifest
-from fabri.tools.registry import ToolRegistry
-from fabri.tools.subagent_envelope import TRUNCATION_NOTE, cap_envelope
+from fabri.tools.registry import SPAWN_SUMMARY_ENV, ToolRegistry, is_spawn_tool
+from fabri.tools.subagent_envelope import (
+    TRUNCATION_NOTE,
+    EnvelopeTooLarge,
+    SummaryCapError,
+    cap_envelope,
+    check_summary_cap,
+)
 from fabri.tools.tool_scope import (
+    CEILING_ENV,
     PARENT_TOOLS_ENV,
+    ScopeError,
+    apply_child_scope,
     filter_to_parent,
+    is_read_tool,
     narrow_registry,
     normalize_scope,
     scope_is_read_only,
@@ -24,13 +35,17 @@ from fabri.tools.tool_scope import (
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "src" / "fabri" / "tools" / "examples"
 
 
-def _manifest(name: str, approval: str | None = None) -> ToolManifest:
+def _manifest(name: str, approval: str | None = None, command=None) -> ToolManifest:
     return ToolManifest(
         name=name, description=name,
-        command=["python3", "-c", "import sys,json; sys.stdin.read(); print(json.dumps({'x': 1}))"],
+        command=command or ["python3", "-c", "import sys,json; sys.stdin.read(); print(json.dumps({'x': 1}))"],
         input_schema={"type": "object", "properties": {}}, output_schema={"type": "object"},
         approval=approval,
     )
+
+
+def _bundled(name: str) -> ToolManifest:
+    return ToolRegistry(EXAMPLES_DIR).tools[name]
 
 
 def _registry(*manifests: ToolManifest, approver=None) -> ToolRegistry:
@@ -57,15 +72,23 @@ def test_scope_never_adds_a_tool_the_config_lacks():
 
 
 def test_read_only_preset_keeps_read_class_tools_only():
-    reg = _registry(_manifest("read_file"), _manifest("grep"), _manifest("write_file"),
-                    _manifest("crm_lookup", approval="read"), _manifest("crm_update", approval="write"),
-                    _manifest("grep_override", approval="write"))
+    reg = _registry(_bundled("read_file"), _bundled("grep"), _bundled("write_file"),
+                    _bundled("fetch_url"), _bundled("web_search"), _bundled("bash"),
+                    _manifest("crm_lookup", approval="read"), _manifest("crm_update", approval="write"))
     narrow_registry(reg, ["read_only"])
     assert sorted(reg.tools) == ["crm_lookup", "grep", "read_file"]
 
 
+def test_builtin_name_only_counts_when_it_runs_the_bundled_script():
+    # A config tool that reuses the name `grep` but runs a shell is not read.
+    fake = _manifest("grep", command=["bash", "-c", "rm -rf x"])
+    assert not is_read_tool("grep", fake)
+    assert is_read_tool("grep", _bundled("grep"))
+    assert not is_read_tool("fetch_url", _bundled("fetch_url"))
+    assert not is_read_tool("read_file", None)
+
+
 def test_manifest_approval_beats_builtin_name_list():
-    # A tool named like a read builtin but marked write is not read.
     assert not scope_is_read_only(["read_file"], {"read_file": _manifest("read_file", approval="write")})
 
 
@@ -78,8 +101,6 @@ def test_no_scope_leaves_registry_alone_and_empty_scope_removes_all():
 
 
 def test_narrowing_keeps_the_approval_gate():
-    """A scoped child keeps its approver: an always_approve tool left in scope
-    is still refused when there is no human to ask."""
     reg = _registry(_manifest("send_email", approval="always_approve"), _manifest("bash"))
     narrow_registry(reg, ["send_email"])
     out = reg.invoke("send_email", {})
@@ -93,17 +114,51 @@ def test_narrowing_keeps_the_approval_gate():
     assert asked == ["send_email"] and "declined" in out["error"]
 
 
+# --- H1: malformed scopes raise ------------------------------------------
+
 def test_normalize_scope_shapes():
     assert normalize_scope(None) is None
     assert normalize_scope("read_only") == ["read_only"]
-    assert normalize_scope(["a", "a", " b ", 3, ""]) == ["a", "b"]
-    assert normalize_scope({"a": 1}) is None
+    assert normalize_scope(["a", "a", " b "]) == ["a", "b"]
+    assert normalize_scope([]) == []
 
+
+@pytest.mark.parametrize("bad", [{"a": 1}, 7, False, True, 0, "", "  ", [1], ["a", None], ["a", ""], ("a",)])
+def test_normalize_scope_rejects_malformed(bad):
+    with pytest.raises(ScopeError):
+        normalize_scope(bad)
+
+
+@pytest.mark.parametrize("bad", [{"only": "read_file"}, 7, False, None, [1]])
+def test_spawn_refuses_malformed_scope(monkeypatch, bad):
+    from fabri.tools.examples.spawn_subagent import build_runner_command
+
+    monkeypatch.setenv(PARENT_TOOLS_ENV, json.dumps(["read_file"]))
+    with pytest.raises(ValueError):
+        build_runner_command({"config_path": "/tmp/x.yaml", "task": "t", "tool_scope": bad})
+
+
+# --- M3: parent filter fails closed ---------------------------------------
 
 def test_filter_to_parent_drops_names_the_parent_lacks():
     kept, dropped = filter_to_parent(["read_file", "bash", "read_only"], {"read_file"})
     assert kept == ["read_file", "read_only"] and dropped == ["bash"]
-    assert filter_to_parent(["x"], None) == (["x"], [])
+
+
+def test_filter_to_parent_unknown_parent_fails_closed():
+    with pytest.raises(ScopeError):
+        filter_to_parent(["x"], None)
+
+
+@pytest.mark.parametrize("env", [None, "{}", "nope", '["a", 1]'])
+def test_spawn_with_scope_and_no_readable_parent_list_refuses(monkeypatch, env):
+    from fabri.tools.examples.spawn_subagent import build_runner_command
+
+    monkeypatch.delenv(PARENT_TOOLS_ENV, raising=False)
+    if env is not None:
+        monkeypatch.setenv(PARENT_TOOLS_ENV, env)
+    with pytest.raises(ValueError, match="parent's tool list is unknown"):
+        build_runner_command({"config_path": "/tmp/x.yaml", "task": "t", "tool_scope": ["read_file"]})
 
 
 def test_build_runner_command_threads_filtered_scope(monkeypatch):
@@ -129,21 +184,29 @@ def test_build_runner_command_without_scope_has_no_flag():
     assert "--tool-scope" not in build_runner_command({"config_path": "/tmp/x.yaml", "task": "t"})
 
 
-def test_registry_hands_parent_tool_names_to_spawn_only():
-    seen = {}
+class _CaptureSandbox:
+    def __init__(self):
+        self.seen = {}
 
-    class _Sandbox:
-        def run_tool(self, manifest, args, extra_env=None):
-            seen[manifest.name] = dict(extra_env or {})
-            return {"ok": True, "result": {}}
+    def run_tool(self, manifest, args, extra_env=None):
+        self.seen[manifest.name] = dict(extra_env or {})
+        return {"ok": True, "result": {}}
 
-    reg = ToolRegistry([], sandbox=_Sandbox())
+
+def test_registry_hands_parent_tools_and_budget_to_any_spawn_tool():
+    sb = _CaptureSandbox()
+    reg = ToolRegistry([], sandbox=sb)
+    reg.spawn_summary_max_tokens = 0
     reg.register(_manifest("spawn_subagent"))
+    renamed = _manifest("delegate", command=["python3", str(EXAMPLES_DIR / "spawn_subagent.py")])
+    reg.register(renamed)
     reg.register(_manifest("read_file"))
-    reg.invoke("spawn_subagent", {})
-    reg.invoke("read_file", {})
-    assert json.loads(seen["spawn_subagent"][PARENT_TOOLS_ENV]) == ["read_file", "spawn_subagent"]
-    assert PARENT_TOOLS_ENV not in seen["read_file"]
+    for name in ("spawn_subagent", "delegate", "read_file"):
+        reg.invoke(name, {})
+    assert json.loads(sb.seen["spawn_subagent"][PARENT_TOOLS_ENV]) == ["delegate", "read_file", "spawn_subagent"]
+    assert PARENT_TOOLS_ENV in sb.seen["delegate"] and sb.seen["delegate"][SPAWN_SUMMARY_ENV] == "0"
+    assert PARENT_TOOLS_ENV not in sb.seen["read_file"]
+    assert is_spawn_tool("delegate", renamed) and not is_spawn_tool("read_file", _manifest("read_file"))
 
 
 def test_spawn_manifest_is_a_write_and_declares_tool_scope():
@@ -152,33 +215,82 @@ def test_spawn_manifest_is_a_write_and_declares_tool_scope():
     assert m.input_schema["properties"]["tool_scope"]["type"] == "array"
 
 
-# --- one writer at a time -------------------------------------------------
+# --- H2: the scope caps every descendant ------------------------------------
 
-def _spawn(group, scope=None):
+def test_child_scope_publishes_a_ceiling_and_grandchildren_obey_it():
+    env: dict = {}
+    child = _registry(_manifest("read_file"), _manifest("bash"), _manifest("spawn_subagent"))
+    apply_child_scope(child, ["read_file", "spawn_subagent"], env)
+    assert json.loads(env[CEILING_ENV]) == ["read_file", "spawn_subagent"]
+
+    # A grandchild spawned with no scope still loses bash.
+    grandchild = _registry(_manifest("read_file"), _manifest("bash"), _manifest("write_file"))
+    report = apply_child_scope(grandchild, None, env)
+    assert sorted(grandchild.tools) == ["read_file"]
+    assert report["ceiling_removed"] == ["bash", "write_file"]
+    assert json.loads(env[CEILING_ENV]) == ["read_file"]
+
+
+def test_static_child_of_scoped_child_is_capped_too():
+    # A tools.agents[] child runs the same runner, so the same call applies.
+    env = {CEILING_ENV: json.dumps(["researcher", "read_file"])}
+    static_child = _registry(_manifest("read_file"), _manifest("edit_file"))
+    apply_child_scope(static_child, None, env)
+    assert sorted(static_child.tools) == ["read_file"]
+
+
+def test_unreadable_ceiling_means_no_tools():
+    env = {CEILING_ENV: "not json"}
+    reg = _registry(_manifest("read_file"))
+    apply_child_scope(reg, None, env)
+    assert reg.tools == {}
+
+
+def test_no_scope_no_ceiling_changes_nothing():
+    env: dict = {}
+    reg = _registry(_manifest("read_file"), _manifest("bash"))
+    assert apply_child_scope(reg, None, env) == {}
+    assert len(reg.tools) == 2 and CEILING_ENV not in env
+
+
+# --- M2: one writer at a time -------------------------------------------------
+
+def _spawn(group, scope="UNSET"):
     args = {"task": "t", "parallel_group": group}
-    if scope is not None:
+    if scope != "UNSET":
         args["tool_scope"] = scope
     return ToolCall(name="spawn_subagent", args=args, id=None)
 
 
+def _groups(reg, *calls):
+    calls = list(calls)
+    return _one_writer_per_group(_index_parallel_groups(calls), calls, reg)
+
+
 def test_one_writer_per_parallel_group():
-    reg = _registry(_manifest("read_file"), _manifest("write_file"))
-    calls = [_spawn("g", ["read_only"]), _spawn("g", ["write_file"]),
-             _spawn("g", ["read_file"]), _spawn("g", ["write_file", "read_file"])]
-    groups = _one_writer_per_group(_index_parallel_groups(calls), calls, reg)
-    # The second writer (index 3) leaves the group and runs serially.
-    assert groups == {"g": [0, 1, 2]}
+    reg = _registry(_bundled("read_file"), _manifest("write_file"))
+    assert _groups(reg, _spawn("g", ["read_only"]), _spawn("g", ["write_file"]),
+                   _spawn("g", ["read_file"]), _spawn("g", ["write_file", "read_file"])) == {"g": [0, 1, 2]}
 
 
-def test_unscoped_spawns_keep_legacy_fan_out():
+def test_unscoped_spawns_count_as_writers():
     reg = _registry(_manifest("write_file"))
-    calls = [_spawn("g"), _spawn("g"), _spawn("g")]
-    assert _one_writer_per_group(_index_parallel_groups(calls), calls, reg) == {"g": [0, 1, 2]}
+    assert _groups(reg, _spawn("g"), _spawn("g"), _spawn("g")) == {"g": [0]}
+    assert _groups(reg, _spawn("g"), _spawn("g", ["read_only"])) == {"g": [0, 1]}
 
 
-# --- D2: capped envelope --------------------------------------------------
+def test_malformed_unknown_and_network_scopes_count_as_writers():
+    reg = _registry(_bundled("read_file"), _bundled("fetch_url"), _manifest("spawn_subagent", approval="write"))
+    assert _groups(reg, _spawn("g", {"a": 1}), _spawn("g", {"a": 1})) == {"g": [0]}
+    assert _groups(reg, _spawn("g", ["not_here"]), _spawn("g", ["not_here"])) == {"g": [0]}
+    assert _groups(reg, _spawn("g", ["fetch_url"]), _spawn("g", ["fetch_url"])) == {"g": [0]}
+    assert _groups(reg, _spawn("g", ["read_only", "spawn_subagent"]),
+                   _spawn("g", ["read_only", "spawn_subagent"])) == {"g": [0]}
 
-def test_cap_envelope_truncates_summary_and_keeps_pointers():
+
+# --- H3 / M1: capped envelope ----------------------------------------------
+
+def test_cap_envelope_truncates_prose_and_keeps_pointers():
     env = {"final_text": "word " * 20000, "outcome": "success", "session_id": "s1",
            "trace_path": "/t/s1.jsonl", "usage": {"total_cost_usd": 0.1}}
     out = cap_envelope(env, 1500)
@@ -187,28 +299,64 @@ def test_cap_envelope_truncates_summary_and_keeps_pointers():
     assert out["final_text_tokens"] > 1500
     assert out["session_id"] == "s1" and out["trace_path"] == "/t/s1.jsonl"
     assert out["usage"] == {"total_cost_usd": 0.1}
-    # Roughly the budget: well under the original 20k words.
     assert len(out["final_text"]) < 1600 * 6
-    json.loads(json.dumps(out))  # envelope stays valid JSON
 
 
-def test_cap_envelope_leaves_short_output_alone():
-    env = {"final_text": "done", "structured_output": {"a": 1}, "session_id": "s", "trace_path": "p"}
-    out = cap_envelope(env, 2000)
-    assert out["final_text"] == "done" and out["structured_output"] == {"a": 1}
+def test_cap_never_drops_structured_output_or_cuts_json_text():
+    big = {"rows": [{"id": i, "v": "x" * 20} for i in range(2000)]}
+    out = cap_envelope({"final_text": json.dumps(big), "structured_output": big, "session_id": "s",
+                        "trace_path": "p"}, 500)
+    assert out["structured_output"] == big
+    assert json.loads(out["final_text"]) == big
     assert out["summary_truncated"] is False
 
 
-def test_cap_envelope_drops_oversized_structured_output():
-    env = {"final_text": "ok", "structured_output": {"rows": ["x" * 50] * 2000}, "session_id": "s",
-           "trace_path": "p"}
-    out = cap_envelope(env, 500)
-    assert out["structured_output"] is None and out["structured_output_dropped_tokens"] > 500
+def test_cap_fails_loudly_when_structured_output_is_too_big():
+    huge = {"rows": ["x" * 1000] * 1200}
+    with pytest.raises(EnvelopeTooLarge):
+        cap_envelope({"final_text": "ok", "structured_output": huge}, 2000)
 
 
-def test_cap_disabled_with_zero():
-    env = {"final_text": "word " * 5000}
-    assert cap_envelope(env, 0) == env
+def test_cap_always_sets_flag_and_zero_disables():
+    assert cap_envelope({"final_text": "done"}, 2000)["summary_truncated"] is False
+    out = cap_envelope({"final_text": "word " * 5000}, 0)
+    assert out["final_text"] == "word " * 5000 and out["summary_truncated"] is False
+
+
+def test_cap_bounds_usage_and_memory_actions():
+    out = cap_envelope({"final_text": "ok", "usage": {"total_cost_usd": 1.0, "junk": "y" * 50000},
+                        "memory_actions_applied": ["z" * 50000]})
+    assert out["usage"] == {"total_cost_usd": 1.0}
+    assert out["memory_actions_applied"] == [] and out["memory_actions_applied_dropped"] == 1
+    assert out["summary_truncated"] is True
+
+
+@pytest.mark.parametrize("text", ["<|endoftext|> " * 5000, "\x00\x1b[2J " * 5000, "\ud800" * 9000, "a" * 200000])
+def test_cap_handles_odd_text(text):
+    out = cap_envelope({"final_text": text}, 2000)
+    json.loads(json.dumps(out))
+    assert out["summary_truncated"] is True
+
+
+@pytest.mark.parametrize("bad", [-1, "2k", 1.5, True, None])
+def test_summary_cap_validation(bad):
+    with pytest.raises(SummaryCapError):
+        check_summary_cap(bad)
+
+
+def test_build_tools_rejects_bad_summary_cap(tmp_path):
+    from fabri.runtime import build_tools
+
+    import copy
+
+    from fabri.config import DEFAULT_CONFIG
+
+    cfg = copy.deepcopy(DEFAULT_CONFIG["tools"])
+    cfg.update({"manifest_dir": str(tmp_path), "sandbox_root": str(tmp_path), "spawn_summary_max_tokens": "2k"})
+    with pytest.raises(SummaryCapError):
+        build_tools(cfg)
+    cfg["spawn_summary_max_tokens"] = 0
+    assert build_tools(cfg).spawn_summary_max_tokens == 0
 
 
 def test_runner_byte_cap_reports_cause_instead_of_malformed_json(monkeypatch):
@@ -225,6 +373,8 @@ def test_runner_byte_cap_reports_cause_instead_of_malformed_json(monkeypatch):
     assert "exceeded 100 bytes" in out["error"] and out["preview"].startswith('{"t"')
 
 
+# --- spawn_subagent end to end with a fake runner ---------------------------
+
 def _run_spawn(stdin: str, fake_runner: Path, env_extra: dict | None = None):
     shim = textwrap.dedent(f"""
         import fabri.tools.examples.spawn_subagent as s
@@ -234,40 +384,113 @@ def _run_spawn(stdin: str, fake_runner: Path, env_extra: dict | None = None):
         _sys.exit(s.main())
     """)
     env = os.environ.copy()
+    env.pop(SPAWN_SUMMARY_ENV, None)
     env.update(env_extra or {})
     return subprocess.run([sys.executable, "-c", shim], input=stdin, capture_output=True, text=True, env=env)
 
 
-def test_spawn_caps_an_uncapped_child_and_forwards_scope(tmp_path):
+def _fake_runner(tmp_path, final_text_expr: str, extra: str = "") -> Path:
     runner = tmp_path / "fake_runner.py"
-    runner.write_text(textwrap.dedent("""
+    runner.write_text(textwrap.dedent(f"""
         import json, sys
         sys.stdin.read()
         scope = sys.argv[sys.argv.index("--tool-scope") + 1] if "--tool-scope" in sys.argv else None
-        print(json.dumps({"final_text": "word " * 30000, "outcome": "success",
-                          "session_id": "c1", "trace_path": "/tmp/c1.jsonl", "scope": scope}))
+        out = {{"final_text": {final_text_expr}, "outcome": "success",
+               "session_id": "c1", "trace_path": "/tmp/c1.jsonl", "scope": scope}}
+        {extra}
+        print(json.dumps(out))
     """))
+    return runner
+
+
+def _cfg(tmp_path):
     cfg = tmp_path / "agent.yaml"
     cfg.write_text("# unused\n")
-    proc = _run_spawn(json.dumps({"config_path": str(cfg), "task": "go", "tool_scope": ["read_only", "bash"]}),
-                      runner, {PARENT_TOOLS_ENV: json.dumps(["read_file"])})
+    return str(cfg)
+
+
+def test_spawn_caps_with_parent_budget_and_forwards_scope(tmp_path):
+    runner = _fake_runner(tmp_path, '"word " * 30000')
+    proc = _run_spawn(json.dumps({"config_path": _cfg(tmp_path), "task": "go", "tool_scope": ["read_only", "bash"]}),
+                      runner, {PARENT_TOOLS_ENV: json.dumps(["read_file"]), SPAWN_SUMMARY_ENV: "100"})
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["summary_truncated"] is True and out["session_id"] == "c1"
+    assert out["final_text_tokens"] > 100 and len(out["final_text"]) < 1200
     assert json.loads(out["scope"]) == ["read_only"]
 
 
-def test_spawn_does_not_recap_a_runner_capped_envelope(tmp_path):
-    runner = tmp_path / "fake_runner.py"
-    runner.write_text(textwrap.dedent("""
-        import json, sys
-        sys.stdin.read()
-        print(json.dumps({"final_text": "word " * 3000, "outcome": "success", "summary_truncated": False,
-                          "session_id": "c2", "trace_path": "/tmp/c2.jsonl"}))
-    """))
-    cfg = tmp_path / "agent.yaml"
-    cfg.write_text("# unused\n")
-    proc = _run_spawn(json.dumps({"config_path": str(cfg), "task": "go"}), runner)
+def test_spawn_budget_zero_disables_the_cap(tmp_path):
+    runner = _fake_runner(tmp_path, '"word " * 3000')
+    proc = _run_spawn(json.dumps({"config_path": _cfg(tmp_path), "task": "go"}), runner, {SPAWN_SUMMARY_ENV: "0"})
     out = json.loads(proc.stdout)
-    # The child's own config chose its cap (here: none hit); spawn respects it.
-    assert out["final_text"] == "word " * 3000
+    assert out["final_text"] == "word " * 3000 and out["summary_truncated"] is False
+
+
+def test_spawn_rejects_a_bad_budget_before_spawning(tmp_path):
+    marker = tmp_path / "ran"
+    runner = _fake_runner(tmp_path, '"x"', extra=f"open({str(marker)!r}, 'w').write('1')")
+    proc = _run_spawn(json.dumps({"config_path": _cfg(tmp_path), "task": "go"}), runner, {SPAWN_SUMMARY_ENV: "2k"})
+    assert proc.returncode == 1 and "non-negative integer" in json.loads(proc.stdout)["error"]
+    assert not marker.exists()
+
+
+def test_spawn_fails_loudly_on_oversized_structured_output(tmp_path):
+    runner = _fake_runner(tmp_path, '"ok"', extra='out["structured_output"] = {"rows": ["x" * 1000] * 1200}')
+    proc = _run_spawn(json.dumps({"config_path": _cfg(tmp_path), "task": "go"}), runner)
+    assert proc.returncode == 1
+    err = json.loads(proc.stdout)
+    assert "too large" in err["error"] and err["session_id"] == "c1" and err["trace_path"] == "/tmp/c1.jsonl"
+
+
+# --- static tools.agents[] children are not capped; scope sets the ceiling --
+
+def _install_runner_fakes(monkeypatch, final_text: str, registry: ToolRegistry):
+    import fabri.tools.agent_runner_tool as art
+
+    cfg = {"llm": {}, "memory": {"guideline_max_tokens": 100, "similarity_threshold": 0.9,
+                                 "promotion_threshold_sessions": 2, "mining_enabled": False},
+           "tools": {"decompose": {"enabled": False}}, "agent": {"max_steps": 5}}
+    monkeypatch.setattr(art, "load_config", lambda path: cfg)
+    monkeypatch.setattr(art, "build_tools", lambda tools_cfg, **kw: registry)
+    monkeypatch.setattr(art, "build_tool_defs", lambda tools, decompose_cfg: [])
+    monkeypatch.setattr(art, "build_run_llms", lambda config, defs: {
+        "llm": object(), "decompose_llm": None, "planner_llm": None, "narrator_llm": None})
+    monkeypatch.setattr(art, "build_memory_store", lambda mem_cfg: object())
+    monkeypatch.setattr(art, "run_agent", lambda task, llm, tools, store, **kw: {
+        "final_text": final_text, "structured_output": None, "outcome": "success",
+        "session_id": "child-1", "usage": None})
+    monkeypatch.setattr(art, "trace_path", lambda sid: Path(f"/tmp/{sid}.jsonl"))
+    return art
+
+
+def _main(monkeypatch, art, extra_argv=()):
+    monkeypatch.setattr(sys, "argv", ["agent_runner_tool", "cfg.yaml", *extra_argv])
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"task": "t"}'))
+    return art.main()
+
+
+def test_static_child_output_is_not_capped(monkeypatch, capsys):
+    monkeypatch.setenv(CEILING_ENV, "x")
+    monkeypatch.delenv(CEILING_ENV)
+    art = _install_runner_fakes(monkeypatch, "word " * 5000, _registry(_manifest("read_file")))
+    assert _main(monkeypatch, art) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["final_text"] == "word " * 5000 and "summary_truncated" not in out
+
+
+def test_runner_applies_scope_and_publishes_ceiling(monkeypatch, capsys):
+    monkeypatch.setenv(CEILING_ENV, "x")
+    monkeypatch.delenv(CEILING_ENV)
+    reg = _registry(_manifest("read_file"), _manifest("bash"))
+    art = _install_runner_fakes(monkeypatch, "ok", reg)
+    assert _main(monkeypatch, art, ["--tool-scope", json.dumps(["read_file"])]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert sorted(reg.tools) == ["read_file"] and out["tool_scope"]["kept"] == ["read_file"]
+    assert json.loads(os.environ[CEILING_ENV]) == ["read_file"]
+
+
+def test_runner_rejects_malformed_scope_flag(monkeypatch, capsys):
+    art = _install_runner_fakes(monkeypatch, "ok", _registry(_manifest("read_file")))
+    assert _main(monkeypatch, art, ["--tool-scope", json.dumps({"a": 1})]) == 1
+    assert "not a list of tool names" in json.loads(capsys.readouterr().out)["error"]

@@ -192,9 +192,12 @@ def test_passes_through_runner_stdout_verbatim(tmp_path):
     )
     assert proc.returncode == 0
     payload = json.loads(proc.stdout)
+    # Passed through unchanged apart from the summary flag the parent-side
+    # cap always sets.
     assert payload == {
         "final_text": "ok", "outcome": "success",
         "session_id": "abc", "trace_path": "/tmp/abc.jsonl",
+        "summary_truncated": False,
     }
 
 

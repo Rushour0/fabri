@@ -61,9 +61,6 @@ DEFAULT_CONFIG = {
         "subagent": {
             "max_steps": None,
             "max_cost_usd": None,
-            # Cap on the summary a child returns to its parent, in tokens.
-            # The full text stays in the child trace. 0 turns the cap off.
-            "summary_max_tokens": 2000,
         },
         # B8: bounded auto-repair. After a run finishes, if `enabled` and a
         # failure signal is present, fabri re-enters the agent with the failure
@@ -153,6 +150,11 @@ DEFAULT_CONFIG = {
         # Members beyond the cap queue and run as slots free up — same result,
         # bounded peak memory. Lower it on tight memory budgets.
         "max_parallel_spawns": DEFAULT_MAX_PARALLEL_SPAWNS,
+        # Cap, in tokens, on the prose summary a spawn_subagent child returns
+        # to this agent. Applied on this side with this budget; the full text
+        # stays in the child's trace. 0 turns it off. Static tools.agents[]
+        # children are never capped.
+        "spawn_summary_max_tokens": 2000,
         "decompose": {"enabled": False, "max_subquestions": DEFAULT_MAX_SUBQUESTIONS},
         # Narrow the system prompt + provider tool list to a task-relevant
         # subset via cosine similarity against each tool's description.

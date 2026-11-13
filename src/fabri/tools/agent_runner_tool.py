@@ -29,8 +29,7 @@ from fabri.orchestrator.pipeline import process_trace
 from fabri.orchestrator.traces import trace_path
 from fabri.runtime import build_llm, build_memory_store, build_run_llms, build_tool_defs, build_tools
 from fabri.tools.approver import default_approver
-from fabri.tools.subagent_envelope import DEFAULT_SUMMARY_MAX_TOKENS, cap_envelope
-from fabri.tools.tool_scope import narrow_registry, normalize_scope
+from fabri.tools.tool_scope import ScopeError, apply_child_scope, normalize_scope
 
 
 class _JSONArgumentParser(argparse.ArgumentParser):
@@ -127,16 +126,20 @@ def main() -> int:
     # pipe, not a terminal, so default_approver gives the parent's socket
     # (when --ask-user-socket was passed) or None, and None refuses them.
     tools = build_tools(tools_cfg, approver=default_approver())
-    # Per-spawn scope (D1): drop every tool the scope does not allow. The
+    # Per-spawn scope (D1): drop every tool the scope does not allow, then
+    # everything above an inherited ceiling, and pass what is left down as
+    # the ceiling for this child's own children (spawned or static). The
     # registry keeps its approver, so the approval gate holds for what's left.
-    scope_report: dict = {}
+    scope = None
     if cli_args.tool_scope is not None:
         try:
             scope = normalize_scope(json.loads(cli_args.tool_scope))
-        except json.JSONDecodeError as e:
-            print(json.dumps({"error": f"--tool-scope is not a JSON list: {e}"}))
+        except (json.JSONDecodeError, ScopeError) as e:
+            print(json.dumps({"error": f"--tool-scope is not a list of tool names: {e}"}))
             return 1
-        scope_report = narrow_registry(tools, scope if scope is not None else [])
+        if scope is None:
+            scope = []
+    scope_report = apply_child_scope(tools, scope)
     decompose_cfg = tools_cfg["decompose"]
     llms = build_run_llms(config, build_tool_defs(tools, decompose_cfg))
 
@@ -240,8 +243,8 @@ def main() -> int:
     # find the child's JSONL when a sub-agent fails. `usage.total_cost_usd`
     # carries own tokens + grandchildren; the parent's dispatch loop reads
     # it to roll this subtree into its own COGS.
-    # The summary is capped (D2) so a chatty child cannot flood the parent's
-    # context; the full text stays in the child's trace at trace_path.
+    # The summary cap (D2) is applied by spawn_subagent on the parent's side
+    # with the parent's budget; a static tools.agents[] child is not capped.
     envelope = {
         "final_text": result["final_text"],
         "structured_output": result.get("structured_output"),
@@ -253,10 +256,7 @@ def main() -> int:
     }
     if scope_report:
         envelope["tool_scope"] = scope_report
-    summary_cap = subagent_cfg.get("summary_max_tokens")
-    if summary_cap is None:
-        summary_cap = DEFAULT_SUMMARY_MAX_TOKENS
-    print(json.dumps(cap_envelope(envelope, int(summary_cap))))
+    print(json.dumps(envelope))
     return 0 if result["outcome"] in (Outcome.SUCCESS.value, Outcome.SUCCESS_WITH_RECOVERY.value) else 1
 
 

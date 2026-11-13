@@ -34,8 +34,8 @@ class _RaisingTools:
 def test_parallel_future_exception_yields_paired_error_blocks(tmp_path):
     # Two spawn_subagent calls in the same parallel_group -> threaded dispatch.
     calls = [
-        ToolCall(name="spawn_subagent", args={"parallel_group": "g"}, id="a"),
-        ToolCall(name="spawn_subagent", args={"parallel_group": "g"}, id="b"),
+        ToolCall(name="spawn_subagent", args={"parallel_group": "g", "tool_scope": ["read_only"]}, id="a"),
+        ToolCall(name="spawn_subagent", args={"parallel_group": "g", "tool_scope": ["read_only"]}, id="b"),
     ]
     messages: list[dict] = []
     had_failure = _dispatch_tool_calls(

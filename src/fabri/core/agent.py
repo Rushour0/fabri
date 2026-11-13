@@ -1320,23 +1320,24 @@ def _index_parallel_groups(calls: list[ToolCall]) -> dict[str, list[int]]:
 def _one_writer_per_group(
     groups: dict[str, list[int]], calls: list[ToolCall], tools: ToolRegistry,
 ) -> dict[str, list[int]]:
-    """Keep at most one scoped child that can write in each parallel group.
+    """Keep at most one child that can write in each parallel group.
 
-    A spawn whose ``tool_scope`` only allows read tools is a reader. A spawn
-    with a scope that allows any other tool is a writer: the first writer in a
-    group stays, and later writers leave the group, so they run serially
-    before it instead of beside it. Spawns with no ``tool_scope`` keep the
-    old behavior (they fan out as before); they are expected to work in
-    independent sandboxes. See docs/specialists.md."""
+    A spawn is a reader only when its ``tool_scope`` can give it nothing but
+    read tools, judged against this registry (``read_only``, or names this
+    registry knows as read-class). Every other spawn is a writer: one with no
+    scope (it gets its whole config), a malformed scope, or a scope naming a
+    tool that is unknown here, writes, or reaches the network. The first
+    writer in a group stays; later writers leave the group and run serially
+    before it. See docs/specialists.md."""
     from fabri.tools.tool_scope import scope_is_read_only
 
+    registry_tools = getattr(tools, "tools", {})
     out: dict[str, list[int]] = {}
     for group, idxs in groups.items():
         kept: list[int] = []
         writer_seen = False
         for i in idxs:
-            scope = calls[i].args.get("tool_scope")
-            if scope is not None and not scope_is_read_only(scope, getattr(tools, "tools", {})):
+            if not scope_is_read_only(calls[i].args.get("tool_scope"), registry_tools):
                 if writer_seen:
                     logger.info("parallel_group %s: call %d runs serially (one writer at a time)", group, i)
                     continue

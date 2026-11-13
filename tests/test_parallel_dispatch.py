@@ -69,7 +69,7 @@ def _time_dispatch_via_registry(reg, n_calls: int, parallel_group: str | None) -
     calls = [
         ToolCall(
             name="spawn_subagent",
-            args=({"parallel_group": parallel_group} if parallel_group else {}),
+            args=({"parallel_group": parallel_group, "tool_scope": ["read_only"]} if parallel_group else {}),
             id=f"t{i}",
         )
         for i in range(n_calls)
@@ -111,7 +111,7 @@ def _time_dispatch_capped(reg, n_calls: int, max_parallel_spawns: int) -> float:
     from fabri.core.agent import _dispatch_tool_calls
 
     calls = [
-        ToolCall(name="spawn_subagent", args={"parallel_group": "g1"}, id=f"t{i}")
+        ToolCall(name="spawn_subagent", args={"parallel_group": "g1", "tool_scope": ["read_only"]}, id=f"t{i}")
         for i in range(n_calls)
     ]
     t0 = time.monotonic()
@@ -150,8 +150,8 @@ def test_parallel_group_tag_in_trace_events():
     reg = _registry_with(_slow_spawn_tool(0.05))
     script = [
         LLMResponse(tool_calls=[
-            ToolCall(name="spawn_subagent", args={"parallel_group": "village"}, id="t1"),
-            ToolCall(name="spawn_subagent", args={"parallel_group": "village"}, id="t2"),
+            ToolCall(name="spawn_subagent", args={"parallel_group": "village", "tool_scope": ["read_only"]}, id="t1"),
+            ToolCall(name="spawn_subagent", args={"parallel_group": "village", "tool_scope": ["read_only"]}, id="t2"),
         ]),
         LLMResponse(final_text="done"),
     ]

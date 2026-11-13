@@ -37,7 +37,7 @@ from typing import Callable
 from fabri.builder.prompt_kit import render_task_brief
 from fabri.builder.specialists import DESIGNER_SYSTEM, ProfileCache, make_specialist
 from fabri.core.llm import LLMResponse, LLMUsage, ToolCall
-from fabri.tools.subagent_envelope import DEFAULT_SUMMARY_MAX_TOKENS, _count_tokens, cap_envelope
+from fabri.tools.subagent_envelope import DEFAULT_SUMMARY_MAX_TOKENS, count_tokens, cap_envelope
 
 ARMS = ("direct", "retrieval", "specialists")
 MOCK_RATE_IN = 3.0 / 1_000_000   # USD per input token, mock runs only
@@ -127,7 +127,7 @@ def run_loop(llm, identity: str, defs: list[dict], task: str,
     messages: list[dict] = [{"role": "user", "content": task}]
     res = LoopResult(final_text="")
     for step in range(max_steps):
-        ctx = _count_tokens(system + json.dumps(defs) + json.dumps(messages))
+        ctx = count_tokens(system + json.dumps(defs) + json.dumps(messages))
         res.peak_context_tokens = max(res.peak_context_tokens, ctx)
         resp = llm.step(system, messages)
         res.steps = step + 1
@@ -224,8 +224,8 @@ class PlanFollowingLLM:
 
     def _reply(self, system: str, messages: list[dict], resp: LLMResponse) -> LLMResponse:
         out = resp.final_text or json.dumps([c.args for c in resp.tool_calls])
-        resp.usage = LLMUsage(input_tokens=_count_tokens(system + json.dumps(messages)),
-                              output_tokens=_count_tokens(out), model="mock")
+        resp.usage = LLMUsage(input_tokens=count_tokens(system + json.dumps(messages)),
+                              output_tokens=count_tokens(out), model="mock")
         self.usages.append(resp.usage)
         return resp
 

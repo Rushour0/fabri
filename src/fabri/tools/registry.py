@@ -22,6 +22,16 @@ class ApprovalRefused(Exception):
 
 
 BATCH_TOOL_NAME = "batch"
+SPAWN_TOOL_NAME = "spawn_subagent"
+SPAWN_SUMMARY_ENV = "FABRI_SPAWN_SUMMARY_MAX_TOKENS"
+
+
+def is_spawn_tool(name: str, manifest: ToolManifest) -> bool:
+    """True for spawn_subagent under any name: the bundled name, or a manifest
+    that runs the spawn_subagent.py script."""
+    if name == SPAWN_TOOL_NAME:
+        return True
+    return any(Path(str(part)).name == "spawn_subagent.py" for part in manifest.command or ())
 # Nested batches multiply fan-out unpredictably; spawn_subagent + ask_user
 # have side effects that don't belong inside an opaque batch result.
 BATCH_FORBIDDEN_NESTED = frozenset({BATCH_TOOL_NAME, "spawn_subagent", "ask_user"})
@@ -60,6 +70,9 @@ class ToolRegistry:
         # With no approver they are refused: a human has to be in the loop.
         self.approver = approver
         self._broker_gated_names: set[str] = set()
+        # Token budget for a spawned child's summary; build_tools sets it from
+        # tools.spawn_summary_max_tokens. None lets the spawn use its default.
+        self.spawn_summary_max_tokens: int | None = None
         # Per tool: calls, failures, refused (approval or bad args), seconds.
         self.usage: dict[str, dict[str, float]] = {}
         for manifest_dir in dirs:
@@ -214,14 +227,16 @@ class ToolRegistry:
             except Exception as e:
                 return tool_error(f"{name}: handler raised {type(e).__name__}: {e}")
         extra_env = {"FABRI_SANDBOX_ROOT": self.sandbox_root} if self.sandbox_root else {}
-        if name == "spawn_subagent":
+        if is_spawn_tool(name, manifest):
             # The spawn drops any requested tool_scope entry this registry
-            # lacks, so a child can never be scoped to a tool its parent
-            # does not have (see fabri.tools.tool_scope).
+            # lacks (see fabri.tools.tool_scope), and caps the child's summary
+            # with this run's budget (see fabri.tools.subagent_envelope).
             import json
 
             from fabri.tools.tool_scope import PARENT_TOOLS_ENV
             extra_env[PARENT_TOOLS_ENV] = json.dumps(sorted(self.tools))
+            if self.spawn_summary_max_tokens is not None:
+                extra_env[SPAWN_SUMMARY_ENV] = str(self.spawn_summary_max_tokens)
         return self.sandbox.run_tool(manifest, args, extra_env=extra_env or None)
 
     def invoke_batch(self, calls: list[dict]) -> dict:
