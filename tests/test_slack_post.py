@@ -73,13 +73,15 @@ def test_happy_path_posts_with_slack_notify_request_shape(
     assert json.loads(request.data.decode("utf-8")) == {
         "channel": "C123",
         "text": "Deploy complete",
+        "unfurl_links": False,
+        "unfurl_media": False,
     }
 
 
 def test_threaded_reply_includes_thread_ts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bodies: list[dict[str, str]] = []
+    bodies: list[dict[str, object]] = []
     monkeypatch.setenv("FABRI_CRED_SLACK_DEFAULT", "xoxb-thread-secret")
     monkeypatch.setattr(slack_post, "validate_url", lambda url: url)
 
@@ -106,6 +108,8 @@ def test_threaded_reply_includes_thread_ts(
         {
             "channel": "C456",
             "text": "Thread update",
+            "unfurl_links": False,
+            "unfurl_media": False,
             "thread_ts": "171234.0001",
         }
     ]
