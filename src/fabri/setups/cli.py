@@ -136,11 +136,14 @@ def _add_env_flags(decl: dict, flags: list[str]) -> None:
     server = decl.get("server")
     if not isinstance(server, dict):
         raise SystemExit("--env needs a declaration with a server: {command: [...]} block")
-    env = dict(server.get("env") or {})
+    env = server.get("env") or {}
+    if not isinstance(env, dict):
+        raise SystemExit("server.env in the declaration must be a mapping of NAME to a reference")
+    env = dict(env)
     for flag in flags:
         name, sep, ref = flag.partition("=")
         if not sep or not name or not ref:
-            raise SystemExit(f"--env expects NAME=ref, got {name or flag!r}")
+            raise SystemExit("--env expects NAME=ref")
         env[name] = {"secret_ref": ref} if ":" in ref else {"env": ref}
     server["env"] = env
 

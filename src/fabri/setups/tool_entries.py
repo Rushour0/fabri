@@ -127,6 +127,12 @@ class EntryReport:
 def check_env_name(value: str, what: str) -> str:
     if not isinstance(value, str) or not ENV_NAME.fullmatch(value):
         raise EntryError(f"{what} must be an environment variable name (A-Z, 0-9, _), not a value")
+    from fabri.tools.policy import PolicyError, check_host_env_ref
+
+    try:
+        check_host_env_ref(value)
+    except PolicyError as exc:
+        raise EntryError(f"{what}: {exc}") from None
     return value
 
 

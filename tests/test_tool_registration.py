@@ -325,3 +325,86 @@ def test_cli_env_flag_builds_refs():
     assert decl["server"]["env"] == {"A": {"secret_ref": "openai:prod"}, "B": {"env": "HOST_B"}}
     with pytest.raises(SystemExit):
         _add_env_flags({"server": {"command": ["x"]}}, ["noequals"])
+
+
+# ---------------------------------------------- host env gate, server shape
+
+FABRI_NAMES = ["FABRI_CRED_OTHER_PROD", "FABRI_CRED_BROKER_KEY", "FABRI_CRED_BROKER_SOCKET",
+               "FABRI_ADMIN_TOKEN", "FABRI_SERVICE_TOKEN"]
+
+
+@pytest.mark.parametrize("name", FABRI_NAMES)
+def test_mcp_env_refuses_fabri_host_vars(layers, name):
+    with pytest.raises(PolicyError, match="fabri credential"):
+        register_tool(layers[1][1], mcp_decl({"RENAMED": {"env": name}}), actor="a", policy=MCP_POLICY)
+
+
+def test_http_auth_header_env_refuses_fabri_host_vars(layers):
+    with pytest.raises(PolicyError):
+        register_tool(layers[1][1], http_decl(auth={"header_env": "FABRI_ADMIN_TOKEN"}), actor="a", policy=POLICY)
+
+
+@pytest.mark.parametrize("name", FABRI_NAMES)
+def test_tool_source_build_refuses_fabri_host_vars(name):
+    import sys
+
+    from fabri.tools.sources import ToolSourceError, build_source_tools
+
+    decl = {"kind": "mcp", "name": "echo", "command": [sys.executable, "-c", "pass"],
+            "env": {"RENAMED": {"env": name}}}
+    with pytest.raises(ToolSourceError, match="fabri credential"):
+        build_source_tools(decl)
+
+
+def test_entries_env_specs_refuse_fabri_host_vars():
+    from fabri.setups.tool_entries import EntryError, env_specs
+
+    with pytest.raises(EntryError):
+        env_specs({"X": "FABRI_CRED_BROKER_KEY"})
+
+
+def test_child_env_drops_broker_value_under_renamed_key(monkeypatch):
+    import sys
+
+    from fabri.tools.mcp_client import MCPStdioClient
+
+    monkeypatch.setenv("FABRI_CRED_BROKER_KEY", "broker-secret-77")
+    code = "import os,sys; sys.stdout.write(os.environ.get('RENAMED','none')); sys.stdout.flush()"
+    client = MCPStdioClient(command=[sys.executable, "-c", code], env={"RENAMED": "broker-secret-77"})
+    try:
+        client.start()
+        out = client.proc.stdout.read(4)
+        assert out in (b"none", "none")
+    finally:
+        client.close()
+
+
+def test_mcp_server_unknown_keys_and_secret_args_rejected(layers):
+    with pytest.raises(RegistrationError, match="server accepts only"):
+        register_tool(layers[1][1], mcp_decl(cwd="/"), actor="a", policy=MCP_POLICY)
+    decl = mcp_decl()
+    decl["server"]["command"] = ["npx", "srv", "--token=sk-live-ABCdef1234567890XYZabc"]
+    with pytest.raises(RegistrationError, match="looks like a secret"):
+        register_tool(layers[1][1], decl, actor="a", policy=MCP_POLICY)
+
+
+def test_mcp_env_key_that_is_a_secret_rejected(layers):
+    with pytest.raises(RegistrationError):
+        register_tool(layers[1][1], mcp_decl({"AbCdEf0123456789xyzXYZ00aaQQ": {"env": "HOME"}}),
+                      actor="a", policy=MCP_POLICY)
+
+
+@pytest.mark.parametrize("env", ["a-string", ["x"]])
+def test_mcp_env_non_mapping_is_a_clear_error(layers, env):
+    with pytest.raises(RegistrationError, match="server.env must map"):
+        register_tool(layers[1][1], mcp_decl(env), actor="a", policy=MCP_POLICY)
+
+
+def test_cli_env_flag_does_not_echo_value(capsys):
+    from fabri.setups.cli import _add_env_flags
+
+    with pytest.raises(SystemExit) as exc:
+        _add_env_flags({"server": {"command": ["x"]}}, ["sk-live-ABCdef1234567890XYZabc"])
+    assert "sk-live" not in str(exc.value)
+    with pytest.raises(SystemExit, match="mapping"):
+        _add_env_flags({"server": {"command": ["x"], "env": ["x"]}}, ["A=B"])

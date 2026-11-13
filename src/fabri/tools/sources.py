@@ -97,7 +97,7 @@ from fabri.tools.openapi import (
     operation_handler,
     parse_operations,
 )
-from fabri.tools.policy import SOURCE_KINDS, PolicyError, ToolPolicy
+from fabri.tools.policy import SOURCE_KINDS, PolicyError, ToolPolicy, check_host_env_ref
 from fabri.tools.result import tool_error, tool_ok
 
 if TYPE_CHECKING:
@@ -591,6 +591,12 @@ def _build_mcp(decl, *, base_dir, policy, transport, store, dry, broker=None) ->
     else:
         cfg["command"] = list(decl["command"])
         if decl.get("env"):
+            for spec in decl["env"].values() if isinstance(decl["env"], Mapping) else ():
+                if isinstance(spec, Mapping) and "env" in spec:
+                    try:
+                        check_host_env_ref(str(spec["env"]))
+                    except PolicyError as exc:
+                        raise ToolSourceError(f"source {decl.get('name')}: {exc}") from None
             cfg["env"] = resolve_headers(decl.get("env"), store)
         # Only an explicit `env_mode: inherit` passes the whole host
         # environment; the default is the allowlist, so a server must declare

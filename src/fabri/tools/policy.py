@@ -18,6 +18,7 @@ A policy file can also be a bare list of names, which sets `allow` only.
 from __future__ import annotations
 
 import fnmatch
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -33,6 +34,23 @@ _POLICY_KEYS = {"allow", "allowed_kinds", "allowed_hosts", "allow_delete", "pyth
 
 class PolicyError(ValueError):
     """A tool or declaration falls outside the caller's policy."""
+
+
+_FABRI_SECRET_ENV = re.compile(r"^FABRI_(CRED_.*|AUTH_.*|.*(TOKEN|KEY|SECRET|PASSWORD|SOCKET))$")
+
+
+def check_host_env_ref(name: str) -> str:
+    """Refuse an `{env: NAME}` reference to one of fabri's own secrets.
+
+    A declaration may copy a host variable into a child or a header under any
+    key it likes, so the broker strip (which works by key name) would not
+    catch a renamed copy. FABRI_CRED_* values must come through `secret_ref`
+    so `credential_grants` apply; the service and broker secrets are never
+    for a tool."""
+    if _FABRI_SECRET_ENV.fullmatch(str(name)):
+        raise PolicyError(f"env {name} is a fabri credential and cannot be passed to a tool; "
+                          "use a secret_ref for a stored credential")
+    return name
 
 
 @dataclass(frozen=True)
