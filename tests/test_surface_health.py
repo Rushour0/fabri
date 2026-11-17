@@ -10,6 +10,7 @@ import pytest
 
 from fabri.service.http_server import _Handler
 from fabri.service.surfaces.github import GitHubAdapter
+from fabri.service.surfaces.jira import JiraAdapter
 from fabri.service.surfaces.linear import LinearAdapter
 from fabri.service.surfaces.registry import SurfaceRegistry
 from fabri.service.surfaces.slack import SlackAdapter
@@ -18,7 +19,8 @@ pytestmark = pytest.mark.unit
 
 ENV = ("SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "GITHUB_APP_WEBHOOK_SECRET", "FABRI_CRED_GITHUB_APP_ID",
        "FABRI_CRED_GITHUB_PRIVATE_KEY", "FABRI_CRED_GITHUB_DEFAULT", "LINEAR_WEBHOOK_SECRET",
-       "FABRI_CRED_LINEAR_DEFAULT", "LINEAR_API_KEY")
+       "FABRI_CRED_LINEAR_DEFAULT", "LINEAR_API_KEY", "JIRA_WEBHOOK_SECRET", "JIRA_URL", "JIRA_EMAIL",
+       "JIRA_API_TOKEN", "JIRA_WORKSPACE", "JIRA_ACCESS_TOKEN")
 
 
 class _Store:
@@ -67,6 +69,17 @@ def test_linear_env_key_is_enough(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "lin-value")
     assert LinearAdapter(_service()).health()["ok"] is True
 
+
+def test_jira_needs_its_secret_and_a_complete_outbound_group(monkeypatch):
+    health = JiraAdapter(_service()).health()
+    assert health["ok"] is False and health["missing"] == ["JIRA_WEBHOOK_SECRET"]
+    assert health["webhook_path"] == "/jira/webhook" and health["installs"] is None
+    monkeypatch.setenv("JIRA_WEBHOOK_SECRET", "hook-value")
+    monkeypatch.setenv("JIRA_URL", "https://acme.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+    assert JiraAdapter(_service()).health()["ok"] is False
+    monkeypatch.setenv("JIRA_API_TOKEN", "token-value")
+    assert JiraAdapter(_service()).health()["ok"] is True
 
 def test_route_lists_registered_surfaces_without_secret_values(monkeypatch):
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "sig-value")

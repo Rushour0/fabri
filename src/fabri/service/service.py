@@ -56,6 +56,7 @@ from fabri.service.run_store import RunStore
 from fabri.service.slack_notify import post_ask_user_question
 from fabri.service import trace_store
 from fabri.service.surfaces.github import GitHubAdapter
+from fabri.service.surfaces.jira import JiraAdapter
 from fabri.service.surfaces.linear import LinearAdapter
 from fabri.service.surfaces.registry import SurfaceRegistry
 from fabri.service.surfaces.slack import SlackAdapter
@@ -246,6 +247,8 @@ class FabriService:
             self.surfaces.register(GitHubAdapter(self))
         if os.environ.get("LINEAR_WEBHOOK_SECRET"):
             self.surfaces.register(LinearAdapter(self))
+        if os.environ.get("JIRA_WEBHOOK_SECRET"):
+            self.surfaces.register(JiraAdapter(self))
         self.sync_hook: FileSyncHook = sync_hook or NoOpSyncHook()
         self.command_builder = command_builder
         self._runs: dict[str, RunHandle] = {}
