@@ -45,6 +45,13 @@ DEFAULT_CONFIG = {
         "response_retries": 1,
         "error_strategy": "strict",
         "response_fallback": None,
+        # Tool calls the engine makes before the first model turn, as a list of
+        # turns; each turn is a list of {"tool": name, "input": {...}}. A string
+        # value "{task}" in an input is replaced by the run's task. Each turn is
+        # dispatched like a model turn (same events, parallel groups, budget
+        # checks), so the model's first call already sees the results. Empty
+        # by default. Single-loop runs only; the planner path ignores it.
+        "preflight": [],
         # Planner/executor split. `off` keeps the single-loop behaviour;
         # `auto` runs the planner only on tasks long enough to benefit;
         # `force` always runs it.

@@ -218,6 +218,7 @@ def _run_single_attempt(
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
     memory_scope: "MemoryScope | ScopedMemory | None" = None,
+    preflight: tuple = (),
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -948,6 +949,50 @@ def _run_single_attempt(
     else:
         plan_engaged = False
 
+    def _run_preflight(item_messages: list[dict]) -> tuple[bool, int, int]:
+        """Dispatch the configured agent.preflight turns before the first model
+        call. Each turn goes through _dispatch_tool_calls exactly like a model
+        turn, so events, parallel groups, cost rollup and budget checks match.
+        Returns (had_failure, total_calls, failed_calls)."""
+        had_failure, total, failed = False, 0, 0
+        for turn_index, turn in enumerate(preflight or ()):
+            calls = [
+                ToolCall(
+                    name=str(entry["tool"]),
+                    args=_fill_preflight_input(entry.get("input") or {}, task),
+                    id=f"toolu_preflight_{turn_index}_{call_index}",
+                )
+                for call_index, entry in enumerate(turn or ())
+                if isinstance(entry, dict) and entry.get("tool") in tools.tools
+            ]
+            if not calls:
+                continue
+            if _budget_breached():
+                break
+            log_event(session_id, {
+                "type": "preflight",
+                "turn": turn_index,
+                "tools": [call.name for call in calls],
+            })
+            stats: dict[str, int] = {}
+            had_failure |= _dispatch_tool_calls(
+                calls, tools, decompose_llm or llm, task, max_subquestions,
+                session_id, item_messages, -1, result_format, output_format,
+                on_subagent_cost=_accumulate_subagent_cost,
+                on_subagent_finished=_on_subagent_finished,
+                on_budget_check=_budget_breached,
+                on_llm_usage=_accumulate,
+                max_parallel_spawns=max_parallel_spawns,
+                parallel_agent_tools=parallel_agent_tools,
+                dispatch_stats=stats,
+            )
+            total += stats.get("total_calls", 0)
+            failed += stats.get("failed_calls", 0)
+        return had_failure, total, failed
+
+    if plan_engaged and preflight:
+        logger.warning("agent.preflight is set but the planner engaged; preflight is skipped")
+
     if not plan_engaged:
         # Non-planner single loop: the whole run is one "item" against the
         # original task. It shares `_run_step_loop` with the planner executor
@@ -955,6 +1000,7 @@ def _run_single_attempt(
         # one of the two paths (they used to be copy-pasted and had already
         # diverged on per-step cost telemetry).
         messages = [{"role": "user", "content": task}]
+        pre_had_failure, pre_total, pre_failed = _run_preflight(messages)
         (
             item_final, item_success, item_failed, item_error, item_had_failure,
             item_total_tool_calls, item_failed_tool_calls, used,
@@ -962,9 +1008,9 @@ def _run_single_attempt(
             messages, task, max_steps, step_offset=0
         )
         step_count = used
-        had_tool_failure |= item_had_failure
-        total_tool_calls += item_total_tool_calls
-        failed_tool_calls += item_failed_tool_calls
+        had_tool_failure |= item_had_failure or pre_had_failure
+        total_tool_calls += item_total_tool_calls + pre_total
+        failed_tool_calls += item_failed_tool_calls + pre_failed
         if item_failed:
             # LLMError or budget breach; _run_step_loop already logged the
             # ERROR / budget_exceeded + STEP_FINISHED events.
@@ -1267,6 +1313,7 @@ def run_agent(
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
     memory_scope: "MemoryScope | ScopedMemory | None" = None,
+    preflight: tuple = (),
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
@@ -1309,11 +1356,24 @@ def run_agent(
         retrieval_config=retrieval_config,
         retrieved_guidelines_task_precedence=retrieved_guidelines_task_precedence,
         memory_scope=memory_scope,
+        preflight=preflight,
     )
     result = _run_single_attempt(task, **base_kwargs)
     if not (repair and repair.get("enabled")):
         return result
     return _run_with_repair(task, result, repair, base_kwargs)
+
+
+def _fill_preflight_input(value: object, task: str) -> object:
+    """Return a preflight input with "{task}" in every string replaced by the
+    run's task. Other values are copied as they are."""
+    if isinstance(value, dict):
+        return {key: _fill_preflight_input(item, task) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fill_preflight_input(item, task) for item in value]
+    if isinstance(value, str):
+        return value.replace("{task}", task)
+    return value
 
 
 SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"

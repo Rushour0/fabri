@@ -73,6 +73,7 @@ class AgentRunConfig:
     error_strategy: str = "strict"
     response_fallback: object | None = None
     repair: dict | None = None
+    preflight: tuple = ()
     retrieval_config: RetrievalConfig = RetrievalConfig()
 
     @classmethod
@@ -123,6 +124,7 @@ class AgentRunConfig:
             error_strategy=agent.get("error_strategy", cls.error_strategy),
             response_fallback=agent.get("response_fallback"),
             repair=agent.get("repair"),
+            preflight=tuple(agent.get("preflight") or ()),
             retrieval_config=RetrievalConfig.from_mem_cfg(mem),
         )
 
@@ -130,7 +132,8 @@ class AgentRunConfig:
         """A copy with the child's budget swapped in (agent.subagent.* overrides).
         Everything else — planner, retrieval, prompts — is inherited so a child
         orchestrates the same way the parent does."""
-        return replace(self, max_steps=max_steps, max_cost_usd=max_cost_usd)
+        # A child never repeats the parent's preflight calls.
+        return replace(self, max_steps=max_steps, max_cost_usd=max_cost_usd, preflight=())
 
     def as_kwargs(self) -> dict:
         """The keyword arguments `run_agent` accepts for these knobs. The caller
@@ -160,5 +163,6 @@ class AgentRunConfig:
             "error_strategy": self.error_strategy,
             "response_fallback": self.response_fallback,
             "repair": self.repair,
+            "preflight": self.preflight,
             "retrieval_config": self.retrieval_config,
         }
