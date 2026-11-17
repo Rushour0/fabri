@@ -590,6 +590,29 @@ def test_runner_applies_scope_and_publishes_ceiling(monkeypatch, capsys):
     assert json.loads(os.environ[CEILING_ENV]) == ["read_file"]
 
 
+def test_runner_applies_tool_scope_from_input(monkeypatch, capsys):
+    # tools.agents[] specialists have no --tool-scope; a reader gets its
+    # read-only pin through the input instead.
+    monkeypatch.setenv(CEILING_ENV, "x")
+    monkeypatch.delenv(CEILING_ENV)
+    reg = _registry(_manifest("read_file"), _manifest("bash"))
+    art = _install_runner_fakes(monkeypatch, "ok", reg)
+    monkeypatch.setattr(sys, "argv", ["agent_runner_tool", "cfg.yaml"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"task": "t", "tool_scope": ["read_file"]})))
+    assert art.main() == 0
+    assert sorted(reg.tools) == ["read_file"]
+    assert json.loads(os.environ[CEILING_ENV]) == ["read_file"]
+
+
+def test_runner_refuses_scope_in_both_flag_and_input(monkeypatch, capsys):
+    reg = _registry(_manifest("read_file"), _manifest("bash"))
+    art = _install_runner_fakes(monkeypatch, "ok", reg)
+    monkeypatch.setattr(sys, "argv", ["agent_runner_tool", "cfg.yaml", "--tool-scope", json.dumps(["bash"])])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"task": "t", "tool_scope": ["read_file"]})))
+    assert art.main() == 1
+    assert "both" in json.loads(capsys.readouterr().out)["error"]
+
+
 def test_runner_rejects_malformed_scope_flag(monkeypatch, capsys):
     art = _install_runner_fakes(monkeypatch, "ok", _registry(_manifest("read_file")))
     assert _main(monkeypatch, art, ["--tool-scope", json.dumps({"a": 1})]) == 1

@@ -1416,9 +1416,14 @@ def _one_writer_per_group(
     unscoped spawn classed a reader gets ``tool_scope: ["read_only"]`` added
     to its arguments, so a config or manifest dir that changed after the
     check cannot hand it write tools. The first writer in a group stays;
-    later writers leave the group and run serially before it. See
-    docs/specialists.md."""
-    from fabri.tools.tool_scope import spawn_is_reader
+    later writers leave the group and run serially before it.
+
+    Calls to ``tools.agents[]`` specialists (the implicit group from
+    ``tools.parallel_agents``) follow the same rule: a specialist is a reader
+    only when its own child config is provably read-only, and a reader gets
+    ``tool_scope: ["read_only"]`` in its input, which the runner applies.
+    See docs/specialists.md."""
+    from fabri.tools.tool_scope import agent_tool_is_reader, spawn_is_reader
 
     registry_tools = getattr(tools, "tools", {})
     out: dict[str, list[int]] = {}
@@ -1426,7 +1431,10 @@ def _one_writer_per_group(
         kept: list[int] = []
         writer_seen = False
         for i in idxs:
-            reader = spawn_is_reader(calls[i].args, registry_tools)
+            if calls[i].name == SPAWN_SUBAGENT_TOOL_NAME:
+                reader = spawn_is_reader(calls[i].args, registry_tools)
+            else:
+                reader = agent_tool_is_reader(calls[i].name, registry_tools)
             if reader and "tool_scope" not in calls[i].args:
                 # Classed a reader from its config. Pin that at spawn time:
                 # the child is narrowed to read tools whatever its config or
@@ -1484,14 +1492,10 @@ def _dispatch_tool_calls(
     # spawn_subagent calls sharing a `parallel_group` arg fan out via
     # threads; other tool kinds stay serial — only sub-agent spawns are
     # slow enough to justify the thread-pool overhead.
-    groups = _index_parallel_groups(calls, parallel_agent_tools)
-    # The one-writer rule covers spawn_subagent groups. tools.agents specialists
-    # in the implicit group are configured children the operator opted into
-    # running together with tools.parallel_agents.
-    agent_group = groups.pop(AGENT_TOOLS_PARALLEL_GROUP, None)
-    parallel_indices = _one_writer_per_group(groups, calls, tools)
-    if agent_group:
-        parallel_indices[AGENT_TOOLS_PARALLEL_GROUP] = agent_group
+    # The one-writer rule covers every group, the implicit tools.agents group
+    # included: two specialists that can write never run at the same time.
+    parallel_indices = _one_writer_per_group(
+        _index_parallel_groups(calls, parallel_agent_tools), calls, tools)
     group_of = {i: g for g, idxs in parallel_indices.items() for i in idxs}
     parallel_index_set = set(group_of)
 

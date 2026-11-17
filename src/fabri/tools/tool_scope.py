@@ -228,6 +228,28 @@ def child_config_is_read_only(config_path: object) -> bool:
     return result
 
 
+def agent_tool_config_path(manifest: object) -> str | None:
+    """The child config path of a ``tools.agents[]`` specialist manifest (see
+    ``fabri.tools.agent_tool.make_agent_tool_manifest``), or None when
+    ``manifest`` is not one."""
+    from fabri.tools.agent_tool import AGENT_RUNNER_SCRIPT
+
+    command = getattr(manifest, "command", None)
+    if not isinstance(command, (list, tuple)) or len(command) < 3:
+        return None
+    if str(command[1]) != str(AGENT_RUNNER_SCRIPT):
+        return None
+    return str(command[2])
+
+
+def agent_tool_is_reader(name: str, tools: Mapping[str, "ToolManifest"]) -> bool:
+    """Whether a call to the ``tools.agents[]`` specialist ``name`` can only
+    read: its child config must pass :func:`child_config_is_read_only`. An
+    unknown name or a manifest that is not a specialist is a writer."""
+    path = agent_tool_config_path(tools.get(name))
+    return path is not None and child_config_is_read_only(path)
+
+
 def spawn_is_reader(args: object, tools: Mapping[str, "ToolManifest"]) -> bool:
     """Whether a spawn_subagent call can only read. With a ``tool_scope`` the
     scope decides (:func:`scope_is_read_only`). Without one the child gets its
