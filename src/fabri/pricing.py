@@ -2,7 +2,15 @@
 
 Rates are resolved DYNAMICALLY, per lookup, from litellm's `model_cost` map
 (cost per token, converted here to $/MTok) -- this is the primary source, kept
-current by the litellm package rather than hand-maintained. The PRICING dict
+current by the litellm package rather than hand-maintained.
+
+litellm is expensive to import (several seconds and well over 100 MB RSS), and
+every fabri subprocess prices its own LLM calls, so it is loaded lazily and only
+when needed. `_LITELLM_SNAPSHOT` holds litellm's resolved rates for the model
+ids fabri is normally configured with; an exact hit there answers without
+importing litellm at all. Any other id goes to the live litellm map as before.
+tests/test_import_weight.py fails when the snapshot drifts from the installed
+litellm, so a litellm upgrade that re-prices a model is caught. The PRICING dict
 below is the FALLBACK for models litellm's map doesn't know about (e.g. the
 Bedrock Moonshot/Kimi ids), consulted only when litellm has no match. They are
 an APPROXIMATION the host reconciles against a real provider invoice: sum the
@@ -28,28 +36,50 @@ at ~1.10x instead of 0.10x -- an ~11x over-charge on the cached portion.
 from __future__ import annotations
 
 import os
+import threading
+from typing import Any
 
 from fabri.core.llm import LLMUsage
 from fabri.core.logging_setup import get_logger
 
 logger = get_logger()
 
-try:
-    # litellm calls `load_dotenv()` at import time, which silently pulls the
-    # working directory's `.env` into os.environ. fabri resolves API keys
-    # explicitly from configured env vars and never auto-loaded `.env` before,
-    # so that import side effect would change key/provider resolution behind
-    # the user's back (and defeats tests that assert a key is absent). Snapshot
-    # the environment across the import and drop any keys the import introduced
-    # -- python-dotenv doesn't override existing vars, so this fully restores
-    # the pre-import environment while keeping litellm's cost map available.
-    _env_before = set(os.environ)
-    import litellm  # type: ignore[import-untyped]
-    for _added_key in set(os.environ) - _env_before:
-        del os.environ[_added_key]
-except ImportError:  # pragma: no cover - litellm should always be present, but
-    # pricing must degrade to the PRICING fallback rather than hard-fail if not.
-    litellm = None  # type: ignore[assignment]
+# Sentinel meaning "litellm has not been imported yet". After the first load
+# `_litellm` is either the module or None (not installed).
+_NOT_LOADED: Any = object()
+_litellm: Any = _NOT_LOADED
+_litellm_lock = threading.Lock()
+
+
+def _load_litellm() -> Any:
+    """Import litellm on first use and cache it. Returns None if it is missing."""
+    global _litellm
+    if _litellm is not _NOT_LOADED:
+        return _litellm
+    with _litellm_lock:
+        if _litellm is not _NOT_LOADED:
+            return _litellm
+        try:
+            # litellm calls `load_dotenv()` at import time, which silently pulls
+            # the working directory's `.env` into os.environ. fabri resolves API
+            # keys explicitly from configured env vars and never auto-loaded
+            # `.env` before, so that import side effect would change key and
+            # provider resolution behind the user's back (and defeats tests that
+            # assert a key is absent). Snapshot the environment across the import
+            # and drop any keys the import introduced. python-dotenv doesn't
+            # override existing vars, so this fully restores the pre-import
+            # environment while keeping litellm's cost map available.
+            env_before = set(os.environ)
+            import litellm  # type: ignore[import-untyped]
+
+            for added_key in set(os.environ) - env_before:
+                del os.environ[added_key]
+            _litellm = litellm
+        except ImportError:  # pragma: no cover - litellm should always be present,
+            # but pricing must degrade to the PRICING fallback rather than fail.
+            _litellm = None
+        return _litellm
+
 
 _PER_MTOK = 1_000_000.0
 
@@ -140,6 +170,53 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+# Exact-id snapshot of what `_litellm_rates_for` returns with the pinned litellm
+# (1.92.0), in $/MTok. It exists only so the common case prices without importing
+# litellm; it must equal litellm's answer, never override it. Regenerate it from
+# litellm when bumping litellm (tests/test_import_weight.py checks it).
+_LITELLM_SNAPSHOT: dict[str, tuple[float, float]] = {
+    "claude-fable-5": (10.0, 50.0),
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-fable-5-2": (8.0, 40.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-haiku-5-5": (0.1, 0.5),
+    "claude-opus-4-5": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "gemini-2.5-flash": (0.3, 2.5),
+    "gemini-2.5-flash-lite": (0.1, 0.4),
+    "gemini-2.5-pro": (1.25, 10.0),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.6),
+    "gpt-5": (1.25, 10.0),
+    "gpt-5-mini": (0.25, 2.0),
+    "gpt-5-nano": (0.05, 0.4),
+    "gpt-5-pro": (15.0, 120.0),
+    "gpt-5.1": (1.25, 10.0),
+    "gpt-5.2": (1.75, 14.0),
+    "gpt-5.2-pro": (21.0, 168.0),
+    "gpt-5.4": (2.5, 15.0),
+    "gpt-5.4-mini": (0.75, 4.5),
+    "gpt-5.4-nano": (0.2, 1.25),
+    "gpt-5.4-pro": (30.0, 180.0),
+    "gpt-5.5": (5.0, 30.0),
+    "gpt-5.5-pro": (30.0, 180.0),
+    "gpt-5.6": (4.0, 20.0),
+    "gpt-5.6-luna": (0.2, 1.2),
+    "gpt-5.6-sol": (4.0, 20.0),
+    "gpt-5.6-terra": (2.0, 12.0),
+    "moonshot.kimi-k2-thinking": (0.6, 2.5),
+    "moonshotai.kimi-k2.5": (0.6, 3.0),
+}
+
+
 def _best_prefix_key(model: str, keys) -> str | None:
     """Longest key in `keys` that `model` starts with, or None.
 
@@ -162,6 +239,7 @@ def _litellm_rates_for(model: str) -> tuple[float, float] | None:
     against litellm's own keys resolves date-suffixed ids the same way the
     PRICING fallback does.
     """
+    litellm = _load_litellm()
     if litellm is None:
         return None
     cost_map = getattr(litellm, "model_cost", None)
@@ -181,6 +259,9 @@ def _litellm_rates_for(model: str) -> tuple[float, float] | None:
 def _rates_for(model: str | None) -> tuple[float, float] | None:
     if not model:
         return None
+    snapshot_rates = _LITELLM_SNAPSHOT.get(model)
+    if snapshot_rates is not None:
+        return snapshot_rates
     litellm_rates = _litellm_rates_for(model)
     if litellm_rates is not None:
         return litellm_rates

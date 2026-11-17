@@ -87,8 +87,11 @@ it provably reads:
 - with a `tool_scope`: the scope gives it read tools only, judged against the
   parent's registry (`read_only`, or names the parent knows as read-class);
 - without a scope: its child config loads, every tool it builds is
-  read-class, and it has no spawn tool, no `tools.agents[]`, no MCP servers
-  and no `tools.sources`.
+  read-class, and it has no spawn tool, no `tools.agents[]` and no MCP
+  servers. `tools.sources` is allowed only when every entry is a
+  `kind: python` source that declares `approval: read` (a python source
+  without `approval` builds as `write`). Other source kinds always make it a
+  writer.
 
 Every other spawn is a writer: a config that fails to load, a malformed
 scope, an unknown tool, or any tool that writes or reaches the network. The
@@ -100,6 +103,13 @@ added to its call before it runs. The check is cached by config path, mtime
 and size, so it can go stale (a write tool added to the manifest dir, or a
 config swapped in place). The added scope means the child is narrowed to read
 tools at spawn time whatever its config says by then.
+
+The same rule covers `tools.agents[]` specialists when `tools.parallel_agents`
+is on. Their same-turn calls form one implicit group. A specialist is a reader
+only when its own child config passes the unscoped check above; a reader gets
+`tool_scope: ["read_only"]` in its input, which the runner applies the way it
+applies `--tool-scope`. A runner given a scope both ways refuses to start. Two
+specialists that can write never run at the same time.
 
 `examples/02-parallel-fanout` keeps fanning out: its `worker.yaml` only has
 `read_file`, `list_dir` and `grep`. A child config with `write_file`, `bash`,

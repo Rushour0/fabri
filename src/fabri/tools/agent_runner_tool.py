@@ -130,12 +130,27 @@ def main() -> int:
     # everything above an inherited ceiling, and pass what is left down as
     # the ceiling for this child's own children (spawned or static). The
     # registry keeps its approver, so the approval gate holds for what's left.
+    # A tools.agents[] specialist has no --tool-scope; the parent's dispatcher
+    # pins a reader with a tool_scope in the input instead. Both at once is
+    # refused rather than guessing which one wins.
     scope = None
+    input_scope = args.get("tool_scope") if isinstance(args, dict) else None
+    if cli_args.tool_scope is not None and input_scope is not None:
+        print(json.dumps({"error": "tool_scope given both as --tool-scope and in the input"}))
+        return 1
     if cli_args.tool_scope is not None:
         try:
             scope = normalize_scope(json.loads(cli_args.tool_scope))
         except (json.JSONDecodeError, ScopeError) as e:
             print(json.dumps({"error": f"--tool-scope is not a list of tool names: {e}"}))
+            return 1
+        if scope is None:
+            scope = []
+    elif input_scope is not None:
+        try:
+            scope = normalize_scope(input_scope)
+        except ScopeError as e:
+            print(json.dumps({"error": f"input tool_scope is not a list of tool names: {e}"}))
             return 1
         if scope is None:
             scope = []

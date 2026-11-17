@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import math
@@ -62,11 +63,10 @@ def _log_embeddings_disabled() -> None:
         _embeddings_disabled_logged = True
 
 # Optional rank_bm25 for Qdrant client-side BM25 (no-op when not installed).
-try:
-    from rank_bm25 import BM25Okapi as _BM25Okapi  # type: ignore[import-not-found]
-    _HAS_RANK_BM25 = True
-except ImportError:
-    _HAS_RANK_BM25 = False
+# Only probe for it here: importing it pulls in numpy, which every fabri
+# process would otherwise pay for even on the sqlite backend. The import
+# happens in _qdrant_bm25, the one place that uses it.
+_HAS_RANK_BM25 = importlib.util.find_spec("rank_bm25") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +324,10 @@ def _qdrant_bm25(
     doesn't expand it — so the vector search still drives candidate recall."""
     if not pool or not _HAS_RANK_BM25:
         return []
+    from rank_bm25 import BM25Okapi  # type: ignore[import-not-found]
+
     corpus = [entry.text.lower().split() for entry, _ in pool]
-    bm25 = _BM25Okapi(corpus)
+    bm25 = BM25Okapi(corpus)
     query_tokens = text.lower().split()
     raw_scores = bm25.get_scores(query_tokens)
     ranked = sorted(

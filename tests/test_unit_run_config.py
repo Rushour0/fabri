@@ -86,3 +86,15 @@ def test_repair_config_flows_through_and_is_inherited():
     assert rc.for_subagent(max_steps=3, max_cost_usd=0.1).repair == cfg["agent"]["repair"]
     # Default config leaves repair disabled (no behavior change).
     assert AgentRunConfig.from_config(_cfg()).repair["enabled"] is False
+
+
+def test_parallel_agents_flag_maps_to_agent_tool_names():
+    cfg = _cfg()
+    cfg["tools"]["agents"] = [{"name": "researcher"}, {"name": "writer"}]
+    assert AgentRunConfig.from_config(cfg).parallel_agent_tools == ()
+    cfg["tools"]["parallel_agents"] = True
+    rc = AgentRunConfig.from_config(cfg)
+    assert rc.parallel_agent_tools == ("researcher", "writer")
+    assert rc.as_kwargs()["parallel_agent_tools"] == ("researcher", "writer")
+    del cfg["tools"]["parallel_agents"]
+    assert AgentRunConfig.from_config(cfg).parallel_agent_tools == ()

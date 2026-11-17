@@ -8,7 +8,9 @@ that produced it.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -134,3 +136,7 @@ class RunOutcome:
     outcome: str | None = None
     total_cost_usd: float | None = None
     studio_url: str | None = None
+    structured_output: Any = None
+    usage: Mapping[str, Any] | None = None
+    cost: Mapping[str, Any] | None = None
+    error: str | None = None

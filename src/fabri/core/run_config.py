@@ -53,6 +53,7 @@ class AgentRunConfig:
     top_k: int = DEFAULT_TOP_K
     max_subquestions: int = DEFAULT_MAX_SUBQUESTIONS
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS
+    parallel_agent_tools: tuple[str, ...] = ()
     system_prompt: str = ""
     system_prompt_prefix: str = ""
     retrieved_guidelines_task_precedence: bool = True
@@ -72,6 +73,7 @@ class AgentRunConfig:
     error_strategy: str = "strict"
     response_fallback: object | None = None
     repair: dict | None = None
+    preflight: tuple = ()
     retrieval_config: RetrievalConfig = RetrievalConfig()
 
     @classmethod
@@ -91,6 +93,14 @@ class AgentRunConfig:
             max_subquestions=decompose.get("max_subquestions", cls.max_subquestions),
             max_parallel_spawns=tools.get(
                 "max_parallel_spawns", cls.max_parallel_spawns
+            ),
+            parallel_agent_tools=(
+                tuple(
+                    e["name"] for e in tools.get("agents") or []
+                    if isinstance(e, dict) and e.get("name")
+                )
+                if tools.get("parallel_agents")
+                else ()
             ),
             system_prompt=agent.get("system_prompt", ""),
             system_prompt_prefix=agent.get("system_prompt_prefix", ""),
@@ -114,6 +124,7 @@ class AgentRunConfig:
             error_strategy=agent.get("error_strategy", cls.error_strategy),
             response_fallback=agent.get("response_fallback"),
             repair=agent.get("repair"),
+            preflight=tuple(agent.get("preflight") or ()),
             retrieval_config=RetrievalConfig.from_mem_cfg(mem),
         )
 
@@ -121,7 +132,8 @@ class AgentRunConfig:
         """A copy with the child's budget swapped in (agent.subagent.* overrides).
         Everything else — planner, retrieval, prompts — is inherited so a child
         orchestrates the same way the parent does."""
-        return replace(self, max_steps=max_steps, max_cost_usd=max_cost_usd)
+        # A child never repeats the parent's preflight calls.
+        return replace(self, max_steps=max_steps, max_cost_usd=max_cost_usd, preflight=())
 
     def as_kwargs(self) -> dict:
         """The keyword arguments `run_agent` accepts for these knobs. The caller
@@ -132,6 +144,7 @@ class AgentRunConfig:
             "top_k": self.top_k,
             "max_subquestions": self.max_subquestions,
             "max_parallel_spawns": self.max_parallel_spawns,
+            "parallel_agent_tools": self.parallel_agent_tools,
             "system_prompt": self.system_prompt,
             "system_prompt_prefix": self.system_prompt_prefix,
             "retrieved_guidelines_task_precedence": self.retrieved_guidelines_task_precedence,
@@ -150,5 +163,6 @@ class AgentRunConfig:
             "error_strategy": self.error_strategy,
             "response_fallback": self.response_fallback,
             "repair": self.repair,
+            "preflight": self.preflight,
             "retrieval_config": self.retrieval_config,
         }

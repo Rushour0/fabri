@@ -1,9 +1,37 @@
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
+"""Qdrant-backed memory store.
+
+qdrant_client is imported lazily. It costs a few hundred milliseconds and tens
+of MB per process, and most callers import this module only for
+COLLECTION_NAME or the QdrantMemoryStore name while running on the sqlite
+backend, so nothing here touches qdrant_client until a store is built.
+"""
+
+from __future__ import annotations
+
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 from fabri.memory.embeddings import EMBEDDING_DIM, embed
 from fabri.memory.schema import EMBEDDING_MODEL_VERSION, MemoryEntry
 from fabri.memory.scopes import MemoryScope, check_collection_access, guarded
+
+if TYPE_CHECKING:
+    from qdrant_client.http import models as qmodels
+else:
+
+    class _LazyQdrantModels:
+        """Stand-in for `qdrant_client.http.models` that imports it on first use."""
+
+        _module: ModuleType | None = None
+
+        def __getattr__(self, name: str) -> Any:
+            if _LazyQdrantModels._module is None:
+                from qdrant_client.http import models
+
+                _LazyQdrantModels._module = models
+            return getattr(_LazyQdrantModels._module, name)
+
+    qmodels = _LazyQdrantModels()
 
 COLLECTION_NAME = "fabri"
 
@@ -19,10 +47,12 @@ class QdrantMemoryStore:
         self.collection = collection
         self.bound_scope = bound_scope
         check_collection_access(collection, bound_scope)
+        from qdrant_client import QdrantClient
+
         self.client = QdrantClient(url=url)
         self._ensure_collection()
 
-    def sibling(self, collection: str, bound_scope: MemoryScope | None = None) -> "QdrantMemoryStore":
+    def sibling(self, collection: str, bound_scope: MemoryScope | None = None) -> QdrantMemoryStore:
         """Another collection on the same Qdrant instance."""
         return QdrantMemoryStore(url=self.url, collection=collection, bound_scope=bound_scope)
 

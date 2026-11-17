@@ -17,6 +17,7 @@ The two backends are interchangeable from the agent loop's perspective —
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re as _re
 import sqlite3
@@ -27,11 +28,9 @@ from fabri.memory.embeddings import EMBEDDING_DIM, embed
 from fabri.memory.schema import EMBEDDING_MODEL_VERSION, MemoryEntry
 from fabri.memory.scopes import MemoryScope, check_collection_access, guarded
 
-try:
-    import sqlite_vec  # type: ignore[import-not-found]
-    _HAS_SQLITE_VEC = True
-except ImportError:
-    _HAS_SQLITE_VEC = False
+# Only probe for sqlite_vec here. Importing it pulls in numpy, so the import
+# waits until a store actually opens a connection.
+_HAS_SQLITE_VEC = importlib.util.find_spec("sqlite_vec") is not None
 
 
 _INSTALL_HINT = (
@@ -100,6 +99,8 @@ class SqliteMemoryStore:
         self.conn = sqlite3.connect(str(path))
         # Enable sqlite-vec extension on this connection.
         self.conn.enable_load_extension(True)
+        import sqlite_vec  # type: ignore[import-not-found]
+
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
         self._ensure_schema()

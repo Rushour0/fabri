@@ -22,3 +22,14 @@ When a crew asks a question, Fabri posts it in the run's Slack thread; reply in
 that thread to answer it. For Studio (non-mention) runs, the configured owned
 channel receives a new run thread when the first question is asked. Posting a
 non-mention run's final result to that thread is a later follow-up.
+
+## Embedding surface runs
+
+A Python host can pass `run_dispatcher` to `FabriService` to put a surface run
+on its own queue. The worker can call `run_and_deliver` with its overrides when
+it is ready to start the run. The surface cost limit is applied after those
+overrides, and results include structured output, usage, cost and errors.
+
+Pass `run_env_resolver` to choose provider environment values for each run on
+the server. It receives `session_id`, `catalog_ref`, `user_id`, `origin` and
+`task`. Client requests still cannot set provider keys.

@@ -214,9 +214,11 @@ def _run_single_attempt(
     error_strategy: str = "strict",
     response_fallback: object | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
+    parallel_agent_tools: tuple[str, ...] = (),
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
     memory_scope: "MemoryScope | ScopedMemory | None" = None,
+    preflight: tuple = (),
 ) -> dict:
     # result_format: tool results -> model context. toon saves input tokens.
     # output_format: the format the model is asked to produce structured
@@ -767,6 +769,7 @@ def _run_single_attempt(
                         on_budget_check=_budget_breached,
                         on_llm_usage=_accumulate,
                         max_parallel_spawns=max_parallel_spawns,
+                        parallel_agent_tools=parallel_agent_tools,
                         dispatch_stats=dispatch_stats,
                     )
                     item_had_failure |= step_had_failure
@@ -946,6 +949,50 @@ def _run_single_attempt(
     else:
         plan_engaged = False
 
+    def _run_preflight(item_messages: list[dict]) -> tuple[bool, int, int]:
+        """Dispatch the configured agent.preflight turns before the first model
+        call. Each turn goes through _dispatch_tool_calls exactly like a model
+        turn, so events, parallel groups, cost rollup and budget checks match.
+        Returns (had_failure, total_calls, failed_calls)."""
+        had_failure, total, failed = False, 0, 0
+        for turn_index, turn in enumerate(preflight or ()):
+            calls = [
+                ToolCall(
+                    name=str(entry["tool"]),
+                    args=_fill_preflight_input(entry.get("input") or {}, task),
+                    id=f"toolu_preflight_{turn_index}_{call_index}",
+                )
+                for call_index, entry in enumerate(turn or ())
+                if isinstance(entry, dict) and entry.get("tool") in tools.tools
+            ]
+            if not calls:
+                continue
+            if _budget_breached():
+                break
+            log_event(session_id, {
+                "type": "preflight",
+                "turn": turn_index,
+                "tools": [call.name for call in calls],
+            })
+            stats: dict[str, int] = {}
+            had_failure |= _dispatch_tool_calls(
+                calls, tools, decompose_llm or llm, task, max_subquestions,
+                session_id, item_messages, -1, result_format, output_format,
+                on_subagent_cost=_accumulate_subagent_cost,
+                on_subagent_finished=_on_subagent_finished,
+                on_budget_check=_budget_breached,
+                on_llm_usage=_accumulate,
+                max_parallel_spawns=max_parallel_spawns,
+                parallel_agent_tools=parallel_agent_tools,
+                dispatch_stats=stats,
+            )
+            total += stats.get("total_calls", 0)
+            failed += stats.get("failed_calls", 0)
+        return had_failure, total, failed
+
+    if plan_engaged and preflight:
+        logger.warning("agent.preflight is set but the planner engaged; preflight is skipped")
+
     if not plan_engaged:
         # Non-planner single loop: the whole run is one "item" against the
         # original task. It shares `_run_step_loop` with the planner executor
@@ -953,6 +1000,7 @@ def _run_single_attempt(
         # one of the two paths (they used to be copy-pasted and had already
         # diverged on per-step cost telemetry).
         messages = [{"role": "user", "content": task}]
+        pre_had_failure, pre_total, pre_failed = _run_preflight(messages)
         (
             item_final, item_success, item_failed, item_error, item_had_failure,
             item_total_tool_calls, item_failed_tool_calls, used,
@@ -960,9 +1008,9 @@ def _run_single_attempt(
             messages, task, max_steps, step_offset=0
         )
         step_count = used
-        had_tool_failure |= item_had_failure
-        total_tool_calls += item_total_tool_calls
-        failed_tool_calls += item_failed_tool_calls
+        had_tool_failure |= item_had_failure or pre_had_failure
+        total_tool_calls += item_total_tool_calls + pre_total
+        failed_tool_calls += item_failed_tool_calls + pre_failed
         if item_failed:
             # LLMError or budget breach; _run_step_loop already logged the
             # ERROR / budget_exceeded + STEP_FINISHED events.
@@ -1261,9 +1309,11 @@ def run_agent(
     response_fallback: object | None = None,
     repair: dict | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
+    parallel_agent_tools: tuple[str, ...] = (),
     retrieval_config: RetrievalConfig | None = None,
     retrieved_guidelines_task_precedence: bool = True,
     memory_scope: "MemoryScope | ScopedMemory | None" = None,
+    preflight: tuple = (),
 ) -> dict:
     """Run the agent on `task` and return the run result dict.
 
@@ -1302,9 +1352,11 @@ def run_agent(
         error_strategy=error_strategy,
         response_fallback=response_fallback,
         max_parallel_spawns=max_parallel_spawns,
+        parallel_agent_tools=parallel_agent_tools,
         retrieval_config=retrieval_config,
         retrieved_guidelines_task_precedence=retrieved_guidelines_task_precedence,
         memory_scope=memory_scope,
+        preflight=preflight,
     )
     result = _run_single_attempt(task, **base_kwargs)
     if not (repair and repair.get("enabled")):
@@ -1312,17 +1364,37 @@ def run_agent(
     return _run_with_repair(task, result, repair, base_kwargs)
 
 
+def _fill_preflight_input(value: object, task: str) -> object:
+    """Return a preflight input with "{task}" in every string replaced by the
+    run's task. Other values are copied as they are."""
+    if isinstance(value, dict):
+        return {key: _fill_preflight_input(item, task) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fill_preflight_input(item, task) for item in value]
+    if isinstance(value, str):
+        return value.replace("{task}", task)
+    return value
+
+
 SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent"
+# Implicit parallel_group for same-turn tools.agents calls (tools.parallel_agents).
+AGENT_TOOLS_PARALLEL_GROUP = "agents"
 
 
-def _index_parallel_groups(calls: list[ToolCall]) -> dict[str, list[int]]:
+def _index_parallel_groups(
+    calls: list[ToolCall], parallel_agent_tools: tuple[str, ...] = (),
+) -> dict[str, list[int]]:
     """Group spawn_subagent call indices by their `parallel_group` arg.
-    Only spawn_subagent participates; other tools stay serial. A group with
-    one entry is still tagged 'parallel' so traces get the tag uniformly.
+    Calls to a tool named in `parallel_agent_tools` (tools.agents specialists,
+    opt-in via `tools.parallel_agents`) join one implicit group so they fan
+    out too. Other tools stay serial. A group with one entry is still tagged
+    'parallel' so traces get the tag uniformly.
     """
     groups: dict[str, list[int]] = {}
     for i, call in enumerate(calls):
         if call.name != SPAWN_SUBAGENT_TOOL_NAME:
+            if call.name in parallel_agent_tools:
+                groups.setdefault(AGENT_TOOLS_PARALLEL_GROUP, []).append(i)
             continue
         group = call.args.get("parallel_group")
         if not group:
@@ -1344,9 +1416,14 @@ def _one_writer_per_group(
     unscoped spawn classed a reader gets ``tool_scope: ["read_only"]`` added
     to its arguments, so a config or manifest dir that changed after the
     check cannot hand it write tools. The first writer in a group stays;
-    later writers leave the group and run serially before it. See
-    docs/specialists.md."""
-    from fabri.tools.tool_scope import spawn_is_reader
+    later writers leave the group and run serially before it.
+
+    Calls to ``tools.agents[]`` specialists (the implicit group from
+    ``tools.parallel_agents``) follow the same rule: a specialist is a reader
+    only when its own child config is provably read-only, and a reader gets
+    ``tool_scope: ["read_only"]`` in its input, which the runner applies.
+    See docs/specialists.md."""
+    from fabri.tools.tool_scope import agent_tool_is_reader, spawn_is_reader
 
     registry_tools = getattr(tools, "tools", {})
     out: dict[str, list[int]] = {}
@@ -1354,7 +1431,10 @@ def _one_writer_per_group(
         kept: list[int] = []
         writer_seen = False
         for i in idxs:
-            reader = spawn_is_reader(calls[i].args, registry_tools)
+            if calls[i].name == SPAWN_SUBAGENT_TOOL_NAME:
+                reader = spawn_is_reader(calls[i].args, registry_tools)
+            else:
+                reader = agent_tool_is_reader(calls[i].name, registry_tools)
             if reader and "tool_scope" not in calls[i].args:
                 # Classed a reader from its config. Pin that at spawn time:
                 # the child is narrowed to read tools whatever its config or
@@ -1386,6 +1466,7 @@ def _dispatch_tool_calls(
     on_budget_check: Callable[[], bool] | None = None,
     on_llm_usage: Callable[[LLMUsage], None] | None = None,
     max_parallel_spawns: int = DEFAULT_MAX_PARALLEL_SPAWNS,
+    parallel_agent_tools: tuple[str, ...] = (),
     dispatch_stats: dict[str, int] | None = None,
 ) -> bool:
     """Run every tool call the model emitted this turn (a model may emit
@@ -1411,8 +1492,12 @@ def _dispatch_tool_calls(
     # spawn_subagent calls sharing a `parallel_group` arg fan out via
     # threads; other tool kinds stay serial — only sub-agent spawns are
     # slow enough to justify the thread-pool overhead.
-    parallel_indices = _one_writer_per_group(_index_parallel_groups(calls), calls, tools)
-    parallel_index_set = {i for idxs in parallel_indices.values() for i in idxs}
+    # The one-writer rule covers every group, the implicit tools.agents group
+    # included: two specialists that can write never run at the same time.
+    parallel_indices = _one_writer_per_group(
+        _index_parallel_groups(calls, parallel_agent_tools), calls, tools)
+    group_of = {i: g for g, idxs in parallel_indices.items() for i in idxs}
+    parallel_index_set = set(group_of)
 
     def _dispatch_one(call: ToolCall) -> dict:
         if call.name == DECOMPOSE_TOOL_NAME:
@@ -1429,6 +1514,10 @@ def _dispatch_tool_calls(
         if (call.name == SPAWN_SUBAGENT_TOOL_NAME and on_budget_check is not None
                 and on_budget_check()):
             return tool_error("cost budget exceeded; refusing to spawn sub-agent")
+        # Same tripwire for tools.agents specialists fanned out in parallel.
+        if (call.name in parallel_agent_tools and on_budget_check is not None
+                and on_budget_check()):
+            return tool_error(f"cost budget exceeded; refusing to run agent tool {call.name}")
         return tools.invoke(call.name, call.args)
 
     results: dict[int, dict] = {}
@@ -1601,8 +1690,8 @@ def _dispatch_tool_calls(
             if canonical != call.name or aliases:
                 event["canonical_name"] = canonical
                 event["aliases"] = aliases
-        if i in parallel_index_set and call.args.get("parallel_group"):
-            event["parallel_group"] = call.args["parallel_group"]
+        if i in group_of:
+            event["parallel_group"] = group_of[i]
         log_event(session_id, event)
 
         # The trace keeps the raw dict; only the copy entering the model's context

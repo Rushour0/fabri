@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import deepcopy
 from collections import OrderedDict
 from collections.abc import Mapping
 from threading import Lock, Thread
 from typing import Any
 
+from fabri.service.binding import merge_overrides
 from fabri.service.surfaces import quota
 from fabri.service.surfaces.base import SurfaceAdapter
 from fabri.service.surfaces.types import (
@@ -188,8 +190,9 @@ def deliver_answer(service: Any, target: ReplyTarget, text: str) -> bool:
 
 
 def _outcome_from_result(result: Mapping, session_id: str) -> RunOutcome:
-    cost = result.get("cost") or {}
+    cost = result.get("cost")
     total = cost.get("total_cost_usd") if isinstance(cost, Mapping) else None
+    usage = result.get("usage")
     return RunOutcome(
         session_id=session_id,
         success=bool(result.get("success")),
@@ -198,27 +201,38 @@ def _outcome_from_result(result: Mapping, session_id: str) -> RunOutcome:
         ),
         outcome=result.get("outcome"),
         total_cost_usd=total,
+        structured_output=result.get("structured_output"),
+        usage=usage if isinstance(usage, Mapping) else None,
+        cost=cost if isinstance(cost, Mapping) else None,
+        error=str(result.get("error")) if result.get("error") else None,
     )
 
 
-def _run_and_deliver(
+def run_and_deliver(
     adapter: SurfaceAdapter,
     service: Any,
     command: Command,
     target: ReplyTarget,
+    *,
+    overrides: Mapping[str, Any] | None = None,
 ) -> None:
     adapter.deliver_ack(target, "On it...")
     try:
         # Whatever the entry declares, a run started by a message from a
         # connected workspace spends no more than the surface cap.
-        overrides = quota.cost_clamp(service, command.catalog_ref)
+        run_overrides = deepcopy(dict(overrides)) if overrides is not None else {}
+        run_overrides = merge_overrides(
+            run_overrides, quota.cost_clamp(service, command.catalog_ref)
+        )
         if not adapter.capabilities().hitl:
             # No channel to ask a question on: a run that stops to ask would
             # hang until the process exits, so it must not be able to.
-            overrides["tools"] = {"ask_user": {"enabled": False}}
+            run_overrides = merge_overrides(
+                run_overrides, {"tools": {"ask_user": {"enabled": False}}}
+            )
         session_id = service.submit(
             command.task,
-            overrides,
+            run_overrides,
             catalog_ref=command.catalog_ref,
             origin=target.as_dict(),
         )
@@ -231,6 +245,15 @@ def _run_and_deliver(
             target,
             "I couldn't complete that run. Check the fabri server logs for details.",
         )
+
+
+def _run_and_deliver(
+    adapter: SurfaceAdapter,
+    service: Any,
+    command: Command,
+    target: ReplyTarget,
+) -> None:
+    run_and_deliver(adapter, service, command, target)
 
 
 def dispatch(
@@ -290,6 +313,18 @@ def dispatch(
     verdict = quota.check(service, (adapter.name, target.tenant.tenant_id))
     if not verdict.allowed:
         adapter.deliver_error(target, verdict.reason)
+        return _OK
+
+    dispatcher = getattr(service, "run_dispatcher", None)
+    if dispatcher is not None:
+        try:
+            dispatcher(adapter, command, target)
+        except Exception:
+            _LOG.exception("surface dispatcher failed", extra={"surface": adapter.name})
+            adapter.deliver_error(
+                target,
+                "I couldn't queue that run. Check the fabri server logs for details.",
+            )
         return _OK
 
     if run_in_background:

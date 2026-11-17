@@ -6,6 +6,9 @@ that ships.
 
 ## Unreleased
 
+- Embedders can resolve a run's server-side environment, queue surface runs
+  with a custom dispatcher, and receive structured output, usage, cost and
+  errors in surface results.
 - Behaviour change: stdio MCP servers no longer inherit the whole parent
   environment. By default a server gets only an allowlist of host variables
   (`PATH`, `HOME`, locale, proxy and CA settings, and selected Docker

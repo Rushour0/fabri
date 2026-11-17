@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from threading import Lock
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -69,6 +70,10 @@ _LOG = logging.getLogger("fabri")
 # A host may swap how the agent is launched (tests point this at a fake script).
 # Signature: (task, config_path, session_id, fabri_home) -> argv.
 CommandBuilder = Callable[[str, Path, str, Path], Sequence[str]]
+
+if TYPE_CHECKING:
+    from fabri.service.surfaces.base import SurfaceAdapter
+    from fabri.service.surfaces.types import Command, ReplyTarget
 
 
 def _api_key_envs(config: Mapping | None) -> tuple[str, ...]:
@@ -172,6 +177,10 @@ class FabriService:
         auth_config: optional service config file whose ``auth:`` section
             replaces the template's, so login settings stay out of run configs.
             Errors in it raise instead of turning auth off.
+        run_env_resolver: optional server-side callback that chooses provider
+            keys for each run. Client requests still cannot set provider keys.
+        run_dispatcher: optional callback that queues a surface run instead of
+            starting it on the request process.
     """
 
     def __init__(
@@ -184,9 +193,13 @@ class FabriService:
         catalog: Mapping[str, dict] | None = None,
         auth_config: str | Path | None = None,
         credential_broker: CredentialBroker | None = None,
+        run_env_resolver: Callable[[Mapping[str, Any]], Mapping[str, str]] | None = None,
+        run_dispatcher: Callable[[SurfaceAdapter, Command, ReplyTarget], None] | None = None,
     ) -> None:
         self.template_config = template_config
         self.catalog = catalog
+        self.run_env_resolver = run_env_resolver
+        self.run_dispatcher = run_dispatcher
         try:
             loaded_config = load_config(
                 str(self.template_config) if self.template_config else None
@@ -396,6 +409,24 @@ class FabriService:
                     "OS user as fabri serve, so it could read installs.db and the service's memory. "
                     f"For local development only, set {ALLOW_SHARED_UID_ENV}=1 on the service"
                 )
+        if self.run_env_resolver is not None:
+            try:
+                resolved_env = self.run_env_resolver(
+                    {
+                        "session_id": session_id,
+                        "catalog_ref": catalog_ref,
+                        "user_id": user_id,
+                        "origin": origin,
+                        "task": task,
+                    }
+                )
+                for key, value in resolved_env.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        raise TypeError("run_env_resolver keys and values must be strings")
+                run_env.update(resolved_env)
+            except Exception:
+                self._abandon_submit(session_id, run_home)
+                raise
         try:
             handle = launch_run(
                 task,
