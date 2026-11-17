@@ -458,3 +458,23 @@ def test_registry_rejects_a_nameless_adapter():
 
     with pytest.raises(ValueError):
         SurfaceRegistry().register(Nameless())
+
+
+def test_injected_submitter_wins_over_service_run_dispatcher():
+    adapter, service = FakeAdapter(), FakeService()
+    dispatched, submitted = [], []
+    service.run_dispatcher = lambda *args: dispatched.append(args)
+
+    status, _, _ = pipeline.dispatch(
+        adapter,
+        service,
+        json.dumps({"id": "d1", "kind": "command", "tenant": "T1", "room": "R1",
+                    "text": "run triage the login bug"}).encode(),
+        {"X-Fake-Signature": "s3cret"},
+        submitter=lambda got_adapter, got_service, decision: submitted.append(decision),
+    )
+
+    assert status == 200
+    assert len(submitted) == 1
+    assert dispatched == []
+    assert service.submissions == []

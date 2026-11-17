@@ -90,10 +90,18 @@ class Command:
 
 @dataclass(frozen=True)
 class Dispatch:
-    """Run something."""
+    """Run something.
+
+    ``meta`` carries what triggered the run (``trigger``: "mention" or
+    "channel_post", plus ids such as ``event_id``, ``user``, ``ts``,
+    ``channel``) for a host that queues runs elsewhere. It is left out of
+    equality so two dispatches of the same command to the same place compare
+    equal whatever the adapter recorded about them.
+    """
 
     command: Command
     target: ReplyTarget
+    meta: dict = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)
@@ -102,6 +110,37 @@ class HitlAnswer:
 
     target: ReplyTarget
     text: str
+
+
+@dataclass(frozen=True)
+class Feedback:
+    """A human replied in the thread of a run that a watched channel started.
+
+    The pipeline first offers it to a pending question (an open question wins,
+    as with :class:`HitlAnswer`), and otherwise hands it to the run submitter.
+    """
+
+    target: ReplyTarget
+    text: str
+    user: str | None = None
+    ts: str | None = None
+    meta: dict = field(default_factory=dict, compare=False)
+
+
+@dataclass(frozen=True)
+class Interaction:
+    """A human clicked a button (or changed an input) on a message we posted.
+
+    ``actions`` and ``state_values`` are the surface's own shapes, passed
+    through untouched. ``target`` is the thread the message lives in.
+    """
+
+    target: ReplyTarget
+    user: str | None = None
+    actions: list = field(default_factory=list)
+    state_values: dict = field(default_factory=dict)
+    message_ts: str | None = None
+    meta: dict = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)
@@ -123,7 +162,9 @@ class ShortCircuit:
     headers: dict = field(default_factory=dict)
 
 
-InboundDecision = Dispatch | HitlAnswer | Handled | Ignore | ShortCircuit
+InboundDecision = (
+    Dispatch | HitlAnswer | Feedback | Interaction | Handled | Ignore | ShortCircuit
+)
 
 
 @dataclass(frozen=True)
