@@ -87,8 +87,11 @@ it provably reads:
 - with a `tool_scope`: the scope gives it read tools only, judged against the
   parent's registry (`read_only`, or names the parent knows as read-class);
 - without a scope: its child config loads, every tool it builds is
-  read-class, and it has no spawn tool, no `tools.agents[]`, no MCP servers
-  and no `tools.sources`.
+  read-class, and it has no spawn tool, no `tools.agents[]` and no MCP
+  servers. `tools.sources` is allowed only when every entry is a
+  `kind: python` source that declares `approval: read` (a python source
+  without `approval` builds as `write`). Other source kinds always make it a
+  writer.
 
 Every other spawn is a writer: a config that fails to load, a malformed
 scope, an unknown tool, or any tool that writes or reaches the network. The

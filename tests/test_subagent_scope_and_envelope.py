@@ -29,6 +29,7 @@ from fabri.tools.tool_scope import (
     is_read_tool,
     narrow_registry,
     normalize_scope,
+    child_config_is_read_only,
     scope_is_read_only,
 )
 
@@ -317,6 +318,71 @@ def test_unscoped_child_with_a_write_tool_serializes(tmp_path):
     # The fanout planner can spawn and write: a writer too.
     planner = FANOUT / "planner.yaml"
     assert _groups(reg, _unscoped("g", planner), _unscoped("g", planner)) == {"g": [0]}
+
+
+_PY_SOURCE = """
+    - kind: python
+      name: {name}
+      description: d
+      callable: "json:dumps"
+      input_schema: {{type: object, properties: {{}}}}
+"""
+
+
+def _sources_cfg(tmp_path, *entries, builtins="[]"):
+    names = [n for n, _ in entries]
+    body = f"tools:\n  manifest_dir: {builtins}\n  enabled: [{', '.join(names)}]\n  sandbox_root: .\n  sources:\n"
+    for name, approval in entries:
+        entry = textwrap.indent(textwrap.dedent(_PY_SOURCE.format(name=name)).strip("\n"), "    ")
+        if approval is not None:
+            entry += f"\n      approval: {approval}"
+        body += entry + "\n"
+    return _child_cfg(tmp_path, "src.yaml", body)
+
+
+def test_child_with_only_declared_read_python_sources_is_a_reader(tmp_path):
+    cfg = _sources_cfg(tmp_path, ("read_diff", "read"), ("search_code", "read"))
+    assert child_config_is_read_only(str(cfg))
+    reg = _registry(_manifest("spawn_subagent"))
+    assert _groups(reg, *[_unscoped("g", cfg) for _ in range(3)]) == {"g": [0, 1, 2]}
+
+
+@pytest.mark.parametrize("second", [None, "write", "send"])
+def test_one_undeclared_or_writing_python_source_makes_a_writer(tmp_path, second):
+    cfg = _sources_cfg(tmp_path, ("read_diff", "read"), ("post_comment", second))
+    assert not child_config_is_read_only(str(cfg))
+
+
+def test_declared_read_sources_with_a_write_builtin_is_a_writer(tmp_path):
+    cfg = _child_cfg(tmp_path, "mixed.yaml", """
+        tools:
+          manifest_dir: [builtin]
+          enabled: [read_file, write_file, read_diff]
+          sandbox_root: .
+          sources:
+            - kind: python
+              name: read_diff
+              description: d
+              callable: "json:dumps"
+              input_schema: {type: object, properties: {}}
+              approval: read
+    """)
+    assert not child_config_is_read_only(str(cfg))
+
+
+def test_non_python_source_is_a_writer_even_if_declared_read(tmp_path):
+    cfg = _child_cfg(tmp_path, "http.yaml", """
+        tools:
+          manifest_dir: []
+          sandbox_root: .
+          sources:
+            - kind: http
+              name: get_thing
+              description: d
+              url: https://example.com/x
+              approval: read
+    """)
+    assert not child_config_is_read_only(str(cfg))
 
 
 @pytest.mark.parametrize("body", [

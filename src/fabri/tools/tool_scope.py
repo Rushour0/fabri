@@ -196,10 +196,26 @@ def apply_child_scope(registry: "ToolRegistry", scope: list[str] | None,
 _CONFIG_READ_ONLY_CACHE: dict[tuple[str, int, int], bool] = {}
 
 
+def _source_declared_read(decl: object) -> bool:
+    """True when a ``tools.sources`` entry is a ``kind: python`` source whose
+    own ``approval`` is ``read``. A python source without ``approval`` builds
+    as ``write`` (sources._build_python), so leaving it out fails closed.
+    Every other kind is never a reader here: building MCP, HTTP or OpenAPI
+    sources has side effects, and their tools reach the network."""
+    if not isinstance(decl, Mapping) or decl.get("kind") != "python":
+        return False
+    approval = decl.get("approval")
+    if isinstance(approval, Mapping):
+        approval = approval.get(decl.get("name"))
+    return approval == "read"
+
+
 def child_config_is_read_only(config_path: object) -> bool:
     """True only when the child config at ``config_path`` loads and every tool
-    it builds is read-class, with no spawn tool, no ``tools.agents[]``, no
-    MCP servers and no ``tools.sources``. Anything else, including a load
+    it builds is read-class, with no spawn tool, no ``tools.agents[]`` and no
+    MCP servers. ``tools.sources`` is allowed only when every entry is a
+    python source that declares ``approval: read``; sources are judged from
+    their declarations and not built here. Anything else, including a load
     failure, is False. Results are cached by path, mtime and size."""
     if not isinstance(config_path, str) or not config_path:
         return False
@@ -218,9 +234,11 @@ def child_config_is_read_only(config_path: object) -> bool:
         from fabri.tools.registry import is_spawn_tool
 
         tools_cfg = load_config(str(path))["tools"]
-        if not (tools_cfg.get("agents") or tools_cfg.get("mcp_servers") or tools_cfg.get("sources")):
-            registry = build_tools(tools_cfg)
-            result = bool(registry.tools) and all(
+        sources = tools_cfg.get("sources") or []
+        if (not (tools_cfg.get("agents") or tools_cfg.get("mcp_servers"))
+                and isinstance(sources, list) and all(_source_declared_read(d) for d in sources)):
+            registry = build_tools({**tools_cfg, "sources": []})
+            result = bool(registry.tools or sources) and all(
                 is_read_tool(n, m) and not is_spawn_tool(n, m) for n, m in registry.tools.items())
     except Exception:  # noqa: BLE001 -- fail closed
         result = False
