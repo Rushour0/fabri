@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import tomllib
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -546,6 +546,7 @@ def _gate_agency_run(
     issue_text: str,
     session_id: str,
     timeout: float,
+    materialize_hook: Callable[[Path], None] | None = None,
 ) -> tuple[GateResult, Path]:
     destination = _stable_agency_dir(workspace, repo, identifier)
     _ensure_workspace_target(destination, workspace, gate="agency_run")
@@ -554,6 +555,8 @@ def _gate_agency_run(
         destination,
         str(checkout_dir),
     )
+    if materialize_hook is not None:
+        materialize_hook(materialized_config)
     argv = [
         "fabri",
         "--config",
@@ -612,14 +615,18 @@ def _agency_run_env(config: Path) -> dict[str, str]:
     other FABRI_CRED_* variable is removed.
     """
     if broker_mode():
-        return env_without_credentials(keep_broker=True)
-    try:
-        keep = subagent_credential_names(
-            config, actor=os.environ.get("FABRI_RUN_ACTOR") or None
-        )
-    except Exception:  # noqa: BLE001 -- an unreadable config passes no credentials
-        keep = frozenset()
-    return env_without_credentials(keep=keep)
+        env = env_without_credentials(keep_broker=True)
+    else:
+        try:
+            keep = subagent_credential_names(
+                config, actor=os.environ.get("FABRI_RUN_ACTOR") or None
+            )
+        except Exception:  # noqa: BLE001 -- an unreadable config passes no credentials
+            keep = frozenset()
+        env = env_without_credentials(keep=keep)
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "JIRA_API_TOKEN", "JIRA_EMAIL"):
+        env.pop(name, None)
+    return env
 
 
 def _gate_verified_tests(
@@ -675,6 +682,7 @@ def _gate_branch_push(
     commit_msg: str,
     github_auth: object | None,
     known_tokens: list[str],
+    force: bool = True,
 ) -> tuple[GateResult, str | None, str | None]:
     get_token = getattr(github_auth, "get_token", None)
     if not callable(get_token):
@@ -691,6 +699,7 @@ def _gate_branch_push(
         new_branch=branch_name,
         commit_msg=commit_msg,
         remote_url=remote_url,
+        force=force,
     )
     if pushed_branch is None:
         return (
@@ -729,13 +738,15 @@ def _gate_open_pr(
     branch_name: str,
     identifier: str,
     issue: Mapping[str, str],
+    body: str | None = None,
 ) -> tuple[GateResult, str]:
     provider = GitHubProvider(token)
     title = f"{identifier}: {issue['title']}"
-    body = (
-        f"Automated change for [{identifier}]({issue['url']}).\n\n"
-        "The authoritative repository test gate passed before this PR was opened."
-    )
+    if body is None:
+        body = (
+            f"Automated change for [{identifier}]({issue['url']}).\n\n"
+            "The authoritative repository test gate passed before this PR was opened."
+        )
     pr_url = provider.open_or_update_pr(
         repo,
         title,

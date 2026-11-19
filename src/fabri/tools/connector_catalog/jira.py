@@ -50,6 +50,7 @@ _ISSUE_KEY = r"(?:\{key\}|[A-Za-z][A-Za-z0-9_]*-[0-9]+|[0-9]+)"
 _PREFIX = rf"(?:/ex/jira/{_CLOUD_ID})?"
 READS = (
     ("GET", rf"{_PREFIX}/rest/api/3/issue/{_ISSUE_KEY}"),
+    ("GET", rf"{_PREFIX}/rest/api/3/issue/{_ISSUE_KEY}/changelog"),
     ("GET", rf"{_PREFIX}/rest/api/3/search/jql"),
     ("GET", rf"{_PREFIX}/rest/api/3/issue/{_ISSUE_KEY}/comment"),
     ("GET", rf"{_PREFIX}/rest/api/3/issue/{_ISSUE_KEY}/remotelink"),
@@ -161,6 +162,24 @@ def _sources(name: str, base: str, auth: dict[str, Any]) -> list[dict[str, Any]]
                     "nextPageToken": {"type": "string"},
                 },
                 "required": ["jql", "fields"],
+            },
+        },
+        {
+            "kind": "http",
+            "name": f"{name}_get_changelog",
+            "title": "Get Jira issue changelog",
+            "description": "Read the paged changelog for one Jira issue.",
+            "url": f"{base}/rest/api/3/issue/{{key}}/changelog",
+            "method": "GET",
+            "headers": auth,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "startAt": {"type": "integer"},
+                    "maxResults": {"type": "integer", "maximum": 100},
+                },
+                "required": ["key"],
             },
         },
         {

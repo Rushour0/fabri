@@ -182,11 +182,11 @@ def test_catalog_loads_jira_with_expected_oauth_spec():
     ],
     ids=["oauth", "api-token"],
 )
-def test_expand_builds_eight_tightened_sources(url, workspace, expected_header):
+def test_expand_builds_nine_tightened_sources(url, workspace, expected_header):
     expanded = connector_entry("jira", name="work", workspace=workspace, url=url)
-    assert len(expanded["sources"]) == 8
+    assert len(expanded["sources"]) == 9
     assert expanded["allow"] == [source["name"] for source in expanded["sources"]]
-    assert len(set(expanded["allow"])) == 8
+    assert len(set(expanded["allow"])) == 9
     for source in expanded["sources"]:
         assert source["approval_mode"] == "tighten" and source["catalog"] == "jira"
         assert source["headers"] == {"Authorization": expected_header}
@@ -223,6 +223,8 @@ def test_expand_refuses_unsupported_options(option):
 READ_PATHS = [
     ("get-template", "/rest/api/3/issue/{key}"),
     ("get-real", "/rest/api/3/issue/PROJ-12"),
+    ("changelog-template", "/rest/api/3/issue/{key}/changelog"),
+    ("changelog-real", "/rest/api/3/issue/PROJ-12/changelog"),
     ("search", "/rest/api/3/search/jql"),
     ("comments-template", "/rest/api/3/issue/{key}/comment"),
     ("comments-real", "/rest/api/3/issue/PROJ-12/comment"),
@@ -277,6 +279,14 @@ REQUEST_CASES = [
         "GET",
         "/rest/api/3/search/jql",
         {"jql": "project = PROJ", "fields": "summary,status", "maxResults": "25", "nextPageToken": "n2"},
+        None,
+    ),
+    (
+        "get_changelog",
+        {"key": "PROJ-12", "startAt": 10, "maxResults": 100},
+        "GET",
+        "/rest/api/3/issue/PROJ-12/changelog",
+        {"startAt": "10", "maxResults": "100"},
         None,
     ),
     (
@@ -368,6 +378,7 @@ def test_built_approval_mode_for_all_tools(url):
     assert {name for name, approval in approvals.items() if approval == "read"} == {
         "work_get_issue",
         "work_search",
+        "work_get_changelog",
         "work_list_comments",
         "work_list_remote_links",
         "work_list_transitions",

@@ -86,6 +86,7 @@ def commit_and_push_all(
     remote_url: str,
     author_name: str = "fabri",
     author_email: str = "fabri@localhost",
+    force: bool = True,
 ) -> str | None:
     """Commit all checkout changes and push current HEAD to ``new_branch``.
 
@@ -138,12 +139,13 @@ def commit_and_push_all(
         env=identity_env,
     )
 
+    push_args = ["push"]
+    if force:
+        push_args.append("--force")
+    push_args.extend((remote_url, f"HEAD:refs/heads/{new_branch}"))
     _run_git(
         checkout_dir,
-        "push",
-        "--force",
-        remote_url,
-        f"HEAD:refs/heads/{new_branch}",
+        *push_args,
         operation="push",
         remote_url=remote_url,
     )
