@@ -60,7 +60,6 @@ cp examples/jira-resolver.example.toml ~/.fabri/jira-resolver.toml
 ```toml
 label = "fabri:fix"
 max_cost_usd = 10.0                          # model spend cap per run, in USD
-agency = "/abs/path/to/fabri/examples/agencies/jira-fix-crew"
 
 [projects.AI]
 repo = "CharlesLadera/play-shaper"
@@ -69,8 +68,8 @@ setup_cmd = "npm --prefix web ci"
 test_cmd = "npm --prefix web test"
 ```
 
-- `agency` may be relative; it then resolves against the directory that holds the TOML file. After
-  copying the file to `~/.fabri`, set it to an absolute path.
+- `agency` is optional. Left out, it uses the `jira-fix-crew` agency bundled with fabri. Set it
+  to use your own crew; a relative path resolves against the directory that holds the TOML file.
 - `test_cmd` is the verification gate. It is run by fabri itself, not by the crew, and only its
   exit code counts. For play-shaper it is the same `npm test` (vitest) step that the repo's
   PR-checks workflow runs. Tests that need Supabase or Caylex skip when those are not reachable,
@@ -134,8 +133,8 @@ Runs go one at a time. A run that crashes is recorded as failed and the poll car
 ## What the bot will not do
 
 - Push to the default branch or to `base`.
-- Force-push. If the branch already exists on GitHub with other commits, the push is rejected and
-  the run fails. Delete the old branch or close its PR before relabelling.
+- Force-push. If the branch already exists on GitHub (from an earlier run), fabri pushes to
+  `<branch>-2`, `<branch>-3` and so on, and opens a new draft PR. Old branches are left as they are.
 - Merge anything, mark a PR ready for review, or approve it.
 - Open a PR when the tests fail, did not run, or the crew changed nothing.
 - Transition, edit, assign or create Jira issues.

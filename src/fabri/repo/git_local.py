@@ -77,6 +77,27 @@ def has_changes(checkout_dir: str | os.PathLike[str]) -> bool:
     return bool(completed.stdout.strip())
 
 
+def remote_branch_exists(
+    checkout_dir: str | os.PathLike[str],
+    branch: str,
+    *,
+    remote_url: str,
+) -> bool:
+    """Return whether ``refs/heads/<branch>`` exists on the remote."""
+    completed = _run_git(
+        checkout_dir,
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        remote_url,
+        f"refs/heads/{branch}",
+        operation="ls-remote",
+        remote_url=remote_url,
+        allowed_returncodes=(0, 2),
+    )
+    return completed.returncode == 0
+
+
 def commit_and_push_all(
     checkout_dir: str | os.PathLike[str],
     *,

@@ -78,7 +78,33 @@ def _cost(value: object, name: str) -> float:
     return cost
 
 
+DEFAULT_AGENCY = "jira-fix-crew"
+
+
+def bundled_agency_path() -> Path:
+    """Return the jira-fix-crew agency shipped with fabri.
+
+    Wheels carry it under fabri/examples/agencies. A source checkout may not
+    have run scripts/sync_examples.py yet, so fall back to examples/agencies.
+    """
+
+    package_root = Path(__file__).resolve().parents[1]
+    candidates = (
+        package_root / "examples" / "agencies" / DEFAULT_AGENCY,
+        package_root.parents[1] / "examples" / "agencies" / DEFAULT_AGENCY,
+    )
+    for candidate in candidates:
+        if (candidate / "agency.toml").is_file():
+            return candidate
+    raise ValueError(
+        "agency is not set and the bundled jira-fix-crew agency was not found; "
+        "set agency to an absolute path"
+    )
+
+
 def _agency_path(value: object, directory: Path, name: str) -> Path:
+    if value is None:
+        return bundled_agency_path()
     path = Path(_nonempty(value, name)).expanduser()
     if not path.is_absolute():
         path = directory / path

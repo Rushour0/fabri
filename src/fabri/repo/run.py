@@ -673,6 +673,23 @@ def _gate_verified_tests(
     )
 
 
+MAX_BRANCH_SUFFIX = 20
+
+
+def _free_branch_name(checkout_dir: Path, branch_name: str, remote_url: str) -> str:
+    """Pick ``branch``, ``branch-2``, ``branch-3``... whichever is not on the remote yet."""
+    for attempt in range(1, MAX_BRANCH_SUFFIX + 1):
+        candidate = branch_name if attempt == 1 else f"{branch_name}-{attempt}"
+        _validate_git_ref(candidate, gate="branch_push")
+        if not git_local.remote_branch_exists(checkout_dir, candidate, remote_url=remote_url):
+            return candidate
+    raise RepoRunFailed(
+        "branch_push",
+        f"{branch_name} and {MAX_BRANCH_SUFFIX - 1} suffixed branches already exist; "
+        "delete old fabri branches before relabelling",
+    )
+
+
 def _gate_branch_push(
     *,
     checkout_dir: Path,
@@ -683,6 +700,7 @@ def _gate_branch_push(
     github_auth: object | None,
     known_tokens: list[str],
     force: bool = True,
+    unique_branch: bool = False,
 ) -> tuple[GateResult, str | None, str | None]:
     get_token = getattr(github_auth, "get_token", None)
     if not callable(get_token):
@@ -693,6 +711,8 @@ def _gate_branch_push(
     known_tokens.append(token)
 
     remote_url = token_url("x-access-token", token, "github.com", repo)
+    if unique_branch:
+        branch_name = _free_branch_name(checkout_dir, branch_name, remote_url)
     pushed_branch = git_local.commit_and_push_all(
         checkout_dir,
         base=base,

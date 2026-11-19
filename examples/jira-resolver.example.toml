@@ -1,9 +1,10 @@
 # Copy to $FABRI_HOME/jira-resolver.toml (default ~/.fabri/jira-resolver.toml).
-# Relative paths resolve against the directory holding this file, so set
-# `agency` to an absolute path after copying.
+# `agency` defaults to the jira-fix-crew agency bundled with fabri. Set it
+# only to use your own crew; relative paths resolve against this file's
+# directory.
 label = "fabri:fix"
 max_cost_usd = 10.0
-agency = "agencies/jira-fix-crew"
+# agency = "/abs/path/to/my-crew"
 
 [projects.AI]
 repo = "CharlesLadera/play-shaper"

@@ -312,11 +312,10 @@ def run_jira_flow(
                 github_auth=github_auth,
                 known_tokens=known_tokens,
                 force=False,
+                unique_branch=True,
             )
     except Exception as exc:
         detail = _failed_gate("branch_push", exc, known_tokens).detail
-        if "push" in detail.lower():
-            detail += "; delete the old branch or close its PR before relabelling"
         branch_gate = GateResult("branch_push", False, detail)
         pushed_branch = None
     if not branch_gate.ok or pushed_branch is None:
@@ -330,7 +329,7 @@ def run_jira_flow(
             token=github_token,
             repo=route.repo,
             base=route.base,
-            branch_name=branch_name,
+            branch_name=pushed_branch,
             identifier=issue_key,
             issue={"title": summary, "url": str(issue["url"])},
             body=(

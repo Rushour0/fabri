@@ -366,3 +366,65 @@ def test_example_routes_file_loads_and_points_at_the_crew() -> None:
     assert route.max_cost_usd == 10.0
     assert (route.agency / "agency.toml").is_file()
     assert list(routes.projects) == ["AI"]
+
+
+def test_example_routes_file_copied_elsewhere_uses_bundled_agency(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    copied = tmp_path / "jira-resolver.toml"
+    copied.write_text(
+        (root / "examples" / "jira-resolver.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    route = route_for(load_routes(copied), "AI-123")
+    assert route.agency.name == "jira-fix-crew"
+    assert (route.agency / "agency.toml").is_file()
+
+
+def test_rerun_pushes_to_next_free_branch_name(tmp_path: Path) -> None:
+    from fabri.repo.run import _free_branch_name
+
+    origin = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    _git("init", "--bare", str(origin))
+    _git("init", str(checkout))
+    _git("-C", str(checkout), "config", "user.name", "Test")
+    _git("-C", str(checkout), "config", "user.email", "test@example.com")
+
+    assert _free_branch_name(checkout, "fabri/ai-1-fix", str(origin)) == "fabri/ai-1-fix"
+    for index, branch in enumerate(("fabri/ai-1-fix", "fabri/ai-1-fix-2")):
+        (checkout / f"f{index}.txt").write_text("x\n", encoding="utf-8")
+        commit_and_push_all(
+            checkout,
+            base="main",
+            new_branch=branch,
+            commit_msg=branch,
+            remote_url=str(origin),
+            force=False,
+        )
+    assert _free_branch_name(checkout, "fabri/ai-1-fix", str(origin)) == "fabri/ai-1-fix-3"
+
+
+def test_run_jira_flow_asks_for_unique_branch_and_opens_pr_on_pushed_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JIRA_URL", "https://example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "jira-token")
+    push, open_pr = _install_run_fakes(monkeypatch, tests_ok=True)
+    push.return_value = (
+        GateResult("branch_push", True),
+        "fabri/ai-123-repair-shape-playback-2",
+        "github-token",
+    )
+
+    result = jira_run.run_jira_flow(
+        issue_key="AI-123",
+        route=_route(tmp_path),
+        jira=_FakeJira(),
+        approver=object(),
+        workspace=tmp_path / "workspace",
+    )
+
+    assert result["ok"] is True
+    assert push.call_args.kwargs["unique_branch"] is True
+    assert open_pr.call_args.kwargs["branch_name"] == "fabri/ai-123-repair-shape-playback-2"
