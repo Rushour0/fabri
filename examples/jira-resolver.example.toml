@@ -1,0 +1,17 @@
+# Copy to $FABRI_HOME/jira-resolver.toml (default ~/.fabri/jira-resolver.toml).
+# Relative paths resolve against the directory holding this file, so set
+# `agency` to an absolute path after copying.
+label = "fabri:fix"
+max_cost_usd = 10.0
+agency = "agencies/jira-fix-crew"
+
+[projects.AI]
+repo = "CharlesLadera/play-shaper"
+base = "main"
+setup_cmd = "npm --prefix web ci"
+test_cmd = "npm --prefix web test"
+
+# Planned, not configured yet. Work out its offline test command first.
+# [projects.PBSCR]
+# repo = "marchsl/nycbbl"
+# test_cmd = "..."

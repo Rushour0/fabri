@@ -1,0 +1,4 @@
+[agency]
+name = "jira-fix-crew"
+description = "Fix a routed Jira issue and verify the focused repository tests."
+entry = "agent.yaml"

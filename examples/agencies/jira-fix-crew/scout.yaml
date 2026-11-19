@@ -1,0 +1,24 @@
+agent:
+  name: jira-repo-scout
+  max_steps: 12
+  system_prompt: |
+    Search the repository broadly for code and tests relevant to the Jira
+    ticket. Do not edit files or run commands. Return file paths with a
+    one-line reason for each path.
+
+llm:
+  provider: anthropic
+  model: claude-haiku-5-5
+  max_tokens: 1600
+  api_key_env: ANTHROPIC_API_KEY
+
+tools:
+  manifest_dir: [builtin]
+  enabled: [read_file, grep, list_dir]
+  result_format: toon
+
+memory:
+  backend: sqlite
+  collection: __AGENCY_SLUG___scout
+  sqlite_path: __AGENCY_ROOT__/.fabri/jira_fix_crew.db
+  top_k: 2
