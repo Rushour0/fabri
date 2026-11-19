@@ -13,20 +13,22 @@ from __future__ import annotations
 import logging
 import re
 from copy import deepcopy
-from collections import OrderedDict
 from collections.abc import Mapping
 from threading import Lock, Thread
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from fabri.service.binding import merge_overrides
 from fabri.service.surfaces import quota
 from fabri.service.surfaces.base import SurfaceAdapter
+from fabri.service.surfaces.delivery_store import DeliveryStore, InMemoryDeliveryStore
 from fabri.service.surfaces.types import (
     Command,
     Dispatch,
+    Feedback,
     Handled,
     HitlAnswer,
     Ignore,
+    Interaction,
     ReplyTarget,
     RunOutcome,
     ShortCircuit,
@@ -34,9 +36,8 @@ from fabri.service.surfaces.types import (
 
 _LOG = logging.getLogger("fabri")
 
-_MAX_DELIVERY_IDS = 512
-_delivery_ids: dict[str, OrderedDict[str, None]] = {}
-_delivery_lock = Lock()
+# The replay guard used when neither the caller nor the service supplies one.
+_default_delivery_store = InMemoryDeliveryStore()
 
 # session_id <-> where that run came from, so a mid-run question and a finished
 # result both find their way home. Held here rather than in any one adapter:
@@ -140,21 +141,17 @@ def reset_state() -> None:
         _target_by_session.clear()
         _session_by_target.clear()
         _pending_question.clear()
-    with _delivery_lock:
-        _delivery_ids.clear()
+    _default_delivery_store.clear()
 
 
-def _is_duplicate(surface: str, delivery_id: object) -> bool:
+def _is_duplicate(
+    surface: str, delivery_id: object, store: DeliveryStore | None = None
+) -> bool:
     if not isinstance(delivery_id, str) or not delivery_id:
         return False
-    with _delivery_lock:
-        seen = _delivery_ids.setdefault(surface, OrderedDict())
-        if delivery_id in seen:
-            return True
-        seen[delivery_id] = None
-        if len(seen) > _MAX_DELIVERY_IDS:
-            seen.popitem(last=False)
-    return False
+    if store is None:
+        store = _default_delivery_store
+    return not store.claim(surface, delivery_id)
 
 
 # --- answering a question from the surface ----------------------------------
@@ -256,6 +253,58 @@ def _run_and_deliver(
     run_and_deliver(adapter, service, command, target)
 
 
+# --- handing work off ---------------------------------------------------------
+
+
+@runtime_checkable
+class RunSubmitter(Protocol):
+    """What happens to a decision once the pipeline has accepted it.
+
+    Called with a :class:`Dispatch` that already passed the catalog and quota
+    checks, a :class:`Feedback` no pending question claimed, or an
+    :class:`Interaction`. A host that runs agencies elsewhere (a queue and a
+    worker pool) injects one that enqueues and returns. An injected submitter
+    owns acknowledgement too: the pipeline posts no "On it..." of its own.
+
+    One Slack post that mentions the bot in a watched channel arrives twice,
+    as an ``app_mention`` and as a ``message``, with different event ids, so
+    both reach the submitter. Collapsing that pair is the host's job, with a
+    job key such as channel + ts taken from ``Dispatch.meta``.
+    """
+
+    def __call__(
+        self,
+        adapter: SurfaceAdapter,
+        service: Any,
+        decision: Dispatch | Feedback | Interaction,
+    ) -> None: ...
+
+
+class DefaultSubmitter:
+    """Today's behaviour: run a Dispatch in this process and post the result.
+
+    Feedback and Interaction need a host that knows what to do with them, so
+    the default lets them go.
+    """
+
+    def __init__(self, run_in_background: bool = True) -> None:
+        self.run_in_background = run_in_background
+
+    def __call__(
+        self,
+        adapter: SurfaceAdapter,
+        service: Any,
+        decision: Dispatch | Feedback | Interaction,
+    ) -> None:
+        if not isinstance(decision, Dispatch):
+            return
+        args = (adapter, service, decision.command, decision.target)
+        if self.run_in_background:
+            Thread(target=_run_and_deliver, args=args, daemon=True).start()
+        else:
+            _run_and_deliver(*args)
+
+
 def dispatch(
     adapter: SurfaceAdapter,
     service: Any,
@@ -263,18 +312,35 @@ def dispatch(
     headers: Mapping[str, str],
     *,
     run_in_background: bool = True,
+    delivery_store: DeliveryStore | None = None,
+    submitter: RunSubmitter | None = None,
 ) -> tuple[int, str, dict[str, str]]:
     """Handle one inbound delivery, end to end.
 
     Always answers fast: surfaces expect an ack within seconds, so the run
     happens on its own thread and the result is delivered when it lands.
+
+    ``delivery_store`` and ``submitter`` default to the service's
+    ``surface_delivery_store`` / ``surface_submitter`` attributes, then to the
+    in-process store and :class:`DefaultSubmitter`. For a Dispatch, an
+    injected submitter wins over the service's ``run_dispatcher``, which wins
+    over the default in-process run. Injecting both lets a
+    receiver run stateless behind a load balancer with runs executed elsewhere.
     """
+    store = delivery_store
+    if store is None:
+        store = getattr(service, "surface_delivery_store", None)
+    submit = submitter
+    if submit is None:
+        submit = getattr(service, "surface_submitter", None)
+    default_submit = DefaultSubmitter(run_in_background)
+
     verified = adapter.verify(raw_body, headers)
     if isinstance(verified, ShortCircuit):
         return verified.status, verified.body, verified.headers
     payload = verified
 
-    if _is_duplicate(adapter.name, adapter.delivery_id(payload)):
+    if _is_duplicate(adapter.name, adapter.delivery_id(payload), store):
         return _OK
 
     decision = adapter.classify(payload)
@@ -288,6 +354,16 @@ def dispatch(
             # Confirm on the surface: a human who answered a question needs to
             # see that the run actually took it.
             adapter.deliver_ack(decision.target, "Got it.")
+        return _OK
+    if isinstance(decision, Feedback):
+        # An open question in this thread wins: the human is answering it.
+        if deliver_answer(service, decision.target, decision.text):
+            adapter.deliver_ack(decision.target, "Got it.")
+        else:
+            (submit or default_submit)(adapter, service, decision)
+        return _OK
+    if isinstance(decision, Interaction):
+        (submit or default_submit)(adapter, service, decision)
         return _OK
     if not isinstance(decision, Dispatch):
         return _OK
@@ -315,6 +391,10 @@ def dispatch(
         adapter.deliver_error(target, verdict.reason)
         return _OK
 
+    if submit is not None:
+        submit(adapter, service, decision)
+        return _OK
+
     dispatcher = getattr(service, "run_dispatcher", None)
     if dispatcher is not None:
         try:
@@ -327,12 +407,5 @@ def dispatch(
             )
         return _OK
 
-    if run_in_background:
-        Thread(
-            target=_run_and_deliver,
-            args=(adapter, service, command, target),
-            daemon=True,
-        ).start()
-    else:
-        _run_and_deliver(adapter, service, command, target)
+    default_submit(adapter, service, decision)
     return _OK

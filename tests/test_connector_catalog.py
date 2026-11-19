@@ -34,6 +34,13 @@ def test_three_entries_match_v0_27_0_snapshot():
         for source in stripped["sources"]:
             for key in NEW_KEYS:
                 source.pop(key, None)
+        if case["kind"] == "slack":
+            old_urls = {"https://slack.com/api/conversations.list", "https://slack.com/api/conversations.history",
+                        "https://slack.com/api/chat.postMessage"}
+            stripped["sources"] = [source for source in stripped["sources"] if source["url"] in old_urls]
+            old_names = {source["name"] for source in stripped["sources"]}
+            stripped["allow"] = [name for name in stripped["allow"] if name in old_names]
+            stripped["sources"][-1]["input_schema"]["properties"].pop("blocks")
         assert json.dumps(stripped, sort_keys=True) == case["entry"], case
         for source in entry["sources"]:
             assert source["approval_mode"] == "tighten"
@@ -41,7 +48,10 @@ def test_three_entries_match_v0_27_0_snapshot():
             stdio = source["kind"] == "mcp" and "command" in source
             assert source.get("env_mode") == ("allowlist" if stdio else None), case
         # The old keys keep their order (to_yaml writes unsorted); the new keys come after them.
-        for source, old in zip(entry["sources"], _old_insertion_order(case), strict=True):
+        ordered = entry["sources"]
+        if case["kind"] == "slack":
+            ordered = [source for source in ordered if source["url"] in old_urls]
+        for source, old in zip(ordered, _old_insertion_order(case), strict=True):
             assert list(source)[:len(old)] == old, case
             assert set(list(source)[len(old):]) <= set(NEW_KEYS), case
 
@@ -66,7 +76,13 @@ def test_list_connectors_keeps_old_keys_and_order():
     assert [r["name"] for r in rows[:3]] == ["github", "linear", "slack"]
     for row, before in zip(rows[:3], old, strict=True):
         assert list(row)[:len(before)] == list(before)
-        assert {k: row[k] for k in before} == before
+        old_values = {k: row[k] for k in before}
+        if row["name"] == "slack":
+            assert row["summary"] == (
+                "Slack Web API: read channels, threads, links and users, then post or edit messages."
+            )
+            old_values["summary"] = before["summary"]
+        assert old_values == before
         assert row["auth_kind"] == "pat" and row["curated"] is False and row["pinned_spec"] is False
         assert row["needs_include"] is False and row["needs_url"] is False and row["experimental"] is False
     assert all("token" not in k and "secret" not in k for r in rows for k in r)
@@ -139,6 +155,8 @@ def test_facade_exports():
         connector_kinds,
         list_connectors,
         request_floor,
+        response_error,
+        shape_request_body,
         spec_rel,
         spec_text,
     )
@@ -148,7 +166,7 @@ def test_facade_exports():
     assert list(CONNECTORS)[:3] == ["github", "linear", "slack"]
     assert set(facade.__all__) >= {"CONNECTORS", "Connector", "ConnectorError", "connector_entry",
                                    "connector_kinds", "list_connectors", "catalog_minimum", "spec_rel", "spec_text",
-                                   "catalog_for_url", "request_floor"}
+                                   "catalog_for_url", "request_floor", "response_error", "shape_request_body"}
     assert connector_kinds(connector_entry("slack")) == {"http"}
     assert spec_text("slack") is None and spec_rel("github", "gh") is None
 
@@ -171,6 +189,8 @@ def test_catalog_minimum_slack():
 
     assert catalog_minimum("slack", "ops_post_message", "POST") == "always_approve"
     assert catalog_minimum("slack", "slack_post_message", None) == "always_approve"
+    assert catalog_minimum("slack", "ops_update_message", "POST") == "always_approve"
+    assert catalog_minimum("slack", "slack_update_message", None) == "always_approve"
     assert catalog_minimum("slack", "slack_channels_list", "GET") is None
     assert catalog_minimum("slack", "slack_channel_history", "GET") is None
     assert catalog_minimum("github", "mcp_github_create_issue", None) is None
@@ -186,7 +206,18 @@ def test_request_floor_by_host():
     assert request_floor("https://slack.com/api/chat.postMessage", "GET") == ("slack", "always_approve")
     assert request_floor("https://slack.com/api/conversations.list", "GET") == ("slack", None)
     assert request_floor("https://slack.com/api/conversations.history?limit=5", "get") == ("slack", None)
+    assert request_floor("https://slack.com/api/conversations.replies", "GET") == ("slack", None)
+    assert request_floor("https://slack.com/api/chat.getPermalink", "GET") == ("slack", None)
+    assert request_floor("https://slack.com/api/users.info", "GET") == ("slack", None)
+    assert request_floor("https://slack.com/api/users.lookupByEmail", "GET") == ("slack", None)
     assert request_floor("https://slack.com/api/conversations.list", "POST") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/conversations.replies", "POST") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/chat.getPermalink", "POST") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/users.info", "POST") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/users.lookupByEmail", "POST") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/chat.update", "POST") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/chat.update", "GET") == ("slack", "always_approve")
+    assert request_floor("https://slack.com/api/users.infox", "GET") == ("slack", "always_approve")
     assert request_floor("https://slack.com/api/conversations.listx", "GET") == ("slack", "always_approve")
     assert request_floor("https://files.slack.com/api/conversations.list", "GET") == ("slack", None)
     assert request_floor("https://evil.test/api/chat.postMessage", "POST") == (None, None)
@@ -209,12 +240,16 @@ def test_loader_checks_hosts_and_reads(temp_catalog):
                  + "READS = (('get', '/x'),)\n")
     temp_catalog("zz_dup", _GOOD_HEADER.format(name="zz_dup") + expand.replace("MOD", "'zz_dup'")
                  + "HOSTS = ('slack.com',)\n")
+    temp_catalog("zz_badhook", _GOOD_HEADER.format(name="zz_badhook")
+                 + expand.replace("MOD", "'zz_badhook'") + "shape_body = 3\n")
     with pytest.raises(connector_catalog.ConnectorError, match="HOSTS"):
         connector_catalog._load_modules(("zz_badhost",))
     with pytest.raises(connector_catalog.ConnectorError, match="READS"):
         connector_catalog._load_modules(("zz_badreads",))
     with pytest.raises(connector_catalog.ConnectorError, match="both claim host slack.com"):
         connector_catalog._load_modules(("slack", "zz_dup"))
+    with pytest.raises(connector_catalog.ConnectorError, match="shape_body must be callable"):
+        connector_catalog._load_modules(("zz_badhook",))
 
 
 def test_setups_cli_connectors_and_route(monkeypatch, capsys, tmp_path):

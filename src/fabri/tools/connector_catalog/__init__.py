@@ -14,6 +14,10 @@ and may expose:
     READS    (method, path pattern) pairs it trusts as read, for example
              (("GET", r"/api/conversations[.]list"),); the pattern must match
              the whole URL path
+    shape_body(path, body) -> dict
+             a request body filter for API-specific outbound safety rules
+    response_error(data) -> str | None
+             an API-specific error reported inside a successful HTTP response
 
 A new connector adds its own hosts by setting ``HOSTS`` in its module (the
 Cakemail module is meant to set ``("api.cakemail.dev",)``); nothing in this
@@ -151,6 +155,9 @@ def _validate(mod: ModuleType, module_name: str) -> Connector:
                              f"expected {module_name!r}")
     for attr in ("expand", "minimum"):
         if not callable(getattr(mod, attr, None)):
+            raise ConnectorError(f"connector module {module_name}: {attr} must be callable")
+    for attr in ("shape_body", "response_error"):
+        if hasattr(mod, attr) and not callable(getattr(mod, attr)):
             raise ConnectorError(f"connector module {module_name}: {attr} must be callable")
     data = mod.expand(entry.name, token_env=None, workspace=None, remote=False,
                       url=_CHECK_URL if entry.needs_url else None, all_tools=False)
@@ -331,6 +338,26 @@ def catalog_for_url(url: str | None) -> str | None:
     return None
 
 
+def shape_request_body(url: str | None, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply an owning connector's outbound request body filter."""
+    kind = catalog_for_url(url)
+    if kind is None:
+        return dict(body)
+    shape_body = getattr(_MODULES[kind], "shape_body", None)
+    if shape_body is None:
+        return dict(body)
+    return shape_body(urlsplit(str(url)).path, body)
+
+
+def response_error(url: str | None, data: object) -> str | None:
+    """Return an owning connector's error for a successful HTTP response."""
+    kind = catalog_for_url(url)
+    if kind is None:
+        return None
+    check = getattr(_MODULES[kind], "response_error", None)
+    return check(data) if check is not None else None
+
+
 def request_floor(url: str | None, method: str | None) -> tuple[str | None, str | None]:
     """``(catalog id, floor)`` for one http request target. The id is None
     when no connector owns the host. The floor is ``always_approve`` unless
@@ -355,4 +382,4 @@ CONNECTORS.update({mod_name: mod.ENTRY for mod_name, mod in _MODULES.items()})
 
 __all__ = ["CONNECTORS", "MODULE_ORDER", "Connector", "ConnectorError", "OAuthSpec", "catalog_for_url",
            "catalog_minimum", "connector_entry", "connector_kinds", "connector_module", "list_connectors",
-           "oauth_configured", "request_floor", "spec_rel", "spec_text"]
+           "oauth_configured", "request_floor", "response_error", "shape_request_body", "spec_rel", "spec_text"]

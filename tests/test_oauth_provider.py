@@ -310,7 +310,7 @@ def test_slack_identity_uses_team_id_and_rejects_not_ok(store, monkeypatch, capl
                          scope_kind="org", handle=None, user_id=None)
     query = _query(url)
     assert "code_challenge" not in query
-    assert query["scope"] == "chat:write,channels:read,app_mentions:read,channels:history"
+    assert query["scope"] == ",".join(slack_module.SLACK_BOT_SCOPES)
     with pytest.raises(ConnectError, match="invalid_code"):
         provider.finish(store, state=query["state"], code=CODE)
     form = _form(rec.requests[0])

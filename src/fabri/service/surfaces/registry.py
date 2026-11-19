@@ -26,18 +26,18 @@ class SurfaceRegistry:
         return self._by_name.get(name) if name else None
 
     def routes(self) -> dict[str, SurfaceAdapter]:
-        """``{webhook_path: adapter}``, including each path's trailing-slash twin.
+        """``{path: adapter}`` for every ``webhook_paths()`` entry, including each path's trailing-slash twin.
 
         The HTTP layer matches both spellings today; keeping that here means the
         server stays a loop over this dict.
         """
         routes: dict[str, SurfaceAdapter] = {}
         for adapter in self._by_name.values():
-            path = adapter.webhook_path
-            if not path:
-                continue
-            routes[path] = adapter
-            routes[path.rstrip("/") + "/"] = adapter
+            for path in adapter.webhook_paths():
+                if not path:
+                    continue
+                routes[path] = adapter
+                routes[path.rstrip("/") + "/"] = adapter
         return routes
 
     def __iter__(self):

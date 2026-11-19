@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from fabri import secret_cipher
-from fabri.service import linear_oauth
+from fabri.service import linear_oauth, slack_oauth
 from fabri.service.auth import sign_session
 from fabri.service.connections_routes import ConnectionsApi
 from fabri.service.http_server import _ADMIN_GETS, StartRefused, _Handler, serve_http
@@ -341,7 +341,7 @@ def test_slack_alias_paths_still_work_and_redirect_with_slack_query(make_server,
     target, query = location(c.get("/slack/install"))
     assert target == "https://slack.com/oauth/v2/authorize"
     assert query["redirect_uri"] == f"{BASE}/slack/oauth/callback"
-    assert query["scope"] == "chat:write,channels:read,app_mentions:read,channels:history"
+    assert query["scope"] == slack_oauth.SLACK_BOT_SCOPES
     assert "code_challenge" not in query
 
     resp = c.get("/slack/oauth/callback", params={"state": query["state"], "code": CODE})

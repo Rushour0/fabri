@@ -1,3 +1,6 @@
+import json
+import urllib.request
+
 from fabri.runtime import build_tools
 from fabri.tools.recipes import slack_post
 
@@ -33,10 +36,16 @@ def test_slack_post_invoke_shape(monkeypatch):
         def read(self):
             return b'{"ok": true, "ts": "1.2", "channel": "C1"}'
 
-    monkeypatch.setattr(
-        slack_post._opener, "open", lambda request, timeout: _Response()
-    )
+    sent = []
 
-    out = slack_post.post_message({"channel": "C1", "text": "hi"})
+    def open_request(request: urllib.request.Request, timeout: int) -> _Response:
+        sent.append(json.loads(request.data))
+        return _Response()
+
+    monkeypatch.setattr(slack_post._opener, "open", open_request)
+
+    out = slack_post.post_message({"channel": "C1", "text": "hi", "link_names": 1, "parse": "full"})
 
     assert out == {"ok": True, "result": {"ts": "1.2", "channel": "C1"}}
+    assert sent == [{"channel": "C1", "text": "hi", "unfurl_links": False, "unfurl_media": False}]
+    assert "link_names" not in sent[0] and "parse" not in sent[0]

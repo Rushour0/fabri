@@ -8,7 +8,8 @@ import urllib.parse
 import urllib.request
 
 
-SLACK_BOT_SCOPES = "chat:write,channels:read,app_mentions:read,channels:history"
+SLACK_BOT_SCOPES = ("chat:write,channels:read,app_mentions:read,channels:history,groups:history,users:read,"
+                    "users:read.email")
 SLACK_AUTHORIZE = "https://slack.com/oauth/v2/authorize"
 SLACK_ACCESS = "https://slack.com/api/oauth.v2.access"
 _STATE_TTL_S = 600

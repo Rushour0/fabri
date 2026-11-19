@@ -53,7 +53,7 @@ def post_message(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return _error(f"{type(exc).__name__}: {exc}")
 
-    payload = {"channel": channel, "text": text}
+    payload = {"channel": channel, "text": text, "unfurl_links": False, "unfurl_media": False}
     if thread_ts is not None:
         payload["thread_ts"] = thread_ts
     request = urllib.request.Request(

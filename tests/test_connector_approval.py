@@ -85,6 +85,16 @@ def test_slack_reads_stay_read_only_with_get(tmp_path):
     assert tools["ops_sneaky"].approval == "always_approve"
 
 
+def test_slack_update_and_user_info_follow_request_floors(tmp_path: Path) -> None:
+    layer = _http_layer(
+        tmp_path,
+        _http("ops_update", "https://slack.com/api/chat.update", "GET", "    approval: read\n"),
+        _http("ops_user", "https://slack.com/api/users.info", "GET", "    approval: read\n"))
+    tools = _resolve(layer).tools
+    assert tools["ops_update"].approval == "always_approve"
+    assert tools["ops_user"].approval == "read"
+
+
 def test_unrelated_host_without_markers_behaves_as_before(tmp_path):
     layer = _http_layer(tmp_path, _http("notes_add", "https://notes.test/api/notes", "POST",
                                         "    approval: read\n"))

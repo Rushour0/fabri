@@ -359,7 +359,7 @@ def test_add_connectors(monkeypatch, capsys, layer):
     assert code == 0 and "github" in out and "slack" in out and "linear" in out
     code, out, _ = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "slack", "--workspace", "acme",
                        "--layer", str(layer))
-    assert code == 0 and "3 tools: 2 read, 0 write, 1 always_approve" in out
+    assert code == 0 and "8 tools: 6 read, 0 write, 2 always_approve" in out
     slack = entry_yaml(layer, "slack")
     assert {s["headers"]["Authorization"]["secret_ref"] for s in slack["sources"]} == {"slack:acme"}
     code, out, _ = run(monkeypatch, capsys, "setups", "tools", "add", "connector", "github", "--layer", str(layer))

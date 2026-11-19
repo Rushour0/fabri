@@ -39,6 +39,11 @@ class SurfaceAdapter(ABC):
     #: adapter never edits the server.
     webhook_path: str = ""
 
+    def webhook_paths(self) -> tuple[str, ...]:
+        """Every path this surface POSTs to. Most have one; Slack adds an
+        interactivity endpoint when it is turned on."""
+        return (self.webhook_path,) if self.webhook_path else ()
+
     def capabilities(self) -> SurfaceCapabilities:
         return SurfaceCapabilities()
 

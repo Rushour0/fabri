@@ -13,6 +13,9 @@ from fabri.service.slack_oauth import (
     sign_state,
     verify_state,
 )
+from fabri.tools.connector_catalog.slack import (
+    SLACK_BOT_SCOPES as CATALOG_SLACK_BOT_SCOPES,
+)
 
 
 class SlackOAuthStateTests(unittest.TestCase):
@@ -50,6 +53,14 @@ class SlackOAuthStateTests(unittest.TestCase):
 
 
 class SlackOAuthRedirectTests(unittest.TestCase):
+    def test_scopes_match_the_catalog(self) -> None:
+        scopes = tuple(SLACK_BOT_SCOPES.split(","))
+
+        self.assertIn("groups:history", scopes)
+        self.assertIn("users:read", scopes)
+        self.assertIn("users:read.email", scopes)
+        self.assertEqual(scopes, CATALOG_SLACK_BOT_SCOPES)
+
     def test_missing_configuration_returns_none(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(build_install_redirect())

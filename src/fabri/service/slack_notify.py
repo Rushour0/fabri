@@ -9,10 +9,14 @@ import urllib.request
 
 _LOG = logging.getLogger("fabri")
 _CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+_CHAT_UPDATE_URL = "https://slack.com/api/chat.update"
 
 
-def _post_message(slack_cfg: dict, payload: dict[str, str]) -> dict | None:
-    """Post a Slack message and return Slack's response on success."""
+def _post_message(
+    slack_cfg: dict, payload: dict, url: str = _CHAT_POST_MESSAGE_URL
+) -> dict | None:
+    """Post a Slack message (or edit one, with ``url``) and return Slack's
+    response on success."""
     if not slack_cfg.get("enabled"):
         return None
 
@@ -24,7 +28,7 @@ def _post_message(slack_cfg: dict, payload: dict[str, str]) -> dict | None:
 
     try:
         request = urllib.request.Request(
-            _CHAT_POST_MESSAGE_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {token}",
@@ -52,12 +56,33 @@ def post_slack_message(
     text: str,
     channel: str,
     thread_ts: str | None = None,
+    blocks: list | None = None,
 ) -> bool:
-    """Best-effort post of one message to a Slack channel or thread."""
-    payload: dict[str, str] = {"channel": channel, "text": text}
+    """Best-effort post of one message to a Slack channel or thread.
+
+    ``text`` stays required with ``blocks``: Slack shows it in notifications
+    and to clients that cannot render blocks.
+    """
+    payload: dict = {"channel": channel, "text": text}
     if thread_ts is not None:
         payload["thread_ts"] = thread_ts
+    if blocks is not None:
+        payload["blocks"] = blocks
     return _post_message(slack_cfg, payload) is not None
+
+
+def update_slack_message(
+    slack_cfg: dict,
+    channel: str,
+    ts: str,
+    text: str,
+    blocks: list | None = None,
+) -> bool:
+    """Best-effort edit of a message the bot posted, through chat.update."""
+    payload: dict = {"channel": channel, "ts": ts, "text": text}
+    if blocks is not None:
+        payload["blocks"] = blocks
+    return _post_message(slack_cfg, payload, _CHAT_UPDATE_URL) is not None
 
 
 def open_slack_thread(slack_cfg: dict, channel: str, text: str) -> str | None:
