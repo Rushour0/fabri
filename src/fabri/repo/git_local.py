@@ -77,6 +77,27 @@ def has_changes(checkout_dir: str | os.PathLike[str]) -> bool:
     return bool(completed.stdout.strip())
 
 
+def remote_branch_exists(
+    checkout_dir: str | os.PathLike[str],
+    branch: str,
+    *,
+    remote_url: str,
+) -> bool:
+    """Return whether ``refs/heads/<branch>`` exists on the remote."""
+    completed = _run_git(
+        checkout_dir,
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        remote_url,
+        f"refs/heads/{branch}",
+        operation="ls-remote",
+        remote_url=remote_url,
+        allowed_returncodes=(0, 2),
+    )
+    return completed.returncode == 0
+
+
 def commit_and_push_all(
     checkout_dir: str | os.PathLike[str],
     *,
@@ -86,6 +107,7 @@ def commit_and_push_all(
     remote_url: str,
     author_name: str = "fabri",
     author_email: str = "fabri@localhost",
+    force: bool = True,
 ) -> str | None:
     """Commit all checkout changes and push current HEAD to ``new_branch``.
 
@@ -138,12 +160,13 @@ def commit_and_push_all(
         env=identity_env,
     )
 
+    push_args = ["push"]
+    if force:
+        push_args.append("--force")
+    push_args.extend((remote_url, f"HEAD:refs/heads/{new_branch}"))
     _run_git(
         checkout_dir,
-        "push",
-        "--force",
-        remote_url,
-        f"HEAD:refs/heads/{new_branch}",
+        *push_args,
         operation="push",
         remote_url=remote_url,
     )

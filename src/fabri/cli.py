@@ -800,21 +800,102 @@ def cmd_repo_open_pr(args: argparse.Namespace) -> None:
     print(url)
 
 
-def cmd_repo_run(args: argparse.Namespace) -> None:
-    from fabri.repo.run import run_repo_flow
+def _jira_setup_or_exit(routes_path):
+    """Load Jira resolver routes and check credentials, or exit with a plain message."""
+    from fabri.repo.jira_issue import default_routes_path, load_routes
 
-    result = run_repo_flow(
-        issue_id=args.from_linear,
-        repo=args.repo,
-        base=args.base,
-        config=args.config,
-        test_cmd=args.test_cmd,
-        setup_cmd=args.setup_cmd,
-        linear_workspace=args.linear_workspace,
-    )
+    missing = [name for name in ("JIRA_URL", "JIRA_EMAIL", "JIRA_API_TOKEN") if not os.environ.get(name)]
+    if missing:
+        print(f"missing environment variables: {', '.join(missing)} (see docs/jira-resolver.md)",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        return load_routes(routes_path or default_routes_path())
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_repo_run(args: argparse.Namespace) -> None:
+    if args.from_jira:
+        from dataclasses import replace
+
+        from fabri.repo.jira_issue import JiraClient, route_for, scoped_comment_approver
+        from fabri.repo.jira_run import run_jira_flow
+
+        routes = _jira_setup_or_exit(args.routes)
+        try:
+            route = route_for(routes, args.from_jira)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(2)
+        route = replace(
+            route,
+            repo=args.repo or route.repo,
+            base=args.base if args.base is not None else route.base,
+            test_cmd=args.test_cmd if args.test_cmd is not None else route.test_cmd,
+            setup_cmd=args.setup_cmd if args.setup_cmd is not None else route.setup_cmd,
+            agency=Path(args.config).resolve() if args.config else route.agency,
+        )
+        result = run_jira_flow(
+            issue_key=args.from_jira,
+            route=route,
+            jira=JiraClient(os.environ.get("JIRA_URL", "")),
+            approver=scoped_comment_approver(args.from_jira),
+        )
+    else:
+        from fabri.repo.run import run_repo_flow
+
+        if not args.repo:
+            raise SystemExit("fabri repo run --from-linear requires --repo")
+        result = run_repo_flow(
+            issue_id=args.from_linear,
+            repo=args.repo,
+            base=args.base or "main",
+            config=args.config,
+            test_cmd=args.test_cmd,
+            setup_cmd=args.setup_cmd,
+            linear_workspace=args.linear_workspace,
+        )
     print(json.dumps(result, indent=2, default=str))
     if not result.get("ok"):
         sys.exit(1)
+
+
+def cmd_jira_poll(args: argparse.Namespace) -> None:
+    from fabri.repo import jira_poll
+
+    routes = _jira_setup_or_exit(args.config)
+    dependencies = jira_poll._poll_dependencies(routes)
+    while True:
+        try:
+            records = jira_poll.poll_once(
+                routes,
+                client=dependencies["client"],
+                state=dependencies["state"],
+                runner=dependencies["runner"],
+                dry_run=args.dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 -- loop mode keeps polling after a bad pass
+            if args.every is None:
+                raise
+            records = [{"action": "error", "ok": False,
+                        "reason": f"poll failed: {type(exc).__name__}: {exc}"}]
+        for record in records:
+            print(json.dumps(record, sort_keys=True), flush=True)
+        if args.every is None:
+            return
+        dependencies["sleep"](args.every)
+
+
+def _poll_interval(value: str) -> float:
+    try:
+        interval = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("poll interval must be a number") from exc
+    if interval < 30:
+        raise argparse.ArgumentTypeError("poll interval must be at least 30 seconds")
+    return interval
 
 
 def cmd_memory_diff(args: argparse.Namespace) -> None:
@@ -2338,10 +2419,13 @@ def main() -> None:
     p_repo_open_pr.set_defaults(func=cmd_repo_open_pr)
 
     p_repo_run = repo_sub.add_parser(
-        "run", help="Run a Linear issue end-to-end into a verified GitHub PR (10 fail-closed gates)")
-    p_repo_run.add_argument("--from-linear", required=True, help="Linear issue id or identifier")
-    p_repo_run.add_argument("--repo", required=True, help="Target repository (owner/name)")
-    p_repo_run.add_argument("--base", default="main", help="Base branch")
+        "run", help="Run a Linear or Jira issue into a verified draft GitHub PR")
+    issue_source = p_repo_run.add_mutually_exclusive_group(required=True)
+    issue_source.add_argument("--from-linear", default=None, help="Linear issue id or identifier")
+    issue_source.add_argument("--from-jira", default=None, help="Jira issue key")
+    p_repo_run.add_argument("--routes", default=None, help="Path to jira-resolver.toml")
+    p_repo_run.add_argument("--repo", default=None, help="Target repository (owner/name)")
+    p_repo_run.add_argument("--base", default=None, help="Base branch")
     p_repo_run.add_argument("--config", default=None, help="Path to the agency entry yaml")
     p_repo_run.add_argument(
         "--test-cmd", default=None,
@@ -2354,6 +2438,14 @@ def main() -> None:
         help="Linear workspace id to use its connected token (resolve_secret 'linear:<id>'); "
              "defaults to the single-tenant 'linear:default' env token")
     p_repo_run.set_defaults(func=cmd_repo_run)
+
+    p_jira = sub.add_parser("jira", help="Poll Jira for routed repository fixes")
+    jira_sub = p_jira.add_subparsers(dest="jira_command", required=True)
+    p_jira_poll = jira_sub.add_parser("poll", help="Poll once or continuously for fabri:fix labels")
+    p_jira_poll.add_argument("--config", default=None, help="Path to jira-resolver.toml")
+    p_jira_poll.add_argument("--every", type=_poll_interval, default=None, metavar="SECONDS")
+    p_jira_poll.add_argument("--dry-run", action="store_true")
+    p_jira_poll.set_defaults(func=cmd_jira_poll)
 
     p_replay = sub.add_parser("replay", help="Re-run a past session's task with current memory state")
     p_replay.add_argument("session_id")
