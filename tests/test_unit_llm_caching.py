@@ -109,3 +109,21 @@ def test_no_tools_does_not_crash(stub_response):
     b._client = _StubClient(stub_response)
     b.step("sys", [{"role": "user", "content": "hi"}])
     assert b._client.calls[0]["tools"] == []
+
+
+def test_anthropic_backend_sends_workspace_header_when_set(monkeypatch):
+    from fabri.core.llm import AnthropicLLMBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+    backend = AnthropicLLMBackend()
+    assert backend._client.default_headers["anthropic-workspace-id"] == "wrkspc_test"
+
+
+def test_anthropic_backend_omits_workspace_header_by_default(monkeypatch):
+    from fabri.core.llm import AnthropicLLMBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    backend = AnthropicLLMBackend()
+    assert "anthropic-workspace-id" not in backend._client.default_headers
