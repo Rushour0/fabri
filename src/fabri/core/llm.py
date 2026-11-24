@@ -256,7 +256,13 @@ class AnthropicLLMBackend:
 
         import anthropic
 
-        self._client = anthropic.Anthropic(api_key=os.environ.get(api_key_env))
+        # A service key that is not scoped to a workspace needs the workspace id on every
+        # request. ANTHROPIC_WORKSPACE_ID is set by the caller only for such keys.
+        workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+        headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
+        self._client = anthropic.Anthropic(
+            api_key=os.environ.get(api_key_env), default_headers=headers
+        )
         self._model = model
         self._tools = tools or []
         self._max_tokens = max_tokens
